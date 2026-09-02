@@ -1577,6 +1577,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn hold_carries_the_decision_to_the_host_and_returns_its_verdict() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"const decision = await hold({
+                    content: "Ship the release?",
+                    verdicts: ["ship", "hold"],
+                });
+                return decision.verdict;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("held run");
+        assert_eq!(output, "\"ship\"");
+        let requests = host.hold_requests.lock().unwrap();
+        assert_eq!(requests[0].content, "Ship the release?");
+        assert_eq!(requests[0].verdicts, vec!["ship", "hold"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_hold_without_two_distinct_verdicts_never_reaches_a_decider() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await hold({ content: "Ship it?", verdicts: ["ship", " ship "] });
+                    return "raised";
+                } catch (error) {
+                    return String(error.message ?? error);
+                }
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("refused run");
+        let message = output;
+        assert!(
+            message.contains("two"),
+            "a decision with one answer is not a decision: {message}"
+        );
+        assert!(
+            host.hold_requests.lock().unwrap().is_empty(),
+            "the refusal happens before any decider sees it"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn defaults_header_fills_unset_options_and_call_sites_override() {
         let host = Arc::new(SurfaceHost::new());
         host.agent_outputs

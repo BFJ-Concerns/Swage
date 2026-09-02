@@ -4121,6 +4121,9 @@ pub(crate) async fn answer_run_hold(
         .make_parked_workflow_run_due(hold.run_id)
         .await
         .map_err(internal)?;
+    if wake_provisioned {
+        resume_owed_workflow_runs(state).await;
+    }
     let answered = state
         .storage
         .get_workflow_run_hold(hold.id)
@@ -11473,6 +11476,355 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+    }
+
+
+    /// A gateway turn's tool context for the answering agent: attribution is
+    /// the session's own, which is the whole point of answering through the
+    /// tool rather than through a parameter.
+    async fn hold_answering_context(
+        storage: &Arc<SqliteStorage>,
+        state: &AppState,
+        space_id: Uuid,
+        agent_id: &str,
+    ) -> (
+        swage_storage::Session,
+        Uuid,
+        swage_tool::context::MockToolContext,
+        tokio::sync::mpsc::UnboundedSender<crate::websocket::ServerEvent>,
+    ) {
+        let session = storage
+            .create_session(NewSession {
+                space_id,
+                agent_id: agent_id.into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("answering session");
+        let turn_id = Uuid::new_v4();
+        let mut base =
+            swage_tool::context::MockToolContext::new(agent_id, session.id.to_string());
+        base.turn_id = Some(turn_id);
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _ = state;
+        (session, turn_id, base, ws_tx)
+    }
+
+    const HOLD_SCRIPT: &str = r#"
+        const decision = await hold({
+            content: "Ship the release?",
+            verdicts: ["ship", "hold"],
+        });
+        return { verdict: decision.verdict, by: decision.answered_by.agent_id };
+    "#;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_run_parks_until_an_agent_answers_it_through_the_tool() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: HOLD_SCRIPT.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let (session, turn_id, base, ws_tx) =
+            hold_answering_context(&storage, &state, space.id, "decider").await;
+        let context = crate::tool_executor::GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+
+        let listed = crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "list"}),
+            &context,
+        )
+        .await
+        .expect("list open holds");
+        assert_eq!(listed["holds"].as_array().expect("holds").len(), 1);
+        let hold_id = listed["holds"][0]["id"].as_str().expect("hold id");
+        assert_eq!(listed["holds"][0]["content"], "Ship the release?");
+        assert_eq!(
+            listed["holds"][0]["verdicts"],
+            serde_json::json!(["ship", "hold"])
+        );
+
+        crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({
+                "action": "answer",
+                "hold_id": hold_id,
+                "verdict": "ship",
+                "agent_id": "spoofed",
+            }),
+            &context,
+        )
+        .await
+        .expect("answer the hold");
+
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"verdict": "ship", "by": "decider"})),
+            "the script resumes with the verdict it was answered with"
+        );
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.holds.len(), 1);
+        let hold = &detail.holds[0];
+        assert!(matches!(hold.state, WorkflowRunHoldState::Answered));
+        assert_eq!(hold.verdict.as_deref(), Some("ship"));
+        let answered_by = hold.answered_by.as_ref().expect("answering source");
+        assert_eq!(answered_by.surface, "agent");
+        assert_eq!(answered_by.agent_id.as_deref(), Some("decider"));
+        assert_eq!(answered_by.session_id, Some(session.id));
+        assert_eq!(answered_by.turn_id, Some(turn_id));
+        assert!(hold.rejections.is_empty());
+        assert!(
+            detail
+                .journal
+                .iter()
+                .any(|entry| matches!(entry.kind, WorkflowJournalEntryKind::Hold)),
+            "the raise lands in the journal as its own kind"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_outside_the_hold_s_set_is_refused_with_feedback_and_the_hold_keeps_waiting()
+    {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: HOLD_SCRIPT.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let (session, turn_id, base, ws_tx) =
+            hold_answering_context(&storage, &state, space.id, "decider").await;
+        let context = crate::tool_executor::GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+        let holds = state
+            .storage
+            .list_workflow_run_holds(started.id)
+            .await
+            .expect("holds");
+        let hold_id = holds[0].id;
+
+        let refused = crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "answer", "hold_id": hold_id, "verdict": "maybe"}),
+            &context,
+        )
+        .await
+        .expect_err("an out-of-set verdict is refused");
+        let feedback = refused.to_string();
+        assert!(
+            feedback.contains("maybe") && feedback.contains("ship") && feedback.contains("hold"),
+            "the refusal names the attempt and the accepted set: {feedback}"
+        );
+
+        let still_parked = wait_for_run_state(&storage, started.id, "parked").await;
+        assert_eq!(still_parked.state, "parked", "the hold keeps waiting");
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        let hold = &detail.holds[0];
+        assert!(matches!(hold.state, WorkflowRunHoldState::Open));
+        assert_eq!(hold.rejections.len(), 1, "the refusal lands on the record");
+        let rejection = &hold.rejections[0];
+        assert_eq!(rejection.attempted_verdict, "maybe");
+        assert_eq!(rejection.source.agent_id.as_deref(), Some("decider"));
+        assert_eq!(rejection.source.session_id, Some(session.id));
+        assert_eq!(rejection.source.turn_id, Some(turn_id));
+        assert_eq!(
+            state
+                .storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal")
+                .len(),
+            1,
+            "a refused answer never moves the script's own sequence"
+        );
+
+        crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "answer", "hold_id": hold_id, "verdict": "hold"}),
+            &context,
+        )
+        .await
+        .expect("an in-set verdict is taken after a refusal");
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"verdict": "hold", "by": "decider"}))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_offering_fewer_than_two_verdicts_is_refused_at_raise() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            try {
+                await hold({ content: "Ship it?", verdicts: ["ship", "ship"] });
+                return { raised: true };
+            } catch (error) {
+                return { refused: String(error.message ?? error) };
+            }
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start single-verdict run");
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        let refused = completed
+            .final_output
+            .expect("output")
+            .get("refused")
+            .and_then(Value::as_str)
+            .expect("the raise is refused, never opened")
+            .to_owned();
+        assert!(
+            refused.contains("two"),
+            "the refusal says a decision needs a choice: {refused}"
+        );
+        assert!(
+            state
+                .storage
+                .list_workflow_run_holds(started.id)
+                .await
+                .expect("holds")
+                .is_empty(),
+            "a refused raise opens no hold"
+        );
+        assert!(
+            state
+                .storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal")
+                .iter()
+                .all(|entry| entry.kind != "hold"),
+            "a refused raise records no hold in the journal"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_a_run_waiting_on_a_hold_ends_the_wait_and_leaves_the_hold_unanswered() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: HOLD_SCRIPT.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let Json(cancelled) = cancel_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("cancel the waiting run");
+        assert_eq!(cancelled.state, WorkflowRunState::Cancelled);
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        let hold = &detail.holds[0];
+        assert!(
+            matches!(hold.state, WorkflowRunHoldState::Open),
+            "cancellation ends the wait without inventing a verdict"
+        );
+        assert!(hold.verdict.is_none());
+
+        let (_session, _turn_id, base, ws_tx) =
+            hold_answering_context(&storage, &state, space.id, "decider").await;
+        let context = crate::tool_executor::GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+        let refused = crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "answer", "hold_id": hold.id, "verdict": "ship"}),
+            &context,
+        )
+        .await
+        .expect_err("a cancelled run's hold cannot be answered");
+        assert!(
+            refused.to_string().contains("cancelled"),
+            "the tool says why: {refused}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
