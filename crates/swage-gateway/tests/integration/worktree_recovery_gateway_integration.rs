@@ -49,7 +49,11 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
     let _second_name = entries.next_entry().await.unwrap().unwrap().file_name();
     assert!(entries.next_entry().await.unwrap().is_none());
     let invalid = owner_path.join(&first_name);
-    let valid = if invalid == first { second } else { first };
+    let valid = if invalid == first.path {
+        second.path
+    } else {
+        first.path
+    };
     tokio::fs::write(invalid.join(".git"), "gitdir: /missing")
         .await
         .unwrap();
