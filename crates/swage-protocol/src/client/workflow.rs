@@ -400,6 +400,20 @@ pub struct WorkflowRunDetailResponse {
     /// The run's decision holds, oldest first, each carrying its accepted
     /// verdict and every answer refused along the way.
     pub holds: Vec<WorkflowRunHold>,
+    /// Derived counts over those holds: what the run is still waiting on,
+    /// what has been decided, and how often a decider offered something the
+    /// hold does not accept.
+    pub hold_metrics: WorkflowHoldMetrics,
+}
+
+/// Derived counters over a run's decision holds. Nothing here is stored:
+/// the hold rows and their rejection rows already hold the history, so the
+/// counters cannot drift from it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowHoldMetrics {
+    pub holds_open: u32,
+    pub holds_answered: u32,
+    pub answers_rejected: u32,
 }
 
 /// Derived counters over a run's wake machinery. `events_pending` counts

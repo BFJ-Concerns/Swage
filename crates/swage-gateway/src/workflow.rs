@@ -5589,11 +5589,29 @@ pub async fn get_run(
         .map(|entry| journal_wire(entry).map_err(internal))
         .collect::<Result<Vec<_>, ApiError>>()?;
     let holds = run_hold_projections(&state, id).await?;
+    // Hold economics are derived the same way the wake economics are: the
+    // hold rows and their rejections are the history, and a stored counter
+    // could only drift from them.
+    let hold_metrics = swage_protocol::client::workflow::WorkflowHoldMetrics {
+        holds_open: holds
+            .iter()
+            .filter(|hold| matches!(hold.state, WorkflowRunHoldState::Open))
+            .count() as u32,
+        holds_answered: holds
+            .iter()
+            .filter(|hold| matches!(hold.state, WorkflowRunHoldState::Answered))
+            .count() as u32,
+        answers_rejected: holds
+            .iter()
+            .map(|hold| hold.rejections.len())
+            .sum::<usize>() as u32,
+    };
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
         wake_metrics,
         holds,
+        hold_metrics,
     }))
 }
 
@@ -11697,6 +11715,92 @@ mod tests {
         assert_eq!(
             completed.final_output,
             Some(serde_json::json!({"verdict": "hold", "by": "decider"}))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_detail_counts_what_is_still_waiting_what_was_decided_and_what_was_refused() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        // Two decisions in sequence: the first is answered, the second is
+        // still waiting after a refused attempt.
+        let source = r#"
+            const first = await hold({ content: "Ship?", verdicts: ["ship", "hold"] });
+            const second = await hold({ content: "Announce?", verdicts: ["announce", "quiet"] });
+            return { first: first.verdict, second: second.verdict };
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let (_session, _turn_id, base, ws_tx) =
+            hold_answering_context(&storage, &state, space.id, "decider").await;
+        let context = crate::tool_executor::GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+
+        let first_hold = state
+            .storage
+            .list_workflow_run_holds(started.id)
+            .await
+            .expect("holds")[0]
+            .id;
+        crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "answer", "hold_id": first_hold, "verdict": "ship"}),
+            &context,
+        )
+        .await
+        .expect("answer the first decision");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let second_hold = *state
+            .storage
+            .list_workflow_run_holds(started.id)
+            .await
+            .expect("holds")
+            .iter()
+            .map(|hold| &hold.id)
+            .nth(1)
+            .expect("the second decision is raised");
+        crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "answer", "hold_id": second_hold, "verdict": "maybe"}),
+            &context,
+        )
+        .await
+        .expect_err("an out-of-set answer is refused");
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.hold_metrics.holds_answered, 1);
+        assert_eq!(detail.hold_metrics.holds_open, 1);
+        assert_eq!(detail.hold_metrics.answers_rejected, 1);
+        assert_eq!(
+            detail.hold_metrics.holds_open as usize + detail.hold_metrics.holds_answered as usize,
+            detail.holds.len(),
+            "the counts are derived from the very rows beside them"
         );
     }
 
