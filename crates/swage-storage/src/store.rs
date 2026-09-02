@@ -12,9 +12,9 @@ use crate::model::{
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
     NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
-    NewPageModule, NewPageTemplate, NewPageTemplateModule, NewSchedule, NewScheduleRun,
-    NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition, NewThread,
-    NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput, NewSchedule,
+    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition,
+    NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
     NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page,
     PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin, Schedule,
     ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceObservation,
@@ -1183,6 +1183,13 @@ pub trait PageStore: Send + Sync {
         &self,
         template: NewPageTemplate,
     ) -> Result<PageTemplate, StorageError>;
+    /// Create a template and every module it seeds in one transaction, so a
+    /// reader can never observe a partially configured template.
+    async fn create_page_template_with_modules(
+        &self,
+        template: NewPageTemplate,
+        modules: Vec<NewPageTemplateModuleInput>,
+    ) -> Result<PageTemplate, StorageError>;
     async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError>;
     /// A space's templates, oldest first.
     async fn list_page_templates_by_space(
@@ -2030,6 +2037,13 @@ mod tests {
         async fn create_page_template(
             &self,
             _: NewPageTemplate,
+        ) -> Result<PageTemplate, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_template_with_modules(
+            &self,
+            _: NewPageTemplate,
+            _: Vec<NewPageTemplateModuleInput>,
         ) -> Result<PageTemplate, StorageError> {
             unimplemented!()
         }

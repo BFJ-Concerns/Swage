@@ -139,10 +139,10 @@ pub struct PageResponse {
     /// The template this page was forked from, if any — the recorded origin
     /// of its seeded shape. Absent on a page created blank.
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, type = "string | null")]
     pub forked_from_template_id: Option<Uuid>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, type = "string | null")]
     pub forked_at: Option<DateTime<Utc>>,
 }
 

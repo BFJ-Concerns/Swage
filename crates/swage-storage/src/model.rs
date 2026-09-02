@@ -1199,6 +1199,14 @@ pub struct NewPageTemplate {
     pub name: String,
 }
 
+/// Input for a module seeded into a template at its creation.
+#[derive(Debug, Clone)]
+pub struct NewPageTemplateModuleInput {
+    pub kind: String,
+    pub position: i32,
+    pub source: String,
+}
+
 /// Input for adding a module row to a template.
 #[derive(Debug, Clone)]
 pub struct NewPageTemplateModule {

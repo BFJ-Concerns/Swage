@@ -6,4 +6,4 @@ export type PageResponse = { id: string, space_id: string, title: string, create
  * The template this page was forked from, if any — the recorded origin
  * of its seeded shape. Absent on a page created blank.
  */
-forked_from_template_id?: string, forked_at?: string, };
+forked_from_template_id?: string | null, forked_at?: string | null, };
