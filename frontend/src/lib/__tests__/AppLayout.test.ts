@@ -124,6 +124,8 @@ function mockConnectionStore(): ConnectionStore {
 function mockStreamingStore(): StreamingStore {
   return {
     get isStreaming() { return false; },
+    streamBelongsTo: () => true,
+    clearConversationOwnership: vi.fn(),
     get activeTurnGeneration() { return 0; },
     get streamedContent() { return ""; },
     get turnError() { return null; },

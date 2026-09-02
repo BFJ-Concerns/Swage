@@ -247,6 +247,46 @@ describe("turn_complete", () => {
     expect(store.isStreaming).toBe(false);
   });
 
+  it("clears conversation ownership when the turn settles", () => {
+    const activeConversation = { id: "conv-a", messages: [] };
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: () => {},
+        appendAssistantMessage: () => {},
+      },
+    });
+    store.startTurn("question");
+
+    expect(store.activeConversationId).toBe("conv-a");
+    expect(store.streamBelongsTo("conv-a")).toBe(true);
+    expect(store.streamBelongsTo("conv-b")).toBe(false);
+
+    store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
+
+    expect(store.activeConversationId).toBeNull();
+  });
+
+  it("clears conversation ownership when the conversation is deselected", () => {
+    const activeConversation = { id: "conv-a", messages: [] };
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: () => {},
+        appendAssistantMessage: () => {},
+      },
+    });
+    store.startTurn("question");
+
+    store.clearConversationOwnership();
+
+    expect(store.activeConversationId).toBeNull();
+  });
+
   it("resets streamedContent to empty", () => {
     const store = createStreamingStore();
     store.startTurn("question");

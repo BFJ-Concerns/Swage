@@ -19,6 +19,14 @@ function makeStreamingStore(
     get activeConversationId() {
       return activeConversationId;
     },
+    streamBelongsTo(conversationId) {
+      return (
+        conversationId === null ||
+        activeConversationId === undefined ||
+        activeConversationId === conversationId
+      );
+    },
+    clearConversationOwnership: vi.fn(),
     get activeTurnGeneration() {
       return 0;
     },
@@ -323,5 +331,16 @@ describe("MessageInput", () => {
 
     expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".action.send")).not.toBeNull();
+  });
+
+  it("locks the space-home composer during conversation creation", () => {
+    const store = makeStreamingStore(true, "conversation-one");
+    component = mount(MessageInput, {
+      target: document.body,
+      props: { store, sessionId: null },
+    });
+
+    expect(document.querySelector(".action.stop")).not.toBeNull();
+    expect(document.querySelector(".action.send")).toBeNull();
   });
 });

@@ -35,8 +35,7 @@
 
   const hasNoConfiguredModels = $derived(modelCatalogueReady && modelOptions.length === 0);
   const isStreamingHere = $derived(
-    (store?.isStreaming ?? false) &&
-      (store?.activeConversationId === undefined || store.activeConversationId === sessionId),
+    (store?.isStreaming ?? false) && (store?.streamBelongsTo(sessionId) ?? false),
   );
 
   // Local draft content — cleared after every successful send.
