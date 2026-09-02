@@ -269,6 +269,18 @@ fn resolved_cargo_target_paths() -> Result<CargoTargetPaths> {
     Ok(cargo_target_paths(cargo_target_directory()?))
 }
 
+fn dev_gateway_command(paths: &CargoTargetPaths, options: &DevOptions) -> Command {
+    let mut gateway = Command::new(&paths.debug_binary);
+    gateway
+        .env("SWAGE_DEV_FRONTEND_PORT", &options.vite_port)
+        .arg("gateway")
+        .arg("start")
+        .arg("--foreground")
+        .arg("--port")
+        .arg(&options.gateway_port);
+    gateway
+}
+
 fn dev(options: &DevOptions) -> Result<()> {
     build_dev(&BuildDevOptions::default())?;
     warn_if_vite_proxy_mismatch(&options.gateway_port)?;
@@ -277,14 +289,8 @@ fn dev(options: &DevOptions) -> Result<()> {
         "==> Starting Swage gateway on port {} (debug binary)",
         options.gateway_port
     );
-    let mut gateway = Command::new(resolved_cargo_target_paths()?.debug_binary)
-        .env("SWAGE_DEV_FRONTEND_PORT", &options.vite_port)
-        .arg("gateway")
-        .arg("start")
-        .arg("--foreground")
-        .arg("--port")
-        .arg(&options.gateway_port)
-        .spawn()?;
+    let target_paths = resolved_cargo_target_paths()?;
+    let mut gateway = dev_gateway_command(&target_paths, options).spawn()?;
 
     println!(
         "==> Starting Vite dev server on {}:{}",
@@ -1140,7 +1146,7 @@ fn prune_debug_incremental_if_needed(paths: &CargoTargetPaths) -> Result<()> {
         incremental_dir.display(),
         paths.root.display(),
     );
-    fs::remove_dir_all(&incremental_dir)?;
+    fs::remove_dir_all(incremental_dir)?;
     Ok(())
 }
 
@@ -1419,7 +1425,10 @@ fn print_help() {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{cargo_target_paths, component_style_lines, off_palette_colour_columns};
+    use super::{
+        DevOptions, cargo_target_paths, component_style_lines, dev_gateway_command,
+        off_palette_colour_columns,
+    };
 
     #[test]
     fn derives_all_xtask_artifact_paths_from_the_resolved_cargo_target_directory() {
@@ -1437,6 +1446,27 @@ mod tests {
         assert_eq!(
             paths.debug_incremental,
             PathBuf::from("/custom/cargo-target/debug/incremental")
+        );
+    }
+
+    #[test]
+    fn dev_gateway_command_uses_the_resolved_cargo_target_directory() {
+        let paths = cargo_target_paths(PathBuf::from("/custom/cargo-target"));
+        let options = DevOptions {
+            gateway_port: "32143".to_owned(),
+            vite_host: "127.0.0.1".to_owned(),
+            vite_port: "5173".to_owned(),
+        };
+
+        let command = dev_gateway_command(&paths, &options);
+
+        assert_eq!(
+            command.get_program(),
+            std::path::Path::new("/custom/cargo-target/debug/swage"),
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["gateway", "start", "--foreground", "--port", "32143"],
         );
     }
 
