@@ -3,7 +3,7 @@
 use std::{
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -26,6 +26,8 @@ use uuid::Uuid;
 struct CountingProvider {
     calls: AtomicUsize,
     counts: Vec<Result<Option<u64>, ProviderError>>,
+    completion_requests: Mutex<Vec<CompletionRequest>>,
+    stream_requests: Mutex<Vec<CompletionRequest>>,
 }
 
 #[async_trait::async_trait]
@@ -36,7 +38,11 @@ impl LlmProvider for CountingProvider {
     async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
         self.counts[self.calls.fetch_add(1, Ordering::SeqCst)].clone()
     }
-    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.completion_requests.lock().unwrap().push(request);
         Ok(CompletionResponse {
             content: "summary".into(),
             input_tokens: 1,
@@ -53,8 +59,9 @@ impl LlmProvider for CountingProvider {
     }
     fn stream(
         &self,
-        _: CompletionRequest,
+        request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.stream_requests.lock().unwrap().push(request);
         Box::pin(futures::stream::iter([
             StreamChunk::Delta {
                 content: "agent completed after compaction".into(),
@@ -91,6 +98,8 @@ async fn agent_caller_compacts_with_the_counting_and_summarising_provider() {
     let provider = Arc::new(CountingProvider {
         calls: AtomicUsize::new(0),
         counts: vec![Ok(Some(100)), Ok(Some(100)), Ok(Some(1))],
+        completion_requests: Mutex::new(vec![]),
+        stream_requests: Mutex::new(vec![]),
     });
     let mut config = AgentConfig::new("compaction-agent").with_workspace("/tmp", vec![]);
     config.compaction_threshold = CompactionThreshold::TokenCount(10);
@@ -127,6 +136,35 @@ async fn agent_caller_compacts_with_the_counting_and_summarising_provider() {
         .unwrap();
 
     assert_eq!(outbound.response, "agent completed after compaction");
+    let completion_requests = provider.completion_requests.lock().unwrap();
+    assert_eq!(
+        completion_requests.len(),
+        1,
+        "compaction must invoke summarisation"
+    );
+    assert!(
+        completion_requests[0].messages[0]
+            .text_content()
+            .contains("first detail"),
+        "the summary request must preserve compacted-away history"
+    );
+    drop(completion_requests);
+    let stream_requests = provider.stream_requests.lock().unwrap();
+    assert_eq!(stream_requests.len(), 1);
+    let streamed_prompt = stream_requests[0]
+        .messages
+        .iter()
+        .map(swage_core::ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        streamed_prompt.contains("Summary of earlier conversation: summary"),
+        "the final stream must receive the provider's summary"
+    );
+    assert!(
+        !streamed_prompt.contains("first detail"),
+        "the compacted-away history must be represented by the summary, not passed through"
+    );
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),
         3,
@@ -163,6 +201,8 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
                 message: "unavailable".into(),
             }),
         ],
+        completion_requests: Mutex::new(vec![]),
+        stream_requests: Mutex::new(vec![]),
     };
     assert!(
         exceeds_threshold_with_model(std::slice::from_ref(&non_text), &threshold, &provider, None,)
@@ -193,6 +233,8 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
     let provider = CountingProvider {
         calls: AtomicUsize::new(0),
         counts: vec![Ok(Some(100)), Ok(Some(1))],
+        completion_requests: Mutex::new(vec![]),
+        stream_requests: Mutex::new(vec![]),
     };
     let (_messages, record) = compact_with_model(
         vec![non_text, tool_replay],
