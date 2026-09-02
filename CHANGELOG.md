@@ -64,6 +64,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.
