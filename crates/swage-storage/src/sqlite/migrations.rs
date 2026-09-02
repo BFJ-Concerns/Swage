@@ -150,7 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_page_modules_page ON page_modules(page_id);
 const CREATE_PAGE_TEMPLATE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS page_templates (
     id          TEXT NOT NULL PRIMARY KEY,
-    space_id    TEXT NOT NULL REFERENCES spaces(id),
+    space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS page_template_modules (
 );
 CREATE INDEX IF NOT EXISTS idx_page_template_modules_template
     ON page_template_modules(template_id);
-ALTER TABLE pages ADD COLUMN forked_from_template_id TEXT REFERENCES page_templates(id);
+ALTER TABLE pages ADD COLUMN forked_from_template_id TEXT REFERENCES page_templates(id) ON DELETE SET NULL;
 ALTER TABLE pages ADD COLUMN forked_at TEXT;
 ";
 
