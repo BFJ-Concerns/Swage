@@ -5021,12 +5021,21 @@
             ]
           },
           "max_total_tokens": {
+            "description": "Legacy default used only when no per-route ledger is configured.\n\nKept while callers move to `per_route`; each resolved provider still\nreceives an independent ledger from these values.",
             "format": "uint64",
             "minimum": 0,
             "type": [
               "integer",
               "null"
             ]
+          },
+          "per_route": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/WorkflowRouteBudget"
+            },
+            "default": {},
+            "description": "Per-provider-entry token ledgers. A model resolves to the provider\nentry named by its catalogue configuration, and calls on one entry\nnever consume another entry's allowance.",
+            "type": "object"
           },
           "reserved_closing_tokens": {
             "description": "Tokens held back from ordinary work for calls made after the run has\nobserved its wind-down boundary. This allowance is part of, not in\naddition to, `max_total_tokens`.",
@@ -5330,6 +5339,29 @@
           "failed"
         ],
         "type": "string"
+      },
+      "WorkflowRouteBudget": {
+        "properties": {
+          "max_total_tokens": {
+            "description": "The token ceiling for calls resolved to this provider entry.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reserved_closing_tokens": {
+            "description": "Tokens retained for closing calls on this provider entry after the\nworkflow has entered wind-down for that route.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WorkflowRun": {
         "properties": {
