@@ -319,11 +319,15 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
             .iter()
             .any(|prompt| prompt.contains("Deliver research findings"))
     );
-    for stage_marker in [
-        "You are scoping a research sweep.",
-        "Gather one source",
-        "Organise them into the space's knowledge base.",
-        "Deliver research findings.",
+    // The topic names the sweep for every worker. The purpose steers the
+    // stages that choose and judge material — scoping and synthesis; gather
+    // workers receive the per-source contribution the scout derived from it,
+    // and the organiser curates the corpus purpose-agnostically.
+    for (stage_marker, carries_purpose) in [
+        ("You are scoping a research sweep.", true),
+        ("Gather one source", false),
+        ("Organise them into the space's knowledge base.", false),
+        ("Deliver research findings.", true),
     ] {
         let stage_prompts = prompts
             .iter()
@@ -338,10 +342,12 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
                 prompt.contains("contract evidence"),
                 "{stage_marker} must receive the submitted topic: {prompt}"
             );
-            assert!(
-                prompt.contains("prove the staged research contract"),
-                "{stage_marker} must receive the submitted purpose: {prompt}"
-            );
+            if carries_purpose {
+                assert!(
+                    prompt.contains("prove the staged research contract"),
+                    "{stage_marker} must receive the submitted purpose: {prompt}"
+                );
+            }
         }
     }
     drop(prompts);
