@@ -892,19 +892,53 @@ impl AnthropicProvider {
             return MessageContent::Blocks(Self::tool_replay_to_anthropic_blocks(replay));
         }
 
-        let text = message
+        if !message
             .content()
             .iter()
-            .filter_map(|p| {
-                if let ContentPart::Text { text } = p {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
+            .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+        {
+            return MessageContent::Text(message.text_content());
+        }
+
+        MessageContent::Blocks(
+            message
+                .content()
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text { text } if !text.is_empty() => Some(serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    })),
+                    ContentPart::ImageUrl { url } => Some(Self::image_block(url)),
+                    ContentPart::Text { .. } => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// Map the two image references the client contract accepts onto the
+    /// Messages API's image source union. A `data:` URL already contains the
+    /// base64 payload Anthropic expects; other URLs use the native URL source.
+    fn image_block(url: &str) -> serde_json::Value {
+        if let Some((media_type, data)) = url.strip_prefix("data:").and_then(|data_url| {
+            let (metadata, data) = data_url.split_once(',')?;
+            let media_type = metadata.strip_suffix(";base64")?;
+            (!media_type.is_empty()).then_some((media_type, data))
+        }) {
+            serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
             })
-            .collect::<Vec<_>>()
-            .join("");
-        MessageContent::Text(text)
+        } else {
+            serde_json::json!({
+                "type": "image",
+                "source": { "type": "url", "url": url },
+            })
+        }
     }
 
     fn tool_replay_to_anthropic_blocks(replay: &[ToolReplayPart]) -> Vec<serde_json::Value> {
@@ -1993,6 +2027,35 @@ mod tests {
         let json = serde_json::to_value(&messages[1]).unwrap();
         let blocks = json["content"].as_array().unwrap();
         assert_eq!(blocks[0]["is_error"], true);
+    }
+
+    #[test]
+    fn image_parts_use_anthropics_url_and_base64_sources() {
+        let message = ChatMessage::new_parts(
+            Role::User,
+            vec![
+                ContentPart::Text {
+                    text: "Describe these images".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://example.test/cat.png".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+                },
+            ],
+        );
+
+        let (_system, messages) = AnthropicProvider::to_anthropic_messages(&[message]);
+        let body = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(
+            body["content"],
+            serde_json::json!([
+                {"type": "text", "text": "Describe these images"},
+                {"type": "image", "source": {"type": "url", "url": "https://example.test/cat.png"}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "cG5nLWJ5dGVz"}}
+            ])
+        );
     }
 
     #[test]

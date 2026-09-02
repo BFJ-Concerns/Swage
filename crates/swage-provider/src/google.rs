@@ -48,9 +48,30 @@ struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    inline_data: Option<GeminiBlob>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_data: Option<GeminiFileData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_response: Option<GeminiFunctionResponse>,
+}
+
+/// Raw media bytes carried in a Gemini `inlineData` part.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GeminiBlob {
+    mime_type: String,
+    data: String,
+}
+
+/// URI-based media carried in a Gemini `fileData` part.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GeminiFileData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+    file_uri: String,
 }
 
 /// A function call issued by the model.
@@ -230,6 +251,8 @@ impl GoogleProvider {
                 role: None,
                 parts: vec![GeminiPart {
                     text: Some(system_texts.join("\n\n")),
+                    inline_data: None,
+                    file_data: None,
                     function_call: None,
                     function_response: None,
                 }],
@@ -255,17 +278,23 @@ impl GoogleProvider {
                 if let Some(replay) = msg.tool_replay() {
                     parts.extend(Self::convert_tool_replay_parts(replay));
                 } else {
-                    // Regular text parts.
+                    // `data:` URLs supply the base64 bytes Gemini needs for
+                    // `inlineData`; URI references use its `fileData` form.
                     for part in msg.content() {
-                        // Image URLs are not yet supported for Gemini.
-                        if let ContentPart::Text { text } = part
-                            && !text.is_empty()
-                        {
-                            parts.push(GeminiPart {
-                                text: Some(text.clone()),
-                                function_call: None,
-                                function_response: None,
-                            });
+                        match part {
+                            ContentPart::Text { text } if !text.is_empty() => {
+                                parts.push(GeminiPart {
+                                    text: Some(text.clone()),
+                                    inline_data: None,
+                                    file_data: None,
+                                    function_call: None,
+                                    function_response: None,
+                                });
+                            }
+                            ContentPart::ImageUrl { url } => {
+                                parts.push(Self::image_part(url));
+                            }
+                            ContentPart::Text { .. } => {}
                         }
                     }
                 }
@@ -274,6 +303,8 @@ impl GoogleProvider {
                 if parts.is_empty() {
                     parts.push(GeminiPart {
                         text: Some(String::new()),
+                        inline_data: None,
+                        file_data: None,
                         function_call: None,
                         function_response: None,
                     });
@@ -293,11 +324,15 @@ impl GoogleProvider {
             .map(|part| match part {
                 ToolReplayPart::Text { text } => GeminiPart {
                     text: Some(text.clone()),
+                    inline_data: None,
+                    file_data: None,
                     function_call: None,
                     function_response: None,
                 },
                 ToolReplayPart::Reasoning { content, .. } => GeminiPart {
                     text: Some(content.clone()),
+                    inline_data: None,
+                    file_data: None,
                     function_call: None,
                     function_response: None,
                 },
@@ -305,6 +340,8 @@ impl GoogleProvider {
                     name, arguments, ..
                 } => GeminiPart {
                     text: None,
+                    inline_data: None,
+                    file_data: None,
                     function_call: Some(GeminiFunctionCall {
                         name: name.clone(),
                         args: arguments.clone(),
@@ -315,6 +352,8 @@ impl GoogleProvider {
                     call_id, content, ..
                 } => GeminiPart {
                     text: None,
+                    inline_data: None,
+                    file_data: None,
                     function_call: None,
                     function_response: Some(GeminiFunctionResponse {
                         name: call_id.clone(),
@@ -323,6 +362,36 @@ impl GoogleProvider {
                 },
             })
             .collect()
+    }
+
+    fn image_part(url: &str) -> GeminiPart {
+        if let Some((mime_type, data)) = url.strip_prefix("data:").and_then(|data_url| {
+            let (metadata, data) = data_url.split_once(',')?;
+            let mime_type = metadata.strip_suffix(";base64")?;
+            (!mime_type.is_empty()).then_some((mime_type, data))
+        }) {
+            GeminiPart {
+                text: None,
+                inline_data: Some(GeminiBlob {
+                    mime_type: mime_type.to_string(),
+                    data: data.to_string(),
+                }),
+                file_data: None,
+                function_call: None,
+                function_response: None,
+            }
+        } else {
+            GeminiPart {
+                text: None,
+                inline_data: None,
+                file_data: Some(GeminiFileData {
+                    mime_type: None,
+                    file_uri: url.to_string(),
+                }),
+                function_call: None,
+                function_response: None,
+            }
+        }
     }
 
     /// Build the request body for a text-only completion.
@@ -817,6 +886,34 @@ mod tests {
     }
 
     #[test]
+    fn convert_image_parts_use_inline_data_and_file_data() {
+        let message = ChatMessage::new_parts(
+            Role::User,
+            vec![
+                ContentPart::Text {
+                    text: "Describe these images".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "https://example.test/cat.png".into(),
+                },
+            ],
+        );
+
+        let json = serde_json::to_value(GoogleProvider::convert_messages(&[&message])).unwrap();
+        assert_eq!(
+            json[0]["parts"],
+            serde_json::json!([
+                {"text": "Describe these images"},
+                {"inlineData": {"mimeType": "image/png", "data": "cG5nLWJ5dGVz"}},
+                {"fileData": {"fileUri": "https://example.test/cat.png"}}
+            ])
+        );
+    }
+
+    #[test]
     fn convert_tool_replay_to_function_call_and_response_parts() {
         let messages = swage_core::build_tool_round_messages(
             &[ToolCall {
@@ -1123,6 +1220,8 @@ mod tests {
                     role: Some("model".into()),
                     parts: vec![GeminiPart {
                         text: Some("Hello!".into()),
+                        inline_data: None,
+                        file_data: None,
                         function_call: None,
                         function_response: None,
                     }],
@@ -1148,6 +1247,8 @@ mod tests {
                     role: Some("model".into()),
                     parts: vec![GeminiPart {
                         text: None,
+                        inline_data: None,
+                        file_data: None,
                         function_call: Some(GeminiFunctionCall {
                             name: "get_weather".into(),
                             args: serde_json::json!({"location": "London"}),
