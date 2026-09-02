@@ -107,6 +107,18 @@ model_id = "claude-sonnet-5"
 Set the key in the gateway's environment before starting it. Providers and
 models can also be managed from the web UI under Settings → Providers.
 
+### Credentials beyond environment variables
+
+Every provider credential resolves through the gateway's secret manager,
+which supports three backends: `managed` (encrypted in the gateway's store),
+`env` (an environment variable, as `api_key_env` above), and `file` (a file
+on the gateway host, re-read on every access so externally refreshed tokens
+stay current). A file-backed secret can optionally narrow into a JSON
+document with a JSON pointer — useful when a tool's own auth store keeps
+multiple tokens in one file. The Codex CLI's OAuth tokens are registered
+this way at startup, so they resolve and redact through the governed system
+without being copied out of the harness's own `auth.json`.
+
 `SWAGE_HOME` overrides the whole data root (config, database, logs) — useful
 for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.
 
@@ -208,7 +220,15 @@ first:
   definitions, operator guidance (`AGENTS.md`), what a tool call is allowed
   to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
-  turn context inspector, the wire contract, and the verification gate.
+  turn context inspector, image attachments, the API error contract, the
+  wire contract and its projections, and the verification gate.
+
+Every failed API response carries a `{"code","message"}` body whose code
+vocabulary is defined in the protocol crate. The client-surface API is
+documented in an OpenAPI 3.1 document at
+`crates/swage-protocol/schema/client-openapi.json`, generated from the same
+route manifest that drives the TypeScript client and the router-coverage
+test.
 
 [`docs/README.md`](docs/README.md) indexes the set, and
 [`docs/architecture-flow.svg`](docs/architecture-flow.svg) is the
