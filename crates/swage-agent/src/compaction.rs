@@ -29,29 +29,59 @@ use crate::error::AgentError;
 /// keeping clearly small contexts off the counting endpoint.
 const PER_MESSAGE_TOKEN_OVERHEAD_BYTES: u64 = 16;
 
+/// Result of checking a prompt against its compaction threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThresholdEvaluation {
+    pub(crate) exceeds: bool,
+    pub(crate) native_breach: bool,
+}
+
 /// Check whether the message history exceeds the compaction threshold for the
 /// model that will receive the completion.
-pub async fn exceeds_threshold_with_model(
+///
+/// `threshold_known_exceeded` preserves a previously established native-token
+/// breach if a later provider count is unavailable. Estimate-only breaches do
+/// not set that flag and continue to fall back to the local estimate.
+pub(crate) async fn exceeds_threshold_with_model(
     messages: &[ChatMessage],
     threshold: &CompactionThreshold,
     provider: &dyn LlmProvider,
     model: Option<&str>,
-) -> bool {
+    threshold_known_exceeded: bool,
+) -> ThresholdEvaluation {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
-            if token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens) {
-                return false;
+            if !threshold_known_exceeded
+                && token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens)
+            {
+                return ThresholdEvaluation {
+                    exceeds: false,
+                    native_breach: false,
+                };
             }
 
             match provider
                 .count_tokens(&counting_request(messages, model))
                 .await
             {
-                Ok(Some(count)) => count > *max_tokens,
-                Ok(None) | Err(_) => estimated_tokens(messages) > *max_tokens as usize,
+                Ok(Some(count)) => {
+                    let exceeds = count > *max_tokens;
+                    ThresholdEvaluation {
+                        exceeds,
+                        native_breach: exceeds,
+                    }
+                }
+                Ok(None) | Err(_) => ThresholdEvaluation {
+                    exceeds: threshold_known_exceeded
+                        || estimated_tokens(messages) > *max_tokens as usize,
+                    native_breach: threshold_known_exceeded,
+                },
             }
         }
-        CompactionThreshold::MessageCount(max_count) => messages.len() > *max_count as usize,
+        CompactionThreshold::MessageCount(max_count) => ThresholdEvaluation {
+            exceeds: messages.len() > *max_count as usize,
+            native_breach: false,
+        },
     }
 }
 
@@ -72,7 +102,9 @@ pub async fn compact_with_model(
     threshold_known_exceeded: bool,
 ) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
     if !threshold_known_exceeded
-        && !exceeds_threshold_with_model(&messages, threshold, provider, model).await
+        && !exceeds_threshold_with_model(messages.as_slice(), threshold, provider, model, false)
+            .await
+            .exceeds
     {
         return Ok((messages, None));
     }
@@ -81,7 +113,16 @@ pub async fn compact_with_model(
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
     // gracefully if the provider call fails.
     let (messages, mut messages_removed) = try_summarise(messages, provider, focus).await;
-    if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
+    if !exceeds_threshold_with_model(
+        &messages,
+        threshold,
+        provider,
+        model,
+        threshold_known_exceeded,
+    )
+    .await
+    .exceeds
+    {
         let tokens_after = estimated_tokens(&messages);
         return Ok((
             messages,
@@ -99,7 +140,16 @@ pub async fn compact_with_model(
     let messages_before_tier = messages.len();
     let messages = truncate(messages, threshold);
     messages_removed += messages_before_tier.saturating_sub(messages.len());
-    if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
+    if !exceeds_threshold_with_model(
+        &messages,
+        threshold,
+        provider,
+        model,
+        threshold_known_exceeded,
+    )
+    .await
+    .exceeds
+    {
         let tokens_after = estimated_tokens(&messages);
         return Ok((
             messages,
@@ -118,7 +168,16 @@ pub async fn compact_with_model(
     let messages_before_tier = messages.len();
     let messages = aggressive_truncate(messages);
     messages_removed += messages_before_tier.saturating_sub(messages.len());
-    if !exceeds_threshold_with_model(&messages, threshold, provider, model).await {
+    if !exceeds_threshold_with_model(
+        &messages,
+        threshold,
+        provider,
+        model,
+        threshold_known_exceeded,
+    )
+    .await
+    .exceeds
+    {
         let tokens_after = estimated_tokens(&messages);
         return Ok((
             messages,
@@ -610,8 +669,10 @@ mod tests {
                 &CompactionThreshold::MessageCount(5),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
     }
 
@@ -631,8 +692,10 @@ mod tests {
                 &CompactionThreshold::MessageCount(3),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
     }
 
@@ -652,8 +715,10 @@ mod tests {
                 &CompactionThreshold::MessageCount(3),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
     }
 
@@ -670,8 +735,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
         assert!(
             !exceeds_threshold_with_model(
@@ -679,8 +746,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(10),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
 
         // The estimate sums all characters before dividing. Three short
@@ -697,8 +766,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
     }
 
@@ -716,8 +787,10 @@ mod tests {
                 &CompactionThreshold::MessageCount(1),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
         assert!(
             provider
@@ -739,8 +812,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(100),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
         assert!(
             provider
@@ -764,8 +839,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(4),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
 
         let requests = provider.count_requests.lock().expect("count request lock");
@@ -792,8 +869,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
         assert_eq!(
             provider
@@ -816,8 +895,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
                 None,
+                false,
             )
             .await
+            .exceeds
         );
         assert_eq!(
             provider
@@ -840,8 +921,10 @@ mod tests {
                 &CompactionThreshold::TokenCount(1),
                 provider.as_ref(),
                 Some("selected-completion-model"),
+                false,
             )
             .await
+            .exceeds
         );
         let requests = provider.count_requests.lock().expect("count request lock");
         assert_eq!(
@@ -1003,15 +1086,44 @@ mod tests {
                 &CompactionThreshold::MessageCount(3),
                 provider.as_ref(),
                 None,
+                false,
             )
-            .await,
+            .await
+            .exceeds,
             "result should be within threshold, got {} messages",
             result.len()
         );
     }
 
     #[tokio::test]
-    async fn failed_summarisation_reports_no_removals_when_counting_falls_back_below_threshold() {
+    async fn known_native_breach_is_not_cleared_when_recount_fails() {
+        let messages = vec![
+            text_msg(Role::User, "a"),
+            text_msg(Role::Assistant, "b"),
+            text_msg(Role::User, "c"),
+            text_msg(Role::Assistant, "d"),
+        ];
+        let storage = stub_storage();
+        let provider = TransientCountFailureProvider::new();
+
+        let error = compact_with_model(
+            messages,
+            &CompactionThreshold::TokenCount(20),
+            provider.as_ref(),
+            storage.as_ref(),
+            Uuid::new_v4(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect_err("a failed native recount cannot clear the known breach");
+
+        assert!(matches!(error, AgentError::CompactionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn failed_recount_without_native_breach_keeps_estimate_fallback() {
         let messages = vec![
             text_msg(Role::User, "a"),
             text_msg(Role::Assistant, "b"),
@@ -1032,9 +1144,9 @@ mod tests {
             false,
         )
         .await
-        .expect("fallback estimate places the unchanged prompt below the threshold");
+        .expect("the estimate fallback must remain available without a native breach");
 
-        let record = record.expect("compaction emits the attempted summarisation record");
+        let record = record.expect("compaction records the failed summarisation attempt");
         assert_eq!(record.actual_strategy, "summarisation");
         assert_eq!(record.messages_removed, 0);
         assert_eq!(record.tokens_before, record.tokens_after);

@@ -350,6 +350,148 @@ mod approval_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod compaction_caller_tests {
+    use std::{pin::Pin, sync::Arc};
+
+    use async_trait::async_trait;
+    use futures::{Stream, stream};
+    use swage_core::{
+        CompletionResponse, FinishReason, ProviderError, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use swage_storage::model::{NewSession, NewThread};
+    use swage_storage::store::{SessionStore, SpaceStore, ThreadStore};
+    use swage_storage::{SqliteStorage, Storage};
+
+    use super::*;
+    use crate::config::CompactionThreshold;
+
+    struct NoNativeCountingProvider;
+
+    #[async_trait]
+    impl LlmProvider for NoNativeCountingProvider {
+        fn model_id(&self) -> &str {
+            "no-native-counting"
+        }
+
+        async fn count_tokens(
+            &self,
+            _request: &CompletionRequest,
+        ) -> Result<Option<u64>, ProviderError> {
+            Ok(None)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Ok(CompletionResponse {
+                content: "brief".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cost: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("the test agent has no tools")
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            Box::pin(stream::iter([
+                StreamChunk::Delta {
+                    content: "completed".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ]))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_without_native_counting_can_still_compact() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "agent".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent".into(),
+            },
+        )
+        .await
+        .expect("thread");
+        let mut config = AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]);
+        config.compaction_threshold = CompactionThreshold::TokenCount(25);
+        let agent = Agent {
+            config,
+            provider: Arc::new(NoNativeCountingProvider),
+            storage: Arc::clone(&storage) as Arc<dyn Storage>,
+            tool_dispatcher: None,
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: None,
+            delegation_handler: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
+        };
+        let messages = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|prefix| ChatMessage::new(Role::User, format!("{prefix}{}", "x".repeat(39))))
+            .collect();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outbound = agent
+            .process_turn_streaming(
+                TurnRequest {
+                    execution: TurnExecutionContext {
+                        session_id: session.id,
+                        thread_id: thread.id,
+                        turn_id: Uuid::new_v4(),
+                        space_id: Some(space.id),
+                    },
+                    user_message: "continue".into(),
+                    assembled_context: messages,
+                    compaction_focus: None,
+                    parent_turn_id: None,
+                    existing_turn_id: None,
+                    effort: None,
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
+                },
+                event_tx,
+            )
+            .await
+            .expect("estimate-only threshold breach must compact successfully");
+
+        assert_eq!(outbound.response, "completed");
+        assert!(
+            std::iter::from_fn(|| event_rx.try_recv().ok())
+                .any(|event| matches!(event, AgentEvent::CompactionApplied { .. })),
+            "the production caller must take the compaction path"
+        );
+    }
+}
 // Agent struct
 // ---------------------------------------------------------------------------
 
@@ -491,14 +633,15 @@ impl Agent {
             approval_scope.approve_remaining_gates();
         }
 
-        let assembled_context = if crate::compaction::exceeds_threshold_with_model(
+        let threshold_evaluation = crate::compaction::exceeds_threshold_with_model(
             &request.assembled_context,
             &self.config.compaction_threshold,
             self.provider.as_ref(),
             self.config.model_id.as_deref(),
+            false,
         )
-        .await
-        {
+        .await;
+        let assembled_context = if threshold_evaluation.exceeds {
             match crate::compaction::compact_with_model(
                 request.assembled_context,
                 &self.config.compaction_threshold,
@@ -507,7 +650,7 @@ impl Agent {
                 thread_id,
                 compaction_focus.as_deref(),
                 self.config.model_id.as_deref(),
-                true,
+                threshold_evaluation.native_breach,
             )
             .await
             {
