@@ -1,8 +1,8 @@
 <!--
   Workflow run detail — renders a run's journal as the account of what its
   workers were asked to do and what came back: the prompt and options each
-  call was dispatched under, the provider rounds its turn ran, what it cost
-  or why that is not known, and how it stopped.
+  call was dispatched under, the provider rounds every attempt of it ran,
+  what it cost or why that is not known, and how it stopped.
 
   Read-only by design: the journal is the record of what already happened,
   fetched on open rather than streamed, so what renders is always what was
@@ -76,10 +76,10 @@
     }
   }
 
+  // A round with no end time is not automatically one still waiting: a round
+  // whose attempt was interrupted has no end time either, and the two read
+  // differently, so the recorded outcome decides the wording.
   function roundLabel(round: WorkflowProviderRound): string {
-    if (round.completed_at === null) {
-      return "no response yet";
-    }
     switch (round.outcome.outcome) {
       case "responded":
         return round.outcome.tool_calls === 0
@@ -89,11 +89,15 @@
         return `failed — ${round.outcome.message}`;
       case "outstanding":
         return "no response yet";
+      case "interrupted":
+        return "interrupted — the attempt stopped before a response came back";
     }
   }
 
+  // The last attempt is the one the call ended on; the earlier ones are the
+  // attempts an interruption cut off before it.
   function resolvedLabel(call: WorkflowAgentCallDetail): string {
-    const resolved = call.dispatch?.resolved;
+    const resolved = call.dispatch?.attempts.at(-1);
     if (!resolved) return "not yet resolved";
     return [resolved.model ?? "default model", resolved.effort ?? "default effort"].join(
       ", ",
@@ -131,6 +135,13 @@
               </dd>
               <dt>Ran with</dt>
               <dd>{resolvedLabel(call)}</dd>
+              {#if call.dispatch.attempts.length > 1}
+                <dt>Attempts</dt>
+                <dd class="attempts">
+                  {call.dispatch.attempts.length} — an earlier attempt was
+                  interrupted and the call dispatched again
+                </dd>
+              {/if}
               {#if call.dispatch.placement}
                 <dt>Placed at</dt>
                 <dd>
@@ -167,6 +178,7 @@
             <table class="rounds">
               <thead>
                 <tr>
+                  <th>Attempt</th>
                   <th>Round</th>
                   <th>Started</th>
                   <th>Ended</th>
@@ -174,8 +186,9 @@
                 </tr>
               </thead>
               <tbody>
-                {#each call.provider_rounds as round (round.round)}
+                {#each call.provider_rounds as round (`${round.attempt}-${round.round}`)}
                   <tr>
+                    <td class="numeric">{round.attempt}</td>
                     <td class="numeric">{round.round}</td>
                     <td>{round.started_at}</td>
                     <td>{round.completed_at ?? "—"}</td>
