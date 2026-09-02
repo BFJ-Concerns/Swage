@@ -249,6 +249,26 @@ fn cargo_target_directory() -> Result<PathBuf> {
     Ok(PathBuf::from(directory))
 }
 
+struct CargoTargetPaths {
+    root: PathBuf,
+    debug_binary: PathBuf,
+    debug_deps: PathBuf,
+    debug_incremental: PathBuf,
+}
+
+fn cargo_target_paths(target_directory: PathBuf) -> CargoTargetPaths {
+    CargoTargetPaths {
+        debug_binary: target_directory.join("debug").join(BINARY_NAME),
+        debug_deps: target_directory.join("debug/deps"),
+        debug_incremental: target_directory.join("debug/incremental"),
+        root: target_directory,
+    }
+}
+
+fn resolved_cargo_target_paths() -> Result<CargoTargetPaths> {
+    Ok(cargo_target_paths(cargo_target_directory()?))
+}
+
 fn dev(options: &DevOptions) -> Result<()> {
     build_dev(&BuildDevOptions::default())?;
     warn_if_vite_proxy_mismatch(&options.gateway_port)?;
@@ -257,8 +277,7 @@ fn dev(options: &DevOptions) -> Result<()> {
         "==> Starting Swage gateway on port {} (debug binary)",
         options.gateway_port
     );
-    let gateway_binary = cargo_target_directory()?.join("debug").join(BINARY_NAME);
-    let mut gateway = Command::new(gateway_binary)
+    let mut gateway = Command::new(resolved_cargo_target_paths()?.debug_binary)
         .env("SWAGE_DEV_FRONTEND_PORT", &options.vite_port)
         .arg("gateway")
         .arg("start")
@@ -1103,15 +1122,15 @@ fn cargo_sweep() -> Result<()> {
         "Capping target/ at 50 GB",
         command("cargo", ["sweep", "--maxsize", TARGET_MAX_SIZE_MB_ARG]),
     )?;
-    prune_debug_incremental_if_needed(&cargo_target_directory()?)
+    prune_debug_incremental_if_needed(&resolved_cargo_target_paths()?)
 }
 
-fn prune_debug_incremental_if_needed(target_directory: &Path) -> Result<()> {
-    if allocated_disk_usage(target_directory)? <= TARGET_MAX_SIZE_BYTES {
+fn prune_debug_incremental_if_needed(paths: &CargoTargetPaths) -> Result<()> {
+    if allocated_disk_usage(&paths.root)? <= TARGET_MAX_SIZE_BYTES {
         return Ok(());
     }
 
-    let incremental_dir = debug_incremental_dir(target_directory);
+    let incremental_dir = &paths.debug_incremental;
     if !incremental_dir.is_dir() {
         return Ok(());
     }
@@ -1119,14 +1138,10 @@ fn prune_debug_incremental_if_needed(target_directory: &Path) -> Result<()> {
     println!(
         "==> Removing {} because {} is still above 50 GB after cargo sweep",
         incremental_dir.display(),
-        target_directory.display(),
+        paths.root.display(),
     );
     fs::remove_dir_all(&incremental_dir)?;
     Ok(())
-}
-
-fn debug_incremental_dir(target_directory: &Path) -> PathBuf {
-    target_directory.join("debug/incremental")
 }
 
 #[derive(Debug, Clone)]
@@ -1138,12 +1153,12 @@ struct ArtifactBudgetSnapshot {
 
 impl ArtifactBudgetSnapshot {
     fn capture() -> io::Result<Self> {
-        let target_directory = cargo_target_directory()
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let paths =
+            resolved_cargo_target_paths().map_err(|error| io::Error::other(error.to_string()))?;
         Ok(Self {
-            target: allocated_disk_usage(&target_directory)?,
-            debug_deps: allocated_disk_usage(&target_directory.join("debug/deps"))?,
-            debug_incremental: allocated_disk_usage(&debug_incremental_dir(&target_directory))?,
+            target: allocated_disk_usage(&paths.root)?,
+            debug_deps: allocated_disk_usage(&paths.debug_deps)?,
+            debug_incremental: allocated_disk_usage(&paths.debug_incremental)?,
         })
     }
 }
@@ -1402,15 +1417,26 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::PathBuf;
 
-    use super::{component_style_lines, debug_incremental_dir, off_palette_colour_columns};
+    use super::{cargo_target_paths, component_style_lines, off_palette_colour_columns};
 
     #[test]
-    fn derives_cleanup_paths_from_the_resolved_cargo_target_directory() {
+    fn derives_all_xtask_artifact_paths_from_the_resolved_cargo_target_directory() {
+        let paths = cargo_target_paths(PathBuf::from("/custom/cargo-target"));
+
+        assert_eq!(paths.root, PathBuf::from("/custom/cargo-target"));
         assert_eq!(
-            debug_incremental_dir(Path::new("/custom/cargo-target")),
-            Path::new("/custom/cargo-target/debug/incremental"),
+            paths.debug_binary,
+            PathBuf::from("/custom/cargo-target/debug/swage")
+        );
+        assert_eq!(
+            paths.debug_deps,
+            PathBuf::from("/custom/cargo-target/debug/deps")
+        );
+        assert_eq!(
+            paths.debug_incremental,
+            PathBuf::from("/custom/cargo-target/debug/incremental")
         );
     }
 

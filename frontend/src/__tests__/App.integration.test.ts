@@ -1005,7 +1005,7 @@ describe("App", () => {
     ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: "conv-stream" }),
-    );
+    ).mockResolvedValueOnce(makeConversationDetail({ id: "conv-other" }));
 
     setPath("/conversations/conv-stream");
     component = mount(App, { target: document.body });
@@ -1044,8 +1044,20 @@ describe("App", () => {
     websocketHarness.client.disconnect.mockClear();
     const conversationButtons = document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn");
     flushSync(() => conversationButtons[1]!.click());
-    (Array.from(document.querySelectorAll("nav button")).find(
+    await settleUi();
+    expect(document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')?.value)
+      .toBe("conv-other");
+
+    const operatorButton = Array.from(document.querySelectorAll("nav button")).find(
       (button) => button.textContent?.trim() === "Operator",
+    ) as HTMLButtonElement;
+    operatorButton.click();
+    await settleUi();
+
+    expect(operatorButton.getAttribute("aria-pressed")).toBe("true");
+
+    (Array.from(document.querySelectorAll("nav button")).find(
+      (button) => button.textContent?.trim() === "Conversations",
     ) as HTMLButtonElement).click();
     await settleUi();
 

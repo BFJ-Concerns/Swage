@@ -159,6 +159,12 @@ fn typescript_bindings_are_regenerated() {
     // Normalise generated files so the committed projection also satisfies
     // the repository whitespace gate.
     trim_generated_typescript(&repo_root().join("frontend/src/lib/protocol"));
+
+    let create_space = std::fs::read_to_string(
+        repo_root().join("frontend/src/lib/protocol/CreateSpaceRequest.ts"),
+    )
+    .expect("read generated create-space binding");
+    assert!(create_space.contains("description?: string"));
 }
 
 fn trim_generated_typescript(directory: &Path) {

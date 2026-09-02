@@ -89,9 +89,6 @@
   }
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
-    if (streamingStore.isStreaming && id !== conversationStore.activeConversation?.id) {
-      return;
-    }
     keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
 
@@ -104,7 +101,7 @@
       await conversationStore.loadConversations(conv.space_id);
     }
 
-    connectionStore.connectTo(id);
+    if (!streamingStore.isStreaming) connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
     router.navigate(`/conversations/${id}`);
   }
@@ -145,7 +142,6 @@
   }
 
   function startNewConversation(): void {
-    if (streamingStore.isStreaming) return;
     void createAndNavigate();
   }
 
@@ -331,7 +327,6 @@
   }
 
   function handleSelectSurface(next: Surface): void {
-    if (streamingStore.isStreaming && next === "operator") return;
     const previous = activeSurface;
     activeSurface = next;
 
@@ -340,7 +335,7 @@
     // navigate away to. Page liveness does not depend on it — the pages
     // store listens on its own channel.
     if (next === "operator") {
-      connectionStore.disconnect();
+      if (!streamingStore.isStreaming) connectionStore.disconnect();
       return;
     }
 
@@ -349,7 +344,7 @@
     // Operator needs to establish the connection again.
     if (previous === "operator") {
       const id = conversationStore.activeConversation?.id;
-      if (id) connectionStore.connectTo(id);
+      if (id && !streamingStore.isStreaming) connectionStore.connectTo(id);
     }
   }
 
