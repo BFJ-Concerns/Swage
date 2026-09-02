@@ -14,7 +14,8 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewWorkspaceAttachment, SpaceStore, SqliteStorage, Storage, WorkspaceAttachmentStore,
+    NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
+    WorkspaceAttachmentStore,
 };
 use tokio::net::TcpListener;
 use tokio::process::Command;
@@ -318,5 +319,78 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
             .iter()
             .any(|prompt| prompt.contains("Deliver research findings"))
     );
+    drop(prompts);
+
+    let journal = storage
+        .list_workflow_journal(run_id.parse().unwrap())
+        .await
+        .unwrap();
+    let stage_contracts = [
+        (
+            "You are scoping a research sweep.",
+            vec![
+                "web_search",
+                "url_fetch",
+                "browser_navigate",
+                "browser_snapshot",
+            ],
+            swage_config::RESERVED_WORKFLOW_AGENT_ID,
+        ),
+        (
+            "Gather one source",
+            vec![
+                "web_search",
+                "url_fetch",
+                "browser_navigate",
+                "browser_snapshot",
+                "knowledge_record",
+            ],
+            swage_config::RESERVED_WORKFLOW_AGENT_ID,
+        ),
+        (
+            "Organise them into the space's knowledge base.",
+            vec![
+                "knowledge_orient",
+                "knowledge_search",
+                "knowledge_curate",
+                "knowledge_curate_orientation",
+            ],
+            swage_config::RESERVED_WORKFLOW_AGENT_ID,
+        ),
+        (
+            "Deliver research findings",
+            vec!["knowledge_search", "knowledge_cite"],
+            swage_config::RESERVED_WORKFLOW_AGENT_ID,
+        ),
+    ];
+    for (marker, expected_tools, expected_agent_id) in stage_contracts {
+        let entries = journal
+            .iter()
+            .filter(|entry| {
+                entry.kind == "agent_call"
+                    && entry.request["prompt"]
+                        .as_str()
+                        .is_some_and(|prompt| prompt.contains(marker))
+            })
+            .collect::<Vec<_>>();
+        assert!(!entries.is_empty(), "journalled {marker} dispatch");
+        for entry in entries {
+            let session_id = entry.result.as_ref().unwrap()["session_id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let session = storage.get_session(session_id).await.unwrap().unwrap();
+            assert_eq!(
+                session.metadata.as_ref().unwrap()["workflow_call_tools"],
+                json!(expected_tools),
+                "{marker} must retain its exact dispatched tool grant; journal: {entry:?}; session: {session:?}"
+            );
+            assert_eq!(
+                session.agent_id, expected_agent_id,
+                "{marker} dispatches as a bare workflow worker — the sweep's roles are dispatches inside the script, never picker-visible definitions"
+            );
+        }
+    }
     server.abort();
 }
