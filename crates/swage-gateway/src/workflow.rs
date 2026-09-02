@@ -534,7 +534,8 @@ fn journal_result_from_storage(
     stored: &Value,
 ) -> Result<WorkflowJournalResult, String> {
     let stored_tag = stored.get("kind").and_then(Value::as_str);
-    if let Some(tag) = stored_tag
+    if kind != WorkflowJournalEntryKind::WorkflowCall
+        && let Some(tag) = stored_tag
         && is_journal_result_tag(tag)
         && !journal_result_tag_matches_kind(kind, tag)
     {
@@ -543,62 +544,49 @@ fn journal_result_from_storage(
         ));
     }
 
+    let tagged_object = |tag: &str| {
+        let mut object = stored
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "workflow journal result is not an object".to_string())?;
+        object.insert("kind".into(), Value::String(tag.into()));
+        Ok::<_, String>(Value::Object(object))
+    };
+    let event_object = |tag: &str| {
+        let mut object = stored
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "workflow journal result is not an object".to_string())?;
+        let event_kind = object
+            .remove("kind")
+            .ok_or_else(|| "workflow journal event result has no kind".to_string())?;
+        object.insert("event_kind".into(), event_kind);
+        object.insert("kind".into(), Value::String(tag.into()));
+        Ok::<_, String>(Value::Object(object))
+    };
+
     let tagged = match kind {
+        WorkflowJournalEntryKind::AgentCall => tagged_object("agent_call")?,
+        WorkflowJournalEntryKind::WorkerPlacement if stored.get("paths").is_some() => {
+            tagged_object("worker_placement_list")?
+        }
+        WorkflowJournalEntryKind::WorkerPlacement => tagged_object("worker_placement")?,
+        WorkflowJournalEntryKind::Effect => tagged_object("effect")?,
         WorkflowJournalEntryKind::Log => serde_json::json!({"kind": "log"}),
         WorkflowJournalEntryKind::Phase => serde_json::json!({"kind": "phase"}),
         WorkflowJournalEntryKind::WorkflowCall => {
             serde_json::json!({"kind": "workflow_call", "output": stored})
         }
-        WorkflowJournalEntryKind::Event | WorkflowJournalEntryKind::AwaitEvent
-            if stored.get("delivered").is_none() =>
-        {
-            let mut object = stored
-                .as_object()
-                .cloned()
-                .ok_or_else(|| "workflow journal result is not an object".to_string())?;
-            let event_kind = object
-                .remove("kind")
-                .ok_or_else(|| "workflow journal event result has no kind".to_string())?;
-            object.insert("event_kind".into(), event_kind);
-            object.insert(
-                "kind".into(),
-                Value::String(
-                    match kind {
-                        WorkflowJournalEntryKind::Event => "event",
-                        WorkflowJournalEntryKind::AwaitEvent => "await_event",
-                        _ => unreachable!(),
-                    }
-                    .into(),
-                ),
-            );
-            Value::Object(object)
+        WorkflowJournalEntryKind::Timer => tagged_object("timer")?,
+        WorkflowJournalEntryKind::Event if stored.get("delivered").is_some() => {
+            tagged_object("event_delivery")?
         }
-        _ => {
-            let mut object = stored
-                .as_object()
-                .cloned()
-                .ok_or_else(|| "workflow journal result is not an object".to_string())?;
-            let tag = match kind {
-                WorkflowJournalEntryKind::AgentCall => "agent_call",
-                WorkflowJournalEntryKind::WorkerPlacement if stored.get("paths").is_some() => {
-                    "worker_placement_list"
-                }
-                WorkflowJournalEntryKind::WorkerPlacement => "worker_placement",
-                WorkflowJournalEntryKind::Effect => "effect",
-                WorkflowJournalEntryKind::Timer => "timer",
-                WorkflowJournalEntryKind::Event => "event_delivery",
-                WorkflowJournalEntryKind::Gate => "gate",
-                WorkflowJournalEntryKind::Budget => "budget",
-                WorkflowJournalEntryKind::TerminalBudget => "terminal_budget",
-                WorkflowJournalEntryKind::WindDown => "wind_down",
-                WorkflowJournalEntryKind::Log
-                | WorkflowJournalEntryKind::Phase
-                | WorkflowJournalEntryKind::WorkflowCall
-                | WorkflowJournalEntryKind::AwaitEvent => unreachable!(),
-            };
-            object.insert("kind".into(), Value::String(tag.into()));
-            Value::Object(object)
-        }
+        WorkflowJournalEntryKind::Event => event_object("event")?,
+        WorkflowJournalEntryKind::AwaitEvent => event_object("await_event")?,
+        WorkflowJournalEntryKind::Gate => tagged_object("gate")?,
+        WorkflowJournalEntryKind::Budget => tagged_object("budget")?,
+        WorkflowJournalEntryKind::TerminalBudget => tagged_object("terminal_budget")?,
+        WorkflowJournalEntryKind::WindDown => tagged_object("wind_down")?,
     };
 
     serde_json::from_value(tagged)
@@ -14881,6 +14869,90 @@ mod tests {
         assert_eq!(replayed.state, "completed");
         assert_eq!(replayed.final_output.as_ref(), Some(output));
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_detail_survives_malformed_results_and_preserves_workflow_output() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { completed: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let malformed_await = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: started.id,
+                seq: 100,
+                kind: "await_event".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("malformed await intent");
+        storage
+            .complete_workflow_journal_entry(
+                malformed_await.id,
+                serde_json::json!({"delivered": 3}),
+            )
+            .await
+            .expect("malformed await result");
+
+        let workflow_call = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: started.id,
+                seq: 101,
+                kind: "workflow_call".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("workflow call intent");
+        let workflow_output = serde_json::json!({"kind": "gate", "answer": 7});
+        storage
+            .complete_workflow_journal_entry(workflow_call.id, workflow_output.clone())
+            .await
+            .expect("workflow call result");
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail remains available");
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == malformed_await.id)
+                .expect("malformed await entry remains visible")
+                .result,
+            None
+        );
+        assert!(matches!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == workflow_call.id)
+                .expect("workflow call entry")
+                .result
+                .as_ref(),
+            Some(WorkflowJournalResult::WorkflowCall { output }) if output == &workflow_output
+        ));
+        assert!(detail.journal.iter().any(|entry| {
+            entry.kind == WorkflowJournalEntryKind::TerminalBudget && entry.result.is_some()
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
