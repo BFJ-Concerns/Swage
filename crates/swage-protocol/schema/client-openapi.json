@@ -1263,6 +1263,23 @@
           {
             "properties": {
               "kind": {
+                "const": "page",
+                "type": "string"
+              },
+              "page_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "page_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
                 "const": "webhook",
                 "type": "string"
               },
