@@ -6,7 +6,7 @@ use std::{path::Path, sync::Arc, time::Instant};
 use serde_json::{Value, json};
 use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
-use swage_core::{ChatMessage, Role, StorageError};
+use swage_core::{ChatMessage, Effort, EffortCapability, EffortControl, ResolvedEffort, Role, StorageError};
 use swage_storage::{
     model::{AppendMessage, NewAuditEvent, NewToolCall, ThreadState, TurnState},
     store::Storage,
@@ -142,6 +142,7 @@ pub struct CodexTurnRequest {
     pub turn_id: Uuid,
     pub agent_id: String,
     pub model: String,
+    pub effort: Option<ResolvedEffort>,
     pub user_message: String,
     pub assembled_context: Vec<ChatMessage>,
     pub agent_config: AgentConfig,
@@ -149,6 +150,26 @@ pub struct CodexTurnRequest {
     pub dispatcher: Arc<ToolDispatcher>,
     pub event_tx: mpsc::UnboundedSender<AgentEvent>,
     pub cancellation: CancellationToken,
+}
+
+/// Codex's app-server accepts the documented named per-turn effort control
+/// for current Codex models. Other route model ids defer to the catalogue.
+pub fn effort_capability(model: &str) -> Option<EffortCapability> {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("gpt-5.")
+        .then_some(EffortCapability::Levels {
+            levels: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh],
+            can_disable: false,
+        })
+}
+
+fn codex_effort(control: EffortControl) -> Option<String> {
+    match control {
+        EffortControl::Level { level } => Some(level.as_str().to_string()),
+        EffortControl::Disabled | EffortControl::Budget { .. } | EffortControl::Omitted => None,
+    }
 }
 
 pub async fn run_turn(
@@ -280,7 +301,7 @@ async fn run_turn_inner(
         };
 
     let sandbox_policy = sandbox_policy(&request.permissions, &request.agent_config.allowed_paths);
-    let provider_request = json!({
+    let mut provider_request = json!({
         "threadId": codex_thread_id,
         "input": [{"type":"text", "text":request.user_message}],
         "sandboxPolicy": sandbox_policy,
@@ -288,6 +309,9 @@ async fn run_turn_inner(
         "cwd": request.agent_config.working_directory,
         "outputSchema": request.agent_config.output_schema,
     });
+    if let Some(effort) = request.effort.as_ref().and_then(|effort| codex_effort(effort.control)) {
+        provider_request["effort"] = Value::String(effort);
+    }
     let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
         turn_id: request.turn_id,
         round: 1,
@@ -904,6 +928,7 @@ mod tests {
             turn_id: turn.id,
             agent_id: "gateway".to_string(),
             model: "fake-codex".to_string(),
+            effort: None,
             user_message: "scripted turn".to_string(),
             assembled_context: Vec::new(),
             agent_config: AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
