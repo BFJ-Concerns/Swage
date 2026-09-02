@@ -100,6 +100,7 @@ vi.mock("../api/agent-definitions", () => ({
 vi.mock("../api/pages", () => ({
   setBaseUrl: vi.fn(),
   listPages: vi.fn(async () => ({ pages: [] })),
+  listPageTemplates: vi.fn(async () => ({ templates: [] })),
   getPage: vi.fn(),
   createPage: vi.fn(),
   writePageModule: vi.fn(),
