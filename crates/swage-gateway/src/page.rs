@@ -699,6 +699,42 @@ pub async fn delete_page_annotation_handler(
     Ok(Json(json!({ "deleted": true })))
 }
 
+pub async fn list_page_templates_handler(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<PageTemplateListResponse>, ApiError> {
+    let templates = state
+        .storage
+        .list_page_templates_by_space(space_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(PageTemplateListResponse {
+        templates: templates
+            .into_iter()
+            .map(|template| PageTemplateSummary {
+                id: template.id,
+                name: template.name,
+                updated_at: template.updated_at,
+            })
+            .collect(),
+    }))
+}
+
+pub async fn create_page_template_handler(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+    Json(request): Json<CreatePageTemplateRequest>,
+) -> Result<Json<PageTemplateResponse>, ApiError> {
+    Ok(Json(create_page_template(&state, space_id, request).await?))
+}
+
+pub async fn get_page_template_handler(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+) -> Result<Json<PageTemplateResponse>, ApiError> {
+    Ok(Json(template_response(&state, template_id).await?))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -997,40 +1033,4 @@ mod tests {
             "the event is a signal: content rides the refetch, never the event"
         );
     }
-}
-
-pub async fn list_page_templates_handler(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-) -> Result<Json<PageTemplateListResponse>, ApiError> {
-    let templates = state
-        .storage
-        .list_page_templates_by_space(space_id)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(PageTemplateListResponse {
-        templates: templates
-            .into_iter()
-            .map(|template| PageTemplateSummary {
-                id: template.id,
-                name: template.name,
-                updated_at: template.updated_at,
-            })
-            .collect(),
-    }))
-}
-
-pub async fn create_page_template_handler(
-    State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
-    Json(request): Json<CreatePageTemplateRequest>,
-) -> Result<Json<PageTemplateResponse>, ApiError> {
-    Ok(Json(create_page_template(&state, space_id, request).await?))
-}
-
-pub async fn get_page_template_handler(
-    State(state): State<AppState>,
-    Path(template_id): Path<Uuid>,
-) -> Result<Json<PageTemplateResponse>, ApiError> {
-    Ok(Json(template_response(&state, template_id).await?))
 }
