@@ -93,7 +93,7 @@ pub fn load_resolved_config_from(
     let mut config_chain: Vec<PartialConfig> = Vec::new();
     for (_, directory) in &hierarchy {
         let path = directory.join("config.toml");
-        if let Some(partial) = try_load_file(path, &mut all_problems) {
+        if let Some(partial) = try_load_file(&path, &mut all_problems) {
             config_chain.push(partial);
         }
     }
