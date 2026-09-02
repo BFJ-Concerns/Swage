@@ -1882,6 +1882,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_preserves_a_genuine_null_worker_result() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(Value::Null));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "empty source", phase: "research" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified null success");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "empty source",
+                "phase": "research",
+                "output": null,
+                "failure": null,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn identified_agent_call_reports_schema_exhaustion_without_losing_its_leg() {
         let host = Arc::new(SurfaceHost::new());
         host.agent_outputs
