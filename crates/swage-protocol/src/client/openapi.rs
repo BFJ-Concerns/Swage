@@ -92,7 +92,8 @@ fn parameter_value(
     required: bool,
     kind: super::routes::ParameterType,
 ) -> Value {
-    let mut schema = Map::from_iter([(String::from("type"), Value::String(String::from("string")))]);
+    let mut schema =
+        Map::from_iter([(String::from("type"), Value::String(String::from("string")))]);
     if let Some(format) = kind.openapi_format() {
         schema.insert(String::from("format"), Value::String(String::from(format)));
     }
