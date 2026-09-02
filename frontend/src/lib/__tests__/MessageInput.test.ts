@@ -359,7 +359,7 @@ describe("MessageInput", () => {
     base.startTurn("Existing turn");
     const store = withConversationAutoCreate(base, {
       hasActiveConversation: () => false,
-      createConversation: vi.fn(() => new Promise(() => {})),
+      createConversation: vi.fn(() => new Promise<string | null>(() => {})),
     });
     store.startTurn("Create from the space home");
 
