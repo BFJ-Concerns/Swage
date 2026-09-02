@@ -147,8 +147,11 @@ does not yet render it.
 A fresh installation's effective agent registry holds one entry: the
 shipped default (`"gateway"`, display name "Swage default"). No other
 agent definitions ship with the gateway. The start-conversation picker
-— and `CreateConversationRequest`'s `agent_id` field — list this default
-plus any operator-authored definitions (global or space-scoped).
+lists this default plus any operator-authored definitions visible to
+the space (via `GET /api/spaces/{spaceId}/agent-definitions`).
+`CreateConversationRequest`'s `agent_id` field selects one of these:
+`"gateway"` or an operator-authored definition visible to the target
+space; the gateway rejects anything else with a validation error.
 
 A shipped workflow's roles (the research sweep's researcher, organiser,
 and synthesist) are bare dispatches inside the workflow script, not

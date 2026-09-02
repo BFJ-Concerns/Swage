@@ -86,7 +86,9 @@ declaration for models it serves:
 - **Named levels** — the control takes specific levels from a fixed set and
   optionally supports a true disable (`off`).
 - **Budget** — the control takes a numeric thinking-budget in tokens; the
-  seven levels spread monotonically across the declared range.
+  six non-off levels spread monotonically across the declared range. `off`
+  is handled separately — it sends the model's own disable when available,
+  or clamps to the minimum budget otherwise.
 - **None** — no effort control exists; the intent is omitted.
 
 The resolution rules are:
@@ -131,9 +133,11 @@ definitions ship with the gateway — a shipped workflow's internal roles (the
 research sweep's researcher, organiser, and synthesist) are bare dispatches
 inside the workflow script, not standalone definitions.
 
-The start-conversation picker in the web UI and the `agent_id` field of
-`CreateConversationRequest` list this default plus any operator-authored
-definitions, global or space-scoped.
+The start-conversation picker in the web UI lists this default plus any
+operator-authored definitions visible to the space. The `agent_id` field of
+`CreateConversationRequest` selects one of these — `"gateway"` or an
+operator-authored definition visible to the target space; the gateway
+rejects anything else with a validation error.
 
 ## Operator guidance (`AGENTS.md`)
 
