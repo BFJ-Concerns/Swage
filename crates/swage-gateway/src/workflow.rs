@@ -566,26 +566,27 @@ fn budget_reading(accounting: &TokenBudgetState, budget: &WorkflowRouteBudget) -
     serde_json::json!({
         "spent": spent,
         "remaining": budget.max_total_tokens.map(|limit| limit.saturating_sub(spent)),
-        "closing_remaining": budget.reserved_closing_tokens.map(|reserve| {
-            accounting.closing_limit.map(|limit| limit.saturating_sub(spent)).unwrap_or_else(|| {
-                reserve.min(budget.max_total_tokens.map(|limit| limit.saturating_sub(spent)).unwrap_or(0))
-            })
-        }),
+        "closing_remaining": closing_partition_remaining(
+            budget.max_total_tokens,
+            budget.reserved_closing_tokens,
+            accounting.closing_limit,
+            spent,
+        ),
     })
 }
 
 fn closing_partition_remaining(
-    budget: &WorkflowBudget,
+    max_total_tokens: Option<u64>,
+    reserved_closing_tokens: Option<u64>,
     closing_limit: Option<u64>,
     spent: u64,
 ) -> Option<u64> {
-    budget.reserved_closing_tokens.map(|reserve| {
+    reserved_closing_tokens.map(|reserve| {
         closing_limit
             .map(|limit| limit.saturating_sub(spent))
             .unwrap_or_else(|| {
                 reserve.min(
-                    budget
-                        .max_total_tokens
+                    max_total_tokens
                         .map(|limit| limit.saturating_sub(spent))
                         .unwrap_or(0),
                 )
@@ -611,7 +612,12 @@ fn terminal_budget_reading(accounting: &RouteTokenBudgetState, budget: &Workflow
     serde_json::json!({
         "spent": spent,
         "remaining": budget.max_total_tokens.map(|limit| limit.saturating_sub(spent)),
-        "closing_remaining": closing_partition_remaining(budget, accounting.default.closing_limit, spent),
+        "closing_remaining": closing_partition_remaining(
+            budget.max_total_tokens,
+            budget.reserved_closing_tokens,
+            accounting.default.closing_limit,
+            spent,
+        ),
         "per_route": per_route,
     })
 }
@@ -687,12 +693,41 @@ async fn record_terminal_budget(
         .map_err(|error| error.to_string())
 }
 
-fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
+fn journal_entry_uses_fallback_budget(
+    entry: &WorkflowJournalRecord,
+    budget: &WorkflowBudget,
+) -> bool {
+    entry
+        .request
+        .get("provider_route")
+        .and_then(Value::as_str)
+        .is_none_or(|route| route == "default" || !budget.per_route.contains_key(route))
+}
+
+fn completed_fallback_agent_tokens_before(
+    replay: &[WorkflowJournalRecord],
+    transition_seq: u64,
+    budget: &WorkflowBudget,
+) -> u64 {
     replay
         .iter()
         .filter(|entry| {
             entry.seq < transition_seq && entry.kind == "agent_call" && entry.status == "completed"
         })
+        .filter(|entry| journal_entry_uses_fallback_budget(entry, budget))
+        .filter_map(|entry| entry.result.as_ref())
+        .fold(0, |spent, result| {
+            spent
+                .saturating_add(result["input_tokens"].as_u64().unwrap_or(0))
+                .saturating_add(result["output_tokens"].as_u64().unwrap_or(0))
+        })
+}
+
+fn fallback_spent_from_journal(journal: &[WorkflowJournalRecord], budget: &WorkflowBudget) -> u64 {
+    journal
+        .iter()
+        .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+        .filter(|entry| journal_entry_uses_fallback_budget(entry, budget))
         .filter_map(|entry| entry.result.as_ref())
         .fold(0, |spent, result| {
             spent
@@ -725,7 +760,7 @@ fn terminal_budget_accounting_from_journal(
                     .saturating_add(result["output_tokens"].as_u64().unwrap_or(0))
             })
             .unwrap_or(0);
-        if route == "default" {
+        if journal_entry_uses_fallback_budget(entry, budget) {
             accounting.default.spent = accounting.default.spent.saturating_add(spent);
         } else {
             accounting.ledger_mut(route).spent =
@@ -764,11 +799,7 @@ fn terminal_budget_accounting_from_journal(
         .iter()
         .filter(|entry| {
             entry.status == "completed"
-                && entry
-                    .request
-                    .get("provider_route")
-                    .and_then(Value::as_str)
-                    .is_none_or(|route| route == "default" || !budget.per_route.contains_key(route))
+                && journal_entry_uses_fallback_budget(entry, budget)
                 && (entry.kind == "wind_down"
                     || (entry.kind == "budget"
                         && entry
@@ -779,7 +810,7 @@ fn terminal_budget_accounting_from_journal(
         .map(|entry| entry.seq)
         .min()
         .map(|transition_seq| {
-            completed_agent_tokens_before(journal, transition_seq)
+            completed_fallback_agent_tokens_before(journal, transition_seq, budget)
                 .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
         });
     accounting
@@ -2489,9 +2520,13 @@ async fn run_host_commands_inner(
                         let mut accounting = token_budget.lock().await;
                         if accounting.closing_limit.is_none() {
                             accounting.closing_limit = Some(
-                                completed_agent_tokens_before(&replay, current_seq)
-                                    .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
-                                    .saturating_add(accounting.replayed_working_credit),
+                                completed_fallback_agent_tokens_before(
+                                    &replay,
+                                    current_seq,
+                                    &budget,
+                                )
+                                .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
+                                .saturating_add(accounting.replayed_working_credit),
                             );
                             accounting.replayed_working_credit = 0;
                         }
@@ -2506,8 +2541,9 @@ async fn run_host_commands_inner(
                         // Retry that idempotent completion and latch only once
                         // the transition is durable.
                         let mut accounting = token_budget.lock().await;
-                        let transition_spent = completed_agent_tokens_before(&replay, current_seq)
-                            .saturating_add(accounting.replayed_working_credit);
+                        let transition_spent =
+                            completed_fallback_agent_tokens_before(&replay, current_seq, &budget)
+                                .saturating_add(accounting.replayed_working_credit);
                         let reserve = budget.reserved_closing_tokens.unwrap_or(0);
                         let reading = serde_json::json!({
                             "spent": transition_spent,
@@ -3438,9 +3474,13 @@ async fn run_host_commands_inner(
                             let mut accounting = token_budget.lock().await;
                             if accounting.closing_limit.is_none() && reading.is_ok() {
                                 accounting.closing_limit = Some(
-                                    completed_agent_tokens_before(&replay, current_seq)
-                                        .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
-                                        .saturating_add(accounting.replayed_working_credit),
+                                    completed_fallback_agent_tokens_before(
+                                        &replay,
+                                        current_seq,
+                                        &budget,
+                                    )
+                                    .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
+                                    .saturating_add(accounting.replayed_working_credit),
                                 );
                                 accounting.replayed_working_credit = 0;
                             }
@@ -3490,7 +3530,8 @@ async fn run_host_commands_inner(
                                 .map(|limit| limit.saturating_sub(spent))
                         };
                         let closing_remaining = closing_partition_remaining(
-                            &budget,
+                            budget.max_total_tokens,
+                            budget.reserved_closing_tokens,
                             reading_winding_down
                                 .then(|| proposed_closing_limit.or(accounting.closing_limit))
                                 .flatten(),
@@ -5063,28 +5104,7 @@ async fn launch_existing_run(
                     .is_some_and(|error| error.starts_with("BudgetExceededError:"))
         })
         .count() as u32;
-    let initial_spent_tokens = replay
-        .iter()
-        .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
-        .filter(|entry| {
-            entry
-                .request
-                .get("provider_route")
-                .and_then(Value::as_str)
-                .is_none_or(|route| route == "default")
-        })
-        .filter_map(|entry| entry.result.as_ref())
-        .map(|result| {
-            result
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                + result
-                    .get("output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-        })
-        .sum();
+    let initial_spent_tokens = fallback_spent_from_journal(&replay, &run_budget);
     let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
     let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
     let token_budget = Arc::new(Mutex::new(terminal_budget_accounting_from_journal(
@@ -16359,7 +16379,7 @@ mod tests {
             "max_concurrent_agent_calls": 2,
             "max_total_tokens": 2,
             "per_route": {
-                "alpha-route": {"max_total_tokens": 1},
+                "alpha-route": {"max_total_tokens": 2, "reserved_closing_tokens": 1},
                 "beta-route": {"max_total_tokens": 1}
             }
         }))
@@ -16398,7 +16418,7 @@ mod tests {
         assert_eq!(output["fallback"], "fallback");
         assert_eq!(output["alpha"], "alpha");
         assert_eq!(output["beta"], "beta", "another route remains admissible");
-        assert_eq!(output["exhausted"], "BudgetExceededError");
+        assert_eq!(output["exhausted"], "BudgetWindDownError");
         assert_eq!(output["fallbackSpent"], 1);
         assert_eq!(output["fallbackRemaining"], 1);
         assert_eq!(output["spentAfterRoutes"], 1);
@@ -16409,6 +16429,13 @@ mod tests {
         );
         assert_eq!(output["snapshot"]["per_route"]["alpha-route"]["spent"], 1);
         assert_eq!(output["snapshot"]["per_route"]["beta-route"]["spent"], 0);
+        let wind_down = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::WindDown)
+            .expect("route wind-down journal");
+        assert_eq!(wind_down.request["provider_route"], "alpha-route");
+        assert_eq!(wind_down.result.as_ref().unwrap()["closing_limit"], 2);
         let terminal = detail
             .journal
             .iter()
@@ -16674,6 +16701,178 @@ mod tests {
             1,
             "resume does not grant a second closing reserve"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resumed_unconfigured_route_spend_uses_the_fallback_ledger() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let request = AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: "unconfigured route".into(),
+            agent: Some("default".into()),
+            task: None,
+            tools: None,
+            skills: None,
+            model: Some("unconfigured".into()),
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+        let mut journal_request = serde_json::to_value(&request).expect("request serialises");
+        journal_request["provider_route"] = Value::String("unconfigured-route".into());
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&serde_json::to_value(&request).expect("request")),
+                request: journal_request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("journal entry");
+        storage
+            .complete_workflow_journal_entry(
+                entry.id,
+                serde_json::to_value(AgentCallResult {
+                    output: Value::String("completed".into()),
+                    input_tokens: 5,
+                    output_tokens: 0,
+                    working_directory: None,
+                    session_id: None,
+                    thread_id: None,
+                    turn_id: None,
+                })
+                .expect("result"),
+            )
+            .await
+            .expect("complete entry");
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "max_total_tokens": 10,
+            "max_concurrent_agent_calls": 1,
+            "per_route": {"alpha-route": {"max_total_tokens": 1}}
+        }))
+        .expect("budget");
+        let replay = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("replay journal");
+        assert_eq!(fallback_spent_from_journal(&replay, &budget), 5);
+        let accounting = terminal_budget_accounting_from_journal(&replay, &budget);
+        assert_eq!(accounting.default.spent, 5);
+        assert!(
+            !accounting.ledgers.contains_key("unconfigured-route"),
+            "an unconfigured route is accounted by the fallback ledger"
+        );
+        let spent_tokens = Arc::new(AtomicU64::new(fallback_spent_from_journal(
+            &replay, &budget,
+        )));
+        let config = swage_config::ResolvedConfig {
+            models: swage_config::ModelCatalogConfig {
+                default: "unconfigured".into(),
+                entries: [(
+                    "unconfigured".into(),
+                    swage_config::ModelEndpointConfig {
+                        provider_id: "unconfigured-route".into(),
+                        model_id: "unconfigured".into(),
+                        ..Default::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands_with_budget(
+            state,
+            run.id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            budget.clone(),
+            replay,
+            Arc::new(AtomicU32::new(1)),
+            Arc::clone(&spent_tokens),
+            Arc::new(Mutex::new(accounting)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let (replay_reply, replay_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: request.clone(),
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply: replay_reply,
+        })
+        .expect("replay command");
+        replay_receive
+            .await
+            .expect("replay reply")
+            .expect("replayed result");
+        assert_eq!(spent_tokens.load(Ordering::SeqCst), 5);
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request,
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("next command");
+        assert_eq!(
+            receive
+                .await
+                .expect("next reply")
+                .expect_err("the fallback ceiling is already partly spent")
+                .to_string(),
+            "BudgetExceededError: token limit reached"
+        );
+        drop(tx);
+        task.await.expect("host task");
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {
