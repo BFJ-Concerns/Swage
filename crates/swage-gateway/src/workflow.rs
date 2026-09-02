@@ -593,9 +593,35 @@ fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudge
 }
 
 const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
+const TERMINAL_BUDGET_WRITE_ATTEMPTS: usize = 3;
 
 fn is_positional_journal_entry(entry: &WorkflowJournalRecord) -> bool {
     entry.kind != "terminal_budget"
+}
+
+async fn complete_terminal_budget_entry(
+    state: &AppState,
+    entry_id: Uuid,
+    reading: Value,
+) -> Result<(), String> {
+    let mut last_error = None;
+    for _ in 0..TERMINAL_BUDGET_WRITE_ATTEMPTS {
+        match state
+            .complete_workflow_journal_entry(entry_id, reading.clone())
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    let error = last_error.expect("the bounded retry loop always attempts a write");
+    state
+        .fail_workflow_journal_entry(entry_id, &error)
+        .await
+        .map_err(|failure| {
+            format!("{error}; could not mark terminal budget entry failed: {failure}")
+        })?;
+    Err(error)
 }
 
 async fn record_terminal_budget(
@@ -627,11 +653,7 @@ async fn record_terminal_budget(
                 .unwrap_or_else(|| "recorded terminal budget failure".into())),
             "started" => {
                 let reading = terminal_budget_reading(&*accounting.lock().await, budget);
-                state
-                    .complete_workflow_journal_entry(entry.id, reading.clone())
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                complete_terminal_budget_entry(state, entry.id, reading).await
             }
             other => Err(format!("unknown terminal budget entry status: {other}")),
         };
@@ -656,11 +678,7 @@ async fn record_terminal_budget(
         })
         .await
         .map_err(|error| error.to_string())?;
-    state
-        .complete_workflow_journal_entry(intent.id, reading)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    complete_terminal_budget_entry(state, intent.id, reading).await
 }
 
 fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
@@ -14911,6 +14929,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        let mut events = state.broadcast.subscribe();
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
@@ -14941,7 +14960,16 @@ mod tests {
             .into_iter()
             .find(|entry| entry.kind == "terminal_budget")
             .expect("terminal budget intent");
-        assert_eq!(terminal.status, "started");
+        assert_eq!(terminal.status, "failed");
+        let event = loop {
+            if let ServerEvent::WorkflowEntryCompleted { event } =
+                events.recv().await.expect("terminal journal broadcast")
+                && event.entry.id == terminal.id
+            {
+                break event;
+            }
+        };
+        assert_eq!(event.entry.status, WorkflowJournalEntryStatus::Failed);
     }
 
     #[tokio::test(flavor = "multi_thread")]
