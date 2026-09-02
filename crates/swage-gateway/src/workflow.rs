@@ -1253,6 +1253,7 @@ impl WorkflowHost for ChannelWorkflowHost {
 struct WorkflowTurnAttempt {
     outcome: Result<(), GatewayError>,
     events: Vec<ServerEvent>,
+    provider_failure: Option<String>,
 }
 
 enum FallbackFailure {
@@ -1302,6 +1303,7 @@ async fn execute_workflow_agent_turn(
 ) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
     let (event_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut events = Vec::new();
+    let provider_failure = Arc::new(std::sync::Mutex::new(None));
     let call_cancellation = cancellation.child_token();
     let mut processing = Box::pin(crate::turn::process_turn_with_composition_and_model(
         state,
@@ -1322,6 +1324,7 @@ async fn execute_workflow_agent_turn(
         composition,
         Some(journal_entry_id),
         requested_model,
+        Some(provider_failure.clone()),
     ));
     let timeout = timeout_ms.map(std::time::Duration::from_millis);
     let mut timeout_wait = Box::pin(async {
@@ -1371,7 +1374,14 @@ async fn execute_workflow_agent_turn(
         events.push(event);
     }
     events.extend(std::iter::from_fn(|| events_rx.try_recv().ok()));
-    Ok(WorkflowTurnAttempt { outcome, events })
+    Ok(WorkflowTurnAttempt {
+        outcome,
+        events,
+        provider_failure: provider_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone(),
+    })
 }
 
 async fn latest_turn(
@@ -1632,10 +1642,6 @@ async fn run_ephemeral_agent_call(
                 ServerEvent::ToolStart { .. } | ServerEvent::ToolEnd { .. }
             )
         });
-    let provider_failure = primary.events.iter().find_map(|event| match event {
-        ServerEvent::Error { code, message } if code == "provider_error" => Some(message),
-        _ => None,
-    });
     let primary_error = match primary.outcome {
         Err(error) => {
             if fallback_failure(&error).is_some_and(|failure| {
@@ -1668,7 +1674,7 @@ async fn run_ephemeral_agent_call(
                     });
                 }
             }
-            if let Some(message) = provider_failure
+            if let Some(message) = primary.provider_failure
                 && fallback_is_eligible(FallbackFailure::Provider, emitted_output, dispatched_tool)
             {
                 Some(format!(

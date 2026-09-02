@@ -7,7 +7,7 @@
 
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -71,6 +71,9 @@ pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
 pub(crate) use swage_core::DispatchContextComposition;
+
+/// Internal workflow-only witness that an agent reported a provider failure.
+pub(crate) type ProviderFailureObserver = Arc<StdMutex<Option<String>>>;
 
 /// What a caller submits for one turn: the message text plus the content
 /// parts sent beside it. Every turn entry point takes this; a `String`
@@ -875,6 +878,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         None,
         compaction_focus,
         requested_model,
+        None,
     )
     .await
 }
@@ -914,6 +918,7 @@ pub(crate) async fn process_turn_with_composition(
         agent_call_scope,
         None,
         None,
+        None,
     )
     .await
 }
@@ -938,6 +943,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
     composition: DispatchContextComposition,
     agent_call_scope: Option<Uuid>,
     requested_model: Option<String>,
+    provider_failure_observer: Option<ProviderFailureObserver>,
 ) -> Result<(), GatewayError> {
     process_turn_with_composition_and_focus(
         state,
@@ -956,6 +962,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
         agent_call_scope,
         None,
         requested_model,
+        provider_failure_observer,
     )
     .await
 }
@@ -983,6 +990,7 @@ async fn process_turn_with_composition_and_focus(
     agent_call_scope: Option<Uuid>,
     compaction_focus: Option<String>,
     requested_model: Option<String>,
+    provider_failure_observer: Option<ProviderFailureObserver>,
 ) -> Result<(), GatewayError> {
     let TurnInput {
         text: content,
@@ -2198,13 +2206,14 @@ async fn process_turn_with_composition_and_focus(
                 message,
                 provider_failure,
             } => {
-                let _ = ws_tx.send(ServerEvent::Error {
-                    code: if provider_failure {
-                        "provider_error"
-                    } else {
-                        "agent_error"
+                if provider_failure {
+                    if let Some(observer) = provider_failure_observer.as_ref() {
+                        *observer.lock().unwrap_or_else(|error| error.into_inner()) =
+                            Some(message.clone());
                     }
-                    .to_string(),
+                }
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "agent_error".to_string(),
                     message,
                 });
             }
