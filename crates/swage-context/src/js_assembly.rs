@@ -1044,7 +1044,7 @@ mod tests {
             r#"
             const byName = Object.fromEntries(elements.map(e => [e.name, e]));
             add(byName.prompts);
-            omit("working_norms");
+            omit("working_norms", "   ");
             "#,
             &elements,
         );
@@ -1052,7 +1052,7 @@ mod tests {
         assert_eq!(output.report.errors.len(), 1, "the run failed");
         assert_eq!(output.report.errors[0].assembly_name, "focus");
         assert!(
-            output.report.errors[0].message.contains("reason"),
+            output.report.errors[0].message.contains("needs a reason"),
             "the error says what the script got wrong: {}",
             output.report.errors[0].message
         );
