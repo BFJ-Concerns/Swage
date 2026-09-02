@@ -13743,19 +13743,17 @@ async fn token_usage_remains_null_when_provider_sends_no_usage() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
 
-    // The agent always persists token counts — zero when the provider
-    // sends no Usage chunk (the old gateway left them NULL, the agent
-    // stores the accumulated total which starts at 0).
+    // No provider round reported usage, so the counts stay unset. A zero
+    // here would be a spend claim the provider never made, and budget
+    // reconstruction would read it as "this turn cost nothing".
     let turn = &turns[0];
     assert_eq!(
-        turn.input_tokens,
-        Some(0),
-        "input_tokens should be zero when no usage reported"
+        turn.input_tokens, None,
+        "input_tokens should stay unset when no usage was reported, not read as zero"
     );
     assert_eq!(
-        turn.output_tokens,
-        Some(0),
-        "output_tokens should be zero when no usage reported"
+        turn.output_tokens, None,
+        "output_tokens should stay unset when no usage was reported, not read as zero"
     );
 }
 
