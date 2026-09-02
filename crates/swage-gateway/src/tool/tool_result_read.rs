@@ -63,13 +63,11 @@ impl Tool for ToolResultReadTool {
             name: self.name().to_owned(),
             message: "tool_result_read requires a turn ID".to_owned(),
         })?;
-        let gateway_ctx = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: "tool_result_read requires gateway execution context".to_owned(),
-            })?;
+        let gateway_ctx = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "tool_result_read requires gateway execution context",
+        )?;
 
         let current_turn = gateway_ctx
             .storage()
