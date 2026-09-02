@@ -6267,6 +6267,124 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn resumed_pre_change_agent_call_replays_before_schema_validation() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"return await agent("reuse recorded result", { schema: { type: 7 } });"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "pre-change".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let request = AgentCallRequest {
+            prompt: "reuse recorded result".into(),
+            agent: None,
+            task: None,
+            tools: None,
+            skills: None,
+            model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: Some(serde_json::json!({"type": 7})),
+            max_attempts: 3,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+        let request_json = serde_json::to_value(&request).expect("agent request");
+        let recorded = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&request_json),
+                request: request_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("recorded agent call");
+        storage
+            .complete_workflow_journal_entry(
+                recorded.id,
+                serde_json::to_value(AgentCallResult {
+                    output: Value::String("recorded before validation existed".into()),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    working_directory: None,
+                    session_id: None,
+                    thread_id: None,
+                    turn_id: None,
+                })
+                .expect("recorded result"),
+            )
+            .await
+            .expect("complete recorded call");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt run");
+
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let Json(resumed) = resume_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("resume pre-change run");
+        wait_for_terminal(&state, resumed.id).await;
+        let resumed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("resumed run");
+        assert_eq!(
+            resumed.state, "completed",
+            "run error: {:?}",
+            resumed.error_message
+        );
+        assert_eq!(
+            resumed.final_output,
+            Some(Value::String("recorded before validation existed".into()))
+        );
+        assert!(
+            provider.requests.lock().expect("requests").is_empty(),
+            "a replayed journal result must not spawn a provider request"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn resumed_run_reapplies_its_persisted_dispatch_bound_after_a_grant_change() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
