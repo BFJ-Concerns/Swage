@@ -410,7 +410,7 @@ impl ThreadStore for SqliteStorage {
             )?;
 
             let mut stmt = conn.prepare(
-                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at
+                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments
                  FROM messages
                  WHERE thread_id = ?1 AND position <= ?2
                  ORDER BY position ASC",

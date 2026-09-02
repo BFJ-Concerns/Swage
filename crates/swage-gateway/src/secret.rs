@@ -1101,10 +1101,11 @@ mod tests {
             .await
             .unwrap();
 
-        let values = manager.known_values().await.unwrap();
+        let mut values = manager.known_values().await.unwrap();
+        values.sort();
         assert_eq!(
             values,
-            vec!["managed-value".to_string(), "file-value".to_string()]
+            vec!["file-value".to_string(), "managed-value".to_string()]
         );
     }
 }

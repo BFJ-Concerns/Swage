@@ -470,7 +470,7 @@ mod shipped_skill_tests {
     fn fresh_orientation_catalogue_contains_all_shipped_skills() {
         let root = tempfile::tempdir().expect("temporary root");
         let available = available_skills_for_agent("default", "gateway", Some(root.path()));
-        assert_eq!(available.len(), 5);
+        assert_eq!(available.len(), 6);
         assert_eq!(
             available
                 .iter()
@@ -481,6 +481,7 @@ mod shipped_skill_tests {
                 "commission",
                 "maestro",
                 "project-docs",
+                "research",
                 "workflow-authoring"
             ]
         );
