@@ -93,8 +93,20 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
         ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
+        (
+            "059_workflow_run_terminal_account",
+            ADD_WORKFLOW_RUN_TERMINAL_ACCOUNT,
+        ),
     ]
 }
+
+/// The terminal account a run leaves when it ends by any path: the ending,
+/// the partition of its workers, and the completed work recoverable from a
+/// run that never returned. Generic JSON, like every other run blob — the
+/// contract lives in `swage-protocol` and is enforced at the wire boundary.
+const ADD_WORKFLOW_RUN_TERMINAL_ACCOUNT: &str = "
+ALTER TABLE workflow_runs ADD COLUMN terminal_account_json TEXT;
+";
 
 /// Annotations on a page's modules: the notes a user and an agent both hang
 /// on the same module, so neither has to describe a location to the other.
