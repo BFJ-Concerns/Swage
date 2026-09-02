@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, RunEventPost,
+    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, HeldWorkerOpen, RunEventPost,
     WorkflowCallRequest, WorkflowHost, WorkflowHostError,
 };
 
@@ -615,6 +615,96 @@ impl WorkflowEngine {
                         ctx.globals().set("__workflow", workflow).map_err(|error| error.to_string())?;
                     }
 
+                    let open_worker_host = Arc::clone(&host);
+                    let open_worker_cancellation = host_cancellation.clone();
+                    let open_worker = Function::new(
+                        ctx.clone(),
+                        Async(move |options_json: String| {
+                            let host = Arc::clone(&open_worker_host);
+                            let cancellation = open_worker_cancellation.clone();
+                            async move {
+                                let worker: HeldWorkerOpen = match serde_json::from_str(&options_json) {
+                                    Ok(worker) => worker,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.open_held_worker(worker, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerOpen", open_worker).map_err(|error| error.to_string())?;
+
+                    let close_worker_host = Arc::clone(&host);
+                    let close_worker_cancellation = host_cancellation.clone();
+                    let close_worker = Function::new(
+                        ctx.clone(),
+                        Async(move |worker_id: String| {
+                            let host = Arc::clone(&close_worker_host);
+                            let cancellation = close_worker_cancellation.clone();
+                            async move {
+                                let worker_id = match worker_id.parse::<uuid::Uuid>() {
+                                    Ok(worker_id) => worker_id,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.close_held_worker(worker_id, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerClose", close_worker).map_err(|error| error.to_string())?;
+
+                    let staleness_host = Arc::clone(&host);
+                    let staleness_cancellation = host_cancellation.clone();
+                    let staleness = Function::new(
+                        ctx.clone(),
+                        Async(move |worker_id: String| {
+                            let host = Arc::clone(&staleness_host);
+                            let cancellation = staleness_cancellation.clone();
+                            async move {
+                                let worker_id = match worker_id.parse::<uuid::Uuid>() {
+                                    Ok(worker_id) => worker_id,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.held_worker_staleness(worker_id, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerStaleness", staleness).map_err(|error| error.to_string())?;
+
                     let timer_host = Arc::clone(&host);
                     let timer_cancellation = host_cancellation.clone();
                     let timer = Function::new(
@@ -893,7 +983,7 @@ impl WorkflowEngine {
                             const knownOptions = new Set([
                                 "agent", "task", "tools", "skills", "model", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label",
-                                "session", "elements", "variables", "assembly",
+                                "session", "worker", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
                                 if (!knownOptions.has(key)) {
@@ -938,6 +1028,9 @@ impl WorkflowEngine {
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
                                 session: merged.session ?? null,
+                                ...(merged.worker === undefined || merged.worker === null
+                                    ? {}
+                                    : { worker: String(merged.worker) }),
                                 elements: merged.elements ?? null,
                                 variables: merged.variables ?? null,
                                 assembly: merged.assembly ?? null,
@@ -995,6 +1088,138 @@ impl WorkflowEngine {
                             // by design; without this the run dies on it.
                             handle.result.catch(() => {});
                             return handle;
+                        };
+                        // A held worker: a party the script returns to, not
+                        // a fresh instance per call. Model, effort, placement
+                        // and requested grants are fixed here, at creation;
+                        // each turn shares everything the worker has already
+                        // seen. Grants are not frozen with them — the turn
+                        // path re-derives effective authority every turn.
+                        const workerCreationOptions = new Set([
+                            "agent", "task", "tools", "skills", "model",
+                            "effort", "cwd", "isolation", "label",
+                        ]);
+                        // What a single turn may vary. Everything else about
+                        // a worker was settled when it opened, so a bigger
+                        // model or more effort is a new worker, not a switch.
+                        const workerTurnOptions = new Set([
+                            "schema", "maxAttempts", "timeoutMs", "label",
+                        ]);
+                        const heldWorkerError = (message) => {
+                            const error = new Error(message);
+                            error.name = "HeldWorkerError";
+                            return error;
+                        };
+                        const requireWorker = (worker, caller) => {
+                            if (!worker || typeof worker.workerId !== "string") {
+                                throw heldWorkerError(`${caller} requires a worker from session()`);
+                            }
+                            return worker;
+                        };
+                        globalThis.session = async (options = {}) => {
+                            const merged = mergeDefaults(options);
+                            for (const key of Object.keys(merged)) {
+                                if (!workerCreationOptions.has(key)) {
+                                    throw heldWorkerError(
+                                        `unknown session() option '${key}'`
+                                    );
+                                }
+                            }
+                            const open = {
+                                ...(merged.agent === undefined || merged.agent === null
+                                    ? {} : { agent: String(merged.agent) }),
+                                ...(merged.task === undefined || merged.task === null
+                                    ? {} : { task: String(merged.task) }),
+                                ...(merged.tools === undefined || merged.tools === null
+                                    ? {} : { tools: merged.tools.map(String) }),
+                                ...(merged.skills === undefined || merged.skills === null
+                                    ? {} : { skills: merged.skills.map(String) }),
+                                ...(merged.model === undefined || merged.model === null
+                                    ? {} : { model: String(merged.model) }),
+                                ...(merged.effort === undefined || merged.effort === null
+                                    ? {} : { effort: String(merged.effort) }),
+                                ...(merged.cwd === undefined || merged.cwd === null
+                                    ? {} : { cwd: String(merged.cwd) }),
+                                ...(merged.isolation === undefined || merged.isolation === null
+                                    ? {} : { isolation: String(merged.isolation) }),
+                                ...(merged.label === undefined || merged.label === null
+                                    ? {} : { label: String(merged.label) }),
+                            };
+                            const opened = unwrapHostResponse(await __workerOpen(JSON.stringify(open)));
+                            return {
+                                workerId: opened.worker_id,
+                                label: open.label ?? null,
+                                creation: open,
+                                session: null,
+                                turns: 0,
+                                closed: false,
+                                busy: false,
+                            };
+                        };
+                        // One turn on a held worker. Turns are sequential: a
+                        // second send while one is in flight is refused rather
+                        // than quietly queued, so the script's own ordering is
+                        // the ordering the journal records.
+                        globalThis.send = async (worker, prompt, options = {}) => {
+                            requireWorker(worker, "send()");
+                            validateAgentPrompt(prompt, "send");
+                            for (const key of Object.keys(options)) {
+                                if (options[key] === undefined) continue;
+                                if (workerCreationOptions.has(key)) {
+                                    throw heldWorkerError(
+                                        `'${key}' is fixed when a worker is created; open a new worker instead of changing it mid-session`
+                                    );
+                                }
+                                if (!workerTurnOptions.has(key)) {
+                                    throw heldWorkerError(`unknown send() option '${key}'`);
+                                }
+                            }
+                            if (worker.closed) {
+                                throw heldWorkerError("this worker is closed; open a new one to keep working");
+                            }
+                            if (worker.busy) {
+                                throw heldWorkerError("this worker is already taking a turn; a worker's turns are sequential");
+                            }
+                            const request = buildAgentRequest({
+                                ...worker.creation,
+                                schema: options.schema,
+                                maxAttempts: options.maxAttempts,
+                                timeoutMs: options.timeoutMs,
+                                label: options.label ?? worker.creation.label,
+                                session: worker.session,
+                                worker: worker.workerId,
+                            });
+                            worker.busy = true;
+                            try {
+                                const response = unwrapAgentResponse(
+                                    await __agent(prompt, JSON.stringify(request))
+                                );
+                                worker.session = response.session ?? worker.session;
+                                worker.turns += 1;
+                                return response.value;
+                            } finally {
+                                worker.busy = false;
+                            }
+                        };
+                        globalThis.close = async (worker) => {
+                            requireWorker(worker, "close()");
+                            if (worker.closed) return;
+                            unwrapHostResponse(await __workerClose(worker.workerId));
+                            worker.closed = true;
+                        };
+                        // What the worker's idle gap actually is, against the
+                        // threshold of the route its model draws on — recorded
+                        // facts, so the script decides warm-continue versus
+                        // fresh re-brief on evidence rather than a guess.
+                        globalThis.staleness = async (worker) => {
+                            requireWorker(worker, "staleness()");
+                            const reading = unwrapHostResponse(await __workerStaleness(worker.workerId));
+                            return {
+                                stale: reading.stale ?? null,
+                                idleMs: reading.idle_ms,
+                                thresholdMs: reading.threshold_ms ?? null,
+                                route: reading.route ?? null,
+                            };
                         };
                         // Race completion watches against a journalled host
                         // timer. Resolves {wake:"completion", handle, value}

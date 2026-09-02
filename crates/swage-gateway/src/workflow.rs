@@ -6345,6 +6345,7 @@ mod tests {
             &[],
             Uuid::new_v4(),
             AgentCallRequest {
+                worker: None,
                 cwd: None,
                 isolation: None,
                 effort: None,
@@ -6422,6 +6423,7 @@ mod tests {
             None,
         );
         let request = |skills| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -6543,6 +6545,7 @@ mod tests {
 
         let journal_entry_id = Uuid::new_v4();
         let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -6854,6 +6857,7 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            worker: None,
             prompt: "Use the briefing".into(),
             agent: Some("default".into()),
             task: None,
@@ -8120,6 +8124,7 @@ mod tests {
             0,
         );
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -8231,6 +8236,7 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -8409,6 +8415,7 @@ mod tests {
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
+                worker: None,
                 cwd: Some(worker_directory.path().to_string_lossy().into_owned()),
                 isolation: None,
                 effort: None,
@@ -8476,6 +8483,7 @@ mod tests {
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
+                worker: None,
                 cwd: None,
                 isolation: None,
                 effort: None,
@@ -8531,6 +8539,7 @@ mod tests {
         let (replacement_reply, replacement_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
+                worker: None,
                 cwd: Some("/unused-replacement".into()),
                 isolation: Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
                 effort: None,
@@ -9284,6 +9293,7 @@ mod tests {
             None,
         );
         let request = || AgentCallRequest {
+            worker: None,
             prompt: "Use the current review contract".into(),
             agent: None,
             task: Some("review".into()),
@@ -10551,6 +10561,7 @@ mod tests {
         tx.send(HostCommand::Agent {
             resolved_working_directory: None,
             request: AgentCallRequest {
+                worker: None,
                 cwd: None,
                 isolation: None,
                 effort: None,
@@ -10605,6 +10616,7 @@ mod tests {
             &[],
             Uuid::new_v4(),
             AgentCallRequest {
+                worker: None,
                 prompt: "continue".into(),
                 agent: None,
                 task: Some("review".into()),
@@ -12282,6 +12294,7 @@ mod tests {
             .await
             .expect("orphaned worker turn");
         let first_request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -12331,6 +12344,7 @@ mod tests {
             .await
             .expect("complete first call");
         let continuation = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -12465,6 +12479,7 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -12545,6 +12560,7 @@ mod tests {
             2,
         );
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -12632,6 +12648,7 @@ mod tests {
         let storage = Arc::clone(&scaffold.storage);
         let run_id = scaffold.run_id;
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -12800,6 +12817,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -12938,6 +12956,7 @@ mod tests {
             .await
             .expect("run");
         let working_request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -13068,6 +13087,7 @@ mod tests {
             true
         );
         let closing_request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -13149,6 +13169,7 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -13394,6 +13415,7 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -13626,6 +13648,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -14364,6 +14387,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -14473,6 +14497,7 @@ mod tests {
             .await
             .expect("run");
         let request = serde_json::to_value(AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
