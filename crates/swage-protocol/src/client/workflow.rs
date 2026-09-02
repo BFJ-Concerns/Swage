@@ -300,8 +300,6 @@ pub struct WorkflowAgentCallDetail {
     pub output_tokens: Option<u64>,
     /// The resolved state of the isolated worktree after the worker settled.
     pub worktree: Option<WorkflowWorktreeCompletion>,
-    /// Timestamps for a worker which is running or has completed.
-    pub liveness: Option<WorkflowWorkerLiveness>,
 }
 
 /// The final Git state of an isolated worker worktree.
@@ -311,13 +309,6 @@ pub struct WorkflowWorktreeCompletion {
     pub tip_commit: String,
     pub changed: bool,
     pub removed: bool,
-}
-
-/// Earliest liveness evidence for one workflow worker.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct WorkflowWorkerLiveness {
-    pub started_at: DateTime<Utc>,
-    pub first_evidence_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

@@ -1220,7 +1220,6 @@ mod tests {
                 thread_id: None,
                 turn_id: None,
                 worktree: None,
-                liveness: None,
             })
         }
         async fn deliver(
@@ -1269,7 +1268,6 @@ mod tests {
                 thread_id: None,
                 turn_id: None,
                 worktree: None,
-                liveness: None,
             })
         }
 
@@ -1375,7 +1373,6 @@ mod tests {
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
                 worktree: None,
-                liveness: None,
             })
         }
 
