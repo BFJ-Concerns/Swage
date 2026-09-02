@@ -29,21 +29,15 @@ impl WorkflowCapabilities {
     /// adapter's message conversion keeps.
     pub fn for_protocol(protocol: swage_config::Protocol) -> Self {
         match protocol {
-            // Chat Completions maps image parts (openai.rs convert_content);
-            // OpenRouter speaks the same envelope through the same adapter.
-            swage_config::Protocol::OpenAi | swage_config::Protocol::OpenRouter => Self {
-                text: true,
-                vision: true,
-                embeddings: false,
-                image_generation: false,
-            },
-            // These adapters convert text parts only today; vision is
-            // claimed for each the moment its mapping lands.
-            swage_config::Protocol::OpenAiResponses
+            // Each adapter maps ContentPart::ImageUrl in its own native
+            // message representation; OpenRouter shares Chat Completions.
+            swage_config::Protocol::OpenAi
+            | swage_config::Protocol::OpenAiResponses
+            | swage_config::Protocol::OpenRouter
             | swage_config::Protocol::Anthropic
             | swage_config::Protocol::Google => Self {
                 text: true,
-                vision: false,
+                vision: true,
                 embeddings: false,
                 image_generation: false,
             },
@@ -85,18 +79,21 @@ mod tests {
     #[test]
     fn vision_is_claimed_only_where_the_adapter_maps_image_parts() {
         use swage_config::Protocol;
-        assert!(WorkflowCapabilities::for_protocol(Protocol::OpenAi).vision);
-        assert!(WorkflowCapabilities::for_protocol(Protocol::OpenRouter).vision);
         for protocol in [
+            Protocol::OpenAi,
             Protocol::OpenAiResponses,
+            Protocol::OpenRouter,
             Protocol::Anthropic,
             Protocol::Google,
-            Protocol::Codex,
         ] {
             assert!(
-                !WorkflowCapabilities::for_protocol(protocol.clone()).vision,
-                "{protocol:?} has no image mapping yet"
+                WorkflowCapabilities::for_protocol(protocol.clone()).vision,
+                "{protocol:?} maps image parts"
             );
         }
+        assert!(
+            !WorkflowCapabilities::for_protocol(Protocol::Codex).vision,
+            "Codex has no documented app-server image input"
+        );
     }
 }
