@@ -504,7 +504,13 @@ mod tests {
             "control": "budget", "min_tokens": 1024, "max_tokens": 32000, "can_disable": false
         }))
         .unwrap();
-        assert!(matches!(budget, EffortCapability::Budget { min_tokens: 1024, .. }));
+        assert!(matches!(
+            budget,
+            EffortCapability::Budget {
+                min_tokens: 1024,
+                ..
+            }
+        ));
     }
 
     #[test]

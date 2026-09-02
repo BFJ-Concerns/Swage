@@ -10,7 +10,7 @@ use uuid::Uuid;
 /// sends only kinds the gateway's configured provider can consume, and the
 /// gateway refuses the turn otherwise rather than dropping the part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageAttachment {
     /// An image the model reads, addressed by URL — `https://` or a
     /// `data:` URL carrying the bytes inline.

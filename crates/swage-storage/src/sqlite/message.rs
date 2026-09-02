@@ -292,7 +292,6 @@ mod tests {
     fn new_msg(thread_id: Uuid, role: Role, content: &str, position: i32) -> NewMessage {
         NewMessage {
             thread_id,
-        attachments: Vec::new(),
             attachments: Vec::new(),
             turn_id: None,
             role,
@@ -305,7 +304,6 @@ mod tests {
     fn append_msg(thread_id: Uuid, role: Role, content: &str) -> AppendMessage {
         AppendMessage {
             thread_id,
-        attachments: Vec::new(),
             attachments: Vec::new(),
             turn_id: None,
             role,
@@ -320,9 +318,8 @@ mod tests {
     async fn append_stores_attachment_values_opaquely_and_reads_them_back() {
         let (storage, _, thread_id) = make_thread().await;
         let mut message = append_msg(thread_id, Role::User, "what is this?");
-        message.attachments = vec![
-            serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"}),
-        ];
+        message.attachments =
+            vec![serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"})];
 
         let appended = storage.append_message(message).await.unwrap();
         assert_eq!(appended.attachments.len(), 1);

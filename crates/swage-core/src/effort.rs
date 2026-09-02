@@ -114,7 +114,10 @@ pub fn resolve_effort(requested: Effort, capability: &EffortCapability) -> Resol
                 };
             }
             if supported.contains(&requested) {
-                return ResolvedEffort::honoured(requested, EffortControl::Level { level: requested });
+                return ResolvedEffort::honoured(
+                    requested,
+                    EffortControl::Level { level: requested },
+                );
             }
             let nearest = supported
                 .iter()
@@ -140,7 +143,9 @@ pub fn resolve_effort(requested: Effort, capability: &EffortCapability) -> Resol
                 } else {
                     ResolvedEffort::substituted(
                         requested,
-                        EffortControl::Budget { tokens: *min_tokens },
+                        EffortControl::Budget {
+                            tokens: *min_tokens,
+                        },
                         Effort::Minimal,
                         format!("off unsupported; budget {min_tokens} tokens (minimal)"),
                     )
@@ -187,7 +192,10 @@ mod tests {
     fn an_unsupported_level_clamps_down_and_is_recorded() {
         let resolved = resolve_effort(
             Effort::Max,
-            &levels(&[Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh], true),
+            &levels(
+                &[Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh],
+                true,
+            ),
         );
         assert_eq!(
             resolved.control,
@@ -204,7 +212,10 @@ mod tests {
 
     #[test]
     fn a_level_below_the_lowest_supported_takes_the_lowest() {
-        let resolved = resolve_effort(Effort::Minimal, &levels(&[Effort::Low, Effort::High], false));
+        let resolved = resolve_effort(
+            Effort::Minimal,
+            &levels(&[Effort::Low, Effort::High], false),
+        );
         assert_eq!(
             resolved.control,
             EffortControl::Level { level: Effort::Low }
@@ -219,10 +230,7 @@ mod tests {
         assert_eq!(disabled.note, None);
 
         let clamped = resolve_effort(Effort::Off, &levels(&[Effort::Low, Effort::High], false));
-        assert_eq!(
-            clamped.control,
-            EffortControl::Level { level: Effort::Low }
-        );
+        assert_eq!(clamped.control, EffortControl::Level { level: Effort::Low });
         assert_eq!(
             clamped.note.as_deref(),
             Some("off unsupported; clamped to low")
@@ -257,7 +265,13 @@ mod tests {
     fn a_model_without_a_control_omits_it_and_says_so() {
         let resolved = resolve_effort(Effort::High, &EffortCapability::None);
         assert_eq!(resolved.control, EffortControl::Omitted);
-        assert!(resolved.note.as_deref().unwrap().contains("no effort control"));
+        assert!(
+            resolved
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("no effort control")
+        );
     }
 
     #[test]

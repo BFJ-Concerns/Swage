@@ -16,7 +16,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, Effort, EffortCapability,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, EffortCapability,
     FinishReason, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolReplayPart,
 };
@@ -871,6 +871,7 @@ mod tests {
 
     #[test]
     fn every_native_level_maps_to_responses_reasoning_effort() {
+        use swage_core::Effort;
         let provider = ResponsesProvider::from_config(local_provider_config());
         for (level, expected) in [
             (Effort::Minimal, "minimal"),
@@ -880,7 +881,10 @@ mod tests {
             (Effort::Xhigh, "xhigh"),
         ] {
             let request = CompletionRequest {
-                effort: Some(swage_core::resolve_effort(level, &openai_effort_capability())),
+                effort: Some(swage_core::resolve_effort(
+                    level,
+                    &openai_effort_capability(),
+                )),
                 ..empty_completion_request()
             };
             let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();

@@ -183,7 +183,7 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        axum::Json::<T>::from_request(request, state)
+        <axum::Json<T> as FromRequest<S>>::from_request(request, state)
             .await
             .map(|axum::Json(value)| Self(value))
             .map_err(rejection_error)
@@ -344,7 +344,10 @@ mod tests {
     }
 
     fn probe_router() -> Router {
-        Router::new().route("/probe", post(|Json(_): Json<Probe>| async { StatusCode::OK }))
+        Router::new().route(
+            "/probe",
+            post(|Json(_): Json<Probe>| async { StatusCode::OK }),
+        )
     }
 
     async fn probe(content_type: &str, body: &'static str) -> Response {

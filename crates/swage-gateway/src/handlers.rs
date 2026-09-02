@@ -1563,8 +1563,7 @@ pub async fn send_agent_message(
             {
                 tracing::warn!(error = ?error, "external delegate execution failed");
                 let router = MessageRouter::new(state_for_task.storage.clone(), None);
-                if let Err(fail_error) = router.fail_message(message_id, error.message()).await
-                {
+                if let Err(fail_error) = router.fail_message(message_id, error.message()).await {
                     tracing::warn!(
                         message_id = %message_id,
                         error = ?fail_error,
@@ -2756,7 +2755,10 @@ mod tests {
         ))
         .await
         .expect_err("malformed composition must be rejected");
-        assert!(matches!(error.cause(), Some(GatewayError::ValidationError(_))));
+        assert!(matches!(
+            error.cause(),
+            Some(GatewayError::ValidationError(_))
+        ));
 
         let valid = router
             .send_message(swage_storage::NewAgentMessage {
@@ -2775,8 +2777,7 @@ mod tests {
         .expect_err("unconsumed dispatcher failure proves malformed input provisioned nothing");
         assert!(
             error
-                .0
-                .to_string()
+                .message()
                 .contains("injected dispatcher build failure")
         );
     }

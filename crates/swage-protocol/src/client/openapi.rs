@@ -156,7 +156,10 @@ mod tests {
     fn a_bodiless_success_and_path_parameters_render() {
         let document = document();
         let delete = &document["paths"]["/api/spaces/{id}"]["delete"];
-        assert_eq!(delete["responses"]["204"]["description"], "Success, no body.");
+        assert_eq!(
+            delete["responses"]["204"]["description"],
+            "Success, no body."
+        );
         assert_eq!(delete["parameters"][0]["name"], "id");
         assert_eq!(delete["parameters"][0]["schema"]["format"], "uuid");
     }

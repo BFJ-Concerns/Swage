@@ -78,6 +78,7 @@ async fn create_full_hierarchy(
     let message = storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(turn.id),
             agent_id: agent_id.to_string(),
             role: Role::User,
@@ -556,6 +557,7 @@ async fn messages_ordered_within_thread() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: Role::User,
@@ -568,6 +570,7 @@ async fn messages_ordered_within_thread() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: Role::User,
@@ -580,6 +583,7 @@ async fn messages_ordered_within_thread() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: Role::Assistant,

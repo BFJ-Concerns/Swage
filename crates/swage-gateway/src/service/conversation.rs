@@ -294,7 +294,7 @@ impl ConversationService {
 
         let message_views = all_messages
             .into_iter()
-            .map(|message| {
+            .map(|message| -> Result<MessageView, GatewayError> {
                 let turn_id = message.turn_id;
                 let turn_state = turn_id
                     .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id))
@@ -309,7 +309,7 @@ impl ConversationService {
                     Vec::new()
                 };
 
-                MessageView {
+                Ok(MessageView {
                     thread_id: message.thread_id,
                     turn_id,
                     role: message.role.to_string(),
@@ -318,9 +318,9 @@ impl ConversationService {
                     timestamp: message.created_at,
                     turn_state,
                     tool_calls,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ConversationDetail {
             id: session.id,
@@ -592,9 +592,9 @@ impl ConversationService {
             state: thread.state.to_string(),
             messages: messages
                 .into_iter()
-                .map(|message| {
+                .map(|message| -> Result<MessageView, GatewayError> {
                     let is_assistant = message.role == Role::Assistant;
-                    MessageView {
+                    Ok(MessageView {
                         thread_id: message.thread_id,
                         turn_id: message.turn_id,
                         role: message.role.to_string(),
@@ -613,9 +613,9 @@ impl ConversationService {
                         } else {
                             Vec::new()
                         },
-                    }
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
             branch: branch.map(thread_branch_to_response),
         })
     }

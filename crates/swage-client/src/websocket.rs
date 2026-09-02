@@ -580,7 +580,10 @@ mod tests {
         assert_eq!(v["type"], "send_message");
         assert_eq!(v["content"], "hello");
         assert!(v.get("thread_id").is_none());
-        assert!(v.get("attachments").is_none(), "text-only sends carry no attachments key");
+        assert!(
+            v.get("attachments").is_none(),
+            "text-only sends carry no attachments key"
+        );
     }
 
     #[test]

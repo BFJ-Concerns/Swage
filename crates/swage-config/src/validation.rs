@@ -2066,7 +2066,10 @@ message_ttl_secs = 86400
                 ..Default::default()
             },
         );
-        config.providers.entries.insert("p".into(), crate::ProviderEndpointConfig::default());
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
         let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
         assert!(
             problems.iter().any(|problem| {
