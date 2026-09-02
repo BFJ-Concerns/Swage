@@ -2,6 +2,7 @@
 import type { WorkflowBudget } from "./WorkflowBudget";
 import type { WorkflowRunHandover } from "./WorkflowRunHandover";
 import type { WorkflowRunState } from "./WorkflowRunState";
+import type { WorkflowRunTerminalAccount } from "./WorkflowRunTerminalAccount";
 
 export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null,
 /**
@@ -11,4 +12,9 @@ source: string | null,
 /**
  * SHA-256 of the exact source executed by this run.
  */
-source_hash: string, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, handover: WorkflowRunHandover | null, error_message: string | null, created_at: string, completed_at: string | null, };
+source_hash: string, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, handover: WorkflowRunHandover | null,
+/**
+ * The run's terminal account: how it ended and where its workers stood.
+ * Absent only while the run is still going.
+ */
+terminal_account: WorkflowRunTerminalAccount | null, error_message: string | null, created_at: string, completed_at: string | null, };
