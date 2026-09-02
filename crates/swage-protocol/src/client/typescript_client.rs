@@ -147,10 +147,14 @@ mod tests {
     fn imports_cover_exactly_the_named_types_once() {
         let rendered = render();
         assert_eq!(
-            rendered.matches("import type { SpaceResponse } from \"./SpaceResponse\";").count(),
+            rendered
+                .matches("import type { SpaceResponse } from \"./SpaceResponse\";")
+                .count(),
             1
         );
-        assert!(rendered.contains("import type { CreateSpaceRequest } from \"./CreateSpaceRequest\";"));
+        assert!(
+            rendered.contains("import type { CreateSpaceRequest } from \"./CreateSpaceRequest\";")
+        );
         assert!(rendered.contains("import { ApiError } from \"../api/error\";"));
     }
 

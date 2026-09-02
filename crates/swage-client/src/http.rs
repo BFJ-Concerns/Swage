@@ -645,6 +645,7 @@ impl GatewayClient {
             conversation_id,
             thread_id,
             message: message.to_owned(),
+            attachments: Vec::new(),
             output_schema,
             compaction_focus,
             model: None,
@@ -1000,6 +1001,7 @@ mod space_type_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorCode;
     // Shared crate-wide lock — prevents races with runtime.rs tests that also
     // manipulate XDG_RUNTIME_DIR during parallel test execution.
     use crate::test_helpers::ENV_LOCK;

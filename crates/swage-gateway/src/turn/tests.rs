@@ -16,9 +16,9 @@ use swage_core::{
     MessageStatus, ProviderError, SandboxError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse, ToolError, ToolReplayPart,
 };
-use swage_protocol::client::turn::MessageAttachment;
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
+use swage_protocol::client::turn::MessageAttachment;
 use swage_provider::LlmProvider;
 use swage_storage::{
     model::{
@@ -404,7 +404,7 @@ async fn provider_response_event_persists_witness_through_gateway_turn() {
         &state,
         session_id,
         None,
-        "Hello".into(),
+        TurnInput::from("Hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -438,7 +438,7 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
         &state,
         session_id,
         None,
-        "Hello".into(),
+        TurnInput::from("Hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -491,7 +491,7 @@ async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loo
         &state,
         session_id,
         None,
-        "continue".into(),
+        TurnInput::from("continue"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -4457,7 +4457,7 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
             &state,
             session_id,
             None,
-            "exercise agent skill loading".into(),
+            TurnInput::from("exercise agent skill loading"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -4686,7 +4686,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
         &state,
         session_id,
         None,
-        "Hello Codex".into(),
+        TurnInput::from("Hello Codex"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -5759,7 +5759,7 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
             &task_state,
             session_id,
             None,
-            "Use echo after accepting degraded execution".into(),
+            TurnInput::from("Use echo after accepting degraded execution"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -7895,7 +7895,7 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
             &task_state,
             session_id,
             None,
-            "Use echo".into(),
+            TurnInput::from("Use echo"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -9017,7 +9017,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         &state,
         session.id,
         None,
-        "Delegate this".into(),
+        TurnInput::from("Delegate this"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -9631,7 +9631,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         &state,
         child_session.id,
         None,
-        "continue the delegated work".into(),
+        TurnInput::from("continue the delegated work"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10672,7 +10672,7 @@ async fn capture_provider_effort_for_selected_model(
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10852,7 +10852,7 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10912,7 +10912,10 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
     let capability = super::effort_capability_for_model(&config, "claude", &anthropic);
     assert!(matches!(
         capability,
-        swage_core::EffortCapability::Levels { can_disable: true, .. }
+        swage_core::EffortCapability::Levels {
+            can_disable: true,
+            ..
+        }
     ));
 
     let declared = swage_core::EffortCapability::None;
@@ -10980,7 +10983,7 @@ async fn process_turn_passes_tool_context_to_tools() {
         &state,
         session_id,
         None,
-        "capture".into(),
+        TurnInput::from("capture"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11056,7 +11059,7 @@ async fn process_turn_resolves_config_per_space_and_completes_turn() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11146,7 +11149,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11188,7 +11191,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11240,7 +11243,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11345,7 +11348,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11504,7 +11507,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11552,7 +11555,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11864,7 +11867,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -15198,8 +15201,14 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
     );
 
     let db = storage.db.lock().await;
-    assert!(db.messages.is_empty(), "nothing is persisted for a refused turn");
-    assert!(db.turns.is_empty(), "no turn record is created for a refused turn");
+    assert!(
+        db.messages.is_empty(),
+        "nothing is persisted for a refused turn"
+    );
+    assert!(
+        db.turns.is_empty(),
+        "no turn record is created for a refused turn"
+    );
 }
 
 /// A stored attachment outside the wire contract is corruption, refused

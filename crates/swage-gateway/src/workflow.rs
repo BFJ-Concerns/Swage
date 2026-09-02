@@ -1464,7 +1464,9 @@ async fn run_ephemeral_agent_call(
         assembly: request.assembly.clone(),
         skills: request.skills.clone(),
     };
-    let processing = crate::turn::process_turn_with_composition(
+    // Boxed: the turn future carries the whole composed input and would
+    // otherwise push this call's future past the large-future lint.
+    let mut processing = Box::pin(crate::turn::process_turn_with_composition(
         state,
         session_id,
         Some(thread_id),
@@ -1479,8 +1481,7 @@ async fn run_ephemeral_agent_call(
         crate::turn::TurnAttendance::Unattended,
         composition,
         Some(journal_entry_id),
-    );
-    tokio::pin!(processing);
+    ));
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         biased;
@@ -5661,7 +5662,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn operator_carried_workflow_shadows_the_same_named_shipped_workflow_when_listed_and_started() {
+    async fn operator_carried_workflow_shadows_the_same_named_shipped_workflow_when_listed_and_started()
+     {
         let root = tempfile::tempdir().expect("skill root");
         let skill_dir = root.path().join("skills/research-shadow");
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -5955,10 +5957,7 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
-        assert_eq!(
-            run.script_id,
-            Some(research_sweep_id(space.id))
-        );
+        assert_eq!(run.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
         assert_eq!(run.carrying_skill.as_deref(), Some("research"));

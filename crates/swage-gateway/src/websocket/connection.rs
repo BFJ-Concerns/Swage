@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
     extract::{Path, State, WebSocketUpgrade},
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
@@ -37,9 +36,7 @@ pub(crate) async fn check_upgrade_preconditions(
         }
         Err(e) => {
             tracing::error!(%session_id, error = %e, "storage error checking conversation");
-            return Some(
-                ApiError::internal("failed to check conversation".into()).into_response(),
-            );
+            return Some(ApiError::internal("failed to check conversation".into()).into_response());
         }
     }
 

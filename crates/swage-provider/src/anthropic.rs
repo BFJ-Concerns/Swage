@@ -99,7 +99,10 @@ pub(crate) fn anthropic_effort_capability() -> EffortCapability {
 /// wire accepts.
 fn anthropic_effort_controls(
     control: EffortControl,
-) -> (Option<AnthropicOutputConfig>, Option<AnthropicThinkingConfig>) {
+) -> (
+    Option<AnthropicOutputConfig>,
+    Option<AnthropicThinkingConfig>,
+) {
     match control {
         EffortControl::Level { level } => (
             Some(AnthropicOutputConfig {
@@ -1719,7 +1722,8 @@ mod tests {
             (Effort::Max, "max"),
         ] {
             let body = serde_json::to_value(
-                provider.build_request_for_completion(&effort_request(Some(resolved(level))), false),
+                provider
+                    .build_request_for_completion(&effort_request(Some(resolved(level))), false),
             )
             .unwrap();
             assert_eq!(body["output_config"]["effort"], expected);
@@ -1787,9 +1791,10 @@ mod tests {
     #[test]
     fn completion_without_effort_omits_anthropic_output_config() {
         let provider = AnthropicProvider::new("key", "model");
-        let body =
-            serde_json::to_value(provider.build_request_for_completion(&effort_request(None), false))
-                .unwrap();
+        let body = serde_json::to_value(
+            provider.build_request_for_completion(&effort_request(None), false),
+        )
+        .unwrap();
         assert!(!body.as_object().unwrap().contains_key("output_config"));
         assert!(!body.as_object().unwrap().contains_key("thinking"));
     }

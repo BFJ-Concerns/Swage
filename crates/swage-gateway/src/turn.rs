@@ -5,9 +5,9 @@
 // with a test explaining why defaulting is safe.
 // ---
 
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::mem;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -385,13 +385,18 @@ pub(crate) fn effort_capability_for_model(
     let model = config.models.entries.get(catalogue_entry);
     model
         .and_then(|model| model.capabilities.effort.clone())
-        .or_else(|| provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id)))
+        .or_else(|| {
+            provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
+        })
         .unwrap_or(swage_core::EffortCapability::None)
 }
 
 /// Record the resolved effort beside the effective model in the turn's
 /// provider-visible snapshot: what was asked, what is sent, and any clamp.
-fn record_effort_snapshot(report_json: &mut serde_json::Value, resolved: &swage_core::ResolvedEffort) {
+fn record_effort_snapshot(
+    report_json: &mut serde_json::Value,
+    resolved: &swage_core::ResolvedEffort,
+) {
     normalise_report_object(report_json);
     if !report_json["provider_visible"].is_object() {
         report_json["provider_visible"] = serde_json::json!({});

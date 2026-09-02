@@ -1,18 +1,3 @@
-use std::env;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use uuid::Uuid;
-
-use swage_core::{GatewayError, StorageError};
-use swage_storage::{
-    ManagedSecretEncryptionDiagnostics, NewAuditEvent, NewSecretRecord, SecretRecord,
-    managed_secret_encryption_diagnostics, store::Storage,
-};
-
 //! The governed secret system: every credential the gateway uses resolves
 //! through one manager, by reference, with an audit event per access and
 //! the resolved value registered for redaction.
@@ -29,6 +14,21 @@ use swage_storage::{
 //!   `metadata.json_pointer` optionally selects one field of a JSON
 //!   document (RFC 6901), which is how a harness-owned auth store such as
 //!   the Codex CLI's is brought under governance without moving it.
+
+use std::env;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use swage_core::{GatewayError, StorageError};
+use swage_storage::{
+    ManagedSecretEncryptionDiagnostics, NewAuditEvent, NewSecretRecord, SecretRecord,
+    managed_secret_encryption_diagnostics, store::Storage,
+};
 
 /// Backend identifiers as stored in `secrets.backend_kind`.
 pub const MANAGED_BACKEND: &str = "managed";
@@ -334,7 +334,11 @@ impl SecretManager {
     /// (an env variable unset, a file not yet written) contributes nothing
     /// rather than failing the capture.
     pub async fn known_values(&self) -> Result<Vec<String>, GatewayError> {
-        let records = self.storage.list_secrets().await.map_err(GatewayError::Storage)?;
+        let records = self
+            .storage
+            .list_secrets()
+            .await
+            .map_err(GatewayError::Storage)?;
         let mut values = Vec::new();
         for record in records
             .into_iter()
@@ -444,7 +448,10 @@ impl SecretManager {
 
     /// Read a record's current material from its backend. The one place a
     /// backend is dereferenced: resolution and redaction both come here.
-    async fn read_backend_value(&self, record: &SecretRecord) -> Result<BackendValue, GatewayError> {
+    async fn read_backend_value(
+        &self,
+        record: &SecretRecord,
+    ) -> Result<BackendValue, GatewayError> {
         match record.backend_kind.as_str() {
             MANAGED_BACKEND => {
                 let value = self
@@ -802,7 +809,7 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    use swage_storage::{AuditStore, MANAGED_SECRET_KEY_ENV, SqliteStorage};
+    use swage_storage::{AuditStore, MANAGED_SECRET_KEY_ENV, SqliteStorage, store::SecretStore};
 
     use super::*;
 
@@ -919,7 +926,10 @@ mod tests {
 
         let first = manager.resolve(&secret.reference).await.unwrap();
         assert_eq!(first.value, "first-token");
-        assert!(first.observed_at.is_some(), "a file backend reports when it changed");
+        assert!(
+            first.observed_at.is_some(),
+            "a file backend reports when it changed"
+        );
 
         std::fs::write(
             &auth_store,
@@ -950,7 +960,10 @@ mod tests {
             .create_secret(file_secret("bare", &token_file, None))
             .await
             .unwrap();
-        assert_eq!(manager.resolve(&secret.reference).await.unwrap().value, "bare-token");
+        assert_eq!(
+            manager.resolve(&secret.reference).await.unwrap().value,
+            "bare-token"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -960,7 +973,11 @@ mod tests {
         let auth_store = dir.path().join("auth.json");
         let manager = SecretManager::new(Arc::new(SqliteStorage::in_memory().unwrap()));
         let secret = manager
-            .create_secret(file_secret("missing", &auth_store, Some("/tokens/access_token")))
+            .create_secret(file_secret(
+                "missing",
+                &auth_store,
+                Some("/tokens/access_token"),
+            ))
             .await
             .expect("registration precedes sign-in, so the file need not exist yet");
 
@@ -978,7 +995,10 @@ mod tests {
             .create_secret(file_secret("bad", &auth_store, Some("tokens.access_token")))
             .await
             .unwrap_err();
-        assert!(bad_pointer.to_string().contains("JSON pointer"), "{bad_pointer}");
+        assert!(
+            bad_pointer.to_string().contains("JSON pointer"),
+            "{bad_pointer}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1024,9 +1044,18 @@ mod tests {
         assert_eq!(access.material_kind, "oauth_access_token");
         assert_eq!(
             access.external_reference.as_deref(),
-            Some(second_dir.path().join("auth.json").to_string_lossy().as_ref())
+            Some(
+                second_dir
+                    .path()
+                    .join("auth.json")
+                    .to_string_lossy()
+                    .as_ref()
+            )
         );
-        assert_eq!(access.metadata[FILE_JSON_POINTER_KEY], "/tokens/access_token");
+        assert_eq!(
+            access.metadata[FILE_JSON_POINTER_KEY],
+            "/tokens/access_token"
+        );
 
         std::fs::write(
             second_dir.path().join("auth.json"),
@@ -1073,6 +1102,9 @@ mod tests {
             .unwrap();
 
         let values = manager.known_values().await.unwrap();
-        assert_eq!(values, vec!["managed-value".to_string(), "file-value".to_string()]);
+        assert_eq!(
+            values,
+            vec!["managed-value".to_string(), "file-value".to_string()]
+        );
     }
 }

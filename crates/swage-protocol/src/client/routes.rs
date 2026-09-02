@@ -153,7 +153,10 @@ mod tests {
         for route in &routes {
             for parameter in route.path_parameters() {
                 assert!(
-                    !parameter.is_empty() && parameter.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                    !parameter.is_empty()
+                        && parameter
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_'),
                     "{}: parameter {parameter:?} is not a plain name",
                     route.path
                 );

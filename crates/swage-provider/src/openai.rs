@@ -112,6 +112,7 @@ enum OpenAiContent {
     Parts(Vec<OpenAiContentPart>),
 }
 
+#[cfg(test)]
 impl OpenAiContent {
     /// The text-only projection of the content — what a caller that reads
     /// the message as a string sees.
@@ -351,7 +352,9 @@ impl OpenAiProvider {
                 parts
                     .iter()
                     .map(|part| match part {
-                        ContentPart::Text { text } => OpenAiContentPart::Text { text: text.clone() },
+                        ContentPart::Text { text } => {
+                            OpenAiContentPart::Text { text: text.clone() }
+                        }
                         ContentPart::ImageUrl { url } => OpenAiContentPart::ImageUrl {
                             image_url: OpenAiImageUrl { url: url.clone() },
                         },
@@ -409,7 +412,8 @@ impl OpenAiProvider {
 
                 Some(vec![OpenAiMessage {
                     role: "assistant".to_string(),
-                    content: (!text_content.is_empty()).then_some(OpenAiContent::Text(text_content)),
+                    content: (!text_content.is_empty())
+                        .then_some(OpenAiContent::Text(text_content)),
                     name: message.name().map(ToOwned::to_owned),
                     tool_call_id: None,
                     tool_calls: if tool_calls.is_empty() {
@@ -933,7 +937,10 @@ mod tests {
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].role, "system");
         assert_eq!(
-            converted[0].content.as_ref().and_then(OpenAiContent::as_text),
+            converted[0]
+                .content
+                .as_ref()
+                .and_then(OpenAiContent::as_text),
             Some("You are helpful")
         );
     }
@@ -1001,7 +1008,13 @@ mod tests {
                     },
                 ],
             )],
-            ..CompletionRequest::default()
+            model: None,
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
         };
         let body = serde_json::to_value(provider.build_request(&request, false))
             .expect("serialise request body");
@@ -1073,7 +1086,10 @@ mod tests {
             (Effort::Xhigh, "xhigh"),
         ] {
             let request = CompletionRequest {
-                effort: Some(swage_core::resolve_effort(level, &openai_effort_capability())),
+                effort: Some(swage_core::resolve_effort(
+                    level,
+                    &openai_effort_capability(),
+                )),
                 messages: vec![],
                 model: None,
                 max_tokens: None,
@@ -1093,7 +1109,10 @@ mod tests {
     fn a_resolved_clamp_and_a_disable_reach_the_openai_wire_as_resolved() {
         let provider = OpenAiProvider::from_config(local_provider_config());
         let mut request = CompletionRequest {
-            effort: Some(swage_core::resolve_effort(Effort::Max, &openai_effort_capability())),
+            effort: Some(swage_core::resolve_effort(
+                Effort::Max,
+                &openai_effort_capability(),
+            )),
             messages: vec![],
             model: None,
             max_tokens: None,
@@ -1102,11 +1121,17 @@ mod tests {
             metadata: None,
             tool_definitions: vec![],
         };
-        assert_eq!(request.effort.as_ref().unwrap().clamped_to, Some(Effort::Xhigh));
+        assert_eq!(
+            request.effort.as_ref().unwrap().clamped_to,
+            Some(Effort::Xhigh)
+        );
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert_eq!(body["reasoning_effort"], "xhigh");
 
-        request.effort = Some(swage_core::resolve_effort(Effort::Off, &openai_effort_capability()));
+        request.effort = Some(swage_core::resolve_effort(
+            Effort::Off,
+            &openai_effort_capability(),
+        ));
         let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
         assert_eq!(body["reasoning_effort"], "none");
     }
@@ -1401,7 +1426,10 @@ mod tests {
         assert_eq!(converted[1].role, "tool");
         assert_eq!(converted[1].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(
-            converted[1].content.as_ref().and_then(OpenAiContent::as_text),
+            converted[1]
+                .content
+                .as_ref()
+                .and_then(OpenAiContent::as_text),
             Some("/workspace")
         );
     }
