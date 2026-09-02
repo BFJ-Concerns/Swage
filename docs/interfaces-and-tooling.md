@@ -167,14 +167,15 @@ path, the JSON pointer if the file is a JSON document, and
 }
 ```
 
-The response includes a `reference` field (e.g. `secret://file/42`). Point
-the provider entry's `api_key_secret_ref` at it to bring the credential
-under the governed path:
+The response includes a `reference` field (e.g.
+`secret://file/a1b2c3d4-e5f6-7890-abcd-ef1234567890`). Point the provider
+entry's `api_key_secret_ref` at it to bring the credential under the
+governed path:
 
 ```toml
 [providers.entries.my-provider]
 protocol = "openai"
-api_key_secret_ref = "secret://file/42"
+api_key_secret_ref = "secret://file/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 ```
 
 ### Codex auth store
