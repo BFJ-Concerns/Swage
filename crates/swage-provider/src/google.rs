@@ -1043,6 +1043,37 @@ mod tests {
     }
 
     #[test]
+    fn lowest_non_off_google_effort_resolves_to_each_flash_family_floor() {
+        use swage_core::Effort;
+
+        for (model, expected_budget) in [("gemini-2.5-flash-lite", 512), ("gemini-2.5-flash", 1)] {
+            let provider = GoogleProvider::from_config(ProviderConfig::new(
+                "key",
+                model,
+                "https://generativelanguage.googleapis.com",
+            ));
+            let capability = google_effort_capability(model).expect("known Flash family");
+            let resolved = swage_core::resolve_effort(Effort::Minimal, &capability);
+            let body = serde_json::to_value(provider.build_request(&CompletionRequest {
+                effort: Some(resolved),
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            }))
+            .expect("Google request serialises");
+
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingBudget"], expected_budget,
+                "{model} sends its documented lowest non-off thinking budget"
+            );
+        }
+    }
+
+    #[test]
     fn resolved_google_disable_and_omission_reach_the_wire_as_resolved() {
         use swage_core::Effort;
 

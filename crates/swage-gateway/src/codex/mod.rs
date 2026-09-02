@@ -1046,44 +1046,57 @@ mod tests {
 
     #[tokio::test]
     async fn codex_omits_non_named_resolved_controls() {
-        let notifications = successful_turn_notifications();
-        let scenario = json!({"keepOpen":true,"steps":[
-            {
-                "receive":{"method":"thread/start"},
-                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
-            },
-            {
-                "receive":{"method":"turn/start"},
-                "send":[
-                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
-                    notifications[0].clone(),
-                    notifications[1].clone()
-                ]
-            }
-        ]});
-        let (result, _, _, events) = run_scripted_turn(
-            scenario,
-            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
-            permissions(&[], &[]),
-        )
-        .await;
-        assert_eq!(
-            result.expect("scripted Codex turn succeeds").response,
-            "done"
-        );
-        let turn_start = events
-            .iter()
-            .find_map(|event| match event {
-                AgentEvent::ProviderRequestPrepared { request, .. } => request
-                    .get("params")
-                    .filter(|_| request["method"] == "turn/start"),
-                _ => None,
-            })
-            .expect("production turn/start request was sent");
-        assert!(
-            turn_start.get("effort").is_none(),
-            "an omitted resolved control is absent from the production turn/start request"
-        );
+        for (control_name, control) in [
+            ("omitted", EffortControl::Omitted),
+            ("budget", EffortControl::Budget { tokens: 512 }),
+            ("disabled", EffortControl::Disabled),
+        ] {
+            let notifications = successful_turn_notifications();
+            let scenario = json!({"keepOpen":true,"steps":[
+                {
+                    "receive":{"method":"thread/start"},
+                    "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+                },
+                {
+                    "receive":{"method":"turn/start"},
+                    "send":[
+                        {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                        notifications[0].clone(),
+                        notifications[1].clone()
+                    ]
+                }
+            ]});
+            let resolved = ResolvedEffort {
+                requested: Effort::Minimal,
+                control,
+                clamped_to: None,
+                note: None,
+            };
+            let (result, _, _, events) = run_scripted_turn_with_effort(
+                scenario,
+                ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+                permissions(&[], &[]),
+                Some(resolved),
+            )
+            .await;
+            assert_eq!(
+                result.expect("scripted Codex turn succeeds").response,
+                "done"
+            );
+            let turn_start = events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::ProviderRequestPrepared { request, .. } => request
+                        .get("params")
+                        .filter(|_| request["method"] == "turn/start"),
+                    _ => None,
+                })
+                .expect("production turn/start request was sent");
+            assert!(
+                turn_start.get("effort").is_none(),
+                "a resolved {control_name} control is absent from the production turn/start request"
+            );
+        }
     }
 
     #[tokio::test]
