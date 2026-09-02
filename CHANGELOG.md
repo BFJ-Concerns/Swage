@@ -66,7 +66,7 @@ All notable changes to Swage are documented in this file.
 - Immediate tool-approval rejections now settle reliably instead of timing out when they arrive as the prompt is shown.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.
-- A native compaction-threshold breach now remains actionable when a later count is unavailable.
+- Compaction preserves a native threshold breach when a later count is unavailable while retaining estimate fallback for providers without native counting.
 - Context compaction now counts tokens with the selected completion model.
 - Tool-schema guidance now describes every `allOf` branch as required together.
 - Workflow metadata headers now accept valid unquoted keys that begin with `$`.
