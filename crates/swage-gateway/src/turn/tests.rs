@@ -3024,7 +3024,11 @@ impl swage_storage::PageAnnotationStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
-    async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
+    async fn delete_page_annotation_with_audit(
+        &self,
+        _: PageAnnotation,
+        _: NewAuditEvent,
+    ) -> Result<bool, StorageError> {
         unimplemented!()
     }
 }
