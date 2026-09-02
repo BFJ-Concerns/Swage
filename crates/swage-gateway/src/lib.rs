@@ -47,8 +47,6 @@ pub mod audit;
 pub mod automated_turn;
 pub mod background_loop;
 pub mod browser;
-mod builtin_agent_definitions;
-mod builtin_workflows;
 pub mod capabilities;
 pub mod capability_bundle;
 pub mod channel_gateway;

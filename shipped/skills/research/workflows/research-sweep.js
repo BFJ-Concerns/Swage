@@ -2,18 +2,18 @@
 // an unattended gather → organise → synthesise pass over live web sources,
 // landing everything in the space's cumulative knowledge base.
 //
-// Saved-script contract: args = { topic, purpose, maxSources? }. The agents
-// named here are agent definitions in the dispatching space: "researcher"
-// needs web reach (search where configured, url fetch, browser) plus
-// knowledge_record; "organiser" needs knowledge_search, knowledge_curate,
-// and knowledge_curate_orientation; "synthesist" needs knowledge_search
-// and knowledge_cite. None of them holds config-apply or schedule tools.
-// Knowledge-base writes happen inside agent turns, so each is journalled as
-// the agent call that made it, and every capture carries that call's scope:
-// a resumed sweep re-running an interrupted gather turn re-records under
-// the same scope and gets the first attempt's observation back, so no
-// observation duplicates even when the live page's bytes changed between
-// attempts.
+// Saved-script contract: args = { topic, purpose, maxSources? }. Every
+// worker here is a bare dispatch — prompt, tool grants, and the run's
+// inherited model — never an agent definition: the roles (scout and
+// gatherer, organiser, synthesist) exist only inside this script, so an
+// operator's picker never lists them and a same-named saved copy is the
+// way to vary them. Each stage's grants are the exact tools it needs, no
+// more; none holds config-apply or schedule tools. Knowledge-base writes
+// happen inside worker turns, so each is journalled as the agent call
+// that made it, and every capture carries that call's scope: a resumed
+// sweep re-running an interrupted gather turn re-records under the same
+// scope and gets the first attempt's observation back, so no observation
+// duplicates even when the live page's bytes changed between attempts.
 export const defaults = { maxAttempts: 3 };
 
 const topic = args.topic;
@@ -23,11 +23,47 @@ if (!topic || !purpose) {
   throw new Error("research-sweep needs args.topic and args.purpose");
 }
 
+// Standing instructions per role, prefixed to every prompt that role
+// receives. The tool lists beside them are the role's whole grant.
+const researcherBrief =
+  "Research the requested topic from web sources. Record gathered source " +
+  "material in the knowledge base and report source failures without " +
+  "inventing substitutes.\n\n";
+const researcherTools = [
+  "web_search",
+  "url_fetch",
+  "browser_navigate",
+  "browser_snapshot",
+  "knowledge_record",
+];
+const organiserBrief =
+  "Organise gathered research in the knowledge base. Author orientation " +
+  "cards with knowledge_curate_orientation so later work can find its way " +
+  "into the corpus, grounding every card in the observation ids it " +
+  "signposts; supersede a card when a better one replaces its signpost, " +
+  "and retire one whose signpost no longer helps. Curate duplicate or " +
+  "superseded observations with knowledge_curate. Never remove source " +
+  "material, and never record your own prose as a source observation - " +
+  "the knowledge base holds gathered external evidence, and your " +
+  "judgements ride cards and curation assertions.\n\n";
+const organiserTools = [
+  "knowledge_search",
+  "knowledge_curate",
+  "knowledge_curate_orientation",
+];
+const synthesistBrief =
+  "Synthesise findings for the stated purpose using only evidence in the " +
+  "knowledge base. Validate the shortest sufficient exact quotation for " +
+  "every delivered claim with knowledge_cite, and report the durable " +
+  "citation id it returns.\n\n";
+const synthesistTools = ["knowledge_search", "knowledge_cite"];
+
 phase("Scope: choose sources");
-// The scout's call-scoped grants exclude knowledge_record; recording waits
-// for the gather wave, so a crash here costs nothing.
+// The scout's grants exclude knowledge_record; recording waits for the
+// gather wave, so a crash here costs nothing.
 const plan = await agent(
-  `You are scoping a research sweep.\n` +
+  researcherBrief +
+    `You are scoping a research sweep.\n` +
     `Topic: ${topic}\n` +
     `Purpose the findings must serve: ${purpose}\n\n` +
     `Choose up to ${maxSources} concrete web sources worth gathering - ` +
@@ -37,13 +73,7 @@ const plan = await agent(
     `over commentary. Record nothing at this stage - you are choosing ` +
     `sources, not gathering them. Return your final answer as JSON only.`,
   {
-    agent: "researcher",
-    tools: [
-      "web_search",
-      "url_fetch",
-      "browser_navigate",
-      "browser_snapshot",
-    ],
+    tools: researcherTools.filter((tool) => tool !== "knowledge_record"),
     label: "Scope sources",
     schema: {
       type: "object",
@@ -85,7 +115,8 @@ const gathered = await pipeline(
   plan.sources,
   (source) =>
     agent(
-      `Gather one source for the research sweep on "${topic}".\n` +
+      researcherBrief +
+        `Gather one source for the research sweep on "${topic}".\n` +
         `Source: ${source.url}\n` +
         `Expected contribution: ${source.why}\n\n` +
         `Fetch it (degrade to the browser only if a plain fetch fails). ` +
@@ -94,7 +125,7 @@ const gathered = await pipeline(
         `text. If the source is unreachable or empty, do not invent a ` +
         `substitute - report the failure. Return JSON only.`,
       {
-        agent: "researcher",
+        tools: researcherTools,
         label: `Gather ${source.url}`,
         schema: {
           type: "object",
@@ -129,7 +160,8 @@ phase("Organise: orientation and curation");
 // whole corpus: author orientation, assert duplicates/supersessions. The
 // organiser judges through its tools; the script hands it ids, not content.
 const organised = await agent(
-  `A research sweep on "${topic}" just recorded these observations:\n` +
+  organiserBrief +
+    `A research sweep on "${topic}" just recorded these observations:\n` +
     landed
       .map((entry) => `- ${entry.observation_id} (${entry.url})`)
       .join("\n") +
@@ -150,7 +182,7 @@ const organised = await agent(
     `"note": "one or two sentences on what you did and anything that ` +
     `needs a human eye"}`,
   {
-    agent: "organiser",
+    tools: organiserTools,
     label: "Organise corpus",
     // A live organiser once answered off-schema and exhausted the default
     // budget; the tool work above is already done by then, so extra
@@ -174,7 +206,8 @@ phase("Synthesise: findings against the purpose");
 // sweep's pocket - and validates quotes through cite before reporting them,
 // so cross-sweep synthesis is the default shape without bypassing citations.
 const findings = await agent(
-  `Deliver research findings.\n` +
+  synthesistBrief +
+    `Deliver research findings.\n` +
     `Topic: ${topic}\n` +
     `Purpose the findings must serve: ${purpose}\n\n` +
     `Work only from the space's knowledge base via knowledge_search - no ` +
@@ -188,7 +221,7 @@ const findings = await agent(
     `corpus, evidence conflicts, the evidence is too thin). Never drop an ` +
     `unsupported claim silently. Return JSON only.`,
   {
-    agent: "synthesist",
+    tools: synthesistTools,
     label: "Synthesise findings",
     schema: {
       type: "object",

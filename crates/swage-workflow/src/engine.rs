@@ -2603,8 +2603,42 @@ mod tests {
         assert_eq!(host.peak.load(Ordering::SeqCst), 2);
     }
 
+    /// A small write → review → deliver script: the delivery capability
+    /// fires only on the reviewer's acceptance, and only with the reviewed
+    /// text.
+    const WRITE_REVIEW_DELIVER: &str = r#"
+const draft = await agent(args.writerPrompt, {
+  agent: args.writerAgent,
+  label: "Write draft",
+});
+
+const review = await agent(
+  `Review the draft below. Return JSON with {"accepted": boolean, "content": string}.\n\n${draft}`,
+  {
+    agent: args.reviewerAgent,
+    label: "Review draft",
+    schema: {
+      type: "object",
+      required: ["accepted", "content"],
+      properties: {
+        accepted: { type: "boolean" },
+        content: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+);
+
+if (!review.accepted) {
+  throw new Error("Reviewer rejected the draft");
+}
+
+await deliver({ content: review.content }, { target: args.deliveryTarget });
+return review.content;
+"#;
+
     #[tokio::test(flavor = "current_thread")]
-    async fn committed_write_review_deliver_example_posts_reviewed_content() {
+    async fn write_review_deliver_script_posts_reviewed_content() {
         let host = Arc::new(FakeHost {
             outputs: Mutex::new(VecDeque::from([
                 json!("unchecked draft"),
@@ -2615,7 +2649,7 @@ mod tests {
             spent: 2,
             remaining: Some(8),
         });
-        let source = include_str!("../../../examples/workflows/write-review-deliver.js");
+        let source = WRITE_REVIEW_DELIVER;
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 source,
@@ -2625,7 +2659,7 @@ mod tests {
                 ScriptCapabilities { delivery: true, composition: false },
             )
             .await
-            .expect("committed example runs");
+            .expect("write-review-deliver script runs");
 
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
@@ -2638,7 +2672,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn committed_write_review_deliver_example_does_not_post_rejection() {
+    async fn write_review_deliver_script_does_not_post_rejection() {
         let host = Arc::new(FakeHost {
             outputs: Mutex::new(VecDeque::from([
                 json!("unchecked draft"),
@@ -2649,7 +2683,7 @@ mod tests {
             spent: 2,
             remaining: None,
         });
-        let source = include_str!("../../../examples/workflows/write-review-deliver.js");
+        let source = WRITE_REVIEW_DELIVER;
         let result = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 source,
