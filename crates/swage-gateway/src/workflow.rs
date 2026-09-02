@@ -153,7 +153,8 @@ impl EffectiveWorkflow {
     }
 }
 
-fn carried_workflows(
+async fn carried_workflows(
+    state: &AppState,
     space_id: Uuid,
     skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
@@ -174,7 +175,14 @@ fn carried_workflows(
                 ) {
                     Ok(workflow) => workflows.push(workflow),
                     Err(error) => {
-                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                        record_carried_workflow_exclusion(
+                            state,
+                            space_id,
+                            &skill.name,
+                            name,
+                            &error,
+                        )
+                        .await;
                     }
                 }
             }
@@ -225,12 +233,43 @@ fn carried_workflows(
             match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
                 Ok(workflow) => workflows.push(workflow),
                 Err(error) => {
-                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    record_carried_workflow_exclusion(state, space_id, &skill.name, name, &error)
+                        .await;
                 }
             }
         }
     }
     Ok(workflows)
+}
+
+async fn record_carried_workflow_exclusion(
+    state: &AppState,
+    space_id: Uuid,
+    skill_name: &str,
+    workflow_name: &str,
+    error: &str,
+) {
+    tracing::warn!(%error, skill = skill_name, workflow = workflow_name, "excluding carried workflow with invalid metadata");
+    if let Err(audit_error) = state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "workflow_script".into(),
+            entity_id: format!("{skill_name}/{workflow_name}"),
+            event_kind: "excluded".into(),
+            summary: "Excluded carried workflow with invalid metadata".into(),
+            metadata: serde_json::json!({
+                "space_id": space_id,
+                "skill": skill_name,
+                "workflow": workflow_name,
+                "error": error,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(%audit_error, skill = skill_name, workflow = workflow_name, "could not audit carried workflow exclusion");
+    }
 }
 
 async fn discover_skills_for_space(
@@ -289,7 +328,8 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    Ok(carried_workflows(space_id, skills)?
+    Ok(carried_workflows(state, space_id, skills)
+        .await?
         .into_iter()
         .find(|workflow| workflow.name == name))
 }
@@ -354,7 +394,7 @@ async fn list_effective_workflows(
     // Carried workflows arrive in skill precedence order (the discovery
     // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
-    for workflow in carried_workflows(space_id, skills)? {
+    for workflow in carried_workflows(state, space_id, skills).await? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
@@ -5753,6 +5793,16 @@ mod tests {
             !list.scripts.iter().any(|script| script.name == "invalid"),
             "the malformed carried workflow must be excluded: {list:?}"
         );
+        let audit = storage
+            .list_audit_events()
+            .await
+            .expect("carried-workflow audit records");
+        assert!(audit.iter().any(|event| {
+            event.entity_kind == "workflow_script"
+                && event.event_kind == "excluded"
+                && event.metadata["skill"] == "invalid-meta"
+                && event.metadata["workflow"] == "invalid"
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
