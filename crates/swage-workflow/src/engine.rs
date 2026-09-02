@@ -1846,10 +1846,7 @@ mod tests {
             requests[1].schema.is_some(),
             "a per-turn schema reaches the dispatch"
         );
-        assert_eq!(
-            host.closed_workers.lock().unwrap().as_slice(),
-            &[worker_id]
-        );
+        assert_eq!(host.closed_workers.lock().unwrap().as_slice(), &[worker_id]);
     }
 
     #[tokio::test(flavor = "current_thread")]

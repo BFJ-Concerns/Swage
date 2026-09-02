@@ -9504,6 +9504,210 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before() {
+    let _swage_home = SwageHomeGuard::isolate();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "agent-a".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create parent session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "agent-a".into(),
+        },
+    )
+    .await
+    .expect("create parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "agent-a".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate twice to the same child".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+    for agent_id in ["agent-a", "agent-b", "agent-c"] {
+        storage
+            .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                id: agent_id.into(),
+                space_id: Some(space.id),
+                display_name: agent_id.into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: Some(serde_json::json!({
+                    "allow": ["delegate"], "deny": [], "bundles": {},
+                    "require_approval": []
+                })),
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store agent definition");
+    }
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "the eastern approach is clear".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "as I said, the eastern approach".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>
+        ]),
+        None,
+    );
+    let handler = GatewayDelegationHandler::new(state.clone());
+
+    handler
+        .handle_delegation(
+            "agent-b",
+            "scout the eastern approach",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-first",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("first delegation completes");
+
+    let sessions_after_first = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions");
+    assert_eq!(sessions_after_first.len(), 1);
+    let child_session_id = sessions_after_first[0].id;
+
+    handler
+        .handle_delegation(
+            "agent-b",
+            "now report what you found",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-second",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("second delegation completes");
+
+    let sessions_after_second = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions");
+    assert_eq!(
+        sessions_after_second.len(),
+        1,
+        "naming a child already delegated to continues it rather than opening a second"
+    );
+    assert_eq!(sessions_after_second[0].id, child_session_id);
+
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(requests.len(), 2, "two child turns ran");
+    let second = requests[1]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second.contains("scout the eastern approach")
+            && second.contains("the eastern approach is clear"),
+        "the returned-to child still sees what it was told and what it answered: {second}"
+    );
+    drop(requests);
+
+    let parent = storage
+        .get_session(session.id)
+        .await
+        .expect("session query")
+        .expect("parent session");
+    let registered = parent
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(DELEGATED_CHILDREN_METADATA_KEY))
+        .and_then(|children| children.get("scout"))
+        .expect("the parent records the child it named");
+    assert_eq!(registered["agent_id"], "agent-b");
+    assert_eq!(registered["session_id"], child_session_id.to_string());
+
+    let mismatch = handler
+        .handle_delegation(
+            "agent-c",
+            "take over the scouting",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-mismatch",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    let mismatch = match mismatch {
+        Err(error) => error,
+        Ok(_) => panic!("a name already used for another agent must be refused"),
+    };
+    assert!(
+        mismatch.to_string().contains("scout"),
+        "the refusal names the child: {mismatch}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));

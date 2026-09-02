@@ -321,6 +321,23 @@ impl DelegationExecutor {
             })
             .await?;
         let turn_id = turn.id;
+        // The child's own thread records the task it was given, so a later
+        // delegation that returns to this child rebuilds a conversation with
+        // both halves of every exchange rather than its answers alone.
+        if let Err(error) = self
+            .storage
+            .append_message(swage_storage::model::AppendMessage {
+                thread_id: thread.id,
+                attachments: Vec::new(),
+                turn_id: Some(turn_id),
+                role: Role::User,
+                content: task_description.to_string(),
+                agent_id: target_agent_id.clone(),
+            })
+            .await
+        {
+            tracing::warn!(%turn_id, %error, "failed to record the delegated task message");
+        }
         let assembled = match self
             .context_assembler
             .assemble(&session, turn_id, delegated_history)
