@@ -36,6 +36,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
         // 017/018 were the scheduled-job and heartbeat tables, absorbed into
         // the unified schedules schema in 001 during the private alpha.
+        ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
         ("023_encrypt_managed_secrets_at_rest", ""),
         (
