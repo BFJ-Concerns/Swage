@@ -62,6 +62,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- One-shot self-wakes now retry after their active turn instead of being consumed as an overlap skip.
 - Continued workflow workers now retain the skill selection made when they were created.
 - Workflow terminal-budget audit entries now settle to failed after bounded completion-write retries, rather than remaining started.
 - Carried workflows excluded for invalid metadata are now recorded in the local audit trail.
