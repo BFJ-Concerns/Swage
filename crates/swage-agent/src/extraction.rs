@@ -1,67 +1,32 @@
 //! JSON extraction from LLM response text.
 //!
 //! LLMs commonly produce JSON wrapped in markdown fences, preceded by prose,
-//! or with trailing explanation. This module extracts the JSON payload from
-//! common wrapping patterns before schema validation.
+//! or with trailing explanation. This module finds every JSON value in that
+//! text so schema validation can choose the final value that fulfils its
+//! contract.
 
-/// Extract a JSON value from LLM response text.
+/// Return every JSON value that starts in the response, in source order.
 ///
-/// Attempts extraction in order, returning the first successful result:
 ///
-/// 1. **Bare JSON** — if the trimmed text is valid JSON, return it directly.
-///    This is the cheapest path and handles the common case where the model
-///    follows instructions precisely.
-///
-/// 2. **Markdown fence** — if the text contains a triple-backtick fence
-///    (` ```json ` or ` ``` `), extract the content between the first opening
-///    and closing fence markers and attempt to parse it as JSON.
-///
-/// Returns `None` when neither strategy succeeds — for example, when the
-/// response is plain prose, contains only a partial JSON fragment mid-sentence,
-/// or the fenced block content is not valid JSON.
-pub fn extract_json(text: &str) -> Option<serde_json::Value> {
-    let trimmed = text.trim();
-
-    // Strategy 1: bare JSON — cheapest, try first.
-    if let Ok(v) = serde_json::from_str(trimmed) {
-        return Some(v);
-    }
-
-    // Strategy 2: markdown fence extraction.
-    extract_from_fence(text)
-}
-
-/// Extract JSON from the content of the first markdown code fence in `text`.
-///
-/// Recognises both ` ```json ` and plain ` ``` ` opening markers. Extracts
-/// the content between the first opening fence and the next closing ` ``` `
-/// marker, then attempts JSON parsing on the trimmed inner text.
-///
-/// Closing fences are matched only at the start of a line (preceded by `\n`)
-/// to avoid treating backtick sequences embedded in string content as a fence.
-fn extract_from_fence(text: &str) -> Option<serde_json::Value> {
-    // Find the first opening fence (``` optionally followed by a language tag).
-    let fence_start = text.find("```")?;
-    let after_open = &text[fence_start + 3..];
-
-    // Skip the optional language tag on the opening line (e.g. "json\n").
-    let content_start = after_open.find('\n').map(|i| i + 1)?;
-    let inner = &after_open[content_start..];
-
-    // Find the closing fence — ``` at the start of a line (\n```).
-    // Matching line-start only avoids false positives from backtick sequences
-    // embedded inside JSON string values (e.g. `{"code": "```nested```"}`).
-    let fence_end = inner.find("\n```").or_else(|| {
-        // Edge case: closing fence at the very start of inner (no preceding newline).
-        if inner.starts_with("```") {
-            Some(0)
-        } else {
-            None
-        }
-    })?;
-
-    let block = inner[..fence_end].trim();
-    serde_json::from_str(block).ok()
+/// The scan deliberately does not treat Markdown fences as syntax. JSON's
+/// grammar is sufficient to recognise values in bare text and fenced blocks
+/// alike, while preserving their order in the complete reply.
+pub fn extract_json_values(text: &str) -> Vec<serde_json::Value> {
+    text.char_indices()
+        .filter_map(|(offset, character)| {
+            matches!(
+                character,
+                '{' | '[' | '"' | '-' | '0'..='9' | 't' | 'f' | 'n'
+            )
+            .then(|| {
+                serde_json::Deserializer::from_str(&text[offset..])
+                    .into_iter::<serde_json::Value>()
+                    .next()
+                    .and_then(Result::ok)
+            })
+            .flatten()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -74,51 +39,65 @@ mod tests {
 
     #[test]
     fn bare_json_object() {
-        let result = extract_json(r#"{"x": 1}"#);
-        assert_eq!(result, Some(serde_json::json!({"x": 1})));
+        let result = extract_json_values(r#"{"x": 1}"#);
+        assert_eq!(
+            result,
+            vec![serde_json::json!({"x": 1}), serde_json::json!(1)]
+        );
     }
 
     #[test]
     fn bare_json_array() {
-        let result = extract_json(r#"[1, 2, 3]"#);
-        assert_eq!(result, Some(serde_json::json!([1, 2, 3])));
+        let result = extract_json_values(r#"[1, 2, 3]"#);
+        assert_eq!(
+            result,
+            vec![
+                serde_json::json!([1, 2, 3]),
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3),
+            ]
+        );
     }
 
     #[test]
     fn bare_json_with_leading_trailing_whitespace() {
-        let result = extract_json("  { \"x\": 1 }  ");
-        assert_eq!(result, Some(serde_json::json!({"x": 1})));
+        let result = extract_json_values("  { \"x\": 1 }  ");
+        assert_eq!(result[0], serde_json::json!({"x": 1}));
     }
 
     // -----------------------------------------------------------------------
-    // Markdown-fenced JSON
+    // Prose and Markdown-fenced JSON
     // -----------------------------------------------------------------------
 
     #[test]
     fn fenced_json_with_language_tag() {
         let input = "```json\n{\"x\": 1}\n```";
-        assert_eq!(extract_json(input), Some(serde_json::json!({"x": 1})));
+        assert!(extract_json_values(input).contains(&serde_json::json!({"x": 1})));
     }
 
     #[test]
     fn fenced_json_without_language_tag() {
         let input = "```\n{\"x\": 1}\n```";
-        assert_eq!(extract_json(input), Some(serde_json::json!({"x": 1})));
+        assert!(extract_json_values(input).contains(&serde_json::json!({"x": 1})));
     }
 
     #[test]
     fn fenced_json_with_surrounding_prose() {
         let input = "Here is the result:\n```json\n{\"name\": \"alice\"}\n```\nHope that helps!";
         assert_eq!(
-            extract_json(input),
-            Some(serde_json::json!({"name": "alice"}))
+            extract_json_values(input),
+            vec![
+                serde_json::json!({"name": "alice"}),
+                serde_json::json!("alice"),
+            ]
         );
     }
 
     #[test]
     fn fenced_json_array() {
         let input = "```json\n[1, 2, 3]\n```";
-        assert_eq!(extract_json(input), Some(serde_json::json!([1, 2, 3])));
+        assert!(extract_json_values(input).contains(&serde_json::json!([1, 2, 3])));
     }
 
     // -----------------------------------------------------------------------
@@ -127,26 +106,24 @@ mod tests {
 
     #[test]
     fn prose_with_no_json_returns_none() {
-        assert_eq!(extract_json("Hello, this is plain text."), None);
+        assert!(extract_json_values("Hello, this is plain text.").is_empty());
     }
 
     #[test]
     fn empty_string_returns_none() {
-        assert_eq!(extract_json(""), None);
+        assert!(extract_json_values("").is_empty());
     }
 
     #[test]
     fn whitespace_only_returns_none() {
-        assert_eq!(extract_json("   \n  "), None);
+        assert!(extract_json_values("   \n  ").is_empty());
     }
 
     #[test]
     fn prose_with_embedded_fragment_returns_none() {
-        // Prose embedding a JSON fragment mid-sentence is too ambiguous to extract.
-        // The fragment is not at the start/end and not in a fence — return None.
         assert_eq!(
-            extract_json("The answer is {\"x\": 1} as you can see."),
-            None
+            extract_json_values("The answer is {\"x\": 1} as you can see."),
+            vec![serde_json::json!({"x": 1}), serde_json::json!(1)]
         );
     }
 
@@ -157,19 +134,34 @@ mod tests {
     #[test]
     fn fenced_block_with_only_whitespace_inside_returns_none() {
         let input = "```json\n   \n```";
-        assert_eq!(extract_json(input), None);
+        assert!(extract_json_values(input).is_empty());
     }
 
     #[test]
     fn nested_backtick_fence_uses_first_pair() {
-        // If a fence block contains another fence, extract the outermost content.
-        // The inner "```" is treated as content, not a closing fence.
         let input = "```json\n{\"code\": \"```nested```\"}\n```";
-        // The content inside the first fence is valid JSON, so it should parse.
-        let result = extract_json(input);
+        let result = extract_json_values(input);
         assert!(
-            result.is_some(),
+            result.contains(&serde_json::json!({"code": "```nested```"})),
             "nested fence should still extract valid JSON"
+        );
+    }
+
+    #[test]
+    fn scans_every_value_in_source_order() {
+        let values = extract_json_values(
+            "preface {\"phase\": \"draft\"} then ```json\n{\"phase\": \"final\"}\n```",
+        );
+
+        assert_eq!(
+            values
+                .into_iter()
+                .filter(|value| value.get("phase").is_some())
+                .collect::<Vec<_>>(),
+            vec![
+                serde_json::json!({"phase": "draft"}),
+                serde_json::json!({"phase": "final"}),
+            ]
         );
     }
 }
