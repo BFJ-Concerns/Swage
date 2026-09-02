@@ -1844,16 +1844,47 @@ fn partial_reason(ending: &WorkflowRunEnding) -> String {
     }
 }
 
+/// The worker directories a run's ending kept, as its own account names them.
+///
+/// A run that returned has a result of its own, and its workers' directories
+/// are reclaimed with the rest of the run's scaffolding as they always were.
+/// Every other ending leaves the account pointing a reader at them, so those
+/// are the directories the host must stop reclaiming.
+fn retained_placements(account: &WorkflowRunTerminalAccount) -> Vec<String> {
+    if matches!(account.ending, WorkflowRunEnding::Returned) {
+        return Vec::new();
+    }
+    let workers = &account.workers;
+    [
+        &workers.done,
+        &workers.failed,
+        &workers.cut_short,
+        &workers.unsettled,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|worker| worker.placement.clone())
+    .collect()
+}
+
 /// Write the run's terminal account, having assembled it. Serialisation
 /// cannot fail: every field is a JSON-safe scalar, string, or list of the
 /// same, and the workers' outputs came out of the journal as JSON. The write
 /// itself is first-write-wins in storage, so a run keeps the one account it
 /// ended with however many times a recovery pass revisits it.
+///
+/// The directories the account names are claimed from the worktree host
+/// first, so that from the moment a reader can find them nothing — not this
+/// gateway's shutdown, not the next one's reclaim sweep — takes them away.
 async fn record_terminal_account(
     storage: &dyn Storage,
+    worktree_host: &crate::worktree::WorktreeHost,
     run_id: Uuid,
     account: WorkflowRunTerminalAccount,
 ) {
+    worktree_host
+        .retain(run_id, &retained_placements(&account))
+        .await;
     let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
     if let Err(error) = storage
         .set_workflow_run_terminal_account(run_id, account)
@@ -5177,7 +5208,7 @@ async fn launch_existing_run(
         // is reclaimed, since it names the directories the workers ran in.
         let ending = ending_of_terminal_state(run_state, error.as_deref());
         if let Some(account) = account_for_run_end(storage.as_ref(), run_id, ending).await {
-            record_terminal_account(storage.as_ref(), run_id, account).await;
+            record_terminal_account(storage.as_ref(), &worktree_host, run_id, account).await;
         }
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
@@ -5460,7 +5491,8 @@ pub async fn cancel_run(
         // run cancelled sees the account of how, never a run briefly ended
         // with nothing to say for itself.
         if let Some(account) = account {
-            record_terminal_account(state.storage.as_ref(), id, account).await;
+            record_terminal_account(state.storage.as_ref(), &state.worktree_host, id, account)
+                .await;
         }
         state
             .storage
@@ -5603,7 +5635,13 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                     if let Some(account) =
                         account_for_run_end(state.storage.as_ref(), run_id, ending).await
                     {
-                        record_terminal_account(state.storage.as_ref(), run_id, account).await;
+                        record_terminal_account(
+                            state.storage.as_ref(),
+                            &state.worktree_host,
+                            run_id,
+                            account,
+                        )
+                        .await;
                     }
                 }
             }
@@ -10324,24 +10362,81 @@ mod tests {
             "the account must name the cancelled run's retained worktree"
         );
 
+        // A worktree no account names is still the gateway's to reclaim; this
+        // one stands in for the ordinary case shutdown exists for.
+        let unclaimed_owner = Uuid::new_v4();
+        let unclaimed_path = state
+            .worktree_host
+            .provision(unclaimed_owner, 0, &repo)
+            .await
+            .expect("provision a worktree no account names");
+        assert!(unclaimed_path.exists());
+
         state.worktree_host.shutdown().await;
-        assert!(!retained_path.exists());
-        assert!(!cancelled_path.exists());
         assert!(
-            !fixture
-                .path()
-                .join("worker-worktrees")
-                .join(failed.id.to_string())
-                .exists(),
-            "shutdown cleanup must remove the empty per-run directory"
+            !unclaimed_path.exists(),
+            "shutdown must still reclaim a worktree no terminal account names"
+        );
+        // The account outlives the gateway that wrote it, so the directories
+        // it names have to outlive that gateway too: a reader coming back to
+        // a run that never returned must find the work, not a path that used
+        // to hold it.
+        assert!(
+            retained_path.exists(),
+            "shutdown must keep the placement the failed run's account names"
         );
         assert!(
-            !fixture
-                .path()
-                .join("worker-worktrees")
-                .join(cancelled.id.to_string())
-                .exists(),
-            "shutdown cleanup must remove the cancelled run directory"
+            cancelled_path.exists(),
+            "shutdown must keep the placement the cancelled run's account names"
+        );
+        assert_eq!(
+            terminal_account_of(&storage, failed.id).await.workers.done[0]
+                .placement
+                .as_deref(),
+            retained_path.to_str(),
+            "the account must still resolve to the placement it named"
+        );
+        assert_eq!(
+            terminal_account_of(&storage, cancelled.id)
+                .await
+                .workers
+                .done[0]
+                .placement
+                .as_deref(),
+            cancelled_path.to_str()
+        );
+
+        // Nor may the next gateway's reclaim sweep take them. It starts with
+        // an empty map, so the claim has to be readable from the disk.
+        let leftover_owner = Uuid::new_v4();
+        let leftover_path = state
+            .worktree_host
+            .provision(leftover_owner, 0, &repo)
+            .await
+            .expect("provision a crash-stranded worktree");
+        let restarted = crate::worktree::WorktreeHost::new(crate::worktree::WorktreeConfig {
+            root: fixture.path().join("worker-worktrees"),
+        });
+        restarted
+            .recover(&std::collections::HashSet::new())
+            .await
+            .expect("startup worktree recovery");
+        assert!(
+            !leftover_path.exists(),
+            "startup recovery must still reclaim a crash-stranded worktree no account names"
+        );
+        assert!(
+            retained_path.exists() && cancelled_path.exists(),
+            "startup recovery must leave the placements the accounts name"
+        );
+        restarted
+            .restore(failed.id, 0, &repo, &retained_path)
+            .await
+            .expect("restore the retained placement into the restarted host");
+        restarted.shutdown().await;
+        assert!(
+            retained_path.exists(),
+            "the restarted gateway must honour the claim it read back"
         );
     }
 
