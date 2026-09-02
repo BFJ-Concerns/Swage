@@ -280,7 +280,7 @@ pub(crate) async fn resolve_create_schedule(
         .routing
         .unwrap_or_else(DeliveryRoutingRequest::local_only);
     // Schedules have no channel origin; reject routing that would need one.
-    let _ = resolve_delivery_targets(None, routing.clone())?;
+    validate_schedule_delivery_targets(state, &request.session, routing.clone()).await?;
 
     let now = Utc::now();
     Ok(NewSchedule {
@@ -360,7 +360,8 @@ pub(crate) async fn resolve_update_schedule(
     let now = Utc::now();
     let parsed = request.spec.as_ref().map(ParsedSpec::parse).transpose()?;
     if let Some(routing) = &request.routing {
-        let _ = resolve_delivery_targets(None, routing.clone())?;
+        validate_schedule_delivery_targets(state, &existing.session_policy, routing.clone())
+            .await?;
     }
     if let Some(wire::ScheduleGateUpdate::Set(gate)) = &request.gate {
         validate_gate(state, gate)?;
@@ -754,7 +755,42 @@ pub(crate) async fn validate_resolved_schedule(
         .map_err(|error| {
             GatewayError::ValidationError(format!("invalid delivery routing: {error}"))
         })?;
-    let _ = resolve_delivery_targets(None, routing)?;
+    validate_schedule_delivery_targets(state, &schedule.session_policy, routing).await?;
+    Ok(())
+}
+
+/// A page target is meaningful only within the schedule's own space. Resolve
+/// continuation policies here as well as fresh ones, so invalid routing never
+/// reaches a future run.
+async fn validate_schedule_delivery_targets(
+    state: &AppState,
+    session_policy: &SessionPolicy,
+    routing: DeliveryRoutingRequest,
+) -> Result<(), GatewayError> {
+    let targets = resolve_delivery_targets(None, routing)?;
+    let space_id = match session_policy {
+        SessionPolicy::Fresh { space_id, .. } => *space_id,
+        SessionPolicy::Continuation { session_id } => {
+            state
+                .storage
+                .get_session(*session_id)
+                .await?
+                .ok_or(GatewayError::ConversationNotFound { id: *session_id })?
+                .space_id
+        }
+    };
+    for target in targets {
+        if let crate::channel_gateway::DeliveryTarget::Page { page_id } = target {
+            let page = state.storage.get_page(page_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("no page with id {page_id}"))
+            })?;
+            if page.space_id != space_id {
+                return Err(GatewayError::ValidationError(format!(
+                    "page delivery target {page_id} is not in the schedule's space"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -933,6 +969,7 @@ enum RunOutcome {
 struct RunFailure {
     message: String,
     output: Option<String>,
+    delivery_attempted: bool,
 }
 
 impl From<GatewayError> for RunFailure {
@@ -940,6 +977,7 @@ impl From<GatewayError> for RunFailure {
         Self {
             message: error.to_string(),
             output: None,
+            delivery_attempted: false,
         }
     }
 }
@@ -949,6 +987,7 @@ impl From<swage_core::StorageError> for RunFailure {
         Self {
             message: error.to_string(),
             output: None,
+            delivery_attempted: false,
         }
     }
 }
@@ -991,9 +1030,11 @@ async fn execute_schedule(
             gate,
             message,
         }) => skip_run(state, schedule, run.id, reason, gate, message).await,
-        Err(RunFailure { message, output }) => {
-            fail_run(state, schedule, run.id, message, output).await
-        }
+        Err(RunFailure {
+            message,
+            output,
+            delivery_attempted,
+        }) => fail_run(state, schedule, run.id, message, output, delivery_attempted).await,
     }
 }
 
@@ -1019,6 +1060,7 @@ async fn run_body(
                 // occurrence tries again.
                 message: format!("gate check failed: {error}"),
                 output: None,
+                delivery_attempted: false,
             })?;
 
         record_gate_decision(state, schedule, run.id, &decision).await?;
@@ -1115,6 +1157,7 @@ async fn run_body(
         .map_err(|error| RunFailure {
             message: format!("delivery failed: {error}"),
             output: Some(output.clone()),
+            delivery_attempted: true,
         })?;
 
     Ok(RunOutcome::Completed { output })
@@ -1142,6 +1185,7 @@ async fn record_overlap_skip(
         ))
         .await?;
     record_overlap_audit(state, schedule, run.id, MESSAGE).await?;
+    crate::channel_gateway::record_no_delivery(state, run.id, MESSAGE).await?;
     tracing::info!(
         schedule_id = %schedule.id,
         run_id = %run.id,
@@ -1186,6 +1230,7 @@ async fn fail_run(
     run_id: Uuid,
     message: String,
     output: Option<String>,
+    delivery_attempted: bool,
 ) -> Result<ScheduleRun, GatewayError> {
     state
         .storage
@@ -1199,6 +1244,9 @@ async fn fail_run(
             },
         )
         .await?;
+    if !delivery_attempted {
+        crate::channel_gateway::record_no_delivery(state, run_id, &message).await?;
+    }
     tracing::warn!(
         schedule_id = %schedule.id,
         run_id = %run_id,
@@ -1254,6 +1302,11 @@ async fn skip_run(
             },
         )
         .await?;
+    let reason = message.as_deref().unwrap_or_else(|| match reason {
+        SkipReason::Gate => "schedule gate decided no work was needed",
+        SkipReason::Overlap => "schedule run overlapped an in-flight run",
+    });
+    crate::channel_gateway::record_no_delivery(state, run_id, reason).await?;
     tracing::info!(
         schedule_id = %schedule.id,
         run_id = %run_id,

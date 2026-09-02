@@ -3353,6 +3353,8 @@ async fn run_host_commands_inner(
                             })
                     } else if let Some(key) = entry.idempotency_key {
                         let capability = match capability_from_grant(
+                            Some(state.clone()),
+                            space_id,
                             Arc::clone(&state.storage),
                             delivery_grant.as_ref(),
                             payload.target.as_deref(),
@@ -3381,6 +3383,8 @@ async fn run_host_commands_inner(
                 } else {
                     let key = Uuid::new_v4();
                     let capability = match capability_from_grant(
+                        Some(state.clone()),
+                        space_id,
                         Arc::clone(&state.storage),
                         delivery_grant.as_ref(),
                         payload.target.as_deref(),

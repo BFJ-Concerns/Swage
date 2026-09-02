@@ -29,7 +29,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 fn row_to_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRecord> {
     let id: String = row.get(0)?;
-    let session_id: String = row.get(1)?;
+    let session_id: Option<String> = row.get(1)?;
     let run_id: Option<String> = row.get(2)?;
     let turn_id: Option<String> = row.get(3)?;
     let target_json: String = row.get(4)?;
@@ -37,7 +37,7 @@ fn row_to_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRecord> 
 
     Ok(DeliveryRecord {
         id: parse_uuid(&id)?,
-        session_id: parse_uuid(&session_id)?,
+        session_id: session_id.as_deref().map(parse_uuid).transpose()?,
         run_id: run_id.as_deref().map(parse_uuid).transpose()?,
         turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
         target: serde_json::from_str(&target_json).map_err(|error| {
@@ -71,7 +71,7 @@ impl DeliveryStore for SqliteStorage {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     id.to_string(),
-                    delivery.session_id.to_string(),
+                    delivery.session_id.map(|id| id.to_string()),
                     delivery.run_id.map(|id| id.to_string()),
                     delivery.turn_id.map(|id| id.to_string()),
                     target_json,
@@ -161,7 +161,7 @@ mod tests {
 
         let created = storage
             .create_delivery_record(NewDeliveryRecord {
-                session_id: session.id,
+                session_id: Some(session.id),
                 run_id: None,
                 turn_id: None,
                 target: json!({"kind": "local_storage"}),
@@ -202,7 +202,7 @@ mod tests {
         let thread = ThreadStore::create(
             &storage,
             NewThread {
-                session_id: session.id,
+                session_id: Some(session.id),
                 agent_id: "gateway".into(),
             },
         )
@@ -247,7 +247,7 @@ mod tests {
 
         storage
             .create_delivery_record(NewDeliveryRecord {
-                session_id: session.id,
+                session_id: Some(session.id),
                 run_id: Some(run.id),
                 turn_id: Some(turn.id),
                 target: json!({"kind": "local_storage"}),

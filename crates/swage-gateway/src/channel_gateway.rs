@@ -47,6 +47,7 @@ fn webhook_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> 
 pub use swage_protocol::client::delivery::{
     DeliveryRoutingRequest, DeliveryTarget, ExternalChannelIntegration,
 };
+use swage_protocol::client::page::WritePageModuleRequest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOrigin {
@@ -675,6 +676,33 @@ async fn deliver_to_target(
             ..
         } => Ok(DeliveryOutcome::NotSent),
         DeliveryTarget::LocalStorage => Ok(DeliveryOutcome::Sent),
+        DeliveryTarget::Page { page_id } => {
+            let session = state
+                .storage
+                .get_session(session_id)
+                .await?
+                .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+            let page = state.storage.get_page(*page_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("no page with id {page_id}"))
+            })?;
+            if page.space_id != session.space_id {
+                return Err(GatewayError::ValidationError(format!(
+                    "page delivery target {page_id} is not in the session's space"
+                )));
+            }
+            crate::page::write_page_module(
+                state,
+                *page_id,
+                WritePageModuleRequest {
+                    module_id: None,
+                    kind: Some("document".into()),
+                    source: content.to_string(),
+                },
+                "delivery",
+            )
+            .await?;
+            Ok(DeliveryOutcome::Sent)
+        }
         DeliveryTarget::Channel {
             integration: ExternalChannelIntegration::Telegram,
             conversation,
@@ -731,13 +759,35 @@ async fn record_delivery(
     state
         .storage
         .create_delivery_record(NewDeliveryRecord {
-            session_id,
+            session_id: Some(session_id),
             run_id: attribution.run_id,
             turn_id: attribution.turn_id,
             target: target_json,
             content,
             status: status.to_string(),
             error,
+        })
+        .await?;
+    Ok(())
+}
+
+/// Record why a schedule produced no output delivery before it reached a
+/// target. The schedule run is the durable owner when no session exists.
+pub async fn record_no_delivery(
+    state: &AppState,
+    run_id: Uuid,
+    reason: impl Into<String>,
+) -> Result<(), GatewayError> {
+    state
+        .storage
+        .create_delivery_record(NewDeliveryRecord {
+            session_id: None,
+            run_id: Some(run_id),
+            turn_id: None,
+            target: serde_json::json!({ "kind": "no_delivery" }),
+            content: String::new(),
+            status: "not_delivered".into(),
+            error: Some(reason.into()),
         })
         .await?;
     Ok(())
