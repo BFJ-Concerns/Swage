@@ -62,6 +62,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Remote-device registration now refuses a Local target consistently, including pairing and recovery imports that have no local producer.
 - Workflow-script updates now retain source-header descriptions, expose their whole delivery grant in configuration history, and return 404 for an absent script.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
