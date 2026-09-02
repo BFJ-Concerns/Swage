@@ -420,7 +420,13 @@ async fn run_turn_inner(
             let validator = jsonschema::validator_for(schema).map_err(|error| {
                 AgentError::InvalidConfig(format!("invalid output schema: {error}"))
             })?;
-            extract_json_values(&response_text)
+            let candidates = extract_json_values(&response_text);
+            if candidates.is_empty() {
+                return Err(AgentError::InvalidConfig(
+                    "Codex structured output was not JSON".into(),
+                ));
+            }
+            candidates
                 .into_iter()
                 .rfind(|value| validator.validate(value).is_ok())
                 .map(Some)

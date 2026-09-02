@@ -65,6 +65,7 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
         authority_path: placement.authority_path.clone(),
         authority_context_id: placement.authority_context_id,
         worktree_seq: None,
+        worktree_base_commit: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> Resol
         authority_path: placement.authority_path.to_string_lossy().into_owned(),
         authority_context_id: placement.authority_context_id,
         worktree_seq: None,
+        worktree_base_commit: None,
     }
 }
 
@@ -1793,18 +1795,20 @@ async fn provision_worker_command(
         if entry.kind != "worker_placement" || entry.args_hash != hash {
             Err("NondeterministicReplayError".into())
         } else if entry.status == "completed" {
-            let (path, can_write, authority_path, authority_context_id) = entry
-                .result
-                .as_ref()
-                .and_then(|result| {
-                    Some((
-                        result.get("path")?.as_str()?.to_string(),
-                        result.get("can_write")?.as_bool()?,
-                        result.get("authority_path")?.as_str()?.to_string(),
-                        Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
-                    ))
-                })
-                .ok_or_else(|| "completed worker placement has no path".to_string())?;
+            let (path, can_write, authority_path, authority_context_id, worktree_base_commit) =
+                entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| {
+                        Some((
+                            result.get("path")?.as_str()?.to_string(),
+                            result.get("can_write")?.as_bool()?,
+                            result.get("authority_path")?.as_str()?.to_string(),
+                            Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
+                            result.get("base_commit")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .ok_or_else(|| "completed worker placement has no path".to_string())?;
             cwd.as_deref().ok_or_else(|| {
                 "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
                     .to_string()
@@ -1818,6 +1822,7 @@ async fn provision_worker_command(
                     authority_path,
                     authority_context_id,
                     worktree_seq: Some(current_seq),
+                    worktree_base_commit: Some(worktree_base_commit),
                 },
             )
             .await?;
@@ -1828,6 +1833,7 @@ async fn provision_worker_command(
                     current_seq,
                     std::path::Path::new(&placement.authority_path),
                     std::path::Path::new(&placement.path),
+                    placement.worktree_base_commit.clone(),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -1918,6 +1924,7 @@ async fn resolve_worker_directory_command(
                         )
                         .ok()?,
                         worktree_seq: None,
+                        worktree_base_commit: None,
                     })
                 })
                 .ok_or_else(|| "completed worker directory resolution has no result".to_string())?;
@@ -3568,6 +3575,7 @@ async fn complete_worker_placement(
                 authority_path: repo.authority_path.to_string_lossy().into_owned(),
                 authority_context_id: repo.authority_context_id,
                 worktree_seq: Some(seq),
+                worktree_base_commit: Some(worktree.base_commit),
             }))
         }
         Err(error) => {
