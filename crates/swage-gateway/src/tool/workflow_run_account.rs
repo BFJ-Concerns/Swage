@@ -119,3 +119,205 @@ impl Tool for WorkflowRunAccountTool {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::state::AppState;
+    use swage_storage::{
+        NewSession, NewSpace, NewWorkflowRun, SessionStore, SpaceStore, SqliteStorage, Storage,
+        WorkflowStore,
+    };
+    use swage_tool::context::MockToolContext;
+
+    fn state(storage: Arc<SqliteStorage>) -> AppState {
+        AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            storage as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+    }
+
+    fn context_for(
+        state: AppState,
+        storage: Arc<SqliteStorage>,
+        session_id: Uuid,
+    ) -> GatewayToolContext {
+        let base = MockToolContext::new("gateway", session_id.to_string());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        GatewayToolContext::new(&base, tx, storage as Arc<dyn Storage>).with_app_state(Some(state))
+    }
+
+    async fn run_in(storage: &SqliteStorage, space_id: Uuid) -> Uuid {
+        storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: Some("fan-out".into()),
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null;".into()),
+                source_hash: "hash".into(),
+                args: Value::Null,
+                budget: Value::Null,
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run")
+            .id
+    }
+
+    fn recorded_account() -> Value {
+        json!({
+            "ending": {"ending": "cancelled"},
+            "workers": {
+                "done": [],
+                "failed": [],
+                "cut_short": [{
+                    "journal_entry_id": Uuid::nil(),
+                    "seq": 1,
+                    "label": "hanging",
+                    "agent_definition_id": "default",
+                    "placement": "/scratch/worktrees/hanging",
+                    "termination": {"cause": "cut_short", "detail": "WorkflowCancelledError: run cancelled"},
+                }],
+                "unsettled": [],
+            },
+            "partial_results": {
+                "reason": "the run was cancelled before returning",
+                "results": [{
+                    "journal_entry_id": Uuid::nil(),
+                    "seq": 0,
+                    "label": "survey",
+                    "output": "survey reply",
+                    "placement": "/scratch/worktrees/survey",
+                }],
+            },
+            "settled_at": "2026-09-02T00:00:00Z",
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lead_reads_the_ending_the_partition_and_the_recovered_work() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = run_in(&storage, space.id).await;
+        storage
+            .set_workflow_run_terminal_account(run_id, recorded_account())
+            .await
+            .expect("record the account");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let context = context_for(
+            state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session.id,
+        );
+
+        let result = WorkflowRunAccountTool
+            .execute(json!({"run_id": run_id.to_string()}), &context)
+            .await
+            .expect("account");
+        assert_eq!(result["ended"], true);
+        assert_eq!(result["account"]["ending"]["ending"], "cancelled");
+        assert_eq!(
+            result["account"]["workers"]["cut_short"][0]["placement"],
+            "/scratch/worktrees/hanging"
+        );
+        assert_eq!(
+            result["account"]["partial_results"]["results"][0]["output"],
+            "survey reply"
+        );
+        assert_eq!(
+            result["account"]["partial_results"]["results"][0]["placement"],
+            "/scratch/worktrees/survey"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_still_going_reads_as_unended_rather_than_missing() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = run_in(&storage, space.id).await;
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let context = context_for(
+            state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session.id,
+        );
+
+        let result = WorkflowRunAccountTool
+            .execute(json!({"run_id": run_id.to_string()}), &context)
+            .await
+            .expect("account");
+        assert_eq!(result["ended"], false);
+        assert!(result.get("account").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_in_another_space_reads_as_absent() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let other = SpaceStore::create(
+            &*storage,
+            NewSpace {
+                name: "Other space".into(),
+                slug: "other-space".into(),
+            },
+        )
+        .await
+        .expect("second space");
+        let run_id = run_in(&storage, space.id).await;
+        storage
+            .set_workflow_run_terminal_account(run_id, recorded_account())
+            .await
+            .expect("record the account");
+        let session = storage
+            .create_session(NewSession {
+                space_id: other.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let context = context_for(
+            state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session.id,
+        );
+
+        let error = WorkflowRunAccountTool
+            .execute(json!({"run_id": run_id.to_string()}), &context)
+            .await
+            .expect_err("another space's run is not readable");
+        assert!(error.to_string().contains("was not found"), "{error}");
+    }
+}
