@@ -7,8 +7,10 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
+- Page template creation records its complete ordered module configuration in the local audit trail.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
+- Pages can be created from a space's reusable templates, seeded with the template's modules and recording which template they were forked from.
 - Workflow runs now journal their terminal budget balance.
 - Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
 - The conversation now rides every work surface: pages carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between pages neither leaves the conversation behind nor resets it.
