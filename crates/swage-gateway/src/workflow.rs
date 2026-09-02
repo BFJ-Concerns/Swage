@@ -5418,8 +5418,8 @@ mod tests {
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
         NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
-        SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
-        WorkflowStore, WorkspaceAttachmentStore,
+        SqliteStorage, Storage, TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -12271,6 +12271,10 @@ mod tests {
         )
         .await
         .expect("worker thread");
+        storage
+            .update_state(thread.id, ThreadState::Processing)
+            .await
+            .expect("persist processing worker thread");
         let orphan = storage
             .create_turn(swage_storage::NewTurn {
                 thread_id: thread.id,
@@ -12377,6 +12381,14 @@ mod tests {
             storage.get_turn(orphan.id).await.unwrap().unwrap().state,
             TurnState::Interrupted
         );
+        assert_eq!(
+            ThreadStore::get(storage.as_ref(), thread.id)
+                .await
+                .expect("read worker thread")
+                .expect("worker thread")
+                .state,
+            ThreadState::Idle
+        );
         assert_eq!(storage.interrupt_running_workflow_runs().await.unwrap(), 1);
 
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -12388,7 +12400,7 @@ mod tests {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            provider,
+            provider.clone(),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
@@ -12399,6 +12411,10 @@ mod tests {
         assert_eq!(
             recovered.final_output,
             Some(Value::String("continued after recovery".into()))
+        );
+        assert!(
+            !provider.requests.lock().expect("requests").is_empty(),
+            "replayed worker call should reach the provider"
         );
     }
 
