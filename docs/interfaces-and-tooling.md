@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, wire-contract architecture, verification gate, and route handling
+description: Network binding, the web UI's context inspector, image attachments, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, and route handling
 ---
 
 # Interfaces and tooling
@@ -87,6 +87,100 @@ no need to reload the page for the link to appear. The terminal UI has a
 comparable inspector toggled by a keybinding, showing a proportional fill bar
 per element.
 
+## Image attachments
+
+A message can include images alongside its text. The REST turn-submission
+endpoint and the WebSocket send event both accept an `attachments` array,
+where each entry is a tagged content part. The only attachment kind today is
+`image_url` — an image addressed by a URL (either `https://` or a `data:`
+URL carrying the bytes inline).
+
+The gateway checks whether the configured provider can consume image parts
+before anything is persisted. If the provider's protocol does not support
+vision, the turn is refused immediately rather than the image being silently
+dropped.
+
+Which protocols accept images depends on whether the provider adapter
+actually maps image content parts to the wire body. At this tree, only two
+protocols claim vision:
+
+| Protocol | Vision | Notes |
+|---|---|---|
+| Chat Completions (`openai`) | Yes | Maps image parts as typed content arrays |
+| OpenRouter | Yes | Uses the same Chat Completions adapter |
+| OpenAI Responses | No | Text parts only in the current adapter |
+| Anthropic | No | Text parts only in the current adapter |
+| Google | No | Text parts only in the current adapter |
+| Codex | No | Assembled text only |
+
+When an image is present, the Chat Completions adapter sends the message
+content as a JSON array of typed parts rather than a plain string, keeping
+text-only messages in the original string form. Stored messages carry their
+attachments as records that survive round-trips through the API.
+
+## Secret backends
+
+Every credential the gateway uses — provider API keys, OAuth tokens,
+service credentials — resolves through a single secret manager with an
+audit event on every access and automatic redaction of resolved values.
+
+Three backends determine where a secret's value lives:
+
+- **Managed** — encrypted at rest in the gateway's own SQLite store. This is
+  the default for secrets created through the API.
+- **Environment** — the secret names an environment variable, read at
+  resolution time. This is what `api_key_env` in the provider config uses.
+- **File** — the secret names a file on the gateway host, re-read on every
+  access so externally refreshed tokens stay current. A JSON pointer
+  (RFC 6901) can optionally select a single field from a JSON file rather
+  than using the whole file's content.
+
+The file backend is how the gateway governs credentials that a companion
+tool manages itself. The Codex CLI, for example, keeps its ChatGPT OAuth
+tokens in an `auth.json` file and refreshes them on its own schedule. At
+startup, the gateway registers the Codex access and refresh tokens as
+file-backed secrets pointing into that document, so they resolve, audit, and
+redact through the governed system without being copied out of the CLI's own
+store.
+
+## API error contract
+
+Every failed HTTP response on the client surface carries the same shape: a
+JSON object with `code` (a machine-readable identifier) and `message` (a
+human-readable explanation). The code is the contract a client branches on;
+the HTTP status is a mechanical projection of the code, never an independent
+decision.
+
+The code vocabulary is defined as an enum in the protocol crate. Each code
+names exactly one HTTP status:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `malformed_body` | 400 | The request body was not valid JSON |
+| `forbidden` | 403 | The caller may not perform this operation |
+| `not_found` | 404 | The addressed entity does not exist |
+| `conflict` | 409 | Collides with existing state |
+| `turn_in_progress` | 409 | A turn is already running in this conversation |
+| `already_connected` | 409 | The conversation already has a live connection |
+| `unsupported_media_type` | 415 | Missing `Content-Type: application/json` |
+| `validation_error` | 422 | The body parsed but a field failed validation |
+| `sign_in_unsupported` | 422 | The provider offers no sign-in of the requested kind |
+| `internal_error` | 500 | An unexpected gateway failure |
+| `provider_error` | 502 | The upstream model provider failed |
+| `sign_in_failed` | 502 | The provider refused or could not complete sign-in |
+| `provider_runtime_unavailable` | 503 | The provider runtime could not be reached |
+
+This contract is exhaustive: every gateway error variant maps to a code, so a
+new kind of failure chooses its code at the point it is defined. Body-parsing
+rejections — malformed JSON, wrong content type, unrecognised fields — answer
+in the same shape, with the message naming the rejected field where
+applicable. A client that reads only the JSON body loses nothing the HTTP
+status would have told it.
+
+The Rust client parses the body into a typed error variant; the frontend has
+an `ApiError` class that extracts the code. The generated TypeScript client
+raises `ApiError` on any non-ok response.
+
 ## Wire-contract architecture
 
 The architecture's rule is that all types crossing a process boundary — HTTP
@@ -124,11 +218,31 @@ it) and to the explicit `ts-rs` export list in
 `crates/swage-protocol/tests/projections.rs` (unless an existing export already
 reaches it).
 
-Running `cargo test -p swage-protocol` regenerates all projections (TypeScript
-bindings and JSON Schemas) in place for the types registered through those two
-paths. Any drift shows up as uncommitted changes and is caught by the
-verification gate, but the freshness check cannot detect an omitted type that
-was never made reachable.
+### Route manifest
+
+The client surface also has a route manifest — a single table naming every
+HTTP route once, with its method, path template, request and response schema
+names. Two projections are generated from it:
+
+- An **OpenAPI 3.1 document** at `crates/swage-protocol/schema/client-openapi.json`,
+  whose `components/schemas` are the client surface's own JSON Schema — so
+  the OpenAPI document and the schema never disagree.
+- A **generated TypeScript client** at `frontend/src/lib/protocol/client.ts`,
+  with one typed function per route over a shared request helper that raises
+  the API error contract on failure.
+
+Adding a route is one entry in the manifest. A router test verifies that
+every manifest route is actually registered on the gateway's HTTP router —
+a manifest entry with no handler fails the test.
+
+### Projections
+
+Running `cargo test -p swage-protocol` regenerates all projections in place:
+TypeScript type bindings, JSON Schemas, the OpenAPI document, and the
+generated client. Any drift shows up as uncommitted changes and is caught by
+the verification gate, but the freshness check cannot detect an omitted type
+that was never made reachable, or a route that was never added to the
+manifest.
 
 ## Verification gate
 
