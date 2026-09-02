@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod dispatch;
+pub mod effort;
 pub mod error;
 pub mod message;
 pub mod message_rendering;
@@ -36,7 +37,8 @@ pub use request::{
     ProviderContentBlockWitness, ProviderResponseWitness, StreamChunk, TokenUsage,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-pub use swage_protocol::client::settings::Effort;
+pub use effort::{EffortControl, ResolvedEffort, resolve_effort};
+pub use swage_protocol::client::settings::{Effort, EffortCapability};
 pub use tool::{
     CompactToolReplay, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,
     build_tool_round_messages, build_tool_round_messages_with_reasoning,

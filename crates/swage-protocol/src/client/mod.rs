@@ -68,6 +68,7 @@ pub struct ClientSurface {
     send_message: turn::SendMessageRequest,
     message_response: turn::MessageResponse,
     settings: settings::SettingsResponse,
+    effort_capability: settings::EffortCapability,
     skills: skill::SkillListResponse,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,

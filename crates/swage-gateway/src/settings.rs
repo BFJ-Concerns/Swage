@@ -1399,6 +1399,7 @@ mod tests {
                 default_effort: Some(swage_protocol::client::settings::Effort::Low),
                 capabilities: swage_config::ModelCapabilitiesConfig {
                     reasoning_replay: true,
+                    effort: None,
                 },
             },
         );
@@ -1440,6 +1441,7 @@ mod tests {
                     default_effort: Some(swage_protocol::client::settings::Effort::High),
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
+                        effort: None,
                     },
                 },
             )]

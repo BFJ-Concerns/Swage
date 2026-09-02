@@ -6926,6 +6926,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
+                effort: None,
             },
         },
     )]
@@ -10685,6 +10686,7 @@ async fn capture_provider_effort_for_selected_model(
         .take()
         .expect("provider should receive the turn request")
         .effort
+        .map(|resolved| resolved.requested)
 }
 
 #[tokio::test]
@@ -10799,6 +10801,138 @@ async fn process_turn_uses_aliased_model_default_effort_without_session_metadata
         ))
         .await,
         Some(swage_core::Effort::Medium)
+    );
+}
+
+/// The effort exemplar's turn seam: the intent resolves once against the
+/// effective model's declared capability, the provider receives the resolved
+/// control, and the turn's audit snapshot records the outcome — a clamp
+/// included.
+#[tokio::test]
+async fn process_turn_resolves_effort_against_the_declared_capability_and_records_it() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) =
+        make_storage_with_session_metadata(Some(serde_json::json!({"effort": "max"}))).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-reasoner".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                reasoning_replay: false,
+                effort: Some(swage_core::EffortCapability::Levels {
+                    levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
+                    can_disable: false,
+                }),
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "hi".into(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let resolved = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request")
+        .effort
+        .expect("effort reached the provider");
+    assert_eq!(resolved.requested, swage_core::Effort::Max);
+    assert_eq!(
+        resolved.control,
+        swage_core::EffortControl::Level {
+            level: swage_core::Effort::High
+        }
+    );
+    assert_eq!(resolved.clamped_to, Some(swage_core::Effort::High));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["effort"]["requested"], "max");
+    assert_eq!(report["provider_visible"]["effort"]["clamped_to"], "high");
+    assert_eq!(
+        report["provider_visible"]["effort"]["note"],
+        "max unsupported; clamped to high"
+    );
+}
+
+/// With no catalogue declaration, the provider adapter's own account of the
+/// documented control resolves the intent.
+#[test]
+fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5");
+    let capability = super::effort_capability_for_model(&config, "claude", &anthropic);
+    assert!(matches!(
+        capability,
+        swage_core::EffortCapability::Levels { can_disable: true, .. }
+    ));
+
+    let declared = swage_core::EffortCapability::None;
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .effort = Some(declared.clone());
+    assert_eq!(
+        super::effort_capability_for_model(&config, "claude", &anthropic),
+        declared,
+        "the catalogue's own declaration wins over the adapter's"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::effort_capability_for_model(&config, "unknown", &mock),
+        swage_core::EffortCapability::None
     );
 }
 

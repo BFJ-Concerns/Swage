@@ -306,7 +306,7 @@ impl Agent {
         let mut llm_request = CompletionRequest {
             messages: assembled_context,
             model: self.config.model_id.clone(),
-            effort: request.effort,
+            effort: request.effort.clone(),
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stop_sequences: self.config.stop_sequences.clone(),

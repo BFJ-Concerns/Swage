@@ -16,9 +16,12 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
-    Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, Effort, EffortCapability,
+    FinishReason, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolReplayPart,
 };
+
+use crate::openai::{openai_effort_capability, openai_reasoning_effort};
 
 use crate::http::{HttpClient, SseEvent};
 use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
@@ -387,15 +390,11 @@ impl ResponsesProvider {
             parallel_tool_calls: false,
             store: false,
             text: ResponsesTextOptions { verbosity: "low" },
-            reasoning: request.effort.map(|effort| ResponsesReasoning {
-                effort: match effort {
-                    swage_core::Effort::Low => "low",
-                    swage_core::Effort::Medium => "medium",
-                    swage_core::Effort::High => "high",
-                    swage_core::Effort::Max => "xhigh",
-                }
-                .to_string(),
-            }),
+            reasoning: request
+                .effort
+                .as_ref()
+                .and_then(|effort| openai_reasoning_effort(effort.control))
+                .map(|effort| ResponsesReasoning { effort }),
             max_output_tokens: request.max_tokens,
             temperature: request.temperature,
             stream: if stream { Some(true) } else { None },
@@ -642,6 +641,10 @@ impl LlmProvider for ResponsesProvider {
         &self.config.model
     }
 
+    fn effort_capability(&self, _model: &str) -> Option<EffortCapability> {
+        Some(openai_effort_capability())
+    }
+
     fn provider_request_snapshot(&self, request: &CompletionRequest, stream: bool) -> Value {
         serde_json::json!({
             "provider": "openai",
@@ -867,16 +870,17 @@ mod tests {
     }
 
     #[test]
-    fn every_completion_effort_maps_to_responses_reasoning_effort() {
+    fn every_native_level_maps_to_responses_reasoning_effort() {
         let provider = ResponsesProvider::from_config(local_provider_config());
-        for (effort, expected) in [
-            (swage_core::Effort::Low, "low"),
-            (swage_core::Effort::Medium, "medium"),
-            (swage_core::Effort::High, "high"),
-            (swage_core::Effort::Max, "xhigh"),
+        for (level, expected) in [
+            (Effort::Minimal, "minimal"),
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
         ] {
             let request = CompletionRequest {
-                effort: Some(effort),
+                effort: Some(swage_core::resolve_effort(level, &openai_effort_capability())),
                 ..empty_completion_request()
             };
             let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();

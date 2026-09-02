@@ -11,8 +11,9 @@ use futures::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
-    Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, Effort, EffortCapability,
+    EffortControl, FinishReason, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::http::{HttpClient, SseEvent};
@@ -29,6 +30,33 @@ const OPENAI_REQUEST_DIVERGENCES: &[(&str, &str)] = &[(
 // ---------------------------------------------------------------------------
 // OpenAI wire types
 // ---------------------------------------------------------------------------
+
+/// The effort control OpenAI documents for GPT reasoning models, shared by
+/// Chat Completions (`reasoning_effort`) and the Responses API
+/// (`reasoning.effort`): `none` through `xhigh`, where `none` is the
+/// model's own off. `max` is not a level the control accepts.
+pub(crate) fn openai_effort_capability() -> EffortCapability {
+    EffortCapability::Levels {
+        levels: vec![
+            Effort::Minimal,
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::Xhigh,
+        ],
+        can_disable: true,
+    }
+}
+
+/// The `reasoning_effort` / `reasoning.effort` value for a resolved control.
+/// Expresses the control only — a level here is one the wire accepts.
+pub(crate) fn openai_reasoning_effort(control: EffortControl) -> Option<String> {
+    match control {
+        EffortControl::Level { level } => Some(level.as_str().to_string()),
+        EffortControl::Disabled => Some("none".to_string()),
+        EffortControl::Budget { .. } | EffortControl::Omitted => None,
+    }
+}
 
 /// Request body for POST /chat/completions.
 #[derive(Serialize)]
@@ -431,15 +459,10 @@ impl OpenAiProvider {
 
         ChatCompletionsRequest {
             model,
-            reasoning_effort: request.effort.map(|effort| {
-                match effort {
-                    swage_core::Effort::Low => "low",
-                    swage_core::Effort::Medium => "medium",
-                    swage_core::Effort::High => "high",
-                    swage_core::Effort::Max => "xhigh",
-                }
-                .to_string()
-            }),
+            reasoning_effort: request
+                .effort
+                .as_ref()
+                .and_then(|effort| openai_reasoning_effort(effort.control)),
             messages: Self::convert_messages(&request.messages),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -746,6 +769,10 @@ impl LlmProvider for OpenAiProvider {
         &self.config.model
     }
 
+    fn effort_capability(&self, _model: &str) -> Option<EffortCapability> {
+        Some(openai_effort_capability())
+    }
+
     fn provider_request_snapshot(
         &self,
         request: &CompletionRequest,
@@ -1036,16 +1063,17 @@ mod tests {
     }
 
     #[test]
-    fn every_completion_effort_maps_to_openai_reasoning_effort() {
+    fn every_native_level_maps_to_openai_reasoning_effort() {
         let provider = OpenAiProvider::from_config(local_provider_config());
-        for (effort, expected) in [
-            (swage_core::Effort::Low, "low"),
-            (swage_core::Effort::Medium, "medium"),
-            (swage_core::Effort::High, "high"),
-            (swage_core::Effort::Max, "xhigh"),
+        for (level, expected) in [
+            (Effort::Minimal, "minimal"),
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
         ] {
             let request = CompletionRequest {
-                effort: Some(effort),
+                effort: Some(swage_core::resolve_effort(level, &openai_effort_capability())),
                 messages: vec![],
                 model: None,
                 max_tokens: None,
@@ -1057,6 +1085,30 @@ mod tests {
             let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
             assert_eq!(body["reasoning_effort"], expected);
         }
+    }
+
+    /// `max` is not an OpenAI level: it arrives clamped to `xhigh`, and
+    /// `off` arrives as the model's own `none`.
+    #[test]
+    fn a_resolved_clamp_and_a_disable_reach_the_openai_wire_as_resolved() {
+        let provider = OpenAiProvider::from_config(local_provider_config());
+        let mut request = CompletionRequest {
+            effort: Some(swage_core::resolve_effort(Effort::Max, &openai_effort_capability())),
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        };
+        assert_eq!(request.effort.as_ref().unwrap().clamped_to, Some(Effort::Xhigh));
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert_eq!(body["reasoning_effort"], "xhigh");
+
+        request.effort = Some(swage_core::resolve_effort(Effort::Off, &openai_effort_capability()));
+        let body = serde_json::to_value(provider.build_request(&request, false)).unwrap();
+        assert_eq!(body["reasoning_effort"], "none");
     }
 
     #[test]
