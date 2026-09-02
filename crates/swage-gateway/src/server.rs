@@ -224,6 +224,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/spaces/{space_id}/pages",
             get(page::list_pages_handler).post(page::create_page_handler),
         )
+        .route(
+            "/api/spaces/{space_id}/page-templates",
+            get(page::list_page_templates_handler).post(page::create_page_template_handler),
+        )
+        .route(
+            "/api/page-templates/{template_id}",
+            get(page::get_page_template_handler),
+        )
         .route("/api/pages/{page_id}", get(page::get_page_handler))
         .route(
             "/api/pages/{page_id}/modules",

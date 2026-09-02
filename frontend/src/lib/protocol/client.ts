@@ -8,6 +8,7 @@ import type { ConversationResponse } from "./ConversationResponse";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreatePageAnnotationRequest } from "./CreatePageAnnotationRequest";
 import type { CreatePageRequest } from "./CreatePageRequest";
+import type { CreatePageTemplateRequest } from "./CreatePageTemplateRequest";
 import type { CreateSpaceRequest } from "./CreateSpaceRequest";
 import type { DeletePageAnnotationResponse } from "./DeletePageAnnotationResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
@@ -15,6 +16,8 @@ import type { PageAnnotationView } from "./PageAnnotationView";
 import type { PageListResponse } from "./PageListResponse";
 import type { PageModuleView } from "./PageModuleView";
 import type { PageResponse } from "./PageResponse";
+import type { PageTemplateListResponse } from "./PageTemplateListResponse";
+import type { PageTemplateResponse } from "./PageTemplateResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
@@ -115,6 +118,21 @@ export async function listPages(spaceId: string): Promise<PageListResponse> {
 /** Create a page in a space. */
 export async function createPage(spaceId: string, body: CreatePageRequest): Promise<PageResponse> {
   return request<PageResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/pages`, body);
+}
+
+/** List page templates in a space. */
+export async function listPageTemplates(spaceId: string): Promise<PageTemplateListResponse> {
+  return request<PageTemplateListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/page-templates`);
+}
+
+/** Create a page template in a space. */
+export async function createPageTemplate(spaceId: string, body: CreatePageTemplateRequest): Promise<PageTemplateResponse> {
+  return request<PageTemplateResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/page-templates`, body);
+}
+
+/** Read a page template. */
+export async function getPageTemplate(templateId: string): Promise<PageTemplateResponse> {
+  return request<PageTemplateResponse>("GET", `/api/page-templates/${encodeURIComponent(templateId)}`);
 }
 
 /** Read a page. */

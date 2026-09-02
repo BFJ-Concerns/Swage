@@ -11,6 +11,9 @@ import type { PageAnnotationView } from "../protocol/PageAnnotationView";
 import type { CreatePageAnnotationRequest } from "../protocol/CreatePageAnnotationRequest";
 import type { UpdatePageAnnotationRequest } from "../protocol/UpdatePageAnnotationRequest";
 import * as generated from "../protocol/client";
+import type { PageTemplateListResponse } from "../protocol/PageTemplateListResponse";
+import type { PageTemplateResponse } from "../protocol/PageTemplateResponse";
+import type { CreatePageTemplateRequest } from "../protocol/CreatePageTemplateRequest";
 
 export function setBaseUrl(url: string): void {
   generated.setClientBaseUrl(url);
@@ -24,11 +27,27 @@ export async function getPage(pageId: string): Promise<PageResponse> {
   return generated.getPage(pageId);
 }
 
+// A template seeds the new page's modules and is recorded as its origin;
+// omitting it creates a blank page.
 export async function createPage(
   spaceId: string,
   title: string,
+  templateId?: string,
 ): Promise<PageResponse> {
-  return generated.createPage(spaceId, { title });
+  return generated.createPage(spaceId, { title, template_id: templateId });
+}
+
+export async function listPageTemplates(
+  spaceId: string,
+): Promise<PageTemplateListResponse> {
+  return generated.listPageTemplates(spaceId);
+}
+
+export async function createPageTemplate(
+  spaceId: string,
+  body: CreatePageTemplateRequest,
+): Promise<PageTemplateResponse> {
+  return generated.createPageTemplate(spaceId, body);
 }
 
 export async function writePageModule(
