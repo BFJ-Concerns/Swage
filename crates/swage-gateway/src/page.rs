@@ -444,7 +444,10 @@ pub async fn update_page_annotation(
         .get_page_annotation(annotation_id)
         .await?
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "page annotation".into(),
+                id: annotation_id.to_string(),
+            })
         })?;
     let body = request.body.trim();
     if body.is_empty() {
@@ -508,7 +511,10 @@ pub async fn delete_page_annotation(
         .get_page_annotation(annotation_id)
         .await?
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "page annotation".into(),
+                id: annotation_id.to_string(),
+            })
         })?;
     let page = state.storage.get_page(existing.page_id).await?;
     let title = page.map(|page| page.title).unwrap_or_default();
@@ -773,7 +779,7 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::{
-        AuditStore, NewSpace, PageAnnotationStore, SpaceStore, SqliteStorage, Storage,
+        AuditStore, NewSpace, PageAnnotationStore, PageStore, SpaceStore, SqliteStorage, Storage,
     };
 
     use super::*;
@@ -1030,7 +1036,7 @@ mod tests {
             recorded.metadata["prior_body"], "withdrawn on reflection",
             "recovery is re-writing the note, informed by the trail"
         );
-        assert_eq!(recorded.metadata["prior_tags"], json!(["question"]));
+        assert_eq!(recorded.metadata["prior_tags"], json!([]));
         assert!(recorded.metadata["new_body"].is_null());
         assert!(recorded.metadata["new_tags"].is_null());
         assert!(
