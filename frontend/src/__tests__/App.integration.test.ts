@@ -842,7 +842,9 @@ describe("App", () => {
     flushSync(() => selectButton!.click());
     await settleUi();
 
-    expect(websocketHarness.clientFor(selected.id)?.connect).toHaveBeenCalledWith(selected.id);
+    const selectedClient = websocketHarness.clientFor(selected.id);
+    expect(selectedClient?.connect).toHaveBeenCalledTimes(1);
+    expect(selectedClient?.connect).toHaveBeenCalledWith(selected.id);
   });
 
   it("shows desktop shell context when the electron bridge is present", async () => {

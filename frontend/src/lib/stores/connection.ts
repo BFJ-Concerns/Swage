@@ -18,7 +18,6 @@ export interface ConnectionStore {
   /** Mark whether a conversation needs its client retained off-screen. */
   setStreamActive?(conversationId: string, active: boolean): void;
   disconnect(): void;
-  disconnectAll?(): void;
   sendMessage(
     conversationId: string,
     content: string,
@@ -137,10 +136,6 @@ export function createConnectionStore(
       streamingConversations.clear();
       selectedConversationId = null;
       statusStore.set("disconnected");
-    },
-
-    disconnectAll(): void {
-      this.disconnect();
     },
 
     sendMessage(

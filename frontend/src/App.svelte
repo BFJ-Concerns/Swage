@@ -88,10 +88,6 @@
     if (activeSurface === "operator") activeSurface = "conversation";
   }
 
-  function connectToConversationIfNeeded(id: string): void {
-    connectionStore.connectTo(id);
-  }
-
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
     keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
@@ -105,7 +101,7 @@
       await conversationStore.loadConversations(conv.space_id);
     }
 
-    connectToConversationIfNeeded(id);
+    connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
     router.navigate(`/conversations/${id}`);
   }
@@ -348,7 +344,7 @@
     // Operator needs to establish the connection again.
     if (previous === "operator") {
       const id = conversationStore.activeConversation?.id;
-      if (id) connectToConversationIfNeeded(id);
+      if (id) connectionStore.connectTo(id);
     }
   }
 
@@ -369,7 +365,7 @@
       if (!spaceId) return;
 
       // Drop the WebSocket — it was bound to the previous space's session.
-      connectionStore.disconnectAll?.();
+      connectionStore.disconnect();
       // Drop the active conversation too: left in place, the old space's
       // conversation would keep rendering and the composer would send into it.
       conversationStore.clearActiveConversation();
