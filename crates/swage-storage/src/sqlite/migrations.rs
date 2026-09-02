@@ -36,7 +36,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("016_session_metadata", ADD_SESSION_METADATA_COLUMN),
         // 017/018 were the scheduled-job and heartbeat tables, absorbed into
         // the unified schedules schema in 001 during the private alpha.
-        ("021_delivery_and_audit", CREATE_DELIVERY_AND_AUDIT_TABLES),
         ("022_secrets", CREATE_SECRET_TABLES),
         ("023_encrypt_managed_secrets_at_rest", ""),
         (
@@ -375,12 +374,12 @@ const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS delivery_records (
         id           TEXT NOT NULL PRIMARY KEY,
-        session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
         run_id       TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
         turn_id      TEXT REFERENCES turns(id) ON DELETE SET NULL,
         target_json  TEXT NOT NULL,
         content      TEXT NOT NULL,
-        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'not_sent')),
+        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'not_sent', 'not_delivered')),
         error        TEXT,
         delivered_at TEXT NOT NULL
     );
@@ -944,12 +943,12 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE TABLE IF NOT EXISTS delivery_records (
         id           TEXT NOT NULL PRIMARY KEY,
-        session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        session_id   TEXT REFERENCES sessions(id) ON DELETE CASCADE,
         run_id       TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
         turn_id      TEXT REFERENCES turns(id) ON DELETE SET NULL,
         target_json  TEXT NOT NULL,
         content      TEXT NOT NULL,
-        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'not_sent')),
+        status       TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'not_sent', 'not_delivered')),
         error        TEXT,
         delivered_at TEXT NOT NULL
     );

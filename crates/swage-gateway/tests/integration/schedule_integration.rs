@@ -28,13 +28,15 @@ use tokio::sync::oneshot;
 
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_protocol::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
+use swage_protocol::client::page::CreatePageRequest;
 use swage_protocol::client::schedule::{
     CreateScheduleRequest, GateConfig, GateVerdict, ScheduleCreator, ScheduleSpec, ScheduleStatus,
     SessionPolicy, SkipReason, UpdateScheduleRequest,
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, SqliteStorage,
+    NewScheduleRun, NewSpace, PageStore, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    SpaceStore, SqliteStorage, Storage,
 };
 
 /// Provider double serving both halves of the schedule domain: queued
@@ -847,6 +849,19 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
     assert_eq!(failed.state, ScheduleRunState::Failed);
     assert!(failed.error_message.is_some());
     assert!(failed.completed_at.is_some());
+    let deliveries = state.storage.list_delivery_records().await.unwrap();
+    let no_delivery = deliveries
+        .iter()
+        .find(|delivery| delivery.run_id == Some(failed.id))
+        .expect("a run failing before delivery records why it made no delivery");
+    assert_eq!(no_delivery.status, "not_delivered");
+    assert!(
+        no_delivery
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("provider down")
+    );
     assert_eq!(completed.trigger, ScheduleRunTrigger::Tick);
     assert_eq!(completed.state, ScheduleRunState::Completed);
     assert_eq!(
@@ -1073,6 +1088,15 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
     // The main model never woke: no session, no turn.
     assert!(run.session_id.is_none());
     assert!(run.turn_id.is_none());
+    let deliveries = state.storage.list_delivery_records().await.unwrap();
+    let no_delivery = deliveries
+        .iter()
+        .find(|delivery| delivery.run_id == Some(run.id))
+        .expect("a gated-out run records why it made no delivery");
+    assert_eq!(no_delivery.status, "not_delivered");
+    assert_eq!(no_delivery.session_id, None);
+    assert_eq!(no_delivery.target["kind"], "no_delivery");
+    assert!(no_delivery.error.as_deref().unwrap().contains("no work"));
 
     // The gate saw the task, the criteria, and asked with the resolved
     // provider-facing model id.
@@ -1413,6 +1437,115 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
         delivery["run_id"] == runs[0].id.to_string()
             && delivery["turn_id"] == runs[0].turn_id.unwrap().to_string()
     }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_runs_deliver_to_a_page_through_the_page_substrate() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("page-delivery.db"),
+        MockProvider::new(vec![MockProvider::text_round("scheduled page output")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let space = state.space_store.get_or_create_default().await.unwrap();
+    let page = swage_gateway::page::create_page(
+        &state,
+        space.id,
+        CreatePageRequest {
+            title: "Schedule output".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut events = state.broadcast.subscribe();
+
+    let created = schedule::create_schedule(
+        &state,
+        CreateScheduleRequest {
+            routing: Some(DeliveryRoutingRequest {
+                deliver_to_origin: false,
+                home_target: None,
+                explicit_targets: vec![DeliveryTarget::Page { page_id: page.id }],
+                store_local_output: false,
+            }),
+            ..create_request(
+                "write the scheduled output",
+                ScheduleSpec::Interval {
+                    every: "every 5 seconds".into(),
+                },
+                continuation(session_id),
+            )
+        },
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+
+    tick_to_completion(&state, created.next_run_at.unwrap()).await;
+
+    let modules = state.storage.list_page_modules(page.id).await.unwrap();
+    assert_eq!(modules.len(), 1);
+    assert_eq!(modules[0].source, "scheduled page output");
+    let event = events.recv().await.unwrap();
+    assert!(matches!(
+        event,
+        swage_protocol::client::websocket::ServerEvent::PageUpdated {
+            page_id,
+            module_id: Some(_),
+        } if page_id == page.id
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn page_delivery_rejects_a_page_outside_the_schedules_space() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("cross-space-page.db"),
+        MockProvider::new(vec![]),
+    );
+    let default = state.space_store.get_or_create_default().await.unwrap();
+    let other = state
+        .space_store
+        .create(NewSpace {
+            name: "Elsewhere".into(),
+        })
+        .await
+        .unwrap();
+    let page = swage_gateway::page::create_page(
+        &state,
+        other.id,
+        CreatePageRequest {
+            title: "Other space".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = schedule::create_schedule(
+        &state,
+        CreateScheduleRequest {
+            message: "write elsewhere".into(),
+            spec: ScheduleSpec::Interval {
+                every: "every 5 seconds".into(),
+            },
+            session: SessionPolicy::Fresh {
+                space_id: default.id,
+                agent_id: "gateway".into(),
+            },
+            routing: Some(DeliveryRoutingRequest {
+                deliver_to_origin: false,
+                home_target: None,
+                explicit_targets: vec![DeliveryTarget::Page { page_id: page.id }],
+                store_local_output: false,
+            }),
+            gate: None,
+        },
+        ScheduleCreator::User,
+    )
+    .await
+    .expect_err("cross-space page delivery must be refused at schedule creation");
+    assert!(error.to_string().contains("schedule's space"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2072,6 +2205,13 @@ async fn tick_racing_an_in_flight_manual_run_records_a_clean_overlap_skip() {
         !message.is_empty() && !message.contains("UNIQUE constraint"),
         "overlap skips must never leak raw constraint text, got: {message}"
     );
+    let deliveries = state.storage.list_delivery_records().await.unwrap();
+    let no_delivery = deliveries
+        .iter()
+        .find(|delivery| delivery.run_id == Some(skip.id))
+        .expect("an overlap-skipped run records why it made no delivery");
+    assert_eq!(no_delivery.status, "not_delivered");
+    assert!(no_delivery.error.as_deref().unwrap().contains("in flight"));
 
     // Release the winning manual run: it completes normally.
     release_tx.send(()).unwrap();

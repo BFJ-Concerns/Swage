@@ -5,12 +5,13 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::Value;
+use swage_protocol::client::page::WritePageModuleRequest;
 use swage_storage::Storage;
 use swage_workflow::{EffectKind, EffectPayload, EffectReceipt};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::secret::SecretManager;
+use crate::{secret::SecretManager, state::AppState};
 
 #[async_trait]
 pub(crate) trait DeliveryCapability: Send + Sync {
@@ -33,6 +34,8 @@ pub(crate) trait DeliveryCapability: Send + Sync {
 }
 
 pub(crate) async fn capability_from_grant(
+    state: Option<AppState>,
+    space_id: Uuid,
     storage: Arc<dyn Storage>,
     grant: Option<&Value>,
     requested_target: Option<&str>,
@@ -43,16 +46,98 @@ pub(crate) async fn capability_from_grant(
     let target = targets
         .iter()
         .find(|target| {
-            target.get("kind").and_then(Value::as_str) == Some("webhook")
-                && requested_target
-                    .is_none_or(|name| target.get("name").and_then(Value::as_str) == Some(name))
+            requested_target
+                .is_none_or(|name| target.get("name").and_then(Value::as_str) == Some(name))
         })
         .ok_or_else(|| {
             "DeliveryNotGrantedError: requested delivery target is not granted".to_string()
         })?;
-    Ok(Arc::new(
-        WebhookDeliveryCapability::from_grant(storage, target).await?,
-    ))
+    match target.get("kind").and_then(Value::as_str) {
+        Some("webhook") => Ok(Arc::new(
+            WebhookDeliveryCapability::from_grant(storage, target).await?,
+        )),
+        Some("page") => Ok(Arc::new(
+            PageDeliveryCapability::from_grant(
+                state.ok_or_else(|| "page delivery needs gateway state".to_string())?,
+                space_id,
+                target,
+            )
+            .await?,
+        )),
+        _ => Err("DeliveryNotGrantedError: requested delivery target is not granted".into()),
+    }
+}
+
+struct PageDeliveryCapability {
+    state: AppState,
+    page_id: Uuid,
+}
+
+impl PageDeliveryCapability {
+    async fn from_grant(state: AppState, space_id: Uuid, target: &Value) -> Result<Self, String> {
+        let page_id = target
+            .get("page_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "page grant is missing page_id".to_string())?
+            .parse()
+            .map_err(|_| "page grant has an invalid page_id".to_string())?;
+        let page = state
+            .storage
+            .get_page(page_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("no page with id {page_id}"))?;
+        if page.space_id != space_id {
+            return Err("page delivery target is not in the workflow's space".into());
+        }
+        Ok(Self { state, page_id })
+    }
+}
+
+#[async_trait]
+impl DeliveryCapability for PageDeliveryCapability {
+    fn kind(&self) -> &'static str {
+        "page"
+    }
+
+    fn effect_kind(&self) -> EffectKind {
+        EffectKind::CheckBeforeRedo
+    }
+
+    async fn deliver(
+        &self,
+        _key: Uuid,
+        payload: EffectPayload,
+        effect_seq: u64,
+        cancellation: CancellationToken,
+    ) -> Result<EffectReceipt, String> {
+        tokio::select! {
+            result = crate::page::write_page_module(
+                &self.state,
+                self.page_id,
+                WritePageModuleRequest {
+                    module_id: None,
+                    kind: Some("document".into()),
+                    source: payload.content,
+                },
+                "workflow delivery",
+            ) => result.map_err(|error| error.to_string())?,
+            () = cancellation.cancelled() => return Err("WorkflowCancelledError: delivery cancelled".into()),
+        };
+        Ok(EffectReceipt {
+            delivered: true,
+            target: self.kind().into(),
+            effect_seq,
+        })
+    }
+
+    async fn probe(
+        &self,
+        _key: Uuid,
+        _payload: &EffectPayload,
+    ) -> Result<Option<EffectReceipt>, String> {
+        Ok(None)
+    }
 }
 
 struct WebhookDeliveryCapability {
@@ -207,9 +292,10 @@ mod tests {
             "url": format!("http://{address}/deliver"),
             "secret_ref": secret.reference,
         }]);
-        let capability = capability_from_grant(storage, Some(&grant), Some("public"))
-            .await
-            .unwrap();
+        let capability =
+            capability_from_grant(None, Uuid::new_v4(), storage, Some(&grant), Some("public"))
+                .await
+                .unwrap();
         capability
             .deliver(
                 Uuid::new_v4(),
