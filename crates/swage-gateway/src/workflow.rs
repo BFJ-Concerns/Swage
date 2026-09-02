@@ -14,9 +14,10 @@ use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
-    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind,
+    WorkflowJournalResult, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunListResponse, WorkflowRunState,
+    WorkflowScript, WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -383,8 +384,9 @@ impl AppState {
     async fn complete_workflow_journal_entry(
         &self,
         id: Uuid,
-        result: Value,
+        result: WorkflowJournalResult,
     ) -> Result<WorkflowJournalRecord, StorageError> {
+        let result = serde_json::to_value(result).expect("journal result serialises");
         let entry = self
             .storage
             .complete_workflow_journal_entry(id, result)
@@ -464,29 +466,47 @@ fn journal_wire(
             target_kind: entry.target_kind.unwrap_or_default(),
             idempotency_key,
         });
+    let result = entry
+        .result
+        .map(serde_json::from_value::<WorkflowJournalResult>)
+        .transpose()
+        .map_err(|error| format!("invalid workflow journal result: {error}"))?;
+    if let Some(result) = result.as_ref()
+        && !journal_result_matches_kind(kind, result)
+    {
+        return Err(format!(
+            "workflow journal result does not match entry kind: {}",
+            entry.kind
+        ));
+    }
     let agent_call = (entry.kind == "agent_call").then(|| {
-        let result = entry.result.as_ref();
+        let result = result.as_ref();
         WorkflowAgentCallDetail {
             agent_definition_id: entry
                 .request
                 .get("agent")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            session_id: result
-                .and_then(|v| v.get("session_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            thread_id: result
-                .and_then(|v| v.get("thread_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            turn_id: result
-                .and_then(|v| v.get("turn_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            input_tokens: result
-                .and_then(|v| v.get("input_tokens"))
-                .and_then(Value::as_u64),
-            output_tokens: result
-                .and_then(|v| v.get("output_tokens"))
-                .and_then(Value::as_u64),
+            session_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { session_id, .. } => *session_id,
+                _ => None,
+            }),
+            thread_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { thread_id, .. } => *thread_id,
+                _ => None,
+            }),
+            turn_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { turn_id, .. } => *turn_id,
+                _ => None,
+            }),
+            input_tokens: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { input_tokens, .. } => Some(*input_tokens),
+                _ => None,
+            }),
+            output_tokens: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { output_tokens, .. } => Some(*output_tokens),
+                _ => None,
+            }),
         }
     });
     let label = entry
@@ -502,13 +522,176 @@ fn journal_wire(
         status,
         label,
         request: entry.request,
-        result: entry.result,
+        result,
         error_message: entry.error_message,
         agent_call,
         effect,
         started_at: entry.started_at,
         completed_at: entry.completed_at,
     })
+}
+
+fn journal_result_matches_kind(
+    kind: WorkflowJournalEntryKind,
+    result: &WorkflowJournalResult,
+) -> bool {
+    matches!(
+        (kind, result),
+        (
+            WorkflowJournalEntryKind::AgentCall,
+            WorkflowJournalResult::AgentCall { .. }
+        ) | (
+            WorkflowJournalEntryKind::WorkerPlacement,
+            WorkflowJournalResult::WorkerPlacement { .. }
+                | WorkflowJournalResult::WorkerPlacementList { .. }
+        ) | (
+            WorkflowJournalEntryKind::Effect,
+            WorkflowJournalResult::Effect { .. }
+        ) | (WorkflowJournalEntryKind::Log, WorkflowJournalResult::Log)
+            | (
+                WorkflowJournalEntryKind::Phase,
+                WorkflowJournalResult::Phase
+            )
+            | (
+                WorkflowJournalEntryKind::WorkflowCall,
+                WorkflowJournalResult::WorkflowCall { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::Timer,
+                WorkflowJournalResult::Timer { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::Event,
+                WorkflowJournalResult::Event { .. } | WorkflowJournalResult::EventDelivery { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::AwaitEvent,
+                WorkflowJournalResult::AwaitEvent { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::Gate,
+                WorkflowJournalResult::Gate { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::Budget,
+                WorkflowJournalResult::Budget { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::TerminalBudget,
+                WorkflowJournalResult::TerminalBudget { .. }
+            )
+            | (
+                WorkflowJournalEntryKind::WindDown,
+                WorkflowJournalResult::WindDown { .. }
+            )
+    )
+}
+
+fn workflow_journal_result(kind: &str, value: Value) -> WorkflowJournalResult {
+    let field = |name: &str| value.get(name).cloned().expect("journal result field");
+    match kind {
+        "agent_call" => {
+            let result: AgentCallResult =
+                serde_json::from_value(value).expect("agent result shape");
+            WorkflowJournalResult::AgentCall {
+                output: result.output,
+                input_tokens: result.input_tokens,
+                output_tokens: result.output_tokens,
+                working_directory: result.working_directory,
+                session_id: result.session_id,
+                thread_id: result.thread_id,
+                turn_id: result.turn_id,
+            }
+        }
+        "worker_placement" if value.get("paths").is_some() => {
+            WorkflowJournalResult::WorkerPlacementList {
+                paths: serde_json::from_value(field("paths")).expect("placement paths"),
+            }
+        }
+        "worker_placement" => WorkflowJournalResult::WorkerPlacement {
+            path: serde_json::from_value(field("path")).expect("placement path"),
+            can_write: serde_json::from_value(field("can_write")).expect("placement writeability"),
+            authority_path: serde_json::from_value(field("authority_path"))
+                .expect("placement authority path"),
+            authority_context_id: serde_json::from_value(field("authority_context_id"))
+                .expect("placement authority context"),
+        },
+        "effect" => {
+            let receipt: EffectReceipt =
+                serde_json::from_value(value).expect("effect receipt shape");
+            WorkflowJournalResult::Effect {
+                delivered: receipt.delivered,
+                target: receipt.target,
+                effect_seq: receipt.effect_seq,
+            }
+        }
+        "log" => WorkflowJournalResult::Log,
+        "phase" => WorkflowJournalResult::Phase,
+        "workflow_call" => WorkflowJournalResult::WorkflowCall { output: value },
+        "timer" => WorkflowJournalResult::Timer {
+            fired: serde_json::from_value(field("fired")).expect("timer fired"),
+        },
+        "event" if value.get("delivered").is_some() => WorkflowJournalResult::EventDelivery {
+            delivered: serde_json::from_value(field("delivered")).expect("event delivery count"),
+        },
+        "event" => WorkflowJournalResult::Event {
+            seq: serde_json::from_value(field("seq")).expect("event seq"),
+            event_kind: serde_json::from_value(field("kind")).expect("event kind"),
+            payload: field("payload"),
+            source: serde_json::from_value(field("source")).expect("event source"),
+        },
+        "await_event" => WorkflowJournalResult::AwaitEvent {
+            seq: serde_json::from_value(field("seq")).expect("event seq"),
+            event_kind: serde_json::from_value(field("kind")).expect("event kind"),
+            payload: field("payload"),
+            source: serde_json::from_value(field("source")).expect("event source"),
+        },
+        "gate" => WorkflowJournalResult::Gate {
+            wake: serde_json::from_value(field("wake")).expect("gate wake"),
+            reasoning: serde_json::from_value(field("reasoning")).expect("gate reasoning"),
+            events: field("events"),
+            read_up_to_seq: serde_json::from_value(field("read_up_to_seq")).expect("gate sequence"),
+        },
+        "budget" => WorkflowJournalResult::Budget {
+            spent: serde_json::from_value(field("spent")).expect("budget spent"),
+            remaining: serde_json::from_value(field("remaining")).expect("budget remaining"),
+            working_remaining: serde_json::from_value(field("working_remaining"))
+                .expect("budget working remaining"),
+            closing_remaining: serde_json::from_value(field("closing_remaining"))
+                .expect("budget closing remaining"),
+            winding_down: serde_json::from_value(field("winding_down")).expect("budget wind down"),
+        },
+        "terminal_budget" => WorkflowJournalResult::TerminalBudget {
+            spent: serde_json::from_value(field("spent")).expect("terminal budget spent"),
+            remaining: serde_json::from_value(field("remaining"))
+                .expect("terminal budget remaining"),
+            closing_remaining: serde_json::from_value(field("closing_remaining"))
+                .expect("terminal budget closing remaining"),
+        },
+        "wind_down" => WorkflowJournalResult::WindDown {
+            spent: serde_json::from_value(field("spent")).expect("wind-down spent"),
+            remaining: serde_json::from_value(field("remaining")).expect("wind-down remaining"),
+            working_remaining: serde_json::from_value(field("working_remaining"))
+                .expect("wind-down working remaining"),
+            closing_remaining: serde_json::from_value(field("closing_remaining"))
+                .expect("wind-down closing remaining"),
+            winding_down: serde_json::from_value(field("winding_down")).expect("wind-down flag"),
+        },
+        other => panic!("unsupported workflow journal result kind: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod journal_result_contract_tests {
+    use super::*;
+
+    #[test]
+    fn journal_result_kind_mismatch_is_rejected_at_the_storage_to_wire_seam() {
+        assert!(!journal_result_matches_kind(
+            WorkflowJournalEntryKind::Timer,
+            &WorkflowJournalResult::Log,
+        ));
+    }
 }
 
 #[derive(Default)]
@@ -588,7 +771,10 @@ async fn record_terminal_budget(
             "started" => {
                 let reading = terminal_budget_reading(&*accounting.lock().await, budget);
                 state
-                    .complete_workflow_journal_entry(entry.id, reading.clone())
+                    .complete_workflow_journal_entry(
+                        entry.id,
+                        workflow_journal_result("terminal_budget", reading.clone()),
+                    )
                     .await
                     .map(|_| ())
                     .map_err(|error| error.to_string())
@@ -617,7 +803,10 @@ async fn record_terminal_budget(
         .await
         .map_err(|error| error.to_string())?;
     state
-        .complete_workflow_journal_entry(intent.id, reading)
+        .complete_workflow_journal_entry(
+            intent.id,
+            workflow_journal_result("terminal_budget", reading),
+        )
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -2149,7 +2338,7 @@ async fn run_host_commands_inner(
                     .create_workflow_journal_intent(NewWorkflowJournalIntent {
                         run_id,
                         seq: current_seq,
-                        kind,
+                        kind: kind.clone(),
                         args_hash: journal_args_hash(&request),
                         request,
                         effect_kind: None,
@@ -2159,7 +2348,10 @@ async fn run_host_commands_inner(
                     .await
                 {
                     let _ = state
-                        .complete_workflow_journal_entry(intent.id, Value::Null)
+                        .complete_workflow_journal_entry(
+                            intent.id,
+                            workflow_journal_result(&kind, Value::Null),
+                        )
                         .await;
                 }
             }
@@ -2293,7 +2485,10 @@ async fn run_host_commands_inner(
                             "winding_down": true,
                         });
                         match state
-                            .complete_workflow_journal_entry(entry.id, reading)
+                            .complete_workflow_journal_entry(
+                                entry.id,
+                                workflow_journal_result("wind_down", reading),
+                            )
                             .await
                         {
                             Ok(_) => {
@@ -2370,7 +2565,10 @@ async fn run_host_commands_inner(
                                     .await
                                 {
                                     Ok(intent) => match state
-                                        .complete_workflow_journal_entry(intent.id, reading)
+                                        .complete_workflow_journal_entry(
+                                            intent.id,
+                                            workflow_journal_result("wind_down", reading),
+                                        )
                                         .await
                                     {
                                         Ok(_) => Ok(()),
@@ -2865,7 +3063,7 @@ async fn run_host_commands_inner(
                     Some(Some(entry_id)) => state
                         .complete_workflow_journal_entry(
                             *entry_id,
-                            serde_json::json!({"fired": true}),
+                            WorkflowJournalResult::Timer { fired: true },
                         )
                         .await
                         .map(|_| ())
@@ -3222,7 +3420,10 @@ async fn run_host_commands_inner(
                         };
                         match entry_id {
                             Ok(entry_id) => match state
-                                .complete_workflow_journal_entry(entry_id, reading.clone())
+                                .complete_workflow_journal_entry(
+                                    entry_id,
+                                    workflow_journal_result("budget", reading.clone()),
+                                )
                                 .await
                             {
                                 Ok(_) => {
@@ -3494,12 +3695,15 @@ async fn complete_worker_placement(
             state
                 .complete_workflow_journal_entry(
                     entry_id,
-                    serde_json::json!({
-                        "path": path,
-                        "can_write": repo.can_write,
-                        "authority_path": repo.authority_path,
-                        "authority_context_id": repo.authority_context_id,
-                    }),
+                    workflow_journal_result(
+                        "worker_placement",
+                        serde_json::json!({
+                            "path": path,
+                            "can_write": repo.can_write,
+                            "authority_path": repo.authority_path,
+                            "authority_context_id": repo.authority_context_id,
+                        }),
+                    ),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -3542,12 +3746,15 @@ async fn complete_worker_directory_resolution(
             state
                 .complete_workflow_journal_entry(
                     entry_id,
-                    serde_json::json!({
-                        "path": placement.path,
-                        "can_write": placement.can_write,
-                        "authority_path": placement.authority_path,
-                        "authority_context_id": placement.authority_context_id,
-                    }),
+                    workflow_journal_result(
+                        "worker_placement",
+                        serde_json::json!({
+                            "path": placement.path,
+                            "can_write": placement.can_write,
+                            "authority_path": placement.authority_path,
+                            "authority_context_id": placement.authority_context_id,
+                        }),
+                    ),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -3588,7 +3795,10 @@ async fn complete_worker_placement_listing(
         .collect::<Vec<_>>();
     let result = serde_json::json!({"paths": paths});
     state
-        .complete_workflow_journal_entry(entry_id, result.clone())
+        .complete_workflow_journal_entry(
+            entry_id,
+            workflow_journal_result("worker_placement", result.clone()),
+        )
         .await
         .map_err(|error| error.to_string())?;
     Ok(result)
@@ -3635,7 +3845,15 @@ async fn complete_agent_entry(
             state
                 .complete_workflow_journal_entry(
                     entry_id,
-                    serde_json::to_value(&result).expect("agent result serialises"),
+                    WorkflowJournalResult::AgentCall {
+                        output: result.output.clone(),
+                        input_tokens: result.input_tokens,
+                        output_tokens: result.output_tokens,
+                        working_directory: result.working_directory.clone(),
+                        session_id: result.session_id,
+                        thread_id: result.thread_id,
+                        turn_id: result.turn_id,
+                    },
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -3706,7 +3924,7 @@ async fn complete_event_post(
             "session_id": record.source_session_id, "turn_id": record.source_turn_id},
     });
     state
-        .complete_workflow_journal_entry(entry_id, result.clone())
+        .complete_workflow_journal_entry(entry_id, workflow_journal_result("event", result.clone()))
         .await
         .map_err(|error| error.to_string())?;
     Ok(result)
@@ -3836,7 +4054,10 @@ async fn complete_await_event(
     {
         let result = await_event_result(claimed);
         state
-            .complete_workflow_journal_entry(entry_id, result.clone())
+            .complete_workflow_journal_entry(
+                entry_id,
+                workflow_journal_result("await_event", result.clone()),
+            )
             .await
             .map_err(|error| error.to_string())?;
         return Ok(Some(result));
@@ -3862,7 +4083,10 @@ async fn complete_await_event(
     }
     let result = await_event_result(matched);
     state
-        .complete_workflow_journal_entry(entry_id, result.clone())
+        .complete_workflow_journal_entry(
+            entry_id,
+            workflow_journal_result("await_event", result.clone()),
+        )
         .await
         .map_err(|error| error.to_string())?;
     Ok(Some(result))
@@ -3892,7 +4116,7 @@ async fn complete_events_delivery(
         .map_err(|error| error.to_string())?;
     let result = serde_json::json!({ "delivered": delivered });
     state
-        .complete_workflow_journal_entry(entry_id, result.clone())
+        .complete_workflow_journal_entry(entry_id, workflow_journal_result("event", result.clone()))
         .await
         .map_err(|error| error.to_string())?;
     Ok(result)
@@ -3908,7 +4132,10 @@ async fn complete_gate_entry(
     match evaluate_run_gate(state, run_id, &request, cancellation).await {
         Ok(outcome) => {
             state
-                .complete_workflow_journal_entry(entry_id, outcome.clone())
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    workflow_journal_result("gate", outcome.clone()),
+                )
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(outcome)
@@ -4210,7 +4437,12 @@ async fn complete_workflow_call_entry(
         "completed" => {
             let output = record.final_output.unwrap_or(Value::Null);
             state
-                .complete_workflow_journal_entry(entry_id, output.clone())
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    WorkflowJournalResult::WorkflowCall {
+                        output: output.clone(),
+                    },
+                )
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(output)
@@ -4247,7 +4479,10 @@ async fn complete_effect_entry(
         Ok(receipt) => {
             let serialised = serde_json::to_value(&receipt).expect("receipt serialises");
             match state
-                .complete_workflow_journal_entry(entry_id, serialised)
+                .complete_workflow_journal_entry(
+                    entry_id,
+                    workflow_journal_result("effect", serialised),
+                )
                 .await
             {
                 Ok(_) => Ok(receipt),
@@ -14802,7 +15037,13 @@ mod tests {
             .iter()
             .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
             .expect("projected terminal budget entry");
-        assert_eq!(replayed.result.as_ref().unwrap()["closing_remaining"], 99);
+        assert!(matches!(
+            replayed.result,
+            Some(WorkflowJournalResult::TerminalBudget {
+                closing_remaining: Some(99),
+                ..
+            })
+        ));
         assert_eq!(
             detail
                 .journal
@@ -15191,7 +15432,13 @@ mod tests {
             .find(|entry| entry.kind == WorkflowJournalEntryKind::WindDown)
             .expect("wind-down journal entry");
         assert_eq!(wind_down.status, WorkflowJournalEntryStatus::Completed);
-        assert_eq!(wind_down.result.as_ref().unwrap()["winding_down"], true);
+        assert!(matches!(
+            wind_down.result,
+            Some(WorkflowJournalResult::WindDown {
+                winding_down: true,
+                ..
+            })
+        ));
         assert_eq!(provider.requests.lock().unwrap().len(), 6);
 
         storage

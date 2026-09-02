@@ -5253,7 +5253,16 @@
             ]
           },
           "request": true,
-          "result": true,
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowJournalResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "seq": {
             "format": "uint64",
             "minimum": 0,
@@ -5330,6 +5339,414 @@
           "failed"
         ],
         "type": "string"
+      },
+      "WorkflowJournalResult": {
+        "description": "A completed workflow journal entry's client-visible result. Durable\nstorage keeps this as JSON, but clients receive only one of these\nkind-specific shapes.",
+        "oneOf": [
+          {
+            "properties": {
+              "input_tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "agent_call",
+                "type": "string"
+              },
+              "output": true,
+              "output_tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "session_id": {
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "thread_id": {
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "turn_id": {
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "working_directory": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "output",
+              "input_tokens",
+              "output_tokens"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "authority_context_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "authority_path": {
+                "type": "string"
+              },
+              "can_write": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "worker_placement",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path",
+              "can_write",
+              "authority_path",
+              "authority_context_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "worker_placement_list",
+                "type": "string"
+              },
+              "paths": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "paths"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "delivered": {
+                "type": "boolean"
+              },
+              "effect_seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "effect",
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delivered",
+              "target",
+              "effect_seq"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "log",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "phase",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "workflow_call",
+                "type": "string"
+              },
+              "output": true
+            },
+            "required": [
+              "kind",
+              "output"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "fired": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "timer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "fired"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_kind": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "event",
+                "type": "string"
+              },
+              "payload": true,
+              "seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "source": {
+                "$ref": "#/components/schemas/WorkflowRunEventSource"
+              }
+            },
+            "required": [
+              "kind",
+              "seq",
+              "event_kind",
+              "payload",
+              "source"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "delivered": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "event_delivery",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "delivered"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event_kind": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "await_event",
+                "type": "string"
+              },
+              "payload": true,
+              "seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "source": {
+                "$ref": "#/components/schemas/WorkflowRunEventSource"
+              }
+            },
+            "required": [
+              "kind",
+              "seq",
+              "event_kind",
+              "payload",
+              "source"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "events": true,
+              "kind": {
+                "const": "gate",
+                "type": "string"
+              },
+              "read_up_to_seq": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reasoning": {
+                "type": "string"
+              },
+              "wake": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "kind",
+              "wake",
+              "reasoning",
+              "events",
+              "read_up_to_seq"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "closing_remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "budget",
+                "type": "string"
+              },
+              "remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "spent": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "winding_down": {
+                "type": "boolean"
+              },
+              "working_remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "spent",
+              "winding_down"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "closing_remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "terminal_budget",
+                "type": "string"
+              },
+              "remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "spent": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "spent"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "closing_remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "wind_down",
+                "type": "string"
+              },
+              "remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "spent": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "winding_down": {
+                "type": "boolean"
+              },
+              "working_remaining": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "spent",
+              "remaining",
+              "working_remaining",
+              "closing_remaining",
+              "winding_down"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WorkflowRun": {
         "properties": {
