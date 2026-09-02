@@ -288,6 +288,37 @@ async fn a_page_created_without_a_template_is_blank_and_has_no_lineage() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn listing_templates_returns_only_the_requested_spaces_summaries() {
+    let (router, _storage) = make_test_router();
+    let first_space = make_space(&router, "first-template-space").await;
+    let second_space = make_space(&router, "second-template-space").await;
+    let first_template = make_template(&router, &first_space).await;
+    let second_template = make_template(&router, &second_space).await;
+
+    for (space_id, template_id) in [
+        (&first_space, &first_template),
+        (&second_space, &second_template),
+    ] {
+        let (status, body) = http_json(
+            &router,
+            "GET",
+            &format!("/api/spaces/{space_id}/page-templates"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "template list: {body}");
+        let templates = body["templates"].as_array().unwrap();
+        assert_eq!(templates.len(), 1, "only this space's template is listed");
+        assert_eq!(templates[0]["id"].as_str(), Some(template_id.as_str()));
+        assert_eq!(templates[0]["name"].as_str(), Some("Standup"));
+        assert!(
+            templates[0]["updated_at"].is_string(),
+            "the list returns the template summary"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
     let (router, _storage) = make_test_router();
     let space_id = make_space(&router, "fork-divergence").await;
