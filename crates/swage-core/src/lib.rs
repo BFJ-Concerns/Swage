@@ -19,6 +19,14 @@ pub mod runtime;
 pub mod secret;
 pub mod tool;
 
+/// Whether a value is a non-empty lowercase ASCII slug.
+pub fn is_lowercase_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 // ---------------------------------------------------------------------------
 // Convenience re-exports
 // ---------------------------------------------------------------------------
