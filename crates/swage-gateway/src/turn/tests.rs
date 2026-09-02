@@ -7952,6 +7952,9 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
 
 #[tokio::test]
 async fn approval_resumption_keeps_structured_tool_messages() {
+    // Another test's space context element would otherwise reach this turn
+    // through the process-wide swage home, adding a sixth message.
+    let _home = crate::test_support::SwageHomeGuard::isolate();
     let round_1 = vec![
         StreamChunk::ToolUse {
             call_id: "c1".into(),
