@@ -62,6 +62,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow terminal-budget audit entries now settle to failed after bounded completion-write retries, rather than remaining started.
 - Carried workflows excluded for invalid metadata are now recorded in the local audit trail.
 - Remote-device registration now refuses a Local target consistently, including pairing and recovery imports that have no local producer.
 - Workflow-script updates now retain source-header descriptions, expose their whole delivery grant in configuration history, and return 404 for an absent script.
