@@ -879,6 +879,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_composition(
     state: &AppState,
@@ -913,6 +914,48 @@ pub(crate) async fn process_turn_with_composition(
         agent_call_scope,
         None,
         None,
+    )
+    .await
+}
+
+/// Process a composed turn with a call-scoped model selection. Workflow calls
+/// use this to make their journalled model choice explicit without changing
+/// the session's durable selection for an ordinary one-off turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_composition_and_model(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    input: impl Into<TurnInput>,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
+    agent_call_scope: Option<Uuid>,
+    requested_model: Option<String>,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        input.into(),
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        composition,
+        agent_call_scope,
+        None,
+        requested_model,
     )
     .await
 }

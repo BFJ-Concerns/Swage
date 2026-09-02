@@ -487,6 +487,10 @@ fn journal_wire(
             output_tokens: result
                 .and_then(|v| v.get("output_tokens"))
                 .and_then(Value::as_u64),
+            served_model: result
+                .and_then(|v| v.get("served_model"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }
     });
     let label = entry
@@ -1246,6 +1250,84 @@ impl WorkflowHost for ChannelWorkflowHost {
     }
 }
 
+struct WorkflowTurnAttempt {
+    outcome: Result<(), String>,
+    events: Vec<ServerEvent>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_workflow_agent_turn(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    prompt: String,
+    schema: Option<Value>,
+    schema_retries: Option<u32>,
+    effort: Option<swage_core::Effort>,
+    timeout_ms: Option<u64>,
+    cancellation: CancellationToken,
+    composition: crate::turn::DispatchContextComposition,
+    journal_entry_id: Uuid,
+    requested_model: Option<String>,
+) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
+    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let call_cancellation = cancellation.child_token();
+    let mut processing = Box::pin(crate::turn::process_turn_with_composition_and_model(
+        state,
+        session_id,
+        Some(thread_id),
+        prompt,
+        events,
+        Arc::new(Mutex::new(SubscriptionState::new(false))),
+        schema,
+        schema_retries,
+        effort,
+        Some(call_cancellation.clone()),
+        None,
+        crate::turn::TurnAttendance::Unattended,
+        composition,
+        Some(journal_entry_id),
+        requested_model,
+    ));
+    let timeout = timeout_ms.map(std::time::Duration::from_millis);
+    let outcome = tokio::select! {
+        biased;
+        result = &mut processing => {
+            if cancellation.is_cancelled() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                }
+                return Err("WorkflowCancelledError".into());
+            }
+            result.map_err(|error| error.to_string())
+        }
+        () = cancellation.cancelled() => {
+            call_cancellation.cancel();
+            if let Err(error) = processing.await {
+                tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+            }
+            return Err("WorkflowCancelledError".into());
+        }
+        () = async {
+            match timeout {
+                Some(duration) => tokio::time::sleep(duration).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            call_cancellation.cancel();
+            if let Err(error) = processing.await {
+                tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
+            }
+            return Err(format!(
+                "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
+                timeout_ms.expect("timeout branch requires a deadline")
+            ).into());
+        }
+    };
+    let events = std::iter::from_fn(|| events_rx.try_recv().ok()).collect();
+    Ok(WorkflowTurnAttempt { outcome, events })
+}
+
 async fn run_ephemeral_agent_call(
     state: &AppState,
     run_id: Uuid,
@@ -1451,83 +1533,74 @@ async fn run_ephemeral_agent_call(
             (session.id, thread.id)
         }
     };
-    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
         .as_ref()
         .map(|_| request.max_attempts.saturating_sub(1));
-    let call_cancellation = cancellation.child_token();
     let composition = crate::turn::DispatchContextComposition {
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
         skills: request.skills.clone(),
     };
-    // Boxed: the turn future carries the whole composed input and would
-    // otherwise push this call's future past the large-future lint.
-    let mut processing = Box::pin(crate::turn::process_turn_with_composition(
+    let primary = execute_workflow_agent_turn(
         state,
         session_id,
-        Some(thread_id),
-        request.prompt,
-        events,
-        Arc::new(Mutex::new(SubscriptionState::new(false))),
-        request.schema,
+        thread_id,
+        request.prompt.clone(),
+        request.schema.clone(),
         request_schema_retries,
         request.effort,
-        Some(call_cancellation.clone()),
-        None,
-        crate::turn::TurnAttendance::Unattended,
-        composition,
-        Some(journal_entry_id),
-    ));
-    let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
-    tokio::select! {
-        biased;
-        result = &mut processing => {
-            // Parent cancellation propagates through call_cancellation and can
-            // settle the turn before this select observes the cancelled arm.
-            // A turn interrupted that way is a cancellation outcome, not an
-            // agent-call failure.
-            if cancellation.is_cancelled() {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
-                }
-                return Err("WorkflowCancelledError".into());
-            }
-            result.map_err(|error| error.to_string())?
-        }
-        () = cancellation.cancelled() => {
-            call_cancellation.cancel();
-            // The turn path owns the sandbox and active-turn registration.
-            // Let it observe cancellation and run that cleanup before the
-            // workflow cancellation is surfaced.
-            if let Err(error) = processing.await {
-                tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
-            }
-            return Err("WorkflowCancelledError".into());
-        }
-        () = async {
-            match timeout {
-                Some(duration) => tokio::time::sleep(duration).await,
-                None => std::future::pending().await,
-            }
-        } => {
-            call_cancellation.cancel();
-            // The turn path owns the sandbox and active-turn registration.
-            // Let it observe cancellation and run that cleanup before the
-            // timeout is surfaced to the workflow journal.
-            if let Err(error) = processing.await {
-                tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
-            }
-            return Err(format!(
-                "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
-                request.timeout_ms.expect("timeout branch requires a deadline")
+        request.timeout_ms,
+        cancellation.clone(),
+        composition.clone(),
+        journal_entry_id,
+        request.model.clone(),
+    )
+    .await?;
+    let emitted_output = primary
+        .events
+        .iter()
+        .any(|event| matches!(event, ServerEvent::Token { .. }));
+    let mut served_model = request.model.clone();
+    let final_events = match primary.outcome {
+        Ok(()) => primary.events,
+        Err(error) if !emitted_output => {
+            let Some(fallback_model) = request.fallback_model.clone() else {
+                return Err(error.into());
+            };
+            crate::turn::resolve_requested_turn_model(&state.active_config(), &fallback_model)
+                .map_err(|fallback_error| {
+                    format!(
+                        "AgentCallError: selected model failed before output ({error}); declared fallback {fallback_model:?} is unavailable: {fallback_error}"
+                    )
+                })?;
+            let fallback = execute_workflow_agent_turn(
+                state,
+                session_id,
+                thread_id,
+                request.prompt.clone(),
+                request.schema.clone(),
+                request_schema_retries,
+                request.effort,
+                request.timeout_ms,
+                cancellation,
+                composition,
+                journal_entry_id,
+                Some(fallback_model.clone()),
             )
-            .into());
+            .await?;
+            fallback.outcome.map_err(|fallback_error| {
+                format!(
+                    "AgentCallError: selected model failed before output ({error}); fallback model {fallback_model:?} failed: {fallback_error}"
+                )
+            })?;
+            served_model = Some(fallback_model);
+            fallback.events
         }
-    }
+        Err(error) => return Err(error.into()),
+    };
     let turn = state
         .storage
         .list_turns_by_thread(thread_id)
@@ -1536,10 +1609,10 @@ async fn run_ephemeral_agent_call(
         .into_iter()
         .max_by_key(|turn| turn.created_at)
         .ok_or_else(|| "agent call produced no turn".to_string())?;
-    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+    let schema_exhausted = final_events.iter().any(|event| {
         matches!(
             event,
-            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if *turn_id == turn.id
         )
     });
     // The turn's failure must surface as this call's error — the shared turn
@@ -1583,11 +1656,25 @@ async fn run_ephemeral_agent_call(
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
         }
     };
+    let selected_model = match served_model {
+        Some(model) => model,
+        None => state
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .and_then(|session| session.selected_model_id)
+            .unwrap_or_else(|| state.active_config().models.default),
+    };
+    let served_model =
+        crate::turn::resolve_model_catalogue_entry(&state.active_config().models, &selected_model)
+            .map(|(model_id, _)| model_id.to_string());
     Ok(AgentCallResult {
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
         working_directory: resolved_working_directory.map(|placement| placement.path),
+        served_model,
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
@@ -6355,6 +6442,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -6432,6 +6520,7 @@ mod tests {
             tools: None,
             skills,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -6553,6 +6642,7 @@ mod tests {
             tools: Some(tools.into_iter().map(String::from).collect()),
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -6860,6 +6950,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             effort: None,
             timeout_ms: None,
             cwd: None,
@@ -8130,6 +8221,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -8241,6 +8333,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -8419,6 +8512,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -8486,6 +8580,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -8541,6 +8636,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -9290,6 +9386,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             effort: None,
             timeout_ms: None,
             cwd: None,
@@ -10561,6 +10658,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -10611,6 +10709,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 effort: None,
                 timeout_ms: None,
                 cwd: None,
@@ -12292,6 +12391,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 3,
             label: None,
@@ -12341,6 +12441,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             session: Some(AgentSessionRef {
                 session_id: session.id,
@@ -12475,6 +12576,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12555,6 +12657,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12642,6 +12745,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12810,6 +12914,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12948,6 +13053,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13078,6 +13184,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13159,6 +13266,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13404,6 +13512,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13636,6 +13745,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -14374,6 +14484,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -14483,6 +14594,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: Some("recorded failure".into()),
@@ -15933,6 +16045,187 @@ mod tests {
                 .filter(|entry| entry.kind == "timer")
                 .count(),
             1
+        );
+    }
+
+    fn fallback_test_config() -> swage_config::ResolvedConfig {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "pinned".into();
+        config.models.entries.insert(
+            "pinned".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "pinned-wire".into(),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "fallback".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "fallback-wire".into(),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    async fn fallback_test_state(
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+    ) -> (
+        AppState,
+        Arc<SqliteStorage>,
+        Arc<ScriptedRecordingProvider>,
+        Uuid,
+    ) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(outputs.into()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            fallback_test_config(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (state, storage, provider, space.id)
+    }
+
+    async fn run_declared_fallback(state: &AppState, space_id: Uuid, model: &str) -> Uuid {
+        let source = format!(
+            r#"return await agent("answer", {{ agent: "default", model: {model:?}, fallbackModel: "fallback" }});"#
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(state, started.id).await;
+        started.id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_model_retries_only_before_output_and_records_the_served_model() {
+        let (state, storage, provider, space_id) =
+            fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
+        let run_id = run_declared_fallback(&state, space_id, "missing").await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.state, "completed",
+            "an absent pinned model must use its declared fallback"
+        );
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("agent call");
+        assert_eq!(
+            call.result
+                .as_ref()
+                .and_then(|result| result["served_model"].as_str()),
+            Some("fallback")
+        );
+        let Json(detail) = get_run(State(state.clone()), Path(run_id))
+            .await
+            .expect("workflow detail");
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.agent_call.is_some())
+                .and_then(|entry| entry.agent_call.as_ref())
+                .and_then(|call| call.served_model.as_deref()),
+            Some("fallback"),
+            "the workflow projection must expose the model that served"
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the unknown model must fail before a provider request"
+        );
+        assert_eq!(requests[0].model.as_deref(), Some("fallback-wire"));
+
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "pinned refused".into(),
+            }],
+            scripted_text_output("fallback answer"),
+        ])
+        .await;
+        let run_id = run_declared_fallback(&state, space_id, "pinned").await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.state, "completed",
+            "a pre-output provider failure must use the fallback"
+        );
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("agent call");
+        assert_eq!(
+            call.result
+                .as_ref()
+                .and_then(|result| result["served_model"].as_str()),
+            Some("fallback")
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("pinned-wire"), Some("fallback-wire")]
+        );
+
+        let (state, storage, provider, space_id) = fallback_test_state(vec![vec![
+            swage_core::StreamChunk::Delta {
+                content: "partial".into(),
+            },
+            swage_core::StreamChunk::Error {
+                message: "failed after output".into(),
+            },
+        ]])
+        .await;
+        let run_id = run_declared_fallback(&state, space_id, "pinned").await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.state, "failed",
+            "a failure after output must preserve the worker failure"
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "a partial response must not trigger fallback"
         );
     }
 
