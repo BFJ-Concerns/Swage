@@ -354,10 +354,11 @@ describe("App", () => {
     vi.mocked(spacesApi.listSpaceSessions).mockResolvedValue([]);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (component) {
       unmount(component);
       component = undefined;
+      await settleUi();
     }
 
     while (document.body.firstChild) {
@@ -508,7 +509,7 @@ describe("App", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       "Conversation not found",
     );
-    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
+    expect(websocketHarness.clientFor("stale-id")).toBeUndefined();
     await openSpaceFromPicker("default");
     expect(
       document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
@@ -587,8 +588,8 @@ describe("App", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       "Conversation not found",
     );
-    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
-    expect(websocketHarness.client.disconnect).toHaveBeenCalledOnce();
+    expect(websocketHarness.clientFor(deletedConversation.id)?.connect).toHaveBeenCalledTimes(1);
+    expect(websocketHarness.clientFor(deletedConversation.id)?.disconnect).toHaveBeenCalledOnce();
     expect(document.body.textContent).not.toContain(
       "Present before server-side deletion",
     );
@@ -617,10 +618,8 @@ describe("App", () => {
       null,
       null,
     );
-    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(2);
-    expect(websocketHarness.client.connect).toHaveBeenLastCalledWith(
-      replacementConversation.id,
-    );
+    expect(websocketHarness.clientFor(replacementConversation.id)?.connect)
+      .toHaveBeenCalledWith(replacementConversation.id);
   });
 
   it("shows the not-found notice when popstate restores a stale ID with no active conversation", async () => {
@@ -657,7 +656,7 @@ describe("App", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       "Conversation not found",
     );
-    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
+    expect(websocketHarness.clientFor("stale-id")).toBeUndefined();
   });
 
   it("keeps the active conversation when its route existence check fails transiently", async () => {
@@ -820,8 +819,7 @@ describe("App", () => {
     flushSync(() => selectButton!.click());
     await settleUi();
 
-    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
-    expect(websocketHarness.client.connect).toHaveBeenCalledWith(selected.id);
+    expect(websocketHarness.clientFor(selected.id)?.connect).toHaveBeenCalledWith(selected.id);
   });
 
   it("shows desktop shell context when the electron bridge is present", async () => {
