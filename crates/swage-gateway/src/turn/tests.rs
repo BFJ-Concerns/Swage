@@ -1340,6 +1340,57 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<bool, StorageError> {
         unimplemented!()
     }
+    async fn create_workflow_run_hold(
+        &self,
+        _: swage_storage::NewWorkflowRunHold,
+    ) -> Result<swage_storage::WorkflowRunHoldRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn get_workflow_run_hold(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::WorkflowRunHoldRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_run_holds(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunHoldRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn list_open_workflow_run_holds(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunHoldRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn answer_workflow_run_hold(
+        &self,
+        _: Uuid,
+        _: swage_storage::WorkflowRunHoldAnswer,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
+    async fn create_workflow_run_hold_rejection(
+        &self,
+        _: swage_storage::NewWorkflowRunHoldRejection,
+    ) -> Result<swage_storage::WorkflowRunHoldRejectionRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_run_hold_rejections(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunHoldRejectionRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn park_workflow_run_if_hold_open(
+        &self,
+        _: Uuid,
+        _: chrono::DateTime<chrono::Utc>,
+        _: Uuid,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn create_workflow_journal_intent(
         &self,
         _: swage_storage::NewWorkflowJournalIntent,

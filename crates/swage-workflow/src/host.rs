@@ -149,6 +149,44 @@ pub struct GateRequest {
     pub model: Option<String>,
 }
 
+/// A decision the script cannot make itself: what is being decided and the
+/// closed set of answers it will accept. Fewer than two distinct verdicts is
+/// no decision and is refused at the raise.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HoldRequest {
+    pub content: String,
+    pub verdicts: Vec<String>,
+}
+
+impl HoldRequest {
+    /// The raise-time rule, kept with the request rather than in one host:
+    /// a hold names what is being decided and offers at least two distinct
+    /// answers. One permitted answer is no decision, so it is refused here
+    /// instead of opening a hold nobody can meaningfully answer.
+    pub fn validated_verdicts(&self) -> Result<Vec<String>, String> {
+        if self.content.trim().is_empty() {
+            return Err("HoldError: content must say what is being decided".into());
+        }
+        let mut verdicts: Vec<String> = Vec::new();
+        for verdict in &self.verdicts {
+            let verdict = verdict.trim();
+            if verdict.is_empty() {
+                return Err("HoldError: an accepted verdict cannot be blank".into());
+            }
+            if !verdicts.iter().any(|existing| existing == verdict) {
+                verdicts.push(verdict.to_owned());
+            }
+        }
+        if verdicts.len() < 2 {
+            return Err(format!(
+                "HoldError: a hold needs at least two distinct accepted verdicts, got {}",
+                verdicts.len()
+            ));
+        }
+        Ok(verdicts)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EffectPayload {
     pub content: String,
@@ -307,6 +345,19 @@ pub trait WorkflowHost: Send + Sync {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         Err("RunEventError: this host does not support the wake gate".into())
+    }
+
+    /// Raise a decision hold and wait for an accepted verdict (journalled;
+    /// exactly-once under replay). A live run parks while it waits and
+    /// resumes when an agent answers through the granted tool; replay
+    /// returns the journalled verdict. Resolves to
+    /// `{hold_id, verdict, answered_by}`.
+    async fn raise_hold(
+        &self,
+        _request: HoldRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("HoldError: this host does not support decision holds".into())
     }
 
     /// Stamp pending events up to `up_to_seq` as delivered by the current

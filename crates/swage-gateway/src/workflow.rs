@@ -11,21 +11,25 @@ use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
 use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
-    CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
+    AnswerWorkflowRunHoldRequest, AnswerWorkflowRunHoldResponse, CreateWorkflowScriptRequest,
+    PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
     WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
+    WorkflowRunHold, WorkflowRunHoldRejection, WorkflowRunHoldState,
     WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
     NewAuditEvent, NewSession, NewThread, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, Storage, ThreadStore, WorkflowRunEventRecord, WorkflowRunRecord,
+    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, Storage, ThreadStore,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
     WorkflowRunWorkerPlacement, WorkflowScriptRecord,
 };
 use swage_workflow::{
-    AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
+    AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt, HoldRequest,
     EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
     RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
     WorkflowHostError, journal_args_hash, recover_started_effect,
@@ -446,6 +450,7 @@ fn journal_wire(
         "event" => WorkflowJournalEntryKind::Event,
         "await_event" => WorkflowJournalEntryKind::AwaitEvent,
         "gate" => WorkflowJournalEntryKind::Gate,
+        "hold" => WorkflowJournalEntryKind::Hold,
         "budget" => WorkflowJournalEntryKind::Budget,
         "terminal_budget" => WorkflowJournalEntryKind::TerminalBudget,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
@@ -988,6 +993,11 @@ enum HostCommand {
         cancellation: CancellationToken,
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    Hold {
+        request: HoldRequest,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     DeliverEvents {
         up_to_seq: u64,
         reply: oneshot::Sender<Result<Value, String>>,
@@ -1201,6 +1211,24 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped awaited-event reply".to_string())?
+    }
+
+    async fn raise_hold(
+        &self,
+        request: HoldRequest,
+        cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::Hold {
+                request,
+                cancellation,
+                reply,
+            })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped hold reply".to_string())?
     }
 
     async fn evaluate_wake_gate(
@@ -2058,7 +2086,7 @@ async fn run_host_commands_inner(
         .filter(|entry| {
             matches!(
                 entry.kind.as_str(),
-                "agent_call" | "workflow_call" | "gate" | "await_event"
+                "agent_call" | "workflow_call" | "gate" | "await_event" | "hold"
             ) && entry.status == "completed"
         })
         .filter_map(|entry| entry.completed_order.map(|order| (entry.seq, order)))
@@ -3056,6 +3084,192 @@ async fn run_host_commands_inner(
                     }
                 }
             }
+            HostCommand::Hold {
+                request,
+                cancellation,
+                reply,
+            } => {
+                // The raise-time rule is checked before a seq is consumed,
+                // so a refused hold is deterministic across live runs and
+                // replays alike and leaves the journal's sequence alone.
+                let verdicts = match request.validated_verdicts() {
+                    Ok(verdicts) => verdicts,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                };
+                let content = request.content.trim().to_owned();
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request_json = serde_json::json!({
+                    "action": "raise", "content": content, "verdicts": verdicts,
+                });
+                let hash = journal_args_hash(&request_json);
+                let existing = replay.get(current_seq as usize).cloned();
+                if existing
+                    .as_ref()
+                    .is_some_and(|entry| entry.args_hash != hash)
+                {
+                    let _ = reply.send(Err("NondeterministicReplayError".into()));
+                    continue;
+                }
+                if let Some(entry) = existing
+                    .as_ref()
+                    .filter(|entry| entry.status == "completed")
+                {
+                    if let Some(rank) = replay_agent_ranks.get(&current_seq).copied() {
+                        await_replay_release(rank, &replay_release_rank, &replay_release_notify)
+                            .await;
+                    }
+                    let _ = reply.send(
+                        entry
+                            .result
+                            .clone()
+                            .ok_or_else(|| "completed hold entry has no result".to_string()),
+                    );
+                    continue;
+                }
+                if let Some(entry) = existing.as_ref().filter(|entry| entry.status == "failed") {
+                    let _ = reply.send(Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded hold failure".into())));
+                    continue;
+                }
+                let entry_id = match existing {
+                    Some(entry) => entry.id,
+                    None => match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "hold".into(),
+                            args_hash: hash,
+                            request: request_json,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(entry) => entry.id,
+                        Err(error) => {
+                            let _ = reply.send(Err(error.to_string()));
+                            continue;
+                        }
+                    },
+                };
+                // Opening the hold is idempotent on the raising entry, so a
+                // started entry redone after a crash reads its own decision
+                // back instead of opening a second one.
+                let hold = match state
+                    .storage
+                    .create_workflow_run_hold(NewWorkflowRunHold {
+                        run_id,
+                        journal_entry_id: entry_id,
+                        content,
+                        verdicts,
+                    })
+                    .await
+                {
+                    Ok(hold) => hold,
+                    Err(error) => {
+                        let _ = reply.send(Err(error.to_string()));
+                        continue;
+                    }
+                };
+                match settle_answered_hold(&state, entry_id, hold.id).await {
+                    Ok(Some(result)) => {
+                        let _ = reply.send(Ok(result));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
+                // Already parked by a sibling wait: this hold joins the park
+                // rather than lowering the run's wake, which nothing but an
+                // answer can bring forward.
+                if parked_due.is_some() {
+                    parked_replies.push(reply);
+                    continue;
+                }
+                // Parking honours the same two guards a durable timer wait
+                // does: an in-flight call would be double-executed by wake
+                // replay, and an armed sibling timer would die unfired.
+                // Raising a hold is itself idempotent, so when a guard
+                // refuses the park the engine simply stays up and watches
+                // the decision in process.
+                if pending_timers.is_empty() && in_flight.load(Ordering::SeqCst) == 0 {
+                    let distant = chrono::Utc::now() + chrono::Duration::days(36500);
+                    match state
+                        .storage
+                        .park_workflow_run_if_hold_open(run_id, distant, hold.id)
+                        .await
+                    {
+                        Ok(true) => {
+                            parked_due = Some(distant);
+                            park.cancel();
+                            parked_replies.push(reply);
+                            continue;
+                        }
+                        Ok(false) => {
+                            // The storage CAS closes the window between
+                            // opening the hold and parking on it: an answer
+                            // that won the race is taken now instead of
+                            // being slept past.
+                            match settle_answered_hold(&state, entry_id, hold.id).await {
+                                Ok(Some(result)) => {
+                                    let _ = reply.send(Ok(result));
+                                }
+                                Ok(None) => {
+                                    let _ = reply.send(Err(
+                                        "WorkflowCancelledError: run changed state before the hold could park"
+                                            .into(),
+                                    ));
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                }
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error.to_string()));
+                            continue;
+                        }
+                    }
+                }
+                let watch_state = state.clone();
+                let hold_id = hold.id;
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            () = cancellation.cancelled() => {
+                                let _ = reply.send(Err(
+                                    "WorkflowCancelledError: hold cancelled".into(),
+                                ));
+                                return;
+                            }
+                            () = tokio::time::sleep(std::time::Duration::from_millis(
+                                HOLD_WATCH_INTERVAL_MS,
+                            )) => {}
+                        }
+                        match settle_answered_hold(&watch_state, entry_id, hold_id).await {
+                            Ok(Some(result)) => {
+                                let _ = reply.send(Ok(result));
+                                return;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
             HostCommand::DeliverEvents { up_to_seq, reply } => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let request_json =
@@ -3710,6 +3924,213 @@ async fn complete_event_post(
         .await
         .map_err(|error| error.to_string())?;
     Ok(result)
+}
+
+/// How often a hold that could not park re-reads its decision. Only reached
+/// when a park guard refused — a parked run is woken by the answer itself.
+const HOLD_WATCH_INTERVAL_MS: u64 = 200;
+
+/// What a settled hold resolves to in the script.
+fn hold_answer_value(hold: &WorkflowRunHoldRecord) -> Value {
+    serde_json::json!({
+        "hold_id": hold.id,
+        "content": hold.content,
+        "verdict": hold.verdict,
+        "answered_by": {
+            "surface": hold.answer_surface, "agent_id": hold.answer_agent_id,
+            "session_id": hold.answer_session_id, "turn_id": hold.answer_turn_id,
+        },
+    })
+}
+
+/// Settle the raising journal entry if the hold has been answered. The
+/// waiting run settles its own journal, never the answerer: the answer is
+/// durable in the hold row, so a crash between the two leaves the entry
+/// started and replay finds the same verdict waiting.
+async fn settle_answered_hold(
+    state: &AppState,
+    entry_id: Uuid,
+    hold_id: Uuid,
+) -> Result<Option<Value>, String> {
+    let hold = state
+        .storage
+        .get_workflow_run_hold(hold_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("HoldError: hold {hold_id} vanished while it was waiting"))?;
+    if hold.state != "answered" {
+        return Ok(None);
+    }
+    let result = hold_answer_value(&hold);
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Some(result))
+}
+
+/// A hold as the run record and the answering tool both show it: the
+/// decision, its accepted answers, and every answer refused along the way.
+pub(crate) async fn hold_projection(
+    state: &AppState,
+    hold: WorkflowRunHoldRecord,
+) -> Result<WorkflowRunHold, ApiError> {
+    let rejections = state
+        .storage
+        .list_workflow_run_hold_rejections(hold.id)
+        .await
+        .map_err(internal)?;
+    Ok(project_hold(hold, rejections))
+}
+
+fn project_hold(
+    hold: WorkflowRunHoldRecord,
+    rejections: Vec<WorkflowRunHoldRejectionRecord>,
+) -> WorkflowRunHold {
+    WorkflowRunHold {
+        id: hold.id,
+        run_id: hold.run_id,
+        seq: hold.seq,
+        content: hold.content,
+        verdicts: hold.verdicts,
+        state: if hold.state == "answered" {
+            WorkflowRunHoldState::Answered
+        } else {
+            WorkflowRunHoldState::Open
+        },
+        verdict: hold.verdict,
+        answered_by: hold.answer_surface.map(|surface| WorkflowRunEventSource {
+            surface,
+            agent_id: hold.answer_agent_id,
+            session_id: hold.answer_session_id,
+            turn_id: hold.answer_turn_id,
+        }),
+        raised_at: hold.raised_at,
+        answered_at: hold.answered_at,
+        rejections: rejections
+            .into_iter()
+            .map(|rejection| WorkflowRunHoldRejection {
+                id: rejection.id,
+                attempted_verdict: rejection.attempted_verdict,
+                feedback: rejection.feedback,
+                source: WorkflowRunEventSource {
+                    surface: rejection.source_surface,
+                    agent_id: rejection.source_agent_id,
+                    session_id: rejection.source_session_id,
+                    turn_id: rejection.source_turn_id,
+                },
+                rejected_at: rejection.rejected_at,
+            })
+            .collect(),
+    }
+}
+
+/// The run's holds as the run detail projection carries them.
+pub(crate) async fn run_hold_projections(
+    state: &AppState,
+    run_id: Uuid,
+) -> Result<Vec<WorkflowRunHold>, ApiError> {
+    let holds = state
+        .storage
+        .list_workflow_run_holds(run_id)
+        .await
+        .map_err(internal)?;
+    let mut projected = Vec::with_capacity(holds.len());
+    for hold in holds {
+        projected.push(hold_projection(state, hold).await?);
+    }
+    Ok(projected)
+}
+
+/// The one answering service behind the granted tool. Attribution is the
+/// caller's own, never a parameter, and an answer outside the hold's set is
+/// recorded and refused with feedback rather than reaching the script.
+pub(crate) async fn answer_run_hold(
+    state: &AppState,
+    request: AnswerWorkflowRunHoldRequest,
+    source: RunEventSource,
+) -> Result<AnswerWorkflowRunHoldResponse, ApiError> {
+    let hold = state
+        .storage
+        .get_workflow_run_hold(request.hold_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run hold", request.hold_id))?;
+    let run = state
+        .storage
+        .get_workflow_run(hold.run_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run", hold.run_id))?;
+    if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(ApiError::conflict(format!(
+            "workflow run {} is already {}",
+            hold.run_id, run.state
+        )));
+    }
+    if hold.state == "answered" {
+        return Err(ApiError::conflict(format!(
+            "hold {} was already answered with {}",
+            hold.id,
+            hold.verdict.as_deref().unwrap_or("a verdict")
+        )));
+    }
+    let verdict = request.verdict.trim().to_owned();
+    if !hold.verdicts.iter().any(|accepted| accepted == &verdict) {
+        let feedback = format!(
+            "'{verdict}' is not one of this hold's accepted verdicts ({}). The hold is still open; answer it with one of them.",
+            hold.verdicts.join(", ")
+        );
+        state
+            .storage
+            .create_workflow_run_hold_rejection(NewWorkflowRunHoldRejection {
+                hold_id: hold.id,
+                attempted_verdict: verdict,
+                feedback: feedback.clone(),
+                source_surface: source.surface.into(),
+                source_agent_id: source.agent_id,
+                source_session_id: source.session_id,
+                source_turn_id: source.turn_id,
+            })
+            .await
+            .map_err(internal)?;
+        return Err(ApiError::validation(feedback));
+    }
+    let settled = state
+        .storage
+        .answer_workflow_run_hold(
+            hold.id,
+            WorkflowRunHoldAnswer {
+                verdict,
+                surface: source.surface.into(),
+                agent_id: source.agent_id,
+                session_id: source.session_id,
+                turn_id: source.turn_id,
+            },
+        )
+        .await
+        .map_err(internal)?;
+    if !settled {
+        return Err(ApiError::conflict(format!(
+            "hold {} was answered by someone else first",
+            hold.id
+        )));
+    }
+    let wake_provisioned = state
+        .storage
+        .make_parked_workflow_run_due(hold.run_id)
+        .await
+        .map_err(internal)?;
+    let answered = state
+        .storage
+        .get_workflow_run_hold(hold.id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run hold", hold.id))?;
+    Ok(AnswerWorkflowRunHoldResponse {
+        hold: hold_projection(state, answered).await?,
+        wake_provisioned,
+    })
 }
 
 #[derive(Clone)]
@@ -5164,10 +5585,12 @@ pub async fn get_run(
         .into_iter()
         .map(|entry| journal_wire(entry).map_err(internal))
         .collect::<Result<Vec<_>, ApiError>>()?;
+    let holds = run_hold_projections(&state, id).await?;
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
         wake_metrics,
+        holds,
     }))
 }
 
