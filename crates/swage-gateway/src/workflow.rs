@@ -1433,7 +1433,17 @@ async fn close_open_held_workers(storage: &dyn Storage, run_id: Uuid) {
         .filter_map(worker_id_of)
         .filter(|worker_id| !closed.contains(worker_id))
         .collect::<Vec<_>>();
-    let first_seq = journal.iter().map(|entry| entry.seq).max().unwrap_or(0) + 1;
+    // The terminal audit record sits at the reserved top of the range, so the
+    // next ordinary sequence is taken from the positional entries alone —
+    // otherwise a closure would be numbered past it and sort before the open
+    // it answers.
+    let first_seq = journal
+        .iter()
+        .filter(|entry| is_positional_journal_entry(entry))
+        .map(|entry| entry.seq)
+        .max()
+        .unwrap_or(0)
+        + 1;
     for (next_seq, worker_id) in (first_seq..).zip(open) {
         let request = serde_json::json!({
             "action": "close", "worker_id": worker_id, "closed_by": "run_end",
@@ -5313,6 +5323,9 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
+        // Every terminal path reaches here — the park case returned above —
+        // so no outcome leaves a worker held.
+        close_open_held_workers(storage.as_ref(), run_id).await;
         if let Err(problem) = record_terminal_budget(
             &terminal_budget_state_owner,
             run_id,
@@ -5326,9 +5339,6 @@ async fn launch_existing_run(
         if run_state == "cancelled" {
             settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
         }
-        // Every terminal path reaches here — the park case returned above —
-        // so no outcome leaves a worker held.
-        close_open_held_workers(storage.as_ref(), run_id).await;
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
                 Some(host_reference) => {
@@ -9272,6 +9282,54 @@ mod tests {
             .expect("a run that throws still closes its held worker");
         assert_eq!(closure.status, "completed");
         assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "run_end");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_end_closure_is_journalled_between_the_last_turn_and_the_terminal_record() {
+        let source = r#"
+            const worker = await session({agent: "worker"});
+            await send(worker, "start something");
+            throw new Error("the script gave up");
+        "#;
+        let (storage, run, _provider, _home) =
+            run_held_worker_script(source, vec![scripted_text_output("started")]).await;
+        assert_eq!(run.state, "failed");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert!(
+            journal
+                .iter()
+                .filter(|entry| is_positional_journal_entry(entry))
+                .all(|entry| entry.seq < TERMINAL_BUDGET_SEQUENCE),
+            "no script entry is numbered past the reserved terminal record: {:?}",
+            journal.iter().map(|entry| entry.seq).collect::<Vec<_>>()
+        );
+        let ordered = journal
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind.as_str(),
+                    entry
+                        .request
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                ("worker", "open"),
+                ("agent_call", ""),
+                ("worker", "close"),
+                ("terminal_budget", ""),
+            ],
+            "the journal reads in the order the run lived it"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
