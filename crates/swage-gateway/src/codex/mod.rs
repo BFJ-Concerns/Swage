@@ -871,13 +871,42 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_with_audit_failure(scenario, dispatcher, permissions, false).await
+        run_scripted_turn_with_effort(scenario, dispatcher, permissions, None).await
+    }
+
+    async fn run_scripted_turn_with_effort(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        effort: Option<ResolvedEffort>,
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
+    ) {
+        run_scripted_turn_inner(scenario, dispatcher, permissions, effort, false).await
     }
 
     async fn run_scripted_turn_with_audit_failure(
         scenario: Value,
         dispatcher: ToolDispatcher,
         permissions: PermissionConfig,
+        fail_audit_writes: bool,
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
+    ) {
+        run_scripted_turn_inner(scenario, dispatcher, permissions, None, fail_audit_writes).await
+    }
+
+    async fn run_scripted_turn_inner(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        effort: Option<ResolvedEffort>,
         fail_audit_writes: bool,
     ) -> (
         Result<OutboundMessage, AgentError>,
@@ -934,7 +963,7 @@ mod tests {
             turn_id: turn.id,
             agent_id: "gateway".to_string(),
             model: "fake-codex".to_string(),
-            effort: None,
+            effort,
             user_message: "scripted turn".to_string(),
             assembled_context: Vec::new(),
             agent_config: AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
@@ -971,8 +1000,8 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn resolved_codex_levels_and_clamps_reach_the_turn_start_request() {
+    #[tokio::test]
+    async fn resolved_codex_levels_and_clamps_reach_the_turn_start_request() {
         for (requested, expected) in [
             (Effort::Low, "low"),
             (Effort::Medium, "medium"),
@@ -985,20 +1014,76 @@ mod tests {
                 requested,
                 &effort_capability("gpt-5.3-codex").expect("documented Codex model"),
             );
-            let mut request = json!({"threadId":"thread"});
-            add_codex_effort(&mut request, Some(&resolved));
+            let notifications = successful_turn_notifications();
+            let scenario = json!({"keepOpen":true,"steps":[
+                {
+                    "receive":{"method":"thread/start"},
+                    "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+                },
+                {
+                    "receive":{"method":"turn/start","params":{"effort":expected}},
+                    "send":[
+                        {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                        notifications[0].clone(),
+                        notifications[1].clone()
+                    ]
+                }
+            ]});
+            let result = run_scripted_turn_with_effort(
+                scenario,
+                ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+                permissions(&[], &[]),
+                Some(resolved),
+            )
+            .await
+            .0;
             assert_eq!(
-                request["effort"], expected,
-                "{requested} reaches the wire as resolved"
+                result.expect("scripted Codex turn succeeds").response,
+                "done"
             );
         }
     }
 
-    #[test]
-    fn codex_omits_non_named_resolved_controls() {
-        let mut request = json!({"threadId":"thread"});
-        add_codex_effort(&mut request, None);
-        assert!(request.get("effort").is_none());
+    #[tokio::test]
+    async fn codex_omits_non_named_resolved_controls() {
+        let notifications = successful_turn_notifications();
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    notifications[0].clone(),
+                    notifications[1].clone()
+                ]
+            }
+        ]});
+        let (result, _, _, events) = run_scripted_turn(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+        )
+        .await;
+        assert_eq!(
+            result.expect("scripted Codex turn succeeds").response,
+            "done"
+        );
+        let turn_start = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ProviderRequestPrepared { request, .. } => request
+                    .get("params")
+                    .filter(|_| request["method"] == "turn/start"),
+                _ => None,
+            })
+            .expect("production turn/start request was sent");
+        assert!(
+            turn_start.get("effort").is_none(),
+            "an omitted resolved control is absent from the production turn/start request"
+        );
     }
 
     #[tokio::test]

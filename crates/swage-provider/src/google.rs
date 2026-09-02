@@ -30,8 +30,6 @@ struct GenerateContentRequest {
     system_instruction: Option<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GenerationConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_config: Option<GeminiThinkingConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<GeminiTool>,
 }
@@ -122,6 +120,8 @@ struct GenerationConfig {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<GeminiThinkingConfig>,
 }
 
 /// Tool definition for function calling.
@@ -374,14 +374,20 @@ impl GoogleProvider {
         let (system_instruction, remaining) = Self::extract_system(&request.messages);
         let contents = Self::convert_messages(&remaining);
 
+        let thinking_config = request
+            .effort
+            .as_ref()
+            .and_then(|effort| google_thinking_config(effort.control));
         let generation_config = if request.max_tokens.is_some()
             || request.temperature.is_some()
             || request.stop_sequences.is_some()
+            || thinking_config.is_some()
         {
             Some(GenerationConfig {
                 max_output_tokens: request.max_tokens,
                 temperature: request.temperature,
                 stop_sequences: request.stop_sequences.clone(),
+                thinking_config,
             })
         } else {
             None
@@ -422,10 +428,6 @@ impl GoogleProvider {
             contents,
             system_instruction,
             generation_config,
-            thinking_config: request
-                .effort
-                .as_ref()
-                .and_then(|effort| google_thinking_config(effort.control)),
             tools,
         }
     }
@@ -443,6 +445,7 @@ impl GoogleProvider {
                 max_output_tokens: request.max_tokens,
                 temperature: request.temperature,
                 stop_sequences: request.stop_sequences.clone(),
+                thinking_config: None,
             })
         } else {
             None
@@ -480,7 +483,6 @@ impl GoogleProvider {
             contents,
             system_instruction,
             generation_config,
-            thinking_config: None,
             tools,
         }
     }
@@ -1018,9 +1020,23 @@ mod tests {
                 tool_definitions: vec![],
             }))
             .unwrap();
-            let budget = body["thinkingConfig"]["thinkingBudget"]
+            let expected_google_body = serde_json::json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": 1}}
+            });
+            assert!(
+                body["generationConfig"].get("thinkingConfig").is_some(),
+                "the documented positive-control body nests thinkingConfig in generationConfig"
+            );
+            let budget = body["generationConfig"]["thinkingConfig"]["thinkingBudget"]
                 .as_u64()
                 .expect("resolved Google control is a numeric budget");
+            if level == Effort::Minimal {
+                assert_eq!(
+                    body["generationConfig"], expected_google_body["generationConfig"],
+                    "the documented positive-control fixture is the generated request shape"
+                );
+            }
             assert!(previous.is_none_or(|previous| budget > previous));
             previous = Some(budget);
         }
@@ -1048,7 +1064,14 @@ mod tests {
             tool_definitions: vec![],
         }))
         .unwrap();
-        assert_eq!(body["thinkingConfig"]["thinkingBudget"], 0);
+        let expected_google_body = serde_json::json!({
+            "contents": [],
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
+        });
+        assert_eq!(
+            body["generationConfig"], expected_google_body["generationConfig"],
+            "the documented positive-control fixture is the generated disable shape"
+        );
 
         let omitted = serde_json::to_value(provider.build_request(&CompletionRequest {
             effort: None,
@@ -1061,7 +1084,7 @@ mod tests {
             tool_definitions: vec![],
         }))
         .unwrap();
-        assert!(omitted.get("thinkingConfig").is_none());
+        assert!(omitted.get("generationConfig").is_none());
     }
 
     #[test]
