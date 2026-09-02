@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, RunEventPost,
+    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, HoldRequest, RunEventPost,
     WorkflowCallRequest, WorkflowHost, WorkflowHostError,
 };
 
@@ -724,6 +724,30 @@ impl WorkflowEngine {
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__awaitEvent", await_event).map_err(|error| error.to_string())?;
 
+                    let hold_host = Arc::clone(&host);
+                    let hold_cancellation = host_cancellation.clone();
+                    let hold = Function::new(
+                        ctx.clone(),
+                        Async(move |request_json: String| {
+                            let host = Arc::clone(&hold_host);
+                            let cancellation = hold_cancellation.clone();
+                            async move {
+                                let request: HoldRequest = match serde_json::from_str(&request_json) {
+                                    Ok(request) => request,
+                                    Err(error) => return serde_json::json!({"ok": false, "error": {"name": "HoldError", "message": error.to_string()}}).to_string(),
+                                };
+                                match host.raise_hold(request, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HoldError");
+                                        serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__hold", hold).map_err(|error| error.to_string())?;
+
                     let gate_host = Arc::clone(&host);
                     let gate_cancellation = host_cancellation.clone();
                     let gate = Function::new(
@@ -1064,6 +1088,15 @@ impl WorkflowEngine {
                             unwrapHostResponse(await __postEvent(String(kind), JSON.stringify(payload ?? null)));
                         globalThis.awaitEvent = async ({ kinds }) =>
                             unwrapHostResponse(await __awaitEvent(JSON.stringify({ kinds })));
+                        // hold() raises a decision the script cannot make
+                        // itself and waits for an agent to answer it
+                        // through the granted tool; the run parks meanwhile
+                        // rather than holding a worker on the wait.
+                        globalThis.hold = async ({ content, verdicts }) =>
+                            unwrapHostResponse(await __hold(JSON.stringify({
+                                content: String(content ?? ""),
+                                verdicts: Array.isArray(verdicts) ? verdicts.map(String) : [],
+                            })));
                         globalThis.gate = async (options = {}) =>
                             unwrapHostResponse(await __gate(JSON.stringify({
                                 criteria: options.criteria ?? "",
@@ -1305,6 +1338,8 @@ mod tests {
         awaited_events: Mutex<Vec<AwaitEventRequest>>,
         gate_requests: Mutex<Vec<GateRequest>>,
         gate_verdict: Value,
+        hold_requests: Mutex<Vec<HoldRequest>>,
+        hold_verdict: String,
         deliveries_up_to: Mutex<Vec<u64>>,
         budget_snapshot: Value,
     }
@@ -1325,6 +1360,8 @@ mod tests {
                 awaited_events: Mutex::new(Vec::new()),
                 gate_requests: Mutex::new(Vec::new()),
                 gate_verdict: Value::Null,
+                hold_requests: Mutex::new(Vec::new()),
+                hold_verdict: "ship".into(),
                 deliveries_up_to: Mutex::new(Vec::new()),
                 budget_snapshot: json!({
                     "spent": 0,
@@ -1451,6 +1488,20 @@ mod tests {
         ) -> Result<Value, String> {
             self.awaited_events.lock().expect("awaits").push(request);
             Ok(json!({"seq": 4, "kind": "operator.decision", "payload": {"verdict": "accept"}}))
+        }
+
+        async fn raise_hold(
+            &self,
+            request: HoldRequest,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            request.validated_verdicts()?;
+            self.hold_requests.lock().expect("holds").push(request);
+            Ok(json!({
+                "hold_id": "00000000-0000-0000-0000-0000000000aa",
+                "verdict": self.hold_verdict,
+                "answered_by": {"surface": "agent", "agent_id": "reviewer"},
+            }))
         }
 
         async fn evaluate_wake_gate(

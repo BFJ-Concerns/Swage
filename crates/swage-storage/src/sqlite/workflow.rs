@@ -6,9 +6,10 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
+    NewWorkflowRunHoldRejection, NewWorkflowScript, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::WorkflowStore;
@@ -197,6 +198,52 @@ fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRe
         posted_at: time(row.get(10)?)?,
         delivered_wake_seq: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
         delivered_at: delivered_at.map(time).transpose()?,
+    })
+}
+
+const RUN_HOLD_COLUMNS: &str = "id, run_id, journal_entry_id, seq, content, verdicts_json, state, verdict, answer_surface, answer_agent_id, answer_session_id, answer_turn_id, raised_at, answered_at";
+
+fn run_hold_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunHoldRecord> {
+    let answered_at: Option<String> = row.get(13)?;
+    Ok(WorkflowRunHoldRecord {
+        id: uuid(row.get(0)?)?,
+        run_id: uuid(row.get(1)?)?,
+        journal_entry_id: uuid(row.get(2)?)?,
+        seq: row.get::<_, i64>(3)? as u64,
+        content: row.get(4)?,
+        verdicts: serde_json::from_str(&row.get::<_, String>(5)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state: row.get(6)?,
+        verdict: row.get(7)?,
+        answer_surface: row.get(8)?,
+        answer_agent_id: row.get(9)?,
+        answer_session_id: row.get::<_, Option<String>>(10)?.map(uuid).transpose()?,
+        answer_turn_id: row.get::<_, Option<String>>(11)?.map(uuid).transpose()?,
+        raised_at: time(row.get(12)?)?,
+        answered_at: answered_at.map(time).transpose()?,
+    })
+}
+
+const RUN_HOLD_REJECTION_COLUMNS: &str = "id, hold_id, attempted_verdict, feedback, source_surface, source_agent_id, source_session_id, source_turn_id, rejected_at";
+
+fn run_hold_rejection_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkflowRunHoldRejectionRecord> {
+    Ok(WorkflowRunHoldRejectionRecord {
+        id: uuid(row.get(0)?)?,
+        hold_id: uuid(row.get(1)?)?,
+        attempted_verdict: row.get(2)?,
+        feedback: row.get(3)?,
+        source_surface: row.get(4)?,
+        source_agent_id: row.get(5)?,
+        source_session_id: row.get::<_, Option<String>>(6)?.map(uuid).transpose()?,
+        source_turn_id: row.get::<_, Option<String>>(7)?.map(uuid).transpose()?,
+        rejected_at: time(row.get(8)?)?,
     })
 }
 
@@ -655,6 +702,190 @@ impl WorkflowStore for SqliteStorage {
                     delivered_wake_seq as i64,
                     now.to_rfc3339()
                 ],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn create_workflow_run_hold(
+        &self,
+        hold: NewWorkflowRunHold,
+    ) -> Result<WorkflowRunHoldRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let verdicts = serde_json::to_string(&hold.verdicts)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| {
+            // Seq assignment and the idempotency key live in one statement,
+            // as they do for a posted event: a replayed raise inserts
+            // nothing and reads back the decision the original run opened.
+            conn.execute(
+                "INSERT INTO workflow_run_holds (id, run_id, journal_entry_id, seq, content, verdicts_json, state, raised_at) \
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_holds WHERE run_id = ?2), ?4, ?5, 'open', ?6) \
+                 ON CONFLICT(journal_entry_id) DO NOTHING",
+                params![
+                    id.to_string(),
+                    hold.run_id.to_string(),
+                    hold.journal_entry_id.to_string(),
+                    hold.content,
+                    verdicts,
+                    now.to_rfc3339()
+                ],
+            )?;
+            conn.query_row(
+                &format!(
+                    "SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds WHERE journal_entry_id = ?1"
+                ),
+                [hold.journal_entry_id.to_string()],
+                run_hold_row,
+            )
+        })
+        .await
+    }
+
+    async fn get_workflow_run_hold(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowRunHoldRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!("SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds WHERE id = ?1"),
+                [id.to_string()],
+                run_hold_row,
+            )
+            .optional()
+        })
+        .await
+    }
+
+    async fn list_workflow_run_holds(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds \
+                 WHERE run_id = ?1 ORDER BY seq ASC"
+            ))?;
+            stmt.query_map([run_id.to_string()], run_hold_row)?.collect()
+        })
+        .await
+    }
+
+    async fn list_open_workflow_run_holds(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {} FROM workflow_run_holds h \
+                 JOIN workflow_runs r ON r.id = h.run_id \
+                 WHERE r.space_id = ?1 AND h.state = 'open' \
+                 ORDER BY h.raised_at ASC",
+                RUN_HOLD_COLUMNS
+                    .split(", ")
+                    .map(|column| format!("h.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))?;
+            stmt.query_map([space_id.to_string()], run_hold_row)?
+                .collect()
+        })
+        .await
+    }
+
+    async fn answer_workflow_run_hold(
+        &self,
+        id: Uuid,
+        answer: WorkflowRunHoldAnswer,
+    ) -> Result<bool, StorageError> {
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            // Only an open hold settles: a second answerer arriving behind
+            // the first changes nothing and is told it lost.
+            let changed = conn.execute(
+                "UPDATE workflow_run_holds \
+                 SET state = 'answered', verdict = ?2, answer_surface = ?3, answer_agent_id = ?4, \
+                     answer_session_id = ?5, answer_turn_id = ?6, answered_at = ?7 \
+                 WHERE id = ?1 AND state = 'open'",
+                params![
+                    id.to_string(),
+                    answer.verdict,
+                    answer.surface,
+                    answer.agent_id,
+                    answer.session_id.map(|id| id.to_string()),
+                    answer.turn_id.map(|id| id.to_string()),
+                    now.to_rfc3339()
+                ],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    async fn create_workflow_run_hold_rejection(
+        &self,
+        rejection: NewWorkflowRunHoldRejection,
+    ) -> Result<WorkflowRunHoldRejectionRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO workflow_run_hold_rejections (id, hold_id, attempted_verdict, feedback, source_surface, source_agent_id, source_session_id, source_turn_id, rejected_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id.to_string(),
+                    rejection.hold_id.to_string(),
+                    rejection.attempted_verdict,
+                    rejection.feedback,
+                    rejection.source_surface,
+                    rejection.source_agent_id,
+                    rejection.source_session_id.map(|id| id.to_string()),
+                    rejection.source_turn_id.map(|id| id.to_string()),
+                    now.to_rfc3339()
+                ],
+            )?;
+            conn.query_row(
+                &format!(
+                    "SELECT {RUN_HOLD_REJECTION_COLUMNS} FROM workflow_run_hold_rejections WHERE id = ?1"
+                ),
+                [id.to_string()],
+                run_hold_rejection_row,
+            )
+        })
+        .await
+    }
+
+    async fn list_workflow_run_hold_rejections(
+        &self,
+        hold_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRejectionRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_HOLD_REJECTION_COLUMNS} FROM workflow_run_hold_rejections \
+                 WHERE hold_id = ?1 ORDER BY rejected_at ASC, id ASC"
+            ))?;
+            stmt.query_map([hold_id.to_string()], run_hold_rejection_row)?
+                .collect()
+        })
+        .await
+    }
+
+    async fn park_workflow_run_if_hold_open(
+        &self,
+        id: Uuid,
+        wake_at: DateTime<Utc>,
+        hold_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_runs SET state='parked', wake_at=?2, completed_at=NULL \
+                 WHERE id=?1 AND state='running' AND EXISTS (\
+                     SELECT 1 FROM workflow_run_holds \
+                     WHERE id=?3 AND run_id=?1 AND state='open'\
+                 )",
+                params![id.to_string(), wake_at.to_rfc3339(), hold_id.to_string()],
             )?;
             Ok(changed == 1)
         })
