@@ -212,9 +212,11 @@ pub struct CompletionRequest {
     /// default model is used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Provider reasoning effort. Providers without a native mapping omit it.
+    /// The resolved effort for this request: the control the adapter sends,
+    /// already reconciled with the model's declared capability. Adapters
+    /// express `control` and never re-interpret `requested`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<crate::Effort>,
+    pub effort: Option<crate::ResolvedEffort>,
     /// Maximum number of tokens to generate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,

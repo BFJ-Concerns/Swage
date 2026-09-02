@@ -671,20 +671,22 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_conversation_accepts_a_shipped_research_agent() {
+    async fn fresh_space_conversation_rejects_a_workflow_role_name() {
         let (svc, storage) = make_definition_service();
 
-        let resp = svc
+        // A shipped workflow's roles are bare dispatches inside its script,
+        // never definitions; the picker and the creation selector see only
+        // authored rows plus the shipped default.
+        let error = svc
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: None,
                 agent_id: Some("synthesist".to_string()),
                 effort: None,
             })
             .await
-            .expect("shipped definition should be selectable without an authored row");
+            .expect_err("a workflow role name is not a selectable definition");
 
-        let session = storage.get_session(resp.id).await.unwrap().unwrap();
-        assert_eq!(session.agent_id, "synthesist");
+        assert!(matches!(error, GatewayError::ValidationError(_)));
         assert!(
             storage
                 .list_agent_definitions(None)
@@ -829,6 +831,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "Hello!".to_string(),
@@ -910,6 +913,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "Hi".to_string(),
@@ -921,6 +925,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Hello!".to_string(),
@@ -1017,6 +1022,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "list files".into(),
@@ -1029,6 +1035,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "I'll run ls for you.".into(),
@@ -1111,6 +1118,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Ran python".into(),
@@ -1210,6 +1218,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Hello".into(),

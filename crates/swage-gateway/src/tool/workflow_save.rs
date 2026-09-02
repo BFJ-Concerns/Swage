@@ -460,10 +460,7 @@ mod tests {
         let (state, storage) = state();
         let (space_id, session_id) = saving_session(&state, &storage).await;
         let (context, _ws) = host_context(&state, &storage, session_id);
-        let shipped = crate::builtin_workflows::BUILTIN_WORKFLOWS
-            .first()
-            .expect("a shipped workflow")
-            .name;
+        let shipped = "research-sweep";
 
         let saved = WorkflowSaveTool
             .execute(
@@ -478,9 +475,13 @@ mod tests {
             .expect("a save under a shipped name creates the space's own script");
         assert_eq!(saved["created"], true);
 
-        // The shipped workflow is compiled in, not a row: saving over its
-        // name cannot have edited it, and the space now resolves its own.
-        assert!(crate::builtin_workflows::find_by_name(shipped).is_some());
+        // The shipped workflow is compiled in with its carrying skill, not a
+        // row: saving over its name cannot have edited it, and the space now
+        // resolves its own.
+        assert!(
+            crate::shipped_skills::workflow_files("research")
+                .any(|file| file.path.ends_with(&format!("/{shipped}.js")))
+        );
         let rows = storage.list_workflow_scripts(space_id).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, shipped);

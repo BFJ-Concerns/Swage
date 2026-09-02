@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use swage_core::ToolResult;
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmRequest,
-    LlmResponse, ProviderContentBlockWitness, ProviderError, ProviderResponseWitness, Role,
-    StreamChunk, TokenUsage, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, Effort, EffortCapability,
+    EffortControl, FinishReason, LlmRequest, LlmResponse, ProviderContentBlockWitness,
+    ProviderError, ProviderResponseWitness, Role, StreamChunk, TokenUsage, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::http::{HttpClient, SseEvent, StreamResponseMetadata};
@@ -29,7 +29,7 @@ const ANTHROPIC_COUNT_TOKENS_PATH: &str = "/v1/messages/count_tokens";
 const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
     (
         "swage_supplied",
-        "thinking and output_config are jointly sourced from the resolved Swage effort choice",
+        "thinking and output_config express the Swage-resolved effort control",
     ),
     (
         "dynamic_vendor_context",
@@ -72,11 +72,57 @@ struct AnthropicOutputConfig {
     effort: &'static str,
 }
 
+/// The `thinking` control. Adaptive thinking pairs with a named
+/// `output_config.effort`; `disabled` is the model's true off switch.
 #[derive(Serialize)]
 struct AnthropicThinkingConfig {
     #[serde(rename = "type")]
     kind: &'static str,
-    display: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<&'static str>,
+}
+
+/// The effort control Anthropic documents for the Messages API: named
+/// levels on `output_config.effort` from `low` to `max`, with adaptive
+/// thinking beside them, and `thinking.type = "disabled"` as a true off.
+/// Declared for Claude models only — the adapter vouches for the models
+/// Anthropic documents, and answers `None` for anything else routed to it.
+pub(crate) fn anthropic_effort_capability() -> EffortCapability {
+    EffortCapability::Levels {
+        levels: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Max],
+        can_disable: true,
+    }
+}
+
+/// The two Anthropic request fields a resolved effort becomes. Adapters
+/// express the resolved `control` only — the intent has already been
+/// reconciled with the declared capability, so a level here is one the
+/// wire accepts.
+fn anthropic_effort_controls(
+    control: EffortControl,
+) -> (
+    Option<AnthropicOutputConfig>,
+    Option<AnthropicThinkingConfig>,
+) {
+    match control {
+        EffortControl::Level { level } => (
+            Some(AnthropicOutputConfig {
+                effort: level.as_str(),
+            }),
+            Some(AnthropicThinkingConfig {
+                kind: "adaptive",
+                display: Some("omitted"),
+            }),
+        ),
+        EffortControl::Disabled => (
+            None,
+            Some(AnthropicThinkingConfig {
+                kind: "disabled",
+                display: None,
+            }),
+        ),
+        EffortControl::Budget { .. } | EffortControl::Omitted => (None, None),
+    }
 }
 
 /// Request body for POST /v1/messages/count_tokens — the messages-request
@@ -913,23 +959,18 @@ impl AnthropicProvider {
         stream: bool,
     ) -> MessagesRequest {
         let (system, messages) = Self::to_anthropic_messages(&request.messages);
+        let (output_config, thinking) = request
+            .effort
+            .as_ref()
+            .map(|effort| anthropic_effort_controls(effort.control))
+            .unwrap_or((None, None));
         MessagesRequest {
             model: request
                 .model
                 .clone()
                 .unwrap_or_else(|| self.config.model.clone()),
-            output_config: request.effort.map(|effort| AnthropicOutputConfig {
-                effort: match effort {
-                    swage_core::Effort::Low => "low",
-                    swage_core::Effort::Medium => "medium",
-                    swage_core::Effort::High => "high",
-                    swage_core::Effort::Max => "max",
-                },
-            }),
-            thinking: request.effort.map(|_| AnthropicThinkingConfig {
-                kind: "adaptive",
-                display: "omitted",
-            }),
+            output_config,
+            thinking,
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             system,
@@ -1030,6 +1071,14 @@ impl AnthropicProvider {
 impl LlmProvider for AnthropicProvider {
     fn model_id(&self) -> &str {
         &self.config.model
+    }
+
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("claude")
+            .then(anthropic_effort_capability)
     }
 
     fn provider_request_snapshot(
@@ -1589,7 +1638,7 @@ mod tests {
     fn count_request_carries_the_prompt_and_no_generation_parameters() {
         let provider = AnthropicProvider::new("key", "configured-model");
         let request = CompletionRequest {
-            effort: Some(swage_core::Effort::High),
+            effort: Some(resolved(Effort::High)),
             messages: vec![
                 ChatMessage::new(Role::System, "You are terse."),
                 ChatMessage::new(Role::User, "How long is this?"),
@@ -1651,38 +1700,13 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "user");
     }
 
-    #[test]
-    fn every_completion_effort_maps_to_both_anthropic_controls() {
-        let provider = AnthropicProvider::new("key", "model");
-        for (effort, expected) in [
-            (swage_core::Effort::Low, "low"),
-            (swage_core::Effort::Medium, "medium"),
-            (swage_core::Effort::High, "high"),
-            (swage_core::Effort::Max, "max"),
-        ] {
-            let request = CompletionRequest {
-                effort: Some(effort),
-                messages: vec![ChatMessage::new(Role::User, "Think carefully")],
-                model: None,
-                max_tokens: None,
-                temperature: None,
-                stop_sequences: None,
-                metadata: None,
-                tool_definitions: vec![],
-            };
-            let body = serde_json::to_value(provider.build_request_for_completion(&request, false))
-                .unwrap();
-            assert_eq!(body["output_config"]["effort"], expected);
-            assert_eq!(body["thinking"]["type"], "adaptive");
-            assert_eq!(body["thinking"]["display"], "omitted");
-        }
+    fn resolved(level: Effort) -> swage_core::ResolvedEffort {
+        swage_core::resolve_effort(level, &anthropic_effort_capability())
     }
 
-    #[test]
-    fn completion_without_effort_omits_anthropic_output_config() {
-        let provider = AnthropicProvider::new("key", "model");
-        let request = CompletionRequest {
-            effort: None,
+    fn effort_request(effort: Option<swage_core::ResolvedEffort>) -> CompletionRequest {
+        CompletionRequest {
+            effort,
             messages: vec![ChatMessage::new(Role::User, "Think carefully")],
             model: None,
             max_tokens: None,
@@ -1690,9 +1714,99 @@ mod tests {
             stop_sequences: None,
             metadata: None,
             tool_definitions: vec![],
+        }
+    }
+
+    #[test]
+    fn every_native_level_maps_to_both_anthropic_controls() {
+        let provider = AnthropicProvider::new("key", "model");
+        for (level, expected) in [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Max, "max"),
+        ] {
+            let body = serde_json::to_value(
+                provider
+                    .build_request_for_completion(&effort_request(Some(resolved(level))), false),
+            )
+            .unwrap();
+            assert_eq!(body["output_config"]["effort"], expected);
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["thinking"]["display"], "omitted");
+        }
+    }
+
+    /// The adapter expresses the resolved control, never the intent: a level
+    /// Anthropic lacks arrives already clamped, and `off` arrives as the
+    /// model's own disable.
+    #[test]
+    fn a_resolved_clamp_and_a_disable_reach_the_wire_as_resolved() {
+        let provider = AnthropicProvider::new("key", "model");
+
+        let clamped = resolved(Effort::Xhigh);
+        assert_eq!(clamped.clamped_to, Some(Effort::High));
+        let body = serde_json::to_value(
+            provider.build_request_for_completion(&effort_request(Some(clamped)), false),
+        )
+        .unwrap();
+        assert_eq!(body["output_config"]["effort"], "high");
+
+        let off = resolved(Effort::Off);
+        assert_eq!(off.control, EffortControl::Disabled);
+        let body = serde_json::to_value(
+            provider.build_request_for_completion(&effort_request(Some(off)), false),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body["thinking"].get("display").is_none());
+        assert!(!body.as_object().unwrap().contains_key("output_config"));
+    }
+
+    #[test]
+    fn effort_capability_is_declared_for_claude_models_only() {
+        let provider = AnthropicProvider::new("key", "claude-opus-5");
+        assert!(provider.effort_capability("claude-opus-5").is_some());
+        assert!(provider.effort_capability("some-other-model").is_none());
+    }
+
+    /// The declaration is bound to the documented control: every level the
+    /// wire accepts is declared, and the wire accepts every declared level.
+    #[test]
+    fn the_declared_capability_matches_the_documented_control() {
+        let capability = anthropic_effort_capability();
+        capability.validate().unwrap();
+        let EffortCapability::Levels {
+            levels,
+            can_disable,
+        } = capability
+        else {
+            panic!("Anthropic declares named levels");
         };
-        let body =
-            serde_json::to_value(provider.build_request_for_completion(&request, false)).unwrap();
+        assert!(can_disable, "thinking.type = disabled is a true off");
+        let mut declared = levels.clone();
+        declared.sort();
+        assert_eq!(
+            declared,
+            vec![Effort::Low, Effort::Medium, Effort::High, Effort::Max]
+        );
+        for level in levels {
+            let (output_config, _) = anthropic_effort_controls(EffortControl::Level { level });
+            assert_eq!(
+                output_config.map(|config| config.effort),
+                Some(level.as_str()),
+                "{level} is sent as itself"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_without_effort_omits_anthropic_output_config() {
+        let provider = AnthropicProvider::new("key", "model");
+        let body = serde_json::to_value(
+            provider.build_request_for_completion(&effort_request(None), false),
+        )
+        .unwrap();
         assert!(!body.as_object().unwrap().contains_key("output_config"));
         assert!(!body.as_object().unwrap().contains_key("thinking"));
     }
@@ -1926,7 +2040,7 @@ mod tests {
             serde_json::json!([
                 [
                     "swage_supplied",
-                    "thinking and output_config are jointly sourced from the resolved Swage effort choice"
+                    "thinking and output_config express the Swage-resolved effort control"
                 ],
                 [
                     "dynamic_vendor_context",

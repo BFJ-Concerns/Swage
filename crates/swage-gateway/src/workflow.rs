@@ -5,10 +5,7 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::State;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
@@ -38,8 +35,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    builtin_workflows::{self, BUILTIN_WORKFLOWS, BuiltinWorkflow},
-    error::ApiError,
+    error::{ApiError, Json, Path},
     state::AppState,
     subscription::SubscriptionState,
     turn::{
@@ -101,7 +97,6 @@ struct EffectiveWorkflow {
     delivery_grant: Option<Value>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
-    built_in: bool,
     immutable: bool,
     carrying_skill: Option<String>,
     argument_schema: Option<Value>,
@@ -115,36 +110,9 @@ struct InlineWorkflowIdentity {
 }
 
 impl EffectiveWorkflow {
-    fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Result<Self, String> {
-        let released_at = builtin_workflows::released_at(workflow);
-        Ok(Self {
-            id: builtin_workflows::id(space_id, workflow.name),
-            space_id,
-            name: workflow.name.into(),
-            description: workflow.description.into(),
-            head_version: 1,
-            source: workflow.source.into(),
-            script_version_id: None,
-            delivery_grant: None,
-            created_at: released_at,
-            updated_at: released_at,
-            built_in: true,
-            immutable: true,
-            carrying_skill: None,
-            argument_schema: swage_workflow::script_meta(workflow.source)
-                .map_err(|error| {
-                    format!(
-                        "built-in workflow {} metadata is invalid: {error}",
-                        workflow.name
-                    )
-                })?
-                .argument_schema,
-        })
-    }
-
     fn inline_identity(&self) -> Option<InlineWorkflowIdentity> {
-        // Immutable workflows — built-in and skill-carried alike — keep their
-        // source inline rather than in the authored-version tables.
+        // Immutable workflows — skill-carried ones — keep their source inline
+        // rather than in the authored-version tables.
         self.immutable.then(|| InlineWorkflowIdentity {
             id: self.id,
             name: self.name.clone(),
@@ -178,7 +146,6 @@ impl EffectiveWorkflow {
             delivery_grant: None,
             created_at: chrono::DateTime::UNIX_EPOCH,
             updated_at: chrono::DateTime::UNIX_EPOCH,
-            built_in: false,
             immutable: true,
             carrying_skill: Some(skill.name.clone()),
             argument_schema,
@@ -300,7 +267,6 @@ async fn authored_workflow(
         delivery_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
-        built_in: false,
         immutable: false,
         carrying_skill: None,
         argument_schema,
@@ -323,15 +289,9 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    if let Some(workflow) = carried_workflows(space_id, skills)?
+    Ok(carried_workflows(space_id, skills)?
         .into_iter()
-        .find(|workflow| workflow.name == name)
-    {
-        return Ok(Some(workflow));
-    }
-    builtin_workflows::find_by_name(name)
-        .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow))
-        .transpose()
+        .find(|workflow| workflow.name == name))
 }
 
 async fn resolve_workflow_by_id(
@@ -387,23 +347,18 @@ async fn list_effective_workflows(
         .map_err(|error| error.to_string())?;
     let authored_names: std::collections::HashSet<_> =
         records.iter().map(|record| record.name.clone()).collect();
-    let mut workflows = Vec::with_capacity(records.len() + BUILTIN_WORKFLOWS.len());
+    let mut workflows = Vec::with_capacity(records.len());
     for record in records {
         workflows.push(authored_workflow(state, record).await?);
     }
+    // Carried workflows arrive in skill precedence order (the discovery
+    // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
     for workflow in carried_workflows(space_id, skills)? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
     }
-    workflows.extend(
-        BUILTIN_WORKFLOWS
-            .iter()
-            .filter(|workflow| !effective_names.contains(workflow.name))
-            .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(workflows)
 }
@@ -943,7 +898,7 @@ impl GatewayWorkflowLauncher {
             inherited_worker_placement,
         )
         .await
-        .map_err(|error| error.0.to_string())?;
+        .map_err(|error| error.message().to_owned())?;
         if !wait {
             return serde_json::to_value(run).map_err(|error| error.to_string());
         }
@@ -964,7 +919,7 @@ impl GatewayWorkflowLauncher {
         })
         .await
         .map_err(|_| "workflow wait timed out".to_string())??;
-        serde_json::to_value(run_wire(record).map_err(|error| error.0.to_string())?)
+        serde_json::to_value(run_wire(record).map_err(|error| error.message().to_owned())?)
             .map_err(|error| error.to_string())
     }
 }
@@ -1509,7 +1464,9 @@ async fn run_ephemeral_agent_call(
         assembly: request.assembly.clone(),
         skills: request.skills.clone(),
     };
-    let processing = crate::turn::process_turn_with_composition(
+    // Boxed: the turn future carries the whole composed input and would
+    // otherwise push this call's future past the large-future lint.
+    let mut processing = Box::pin(crate::turn::process_turn_with_composition(
         state,
         session_id,
         Some(thread_id),
@@ -1524,8 +1481,7 @@ async fn run_ephemeral_agent_call(
         crate::turn::TurnAttendance::Unattended,
         composition,
         Some(journal_entry_id),
-    );
-    tokio::pin!(processing);
+    ));
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
         biased;
@@ -4151,7 +4107,7 @@ async fn complete_workflow_call_entry(
                     .ok_or_else(|| "child workflow run disappeared".to_string())?;
                 launch_existing_run(state.clone(), running, source, grant)
                     .await
-                    .map_err(|error| error.0.to_string())?;
+                    .map_err(|error| error.message().to_owned())?;
                 child
             }
             _ => child,
@@ -4226,7 +4182,7 @@ async fn complete_workflow_call_entry(
                 script.delivery_grant.clone(),
             )
             .await
-            .map_err(|error| error.0.to_string())?;
+            .map_err(|error| error.message().to_owned())?;
             record
         }
     };
@@ -4355,7 +4311,7 @@ fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
         name: workflow.name,
         description: workflow.description,
         head_version: workflow.head_version,
-        built_in: workflow.built_in,
+        carrying_skill: workflow.carrying_skill,
         has_delivery_grant: workflow.delivery_grant.is_some(),
         argument_contract: argument_contract(workflow.argument_schema),
         created_at: workflow.created_at,
@@ -5378,7 +5334,7 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                 tracing::info!(%run_id, from_state = %was, "resumed workflow run");
             }
             Err(error) => {
-                tracing::warn!(%run_id, error = %error.0, "failed to resume workflow run");
+                tracing::warn!(%run_id, error = %error, "failed to resume workflow run");
             }
         }
     }
@@ -5467,6 +5423,23 @@ mod tests {
     };
     use swage_workflow::AgentSessionRef;
 
+    /// The research sweep as the shipped research skill carries it.
+    fn research_sweep_source() -> &'static str {
+        crate::shipped_skills::workflow_files("research")
+            .find(|file| file.path.ends_with("/research-sweep.js"))
+            .expect("embedded research sweep")
+            .contents
+    }
+
+    /// The carried workflow's per-space identity, as listing assigns it.
+    fn research_sweep_id(space_id: Uuid) -> Uuid {
+        crate::synthetic_id::synthetic_id(
+            CARRIED_WORKFLOW_ID_DOMAIN,
+            space_id,
+            "research/research-sweep",
+        )
+    }
+
     fn workflow_test_state() -> (AppState, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let state = AppState::new(
@@ -5517,7 +5490,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_space_lists_shipped_carried_and_built_in_workflows() {
+    async fn empty_space_lists_every_shipped_carried_workflow_and_nothing_else() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -5526,21 +5499,21 @@ mod tests {
             .await
             .expect("workflow list");
 
-        let names = list
+        // Nothing ships as a global built-in: every listed workflow on a
+        // fresh space names the shipped skill that carries it.
+        let carried = list
             .scripts
             .iter()
-            .map(|script| script.name.as_str())
+            .map(|script| {
+                (
+                    script.name.as_str(),
+                    script.carrying_skill.as_deref().expect("a carrying skill"),
+                )
+            })
             .collect::<Vec<_>>();
-        assert!(names.contains(&"research-sweep"));
-        assert!(names.contains(&"build-verify"));
-        assert!(names.contains(&"teardown-audit"));
-        assert_eq!(
-            list.scripts
-                .iter()
-                .find(|script| script.name == "research-sweep")
-                .map(|script| script.built_in),
-            Some(true)
-        );
+        assert!(carried.contains(&("research-sweep", "research")));
+        assert!(carried.contains(&("build-verify", "assembly")));
+        assert!(carried.contains(&("teardown-audit", "maestro")));
         assert!(
             list.scripts
                 .iter()
@@ -5549,7 +5522,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn authored_workflow_shadows_the_same_named_builtin() {
+    async fn authored_workflow_shadows_the_same_named_shipped_workflow() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -5579,14 +5552,14 @@ mod tests {
             .json::<Value>()
             .await
             .expect("serialise built-in listing");
-        let builtin = initial_list["scripts"]
+        let shipped = initial_list["scripts"]
             .as_array()
             .expect("script array")
             .iter()
             .find(|script| script["name"] == "research-sweep")
-            .expect("research-sweep built-in");
-        let builtin_id = builtin["id"].as_str().expect("built-in id").to_string();
-        assert_eq!(builtin["built_in"], true);
+            .expect("shipped research-sweep");
+        let shipped_id = shipped["id"].as_str().expect("shipped id").to_string();
+        assert_eq!(shipped["carrying_skill"], "research");
 
         let authored = client
             .post(format!(
@@ -5608,14 +5581,14 @@ mod tests {
             .await
             .expect("serialise authored shadow");
         let authored_id = authored["id"].as_str().expect("authored id");
-        assert_ne!(authored_id, builtin_id);
-        assert_eq!(authored["built_in"], false);
+        assert_ne!(authored_id, shipped_id);
+        assert!(authored["carrying_skill"].is_null());
 
         let hidden_read = client
-            .get(format!("{base_url}/api/workflow-scripts/{builtin_id}"))
+            .get(format!("{base_url}/api/workflow-scripts/{shipped_id}"))
             .send()
             .await
-            .expect("read hidden built-in over HTTP");
+            .expect("read hidden shipped workflow over HTTP");
         assert_eq!(hidden_read.status(), reqwest::StatusCode::NOT_FOUND);
         assert_eq!(
             hidden_read
@@ -5626,11 +5599,11 @@ mod tests {
         );
 
         let hidden_start = client
-            .post(format!("{base_url}/api/workflow-scripts/{builtin_id}/runs"))
+            .post(format!("{base_url}/api/workflow-scripts/{shipped_id}/runs"))
             .json(&serde_json::json!({ "args": null, "budget": null }))
             .send()
             .await
-            .expect("start hidden built-in over HTTP");
+            .expect("start hidden shipped workflow over HTTP");
         assert_eq!(hidden_start.status(), reqwest::StatusCode::NOT_FOUND);
         assert_eq!(
             hidden_start
@@ -5652,7 +5625,7 @@ mod tests {
             .expect("serialise authored winner");
         assert_eq!(read["id"], authored_id);
         assert_eq!(read["name"], "research-sweep");
-        assert_eq!(read["built_in"], false);
+        assert!(read["carrying_skill"].is_null());
 
         let started = client
             .post(format!(
@@ -5689,7 +5662,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn carried_workflow_shadows_the_same_named_builtin_when_listed_and_started() {
+    async fn operator_carried_workflow_shadows_the_same_named_shipped_workflow_when_listed_and_started()
+     {
         let root = tempfile::tempdir().expect("skill root");
         let skill_dir = root.path().join("skills/research-shadow");
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -5717,7 +5691,7 @@ mod tests {
             .into_iter()
             .find(|script| script.name == "research-sweep")
             .expect("research sweep");
-        assert!(!listed.built_in);
+        assert_eq!(listed.carrying_skill.as_deref(), Some("research-shadow"));
 
         let Json(started) = start_saved_run(
             State(state.clone()),
@@ -5808,7 +5782,7 @@ mod tests {
         .await
         .expect_err("invalid arguments must be rejected");
         assert!(
-            error.0.to_string().contains("/task"),
+            error.message().contains("/task"),
             "validation must name the failing field: {error:?}"
         );
         assert!(
@@ -5822,7 +5796,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn listed_builtin_can_be_read_and_started_but_not_updated() {
+    async fn shipped_research_sweep_can_be_read_and_started_but_not_updated() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -5837,9 +5811,9 @@ mod tests {
 
         let Json(read) = get_script(State(state.clone()), Path(listed.id))
             .await
-            .expect("read built-in");
+            .expect("read shipped workflow");
         assert_eq!(read.id, listed.id);
-        assert!(read.built_in);
+        assert_eq!(read.carrying_skill.as_deref(), Some("research"));
 
         let update_error = update_script(
             State(state.clone()),
@@ -5850,9 +5824,9 @@ mod tests {
             }),
         )
         .await
-        .expect_err("built-in update must fail");
+        .expect_err("shipped update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -5864,35 +5838,23 @@ mod tests {
             }),
         )
         .await
-        .expect("start listed built-in");
+        .expect("start shipped research sweep");
         wait_for_terminal(&state, started.id).await;
         let run = storage
             .get_workflow_run(started.id)
             .await
             .expect("run query")
             .expect("run");
+        let embedded = research_sweep_source();
         assert_eq!(run.engine_version, "rquickjs-0.12.2");
         assert_eq!(run.state, "failed");
         assert_eq!(run.script_version_id, None);
         assert_eq!(run.script_id, Some(listed.id));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
-        assert_eq!(
-            run.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
-        assert_eq!(
-            run.source_hash,
-            source_hash(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(run.source.as_deref(), Some(embedded));
+        assert_eq!(run.source_hash, source_hash(embedded));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5908,7 +5870,7 @@ mod tests {
             .into_iter()
             .find(|script| script.name == "build-verify")
             .expect("shipped carried workflow");
-        assert!(!listed.built_in);
+        assert_eq!(listed.carrying_skill.as_deref(), Some("assembly"));
 
         let update_error = update_script(
             State(state.clone()),
@@ -5921,7 +5883,7 @@ mod tests {
         .await
         .expect_err("carried update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -5970,7 +5932,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_tool_name_resolution_falls_back_to_a_builtin() {
+    async fn workflow_tool_name_resolution_reaches_a_shipped_carried_workflow() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let session = storage
@@ -5987,7 +5949,7 @@ mod tests {
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "research-sweep", Value::Null, None, false)
             .await
-            .expect("built-in name resolution");
+            .expect("shipped name resolution");
         let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
         wait_for_terminal(&state, run_id).await;
         let run = storage
@@ -5995,24 +5957,15 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
-        assert_eq!(
-            run.script_id,
-            Some(builtin_workflows::id(space.id, "research-sweep"))
-        );
+        assert_eq!(run.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
-        assert_eq!(
-            run.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(run.source.as_deref(), Some(research_sweep_source()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_composition_resolves_a_builtin_child() {
+    async fn workflow_composition_resolves_a_shipped_carried_child() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -6058,22 +6011,13 @@ mod tests {
             .expect("runs")
             .into_iter()
             .find(|run| run.parent_run_id == Some(started.id))
-            .expect("built-in child run");
+            .expect("shipped child run");
         assert_eq!(child.engine_version, "rquickjs-0.12.2");
-        assert_eq!(
-            child.script_id,
-            Some(builtin_workflows::id(space.id, "research-sweep"))
-        );
+        assert_eq!(child.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(child.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(child.script_version, Some(1));
-        assert_eq!(
-            child.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(child.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(child.source.as_deref(), Some(research_sweep_source()));
         assert!(
             child
                 .error_message
@@ -6558,8 +6502,11 @@ mod tests {
         );
     }
 
+    /// A shipped workflow's roles are bare dispatches: a fresh space holds no
+    /// definition for them, and the role's whole grant rides the call's
+    /// `tools` list, narrowed further by a later call the same way.
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_workflow_call_applies_the_shipped_researcher_definition() {
+    async fn fresh_space_workflow_call_grants_a_role_through_its_call_scoped_tools() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -6582,8 +6529,38 @@ mod tests {
             ]),
             None,
         );
+        assert!(
+            crate::service::resolve_effective_agent_definition(
+                storage.as_ref(),
+                "researcher",
+                space.id
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "a workflow role is not a definition"
+        );
 
         let journal_entry_id = Uuid::new_v4();
+        let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: prompt.into(),
+            agent: None,
+            task: None,
+            tools: Some(tools.into_iter().map(String::from).collect()),
+            skills: None,
+            model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
         let result = run_ephemeral_agent_call(
             &state,
             Uuid::new_v4(),
@@ -6591,39 +6568,17 @@ mod tests {
             &[],
             &[],
             journal_entry_id,
-            AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Gather the selected source".into(),
-                agent: Some("researcher".into()),
-                task: None,
-                tools: None,
-                skills: None,
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
-            },
+            gather(
+                "Record gathered source material in the knowledge base.\n\nGather the selected source",
+                vec!["web_search", "knowledge_record"],
+            ),
             None,
             CancellationToken::new(),
         )
         .await
-        .expect("shipped researcher workflow call");
+        .expect("bare role workflow call");
 
         assert_eq!(result.output, Value::String("gathered".into()));
-        assert!(
-            storage
-                .list_agent_definitions(None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
         let requests = provider.requests.lock().expect("requests");
         let advertised_tools = requests[0]
             .tool_definitions
@@ -6643,7 +6598,7 @@ mod tests {
         // The worker session carries its journalled call's identity, so its
         // knowledge captures dedup across an interrupted call's re-run.
         let session = storage
-            .list_sessions_by_agent_id("researcher")
+            .list_sessions_by_agent_id(BARE_WORKFLOW_AGENT_ID)
             .await
             .unwrap()
             .into_iter()
@@ -6661,30 +6616,12 @@ mod tests {
             &[],
             &[],
             Uuid::new_v4(),
-            AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Scope sources without recording".into(),
-                agent: Some("researcher".into()),
-                task: None,
-                tools: Some(vec!["web_search".into()]),
-                skills: None,
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
-            },
+            gather("Scope sources without recording", vec!["web_search"]),
             None,
             CancellationToken::new(),
         )
         .await
-        .expect("call-scoped researcher workflow call");
+        .expect("narrower bare role workflow call");
         assert_eq!(scoped.output, Value::String("scoped".into()));
         let requests = provider.requests.lock().expect("requests");
         let advertised_tools = requests[1]
@@ -6733,7 +6670,7 @@ mod tests {
 
         let Json(started) = start_saved_run(
             State(state.clone()),
-            Path(builtin_workflows::id(space.id, "research-sweep")),
+            Path(research_sweep_id(space.id)),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({
                     "topic": "contract evidence",
@@ -7064,8 +7001,8 @@ mod tests {
         .expect_err("reserve without ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens requires max_total_tokens"
         ));
     }
@@ -7081,8 +7018,8 @@ mod tests {
         .expect_err("reserve above ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens cannot exceed max_total_tokens"
         ));
     }
@@ -10284,7 +10221,10 @@ mod tests {
         {
             let requests = provider.requests.lock().expect("requests");
             assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].effort, Some(swage_core::Effort::High));
+            assert_eq!(
+                requests[0].effort.as_ref().map(|effort| effort.requested),
+                Some(swage_core::Effort::High)
+            );
         }
         wait_for_worker_turn_interrupted(&storage).await;
         assert!(

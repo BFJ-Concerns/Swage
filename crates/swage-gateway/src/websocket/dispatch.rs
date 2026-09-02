@@ -98,6 +98,7 @@ pub(super) async fn dispatch_client_message(
 
         ClientEvent::SendMessage {
             content,
+            attachments,
             thread_id,
             selected_model_id,
         } => {
@@ -193,7 +194,7 @@ pub(super) async fn dispatch_client_message(
                                 &state,
                                 session_id,
                                 thread_id,
-                                turn_content,
+                                turn::TurnInput::with_attachments(turn_content, attachments),
                                 tx.clone(),
                                 sub,
                                 None,
@@ -213,7 +214,7 @@ pub(super) async fn dispatch_client_message(
                                 &state,
                                 session_id,
                                 thread_id,
-                                content,
+                                turn::TurnInput::with_attachments(content, attachments),
                                 tx.clone(),
                                 sub,
                                 None,
@@ -235,7 +236,7 @@ pub(super) async fn dispatch_client_message(
                             &state,
                             session_id,
                             thread_id,
-                            content,
+                            turn::TurnInput::with_attachments(content, attachments),
                             tx.clone(),
                             sub,
                             None,
@@ -463,7 +464,7 @@ pub(super) async fn dispatch_client_message(
                 crate::approval_scope::apply_approval_scope(state, &approval, decision_value, scope)
                     .await
             {
-                tracing::error!(%session_id, %approval_uuid, err = %error.0, "approval scope update failed");
+                tracing::error!(%session_id, %approval_uuid, err = %error, "approval scope update failed");
                 let _ = tx.send(ServerEvent::Error {
                     code: error_codes::INTERNAL_ERROR.to_string(),
                     message: "Failed to save approval scope.".to_string(),
