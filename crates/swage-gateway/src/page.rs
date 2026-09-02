@@ -513,6 +513,18 @@ pub async fn delete_page_annotation(
                 id: annotation_id.to_string(),
             })
         })?;
+    delete_page_annotation_after_read(state, annotation_id, existing, author).await
+}
+
+/// Finish an annotation deletion after its caller has read the note. The
+/// storage operation remains the authority for a race with another deleter:
+/// its zero-row result is the typed not-found response, not a second audit.
+async fn delete_page_annotation_after_read(
+    state: &AppState,
+    annotation_id: Uuid,
+    existing: PageAnnotation,
+    author: &str,
+) -> Result<(), GatewayError> {
     let page = state.storage.get_page(existing.page_id).await?;
     let title = page.map(|page| page.title).unwrap_or_default();
     let audit_event = annotation_change_event(
@@ -1077,6 +1089,50 @@ mod tests {
                 .count(),
             1,
             "the losing delete must not append a second audit event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_that_loses_after_reading_the_note_returns_not_found_without_an_audit() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let created = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "both requests read this note first"),
+            "user",
+        )
+        .await
+        .unwrap();
+        let existing = storage
+            .get_page_annotation(created.id)
+            .await
+            .unwrap()
+            .expect("both concurrent requests read the note before either deletes it");
+
+        let (first, second) = tokio::join!(
+            delete_page_annotation_after_read(&state, created.id, existing.clone(), "user"),
+            delete_page_annotation_after_read(&state, created.id, existing, "user"),
+        );
+
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let failure = first
+            .err()
+            .or(second.err())
+            .expect("the second delete reaches the storage zero-row guard");
+        assert!(matches!(
+            failure,
+            GatewayError::Storage(StorageError::NotFound { .. })
+        ));
+        assert_eq!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_kind == "page_annotation_deleted")
+                .count(),
+            1,
+            "the zero-row loser must not append an audit event"
         );
     }
 
