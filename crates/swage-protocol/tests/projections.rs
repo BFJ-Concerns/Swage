@@ -178,6 +178,22 @@ fn trim_generated_typescript(directory: &Path) {
     }
 }
 
+/// The OpenAPI document and the TypeScript client are projections of the
+/// route manifest; like the schema, they are rewritten in place so drift
+/// shows as a dirty tree at the gate.
+#[test]
+fn client_route_projections_are_regenerated() {
+    let document = serde_json::to_string_pretty(&client::openapi::document())
+        .expect("openapi document serialises")
+        + "\n";
+    let document_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client-openapi.json");
+    std::fs::write(&document_path, document).expect("write openapi document");
+
+    let client_path = repo_root().join("frontend/src/lib/protocol/client.ts");
+    std::fs::write(&client_path, client::typescript_client::render())
+        .expect("write generated client");
+}
+
 #[test]
 fn client_schema_is_regenerated() {
     let schema = schemars::schema_for!(client::ClientSurface);

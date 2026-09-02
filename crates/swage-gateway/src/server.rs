@@ -390,3 +390,71 @@ pub fn build_router(state: AppState) -> Router {
         ))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    use swage_protocol::client::routes::{Method, routes};
+    use swage_storage::store::{SpaceStore, Storage};
+
+    use super::build_router;
+    use crate::{
+        state::AppState,
+        turn::tests::{MockProvider, MockStorage},
+    };
+
+    /// Every route the protocol manifest names is registered on the router
+    /// with the same method and path template. The probe substitutes a nil
+    /// UUID for each path parameter and asks only whether the router
+    /// matched: a 404 or 405 means the manifest and the router disagree.
+    #[tokio::test]
+    async fn every_manifest_route_is_registered_on_the_router() {
+        let storage = Arc::new(MockStorage::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = build_router(state);
+        for route in routes() {
+            let mut path = route.path.to_string();
+            for parameter in route.path_parameters() {
+                path = path.replace(&format!("{{{parameter}}}"), &uuid::Uuid::nil().to_string());
+            }
+            let method = match route.method {
+                Method::Get => "GET",
+                Method::Post => "POST",
+                Method::Put => "PUT",
+                Method::Delete => "DELETE",
+            };
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.status() != axum::http::StatusCode::METHOD_NOT_ALLOWED
+                    && !(response.status() == axum::http::StatusCode::NOT_FOUND
+                        && route.path_parameters().is_empty()),
+                "{} {} is in the manifest but the router answered {}",
+                method,
+                route.path,
+                response.status()
+            );
+        }
+    }
+}
