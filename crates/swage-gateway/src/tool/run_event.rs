@@ -68,14 +68,11 @@ impl Tool for RunEventPostTool {
             .get("payload")
             .cloned()
             .ok_or_else(|| invalid("'payload' is required"))?;
-        let gateway = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .and_then(GatewayToolContext::app_state)
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: TOOL.into(),
-                message: "this tool runs only inside a gateway host turn".into(),
-            })?;
+        let gateway = super::require_gateway_state(
+            ctx,
+            TOOL,
+            "this tool runs only inside a gateway host turn",
+        )?;
         let session_id =
             Uuid::parse_str(ctx.session_id()).map_err(|_| ToolError::ExecutionFailed {
                 name: TOOL.into(),

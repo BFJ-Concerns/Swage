@@ -119,14 +119,11 @@ impl Tool for WorkflowListTool {
                 name: self.name().into(),
                 message: error.to_string(),
             })?;
-        let state = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .and_then(GatewayToolContext::app_state)
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().into(),
-                message: "workflow_list requires gateway execution".into(),
-            })?;
+        let state = super::require_gateway_state(
+            ctx,
+            self.name(),
+            "workflow_list requires gateway execution",
+        )?;
         workflows_for_session(state, session_id)
             .await
             .map_err(|message| ToolError::ExecutionFailed {

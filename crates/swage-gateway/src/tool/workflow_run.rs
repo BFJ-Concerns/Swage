@@ -85,13 +85,11 @@ impl Tool for WorkflowRunTool {
                 name: self.name().into(),
                 message: error.to_string(),
             })?;
-        let gateway = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().into(),
-                message: "workflow_run requires gateway execution".into(),
-            })?;
+        let gateway = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "workflow_run requires gateway execution",
+        )?;
         let state = gateway
             .app_state()
             .ok_or_else(|| ToolError::ExecutionFailed {

@@ -50,10 +50,11 @@ fn failed(message: impl std::fmt::Display) -> ToolError {
 /// never reached the host path is a wiring bug, reported as an execution
 /// failure rather than silently degrading.
 fn gateway_state(ctx: &dyn ToolContext) -> Result<&AppState, ToolError> {
-    ctx.as_any()
-        .downcast_ref::<GatewayToolContext>()
-        .and_then(GatewayToolContext::app_state)
-        .ok_or_else(|| failed("workflow_save runs only inside a gateway host turn"))
+    super::require_gateway_state(
+        ctx,
+        WORKFLOW_SAVE_TOOL,
+        "workflow_save runs only inside a gateway host turn",
+    )
 }
 
 #[async_trait]

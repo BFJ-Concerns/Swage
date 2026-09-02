@@ -54,3 +54,19 @@ pub(crate) fn require_gateway_state<'ctx>(
             message: message.into(),
         })
 }
+
+/// Resolve the host execution context for tools that need its storage or turn
+/// metadata rather than the application state itself.
+pub(crate) fn require_gateway_context<'ctx>(
+    context: &'ctx dyn swage_tool::context::ToolContext,
+    tool: &str,
+    message: impl Into<String>,
+) -> Result<&'ctx crate::tool_executor::GatewayToolContext, swage_core::ToolError> {
+    context
+        .as_any()
+        .downcast_ref::<crate::tool_executor::GatewayToolContext>()
+        .ok_or_else(|| swage_core::ToolError::ExecutionFailed {
+            name: tool.to_owned(),
+            message: message.into(),
+        })
+}
