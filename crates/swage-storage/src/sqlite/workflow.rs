@@ -561,7 +561,8 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         self.with_conn(move |conn| {
             conn.execute(
-                "UPDATE workflow_runs SET terminal_account_json=?2 WHERE id=?1",
+                "UPDATE workflow_runs SET terminal_account_json=?2 \
+                 WHERE id=?1 AND terminal_account_json IS NULL",
                 params![id.to_string(), account],
             )?;
             Ok(())
