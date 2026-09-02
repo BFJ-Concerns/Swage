@@ -1,5 +1,6 @@
 //! Durable JavaScript workflows and their read-only run traces.
 
+use crate::client::settings::Effort;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -288,6 +289,134 @@ pub enum WorkflowJournalEntryStatus {
     Started,
     Completed,
     Failed,
+    /// The run's own end stopped this entry's work. Distinct from `failed`,
+    /// which is the work's own failure.
+    CutShort,
+}
+
+/// What a worker call cost, or why that is not known.
+///
+/// A call whose provider reported no usage is not a call that spent nothing:
+/// the two are different facts and the record keeps them apart. Absence is
+/// always the `unavailable` variant carrying its reason, never zero counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "availability", rename_all = "snake_case")]
+pub enum WorkflowCallUsage {
+    Known { input_tokens: u64, output_tokens: u64 },
+    Unavailable { reason: WorkflowUsageUnavailableReason },
+}
+
+impl WorkflowCallUsage {
+    /// Counts when the provider reported them; `None` when it did not.
+    pub fn known_total(&self) -> Option<u64> {
+        match self {
+            Self::Known {
+                input_tokens,
+                output_tokens,
+            } => Some(input_tokens.saturating_add(*output_tokens)),
+            Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// Why a call's usage is not known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowUsageUnavailableReason {
+    /// The turn completed but the provider reported no token counts.
+    ProviderReportedNoUsage,
+    /// The call never settled, so no usage was ever collected.
+    CallDidNotSettle,
+}
+
+/// Why a worker stopped.
+///
+/// `cut_short` is the run's own end reaching into a worker that was still
+/// working. It is not a failure of the worker, and the terminal run account
+/// partitions on the same cause — this is where that cause is named.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "termination", rename_all = "snake_case")]
+pub enum WorkflowWorkerTermination {
+    /// The worker is still working; nothing has terminated it.
+    Outstanding,
+    /// The worker ran to its own end, successfully or not.
+    Settled,
+    /// The worker's own work failed.
+    Failed { message: String },
+    /// The run ended while this worker was still working.
+    CutShort { cause: WorkflowCutShortCause },
+}
+
+/// The run-end circumstance that cut a worker short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowCutShortCause {
+    /// The run was cancelled while the worker was in flight.
+    RunCancelled,
+}
+
+/// One provider request round inside a worker call.
+///
+/// A round with no `completed_at` is still outstanding: the request went to
+/// the provider and no response has come back. A settled round names what
+/// came back, so a tool loop (rounds settling with tool calls), a hung
+/// request (an outstanding round), and a slow response (a settled round with
+/// a long span) are told apart from the record alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowProviderRound {
+    pub round: u32,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub outcome: WorkflowProviderRoundOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum WorkflowProviderRoundOutcome {
+    /// The request is outstanding — no response has arrived.
+    Outstanding,
+    /// A response arrived, asking for this many tool calls (zero when the
+    /// model answered instead of calling tools).
+    Responded { tool_calls: u32 },
+    Failed { message: String },
+}
+
+/// What a worker was asked to do, recorded when it was dispatched.
+///
+/// Written before any provider work begins, so a worker that dies mid-run
+/// still leaves evidence of the call it was serving.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowAgentCallDispatch {
+    pub prompt: String,
+    pub agent_definition_id: Option<String>,
+    /// The model the call named, before the turn resolved it.
+    pub requested_model: Option<String>,
+    /// The effort the call named, before the turn resolved it.
+    pub requested_effort: Option<Effort>,
+    /// Where the worker runs, once the placement was provisioned.
+    pub placement: Option<WorkflowWorkerPlacementRecord>,
+    /// The call-scoped tool grants after intersection with the dispatching
+    /// context's own authority. `None` means the call narrowed nothing.
+    pub grants: Option<Vec<String>>,
+    /// Stamped once the turn resolved the options it actually ran with.
+    pub resolved: Option<WorkflowAgentCallResolution>,
+}
+
+/// Where a dispatched worker was placed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorkerPlacementRecord {
+    pub path: String,
+    pub can_write: bool,
+}
+
+/// The options a dispatched worker's turn resolved for itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowAgentCallResolution {
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub session_id: Option<Uuid>,
+    pub thread_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -296,8 +425,17 @@ pub struct WorkflowAgentCallDetail {
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
+    pub usage: WorkflowCallUsage,
+    pub termination: WorkflowWorkerTermination,
+    /// What the call was dispatched with. Absent only for calls journalled
+    /// before the dispatch record existed.
+    pub dispatch: Option<WorkflowAgentCallDispatch>,
+    /// The provider rounds this call's turn ran, oldest first. `None` where
+    /// the projection does not carry them — the live entry event, which is
+    /// sent as the entry settles — so an absent round record is never read
+    /// as a call that made no provider request. The run detail always
+    /// carries them.
+    pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

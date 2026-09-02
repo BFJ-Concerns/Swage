@@ -27,7 +27,7 @@ use crate::approval::{ApprovalChannelRegistrar, PreToolUseOutcome};
 use crate::config::AgentConfig;
 use crate::context::{AgentToolContext, TurnExecutionContext};
 use crate::error::AgentError;
-use crate::event::{AgentEvent, SchemaValidationError};
+use crate::event::{AgentEvent, ProviderRoundOutcome, SchemaValidationError};
 use crate::extraction::extract_json;
 use crate::message::{OutboundMessage, TurnRequest};
 
@@ -855,6 +855,11 @@ impl Agent {
                         }
                         Some(StreamChunk::Error { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
+                            let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                                turn_id: execution.turn_id,
+                                round,
+                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                            });
                             let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
@@ -862,6 +867,11 @@ impl Agent {
                         }
                         Some(StreamChunk::ProviderAnomaly { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
+                            let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                                turn_id: execution.turn_id,
+                                round,
+                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                            });
                             let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::ProviderAnomaly(message),
@@ -875,6 +885,14 @@ impl Agent {
                 }
             }
         }
+
+        let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+            turn_id: execution.turn_id,
+            round,
+            outcome: ProviderRoundOutcome::Responded {
+                tool_calls: tool_calls.len() as u32,
+            },
+        });
 
         Ok(StreamRoundOutcome {
             text,

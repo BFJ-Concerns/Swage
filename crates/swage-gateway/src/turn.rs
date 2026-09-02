@@ -21,6 +21,7 @@ use swage_core::{
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
+use swage_protocol::client::workflow::{WorkflowAgentCallResolution, WorkflowProviderRoundOutcome};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -389,6 +390,94 @@ pub(crate) fn effort_capability_for_model(
             provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
         })
         .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// Open the record for a provider request that has just gone out.
+///
+/// The row's start time with no settlement is what tells an outstanding
+/// provider request from a tool loop that is making progress, so it is
+/// written when the request leaves rather than when the round ends.
+/// Reconstructive record (record_durability.rs): losing it degrades the
+/// trail's account of the round without falsifying the turn, so the gap is
+/// named rather than swallowed, and a gap that cannot itself be recorded
+/// escalates.
+async fn open_provider_round_record(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    round: usize,
+    record_integrity_lost: &mut Option<String>,
+) {
+    let outcome = match serde_json::to_value(WorkflowProviderRoundOutcome::Outstanding) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round outcome could not be serialised: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = state
+        .storage
+        .open_provider_round(turn_id, round as i64, outcome)
+        .await
+    {
+        tracing::warn!(error = %error, round, "failed to record provider round start");
+        if let Err(audit_error) = record_durability::record_reconstruction_gap(
+            state.storage.as_ref(),
+            Some(session_id),
+            turn_id,
+            "provider_round",
+            &error,
+        )
+        .await
+        {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round record lost and the loss could not be recorded: {audit_error}"
+            ));
+        }
+    }
+}
+
+/// Settle the record for a provider round that has ended, with what came
+/// back. Same reconstructive class and escalation as the opening record.
+async fn settle_provider_round_record(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    round: usize,
+    outcome: WorkflowProviderRoundOutcome,
+    record_integrity_lost: &mut Option<String>,
+) {
+    let outcome = match serde_json::to_value(outcome) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round outcome could not be serialised: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = state
+        .storage
+        .settle_provider_round(turn_id, round as i64, outcome)
+        .await
+    {
+        tracing::warn!(error = %error, round, "failed to record provider round outcome");
+        if let Err(audit_error) = record_durability::record_reconstruction_gap(
+            state.storage.as_ref(),
+            Some(session_id),
+            turn_id,
+            "provider_round",
+            &error,
+        )
+        .await
+        {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round record lost and the loss could not be recorded: {audit_error}"
+            ));
+        }
+    }
 }
 
 /// Record the resolved effort beside the effective model in the turn's
@@ -1653,6 +1742,9 @@ async fn process_turn_with_composition_and_focus(
 
     // Step 10: Both runtimes emit AgentEvents into the same projection loop.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    // Set when a record written before the agent starts is lost; folded into
+    // the loop's own integrity flag below (record_durability.rs).
+    let mut record_integrity_lost_before_agent: Option<String> = None;
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
     let model_name = config.default_model_id().to_string();
@@ -1766,6 +1858,52 @@ async fn process_turn_with_composition_and_focus(
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(&mut report_json, resolved);
         }
+        // The dispatch record names what the call *asked* for; what the
+        // turn actually resolved is only known here, so it is stamped onto
+        // the same journal entry as a second field rather than by rewriting
+        // the dispatch one.
+        if let Some(agent_call_scope) = agent_call_scope {
+            let resolution = WorkflowAgentCallResolution {
+                model: Some(model_name.clone()),
+                effort: effort
+                    .as_ref()
+                    .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
+                session_id: Some(session_id),
+                thread_id: Some(thread_id),
+                turn_id: Some(prepared_turn_id),
+            };
+            match serde_json::to_value(&resolution) {
+                Ok(resolution) => {
+                    if let Err(error) = state
+                        .storage
+                        .record_workflow_call_resolution(agent_call_scope, resolution)
+                        .await
+                    {
+                        // Reconstructive record (record_durability.rs): the
+                        // call still happened and its dispatch record stands.
+                        tracing::warn!(error = %error, "failed to record agent call resolution");
+                        if let Err(audit_error) = record_durability::record_reconstruction_gap(
+                            state.storage.as_ref(),
+                            Some(session_id),
+                            prepared_turn_id,
+                            "agent_call_resolution",
+                            &error,
+                        )
+                        .await
+                        {
+                            record_integrity_lost_before_agent.get_or_insert(format!(
+                                "agent call resolution lost and the loss could not be recorded: {audit_error}"
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    record_integrity_lost_before_agent.get_or_insert(format!(
+                        "agent call resolution could not be serialised: {error}"
+                    ));
+                }
+            }
+        }
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -1793,7 +1931,7 @@ async fn process_turn_with_composition_and_focus(
     // as a degradation (record_durability.rs). Checked after the agent
     // settles — the turn is then failed loudly rather than left looking
     // auditable.
-    let mut record_integrity_lost: Option<String> = None;
+    let mut record_integrity_lost: Option<String> = record_integrity_lost_before_agent;
 
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
@@ -1885,6 +2023,14 @@ async fn process_turn_with_composition_and_focus(
                 round,
                 request,
             } => {
+                open_provider_round_record(
+                    state,
+                    session_id,
+                    snapshot_turn_id,
+                    round,
+                    &mut record_integrity_lost,
+                )
+                .await;
                 apply_provider_snapshot_event(
                     state,
                     &mut report_json,
@@ -1920,6 +2066,29 @@ async fn process_turn_with_composition_and_focus(
                         ));
                     }
                 }
+            }
+            AgentEvent::ProviderRoundSettled {
+                turn_id: round_turn_id,
+                round,
+                outcome,
+            } => {
+                let outcome = match outcome {
+                    swage_agent::ProviderRoundOutcome::Responded { tool_calls } => {
+                        WorkflowProviderRoundOutcome::Responded { tool_calls }
+                    }
+                    swage_agent::ProviderRoundOutcome::Failed { message } => {
+                        WorkflowProviderRoundOutcome::Failed { message }
+                    }
+                };
+                settle_provider_round_record(
+                    state,
+                    session_id,
+                    round_turn_id,
+                    round,
+                    outcome,
+                    &mut record_integrity_lost,
+                )
+                .await;
             }
             AgentEvent::ProviderReasoningCaptured {
                 turn_id: snapshot_turn_id,

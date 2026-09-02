@@ -172,7 +172,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
     carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json";
-const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
+const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_resolution_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
 fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRecord> {
@@ -235,7 +235,28 @@ fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecor
         target_kind: row.get(12)?,
         started_at: time(row.get(13)?)?,
         completed_at: completed.map(time).transpose()?,
+        dispatch: json_column(row, 15)?,
+        dispatch_resolution: json_column(row, 16)?,
+        termination: json_column(row, 17)?,
     })
+}
+
+/// Read a nullable generic-JSON column, failing the row rather than dropping
+/// a record the projection is contracted to read.
+fn json_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<serde_json::Value>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
 }
 
 #[async_trait]
@@ -704,6 +725,83 @@ impl WorkflowStore for SqliteStorage {
         let error_message = error_message.to_string();
         let now = Utc::now();
         self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='failed', error_message=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),error_message,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
+    async fn record_workflow_call_dispatch(
+        &self,
+        id: Uuid,
+        dispatch: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let dispatch = serde_json::to_string(&dispatch)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflow_journal SET dispatch_json=?2 WHERE id=?1",
+                params![id.to_string(), dispatch],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn record_workflow_call_resolution(
+        &self,
+        id: Uuid,
+        resolution: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let resolution = serde_json::to_string(&resolution)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflow_journal SET dispatch_resolution_json=?2 WHERE id=?1",
+                params![id.to_string(), resolution],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn cut_short_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        termination: serde_json::Value,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let termination = serde_json::to_string(&termination)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let error_message = error_message.to_string();
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let run_id: String = tx.query_row(
+                "SELECT run_id FROM workflow_journal WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?;
+            let order: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE workflow_journal SET status='failed', error_message=?2, \
+                 termination_json=?3, completed_order=?4, completed_at=?5 WHERE id=?1",
+                params![
+                    id.to_string(),
+                    error_message,
+                    termination,
+                    order,
+                    now.to_rfc3339()
+                ],
+            )?;
+            tx.commit()?;
+            conn.query_row(
+                &format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),
+                [id.to_string()],
+                journal_row,
+            )
+        })
+        .await
     }
 
     async fn list_workflow_journal(

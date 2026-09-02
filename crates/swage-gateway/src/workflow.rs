@@ -13,10 +13,13 @@ use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
-    WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowAgentCallDispatch, WorkflowArgumentContract, WorkflowBudget, WorkflowCallUsage,
+    WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
     WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
     WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
     WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowCutShortCause, WorkflowUsageUnavailableReason, WorkflowWorkerPlacementRecord,
+    WorkflowWorkerTermination,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -369,7 +372,7 @@ impl AppState {
         intent: NewWorkflowJournalIntent,
     ) -> Result<WorkflowJournalRecord, StorageError> {
         let entry = self.storage.create_workflow_journal_intent(intent).await?;
-        if let Ok(wire) = journal_wire(entry.clone()) {
+        if let Ok(wire) = journal_wire(entry.clone(), None) {
             let _ = self.broadcast.send(ServerEvent::WorkflowEntryStarted {
                 event: swage_protocol::client::workflow::WorkflowEntryEvent {
                     run_id: entry.run_id,
@@ -417,7 +420,7 @@ impl AppState {
     }
 
     fn broadcast_terminal_workflow_entry(&self, entry: &WorkflowJournalRecord) {
-        if let Ok(wire) = journal_wire(entry.clone()) {
+        if let Ok(wire) = journal_wire(entry.clone(), None) {
             let _ = self.broadcast.send(ServerEvent::WorkflowEntryCompleted {
                 event: swage_protocol::client::workflow::WorkflowEntryEvent {
                     run_id: entry.run_id,
@@ -428,12 +431,58 @@ impl AppState {
     }
 }
 
+/// The turn an agent-call entry ran, from whichever record carries it: the
+/// settled result, or the dispatch resolution stamped when the turn started.
+/// A call killed mid-run has only the latter.
+fn agent_call_turn_id(entry: &WorkflowJournalRecord) -> Option<Uuid> {
+    entry
+        .result
+        .as_ref()
+        .and_then(|result| result.get("turn_id"))
+        .or_else(|| {
+            entry
+                .dispatch_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.get("turn_id"))
+        })
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+/// Project one stored provider round onto the wire contract, rejecting an
+/// outcome blob that is no longer in it.
+fn provider_round_wire(
+    round: swage_storage::ProviderRoundRecord,
+) -> Result<swage_protocol::client::workflow::WorkflowProviderRound, String> {
+    Ok(swage_protocol::client::workflow::WorkflowProviderRound {
+        round: round.round as u32,
+        started_at: round.started_at,
+        completed_at: round.completed_at,
+        outcome: serde_json::from_value(round.outcome).map_err(|error| {
+            format!(
+                "provider round {} carries an outcome outside \
+                 WorkflowProviderRoundOutcome: {error}",
+                round.id
+            )
+        })?,
+    })
+}
+
+/// Project a stored journal record onto the wire contract.
+///
+/// `provider_rounds` is the rounds this entry's turn ran where the caller
+/// loaded them, and `None` where this projection does not carry them (the
+/// live entry event). An out-of-contract stored payload is rejected here
+/// rather than passed through: the record and the contract it broke are both
+/// named, because a blob that no longer parses is a bug to fix, not a shape
+/// to tolerate.
 fn journal_wire(
     entry: WorkflowJournalRecord,
+    provider_rounds: Option<Vec<swage_protocol::client::workflow::WorkflowProviderRound>>,
 ) -> Result<swage_protocol::client::workflow::WorkflowJournalEntry, String> {
     use swage_protocol::client::workflow::{
-        WorkflowAgentCallDetail, WorkflowEffectDetail, WorkflowJournalEntry,
-        WorkflowJournalEntryKind, WorkflowJournalEntryStatus,
+        WorkflowAgentCallDetail, WorkflowAgentCallDispatch, WorkflowCallUsage, WorkflowEffectDetail,
+        WorkflowJournalEntry, WorkflowJournalEntryKind, WorkflowJournalEntryStatus,
+        WorkflowUsageUnavailableReason, WorkflowWorkerTermination,
     };
     let kind = match entry.kind.as_str() {
         "agent_call" => WorkflowJournalEntryKind::AgentCall,
@@ -451,11 +500,36 @@ fn journal_wire(
         "wind_down" => WorkflowJournalEntryKind::WindDown,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
-    let status = match entry.status.as_str() {
-        "started" => WorkflowJournalEntryStatus::Started,
-        "completed" => WorkflowJournalEntryStatus::Completed,
-        "failed" => WorkflowJournalEntryStatus::Failed,
-        other => return Err(format!("unknown workflow entry status: {other}")),
+    // The termination record is the authority on how the entry ended; the
+    // stored status stays `failed` for a cut-short worker so replay keeps
+    // treating it as terminal.
+    let termination = match entry.termination.as_ref() {
+        Some(termination) => {
+            serde_json::from_value::<WorkflowWorkerTermination>(termination.clone()).map_err(
+                |error| {
+                    format!(
+                        "workflow journal entry {} carries a termination record outside \
+                         WorkflowWorkerTermination: {error}",
+                        entry.id
+                    )
+                },
+            )?
+        }
+        None => match entry.status.as_str() {
+            "started" => WorkflowWorkerTermination::Outstanding,
+            "completed" => WorkflowWorkerTermination::Settled,
+            "failed" => WorkflowWorkerTermination::Failed {
+                message: entry.error_message.clone().unwrap_or_default(),
+            },
+            other => return Err(format!("unknown workflow entry status: {other}")),
+        },
+    };
+    let status = match (&termination, entry.status.as_str()) {
+        (WorkflowWorkerTermination::CutShort { .. }, _) => WorkflowJournalEntryStatus::CutShort,
+        (_, "started") => WorkflowJournalEntryStatus::Started,
+        (_, "completed") => WorkflowJournalEntryStatus::Completed,
+        (_, "failed") => WorkflowJournalEntryStatus::Failed,
+        (_, other) => return Err(format!("unknown workflow entry status: {other}")),
     };
     let effect = entry
         .idempotency_key
@@ -464,31 +538,77 @@ fn journal_wire(
             target_kind: entry.target_kind.unwrap_or_default(),
             idempotency_key,
         });
-    let agent_call = (entry.kind == "agent_call").then(|| {
+    let agent_call = if entry.kind == "agent_call" {
         let result = entry.result.as_ref();
-        WorkflowAgentCallDetail {
+        // A call with no settled result spent nothing the record can vouch
+        // for; the absence is named with its reason rather than read as zero.
+        let usage = match result.and_then(|result| result.get("usage")) {
+            Some(usage) => serde_json::from_value::<WorkflowCallUsage>(usage.clone()).map_err(
+                |error| {
+                    format!(
+                        "workflow journal entry {} carries a usage record outside \
+                         WorkflowCallUsage: {error}",
+                        entry.id
+                    )
+                },
+            )?,
+            None => WorkflowCallUsage::Unavailable {
+                reason: WorkflowUsageUnavailableReason::CallDidNotSettle,
+            },
+        };
+        let mut dispatch = entry
+            .dispatch
+            .as_ref()
+            .map(|dispatch| {
+                serde_json::from_value::<WorkflowAgentCallDispatch>(dispatch.clone()).map_err(
+                    |error| {
+                        format!(
+                            "workflow journal entry {} carries a dispatch record outside \
+                             WorkflowAgentCallDispatch: {error}",
+                            entry.id
+                        )
+                    },
+                )
+            })
+            .transpose()?;
+        if let (Some(dispatch), Some(resolution)) =
+            (dispatch.as_mut(), entry.dispatch_resolution.as_ref())
+        {
+            dispatch.resolved = Some(serde_json::from_value(resolution.clone()).map_err(
+                |error| {
+                    format!(
+                        "workflow journal entry {} carries a resolution record outside \
+                         WorkflowAgentCallResolution: {error}",
+                        entry.id
+                    )
+                },
+            )?);
+        }
+        let resolved = dispatch
+            .as_ref()
+            .and_then(|dispatch| dispatch.resolved.as_ref());
+        let from_result = |field: &str| {
+            result
+                .and_then(|value| value.get(field))
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+        };
+        Some(WorkflowAgentCallDetail {
             agent_definition_id: entry
                 .request
                 .get("agent")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            session_id: result
-                .and_then(|v| v.get("session_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            thread_id: result
-                .and_then(|v| v.get("thread_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            turn_id: result
-                .and_then(|v| v.get("turn_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            input_tokens: result
-                .and_then(|v| v.get("input_tokens"))
-                .and_then(Value::as_u64),
-            output_tokens: result
-                .and_then(|v| v.get("output_tokens"))
-                .and_then(Value::as_u64),
-        }
-    });
+            session_id: from_result("session_id").or(resolved.and_then(|r| r.session_id)),
+            thread_id: from_result("thread_id").or(resolved.and_then(|r| r.thread_id)),
+            turn_id: from_result("turn_id").or(resolved.and_then(|r| r.turn_id)),
+            usage,
+            termination: termination.clone(),
+            dispatch,
+            provider_rounds,
+        })
+    } else {
+        None
+    };
     let label = entry
         .request
         .get("label")
@@ -522,6 +642,10 @@ struct TokenBudgetState {
     // the transition's recorded reading, so carry it forward until the
     // closing limit is reconstructed (or add it directly if already latched).
     replayed_working_credit: u64,
+    /// Calls whose spend the record could not vouch for. Their tokens are
+    /// missing from `spent`, so a non-zero count is what tells a budget
+    /// reading that is complete from one that merely looks it.
+    usage_unavailable_calls: u32,
 }
 
 fn closing_partition_remaining(
@@ -623,17 +747,36 @@ async fn record_terminal_budget(
         .map_err(|error| error.to_string())
 }
 
-fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
+/// Reconstruct spend from the journal, and count the calls the journal
+/// cannot account for.
+///
+/// The count is returned rather than folded away: a call recorded as
+/// usage-unavailable adds nothing to the total, and a caller that treated
+/// the total as complete would be reading absence as zero spend.
+fn completed_agent_tokens_before(
+    replay: &[WorkflowJournalRecord],
+    transition_seq: u64,
+) -> (u64, u32) {
     replay
         .iter()
         .filter(|entry| {
             entry.seq < transition_seq && entry.kind == "agent_call" && entry.status == "completed"
         })
         .filter_map(|entry| entry.result.as_ref())
-        .fold(0, |spent, result| {
-            spent
-                .saturating_add(result["input_tokens"].as_u64().unwrap_or(0))
-                .saturating_add(result["output_tokens"].as_u64().unwrap_or(0))
+        .fold((0, 0), |(spent, unavailable), result| {
+            match result
+                .get("usage")
+                .and_then(|usage| {
+                    serde_json::from_value::<
+                        swage_protocol::client::workflow::WorkflowCallUsage,
+                    >(usage.clone())
+                    .ok()
+                })
+                .and_then(|usage| usage.known_total())
+            {
+                Some(total) => (spent.saturating_add(total), unavailable),
+                None => (spent, unavailable.saturating_add(1)),
+            }
         })
 }
 
@@ -657,14 +800,17 @@ fn terminal_budget_accounting_from_journal(
         .min()
         .map(|transition_seq| {
             completed_agent_tokens_before(journal, transition_seq)
+                .0
                 .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
         });
+    let (spent, usage_unavailable_calls) = spent;
     TokenBudgetState {
         spent,
         working_reserved: 0,
         closing_reserved: 0,
         closing_limit,
         replayed_working_credit: 0,
+        usage_unavailable_calls,
     }
 }
 
@@ -1452,6 +1598,37 @@ async fn run_ephemeral_agent_call(
         }
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    // The dispatch record is written before any provider work, so a call the
+    // run's end kills mid-flight still leaves an account of what it was asked
+    // to do. It lives in its own journal field rather than in the request:
+    // `args_hash` covers the serialised request and must stay stable across
+    // replay.
+    let dispatch = WorkflowAgentCallDispatch {
+        prompt: request.prompt.clone(),
+        agent_definition_id: request.agent.clone(),
+        requested_model: request.model.clone(),
+        requested_effort: request.effort,
+        placement: resolved_working_directory.as_ref().map(|placement| {
+            WorkflowWorkerPlacementRecord {
+                path: placement.path.clone(),
+                can_write: placement.can_write,
+            }
+        }),
+        grants: effective_call_tools.clone(),
+        resolved: None,
+    };
+    match serde_json::to_value(&dispatch) {
+        Ok(dispatch) => {
+            if let Err(error) = state
+                .storage
+                .record_workflow_call_dispatch(journal_entry_id, dispatch)
+                .await
+            {
+                tracing::warn!(%error, "failed to record agent call dispatch");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "failed to serialise agent call dispatch"),
+    }
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -1585,8 +1762,18 @@ async fn run_ephemeral_agent_call(
     };
     Ok(AgentCallResult {
         output,
-        input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
-        output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
+        usage: match (turn.input_tokens, turn.output_tokens) {
+            // A provider that reported nothing leaves an unavailable record.
+            // Absence is not zero spend: a worker that ran and reported no
+            // usage did not cost nothing, and the record says so.
+            (None, None) => WorkflowCallUsage::Unavailable {
+                reason: WorkflowUsageUnavailableReason::ProviderReportedNoUsage,
+            },
+            (input, output) => WorkflowCallUsage::Known {
+                input_tokens: input.unwrap_or(0).max(0) as u64,
+                output_tokens: output.unwrap_or(0).max(0) as u64,
+            },
+        },
         working_directory: resolved_working_directory.map(|placement| placement.path),
         session_id: Some(session_id),
         thread_id: Some(thread_id),
@@ -1603,7 +1790,25 @@ async fn run_ephemeral_agent_call(
 /// join the resolved configuration model.
 const PARK_TIMER_THRESHOLD_MS: u64 = 60_000;
 
-async fn settle_cancelled_workflow_journal(storage: &dyn Storage, run_id: Uuid) {
+/// Settle the entries still running when the run ended.
+///
+/// These workers did not fail — the run's own end stopped them — so each is
+/// settled with that cause rather than with a failure the worker never had.
+async fn settle_cancelled_workflow_journal(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    cause: WorkflowCutShortCause,
+) {
+    let termination = match serde_json::to_value(WorkflowWorkerTermination::CutShort { cause }) {
+        Ok(termination) => termination,
+        Err(error) => {
+            tracing::warn!(%run_id, %error, "could not serialise cut-short termination");
+            return;
+        }
+    };
+    let message = match cause {
+        WorkflowCutShortCause::RunCancelled => "WorkflowCancelledError: run cancelled",
+    };
     match storage.list_workflow_journal(run_id).await {
         Ok(entries) => {
             for entry in entries
@@ -1611,7 +1816,7 @@ async fn settle_cancelled_workflow_journal(storage: &dyn Storage, run_id: Uuid) 
                 .filter(|entry| entry.status == "started")
             {
                 if let Err(error) = storage
-                    .fail_workflow_journal_entry(entry.id, "WorkflowCancelledError: run cancelled")
+                    .cut_short_workflow_journal_entry(entry.id, termination.clone(), message)
                     .await
                 {
                     tracing::warn!(
@@ -1655,6 +1860,7 @@ fn run_host_commands(
         closing_reserved: 0,
         closing_limit: None,
         replayed_working_credit: 0,
+        usage_unavailable_calls: 0,
     }));
     run_host_commands_with_budget(
         state,
@@ -2266,6 +2472,7 @@ async fn run_host_commands_inner(
                         if accounting.closing_limit.is_none() {
                             accounting.closing_limit = Some(
                                 completed_agent_tokens_before(&replay, current_seq)
+                                    .0
                                     .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
                                     .saturating_add(accounting.replayed_working_credit),
                             );
@@ -2283,6 +2490,7 @@ async fn run_host_commands_inner(
                         // the transition is durable.
                         let mut accounting = token_budget.lock().await;
                         let transition_spent = completed_agent_tokens_before(&replay, current_seq)
+                            .0
                             .saturating_add(accounting.replayed_working_credit);
                         let reserve = budget.reserved_closing_tokens.unwrap_or(0);
                         let reading = serde_json::json!({
@@ -2599,15 +2807,22 @@ async fn run_host_commands_inner(
                     } else {
                         result
                     };
-                    let actual = if !completed_replay {
-                        result
-                            .as_ref()
-                            .map(|result| result.input_tokens.saturating_add(result.output_tokens))
-                            .unwrap_or(0)
+                    // A settled call whose usage is unavailable contributes
+                    // no tokens to the running total — there are none to
+                    // contribute — but it does make the total incomplete, and
+                    // the accounting records that rather than absorbing the
+                    // absence as a zero-spend call.
+                    let known = if !completed_replay {
+                        result.as_ref().ok().map(|result| result.usage.known_total())
                     } else {
-                        0
+                        None
                     };
+                    let actual = known.flatten().unwrap_or(0);
                     let mut accounting = token_budget.lock().await;
+                    if matches!(known, Some(None)) {
+                        accounting.usage_unavailable_calls =
+                            accounting.usage_unavailable_calls.saturating_add(1);
+                    }
                     accounting.spent = accounting.spent.saturating_add(actual);
                     spent.store(accounting.spent, Ordering::SeqCst);
                     if call_uses_closing_partition {
@@ -3133,6 +3348,7 @@ async fn run_host_commands_inner(
                             if accounting.closing_limit.is_none() && reading.is_ok() {
                                 accounting.closing_limit = Some(
                                     completed_agent_tokens_before(&replay, current_seq)
+                                        .0
                                         .saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
                                         .saturating_add(accounting.replayed_working_credit),
                                 );
@@ -4755,21 +4971,8 @@ async fn launch_existing_run(
                     .is_some_and(|error| error.starts_with("BudgetExceededError:"))
         })
         .count() as u32;
-    let initial_spent_tokens = replay
-        .iter()
-        .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
-        .filter_map(|entry| entry.result.as_ref())
-        .map(|result| {
-            result
-                .get("input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                + result
-                    .get("output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-        })
-        .sum();
+    let (initial_spent_tokens, initial_usage_unavailable_calls) =
+        completed_agent_tokens_before(&replay, u64::MAX);
     let agent_calls = Arc::new(AtomicU32::new(initial_agent_calls));
     let spent_tokens = Arc::new(AtomicU64::new(initial_spent_tokens));
     let token_budget = Arc::new(Mutex::new(TokenBudgetState {
@@ -4778,6 +4981,7 @@ async fn launch_existing_run(
         closing_reserved: 0,
         closing_limit: None,
         replayed_working_credit: 0,
+        usage_unavailable_calls: initial_usage_unavailable_calls,
     }));
     let failed_agent_calls = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let host_task = tokio::spawn(run_host_commands_with_budget(
@@ -4898,7 +5102,12 @@ async fn launch_existing_run(
             tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
         }
         if run_state == "cancelled" {
-            settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
+            settle_cancelled_workflow_journal(
+                storage.as_ref(),
+                run_id,
+                WorkflowCutShortCause::RunCancelled,
+            )
+            .await;
         }
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
@@ -5160,10 +5369,30 @@ pub async fn get_run(
             .filter(|event| event.delivered_at.is_none())
             .count() as u32,
     };
-    let journal = entries
-        .into_iter()
-        .map(|entry| journal_wire(entry).map_err(internal))
-        .collect::<Result<Vec<_>, ApiError>>()?;
+    // The run detail is the read that carries the provider rounds, so a
+    // reader can tell an outstanding request from a tool loop.
+    let mut journal = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let rounds = match entry.kind == "agent_call" {
+            true => match agent_call_turn_id(&entry) {
+                Some(turn_id) => Some(
+                    state
+                        .storage
+                        .list_provider_rounds_by_turn(turn_id)
+                        .await
+                        .map_err(internal)?
+                        .into_iter()
+                        .map(provider_round_wire)
+                        .collect::<Result<Vec<_>, String>>()
+                        .map_err(internal)?,
+                ),
+                // No turn was ever resolved, so the call ran no rounds.
+                None => Some(Vec::new()),
+            },
+            false => None,
+        };
+        journal.push(journal_wire(entry, rounds).map_err(internal)?);
+    }
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
@@ -5202,7 +5431,12 @@ pub async fn cancel_run(
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
-        settle_cancelled_workflow_journal(state.storage.as_ref(), id).await;
+        settle_cancelled_workflow_journal(
+            state.storage.as_ref(),
+            id,
+            WorkflowCutShortCause::RunCancelled,
+        )
+        .await;
         let budget = budget_wire(&run.budget);
         if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
             tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
@@ -8699,7 +8933,7 @@ mod tests {
         assert_eq!(agent_call.status, "completed");
         assert!(agent_call.request.get("agent").is_none());
         assert_eq!(
-            journal_wire(agent_call.clone())
+            journal_wire(agent_call.clone(), None)
                 .expect("journal wire projection")
                 .agent_call
                 .expect("agent-call detail")
@@ -12319,8 +12553,10 @@ mod tests {
                 first.id,
                 serde_json::to_value(AgentCallResult {
                     output: Value::String("restated".into()),
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    usage: WorkflowCallUsage::Known {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
                     working_directory: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
@@ -12495,7 +12731,7 @@ mod tests {
             .await
             .expect("first reply")
             .expect("first call");
-        assert_eq!(settled.input_tokens + settled.output_tokens, 400_000);
+        assert_eq!(settled.usage.known_total(), Some(400_000));
         assert_eq!(spent.load(Ordering::SeqCst), 400_000);
 
         let pending_cancellation = CancellationToken::new();
@@ -13187,8 +13423,10 @@ mod tests {
                 work.id,
                 serde_json::to_value(AgentCallResult {
                     output: Value::String("completed work".into()),
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    usage: WorkflowCallUsage::Known {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
                     working_directory: None,
                     session_id: None,
                     thread_id: None,
@@ -13432,8 +13670,10 @@ mod tests {
                 work.id,
                 serde_json::to_value(AgentCallResult {
                     output: Value::String("completed work".into()),
-                    input_tokens: 1,
-                    output_tokens: 1,
+                    usage: WorkflowCallUsage::Known {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    },
                     working_directory: None,
                     session_id: None,
                     thread_id: None,

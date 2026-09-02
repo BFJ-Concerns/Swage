@@ -1162,7 +1162,80 @@ pub(crate) struct MockStorage {
     fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    fail_provider_round_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
+}
+
+#[async_trait]
+impl swage_storage::ProviderRoundStore for MockStorage {
+    async fn open_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<swage_storage::ProviderRoundRecord, swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        if let Some(existing) = db
+            .provider_rounds
+            .iter()
+            .find(|record| record.turn_id == turn_id && record.round == round)
+        {
+            return Ok(existing.clone());
+        }
+        let record = swage_storage::ProviderRoundRecord {
+            id: Uuid::new_v4(),
+            turn_id,
+            round,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            outcome,
+        };
+        db.provider_rounds.push(record.clone());
+        Ok(record)
+    }
+
+    async fn settle_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<(), swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        if let Some(record) = db
+            .provider_rounds
+            .iter_mut()
+            .find(|record| record.turn_id == turn_id && record.round == round)
+        {
+            record.completed_at = Some(chrono::Utc::now());
+            record.outcome = outcome;
+        }
+        Ok(())
+    }
+
+    async fn list_provider_rounds_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<swage_storage::ProviderRoundRecord>, swage_core::StorageError> {
+        let db = self.db.lock().await;
+        let mut rounds = db
+            .provider_rounds
+            .iter()
+            .filter(|record| record.turn_id == turn_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        rounds.sort_by_key(|record| record.round);
+        Ok(rounds)
+    }
 }
 
 #[async_trait]
@@ -1241,6 +1314,28 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn fail_workflow_journal_entry(
         &self,
         _: Uuid,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn record_workflow_call_dispatch(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn record_workflow_call_resolution(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn cut_short_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
         _: &str,
     ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
         unimplemented!()
@@ -1423,6 +1518,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) workspace_attachments: HashMap<Uuid, WorkspaceAttachment>,
     pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
+    pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
 }
 
 impl MockStorage {
@@ -1442,6 +1538,7 @@ impl MockStorage {
             fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            fail_provider_round_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
         }
     }
