@@ -2107,6 +2107,18 @@ async fn run_host_commands_inner(
                 cancellation,
                 reply,
             } => {
+                // A requested placement consumes one sequence slot before the
+                // agent call. Probe the following slot without provisioning so
+                // fresh author errors are reported before any journal intent
+                // or worktree work, while pre-change calls still replay.
+                let agent_call_seq = seq.load(Ordering::SeqCst)
+                    + u64::from(request.isolation.is_some() || request.cwd.is_some());
+                if replay.get(agent_call_seq as usize).is_none()
+                    && let Err(error) = validate_agent_call(&request)
+                {
+                    let _ = reply.send(Err(WorkflowHostError::Message(error)));
+                    continue;
+                }
                 let resolved_working_directory = match resolve_agent_placement_command(
                     &state,
                     run_id,
@@ -2126,16 +2138,6 @@ async fn run_host_commands_inner(
                         continue;
                     }
                 };
-                // Placement has its own journal entry and consumes the
-                // sequence first. Validate at the following agent-call slot:
-                // fresh invalid schemas stop before a worker or agent intent,
-                // while entries recorded before this check still replay.
-                if replay.get(seq.load(Ordering::SeqCst) as usize).is_none()
-                    && let Err(error) = validate_agent_call(&request)
-                {
-                    let _ = reply.send(Err(WorkflowHostError::Message(error)));
-                    continue;
-                }
                 HostCommand::Agent {
                     request,
                     resolved_working_directory,
@@ -16054,6 +16056,112 @@ mod tests {
                 "{forbidden_kind} must not be journalled for a rejected call: {journal:#?}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_placed_agent_schema_fails_before_worktree_provisioning() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("seed");
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .expect("stage seed")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .expect("commit seed")
+                .success()
+        );
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).expect("serialise cwd");
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "invalid placed schema".into(),
+                description: String::new(),
+                source: format!(
+                    r#"await agent("bad schema", {{ cwd: {cwd}, isolation: "worktree", schema: {{ type: 7 }} }});"#
+                ),
+                delivery_grant: None,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("script");
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("agent schema is invalid")),
+            "expected schema error in {:?}",
+            run.error_message
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert!(
+            !journal.iter().any(|entry| entry.kind == "worker_placement"),
+            "invalid call must not journal placement: {journal:#?}"
+        );
+        assert!(
+            state.worktree_host.list_owner(started.id).await.is_empty(),
+            "invalid call must not provision a worktree"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
