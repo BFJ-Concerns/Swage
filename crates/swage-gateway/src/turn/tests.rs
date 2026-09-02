@@ -1323,14 +1323,14 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: serde_json::Value,
     ) -> Result<(), StorageError> {
-        unimplemented!()
+        Ok(())
     }
     async fn record_workflow_call_resolution(
         &self,
         _: Uuid,
         _: serde_json::Value,
     ) -> Result<(), StorageError> {
-        unimplemented!()
+        Ok(())
     }
     async fn cut_short_workflow_journal_entry(
         &self,
