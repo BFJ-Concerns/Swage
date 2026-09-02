@@ -15,6 +15,11 @@ pub struct AssemblyReport {
     pub compaction_applied: Vec<CompactionRecord>,
     pub warnings: Vec<String>,
     pub errors: Vec<AssemblyError>,
+    /// Baseline elements the assembly script renounced by name, with the
+    /// reason it gave. An element absent from the assembled context and
+    /// absent from this list is a floor breach, not a choice.
+    #[serde(default)]
+    pub declared_omissions: Vec<DeclaredOmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, unknown>")]
     pub effective_tool_permissions: Option<serde_json::Value>,
@@ -39,6 +44,7 @@ impl AssemblyReport {
             compaction_applied: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            declared_omissions: Vec::new(),
             effective_tool_permissions: None,
             tool_scope: None,
             provider_visible: None,
@@ -51,6 +57,15 @@ impl Default for AssemblyReport {
     fn default() -> Self {
         Self::new("default")
     }
+}
+
+/// One baseline element the assembly deliberately left out of the context.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+pub struct DeclaredOmission {
+    /// The omitted element's name, as it appears in the elements projection.
+    pub element: String,
+    /// The reason the assembly gave for leaving it out.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
