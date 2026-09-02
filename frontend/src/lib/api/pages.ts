@@ -10,6 +10,7 @@ import type { WritePageModuleRequest } from "../protocol/WritePageModuleRequest"
 import type { PageAnnotationView } from "../protocol/PageAnnotationView";
 import type { CreatePageAnnotationRequest } from "../protocol/CreatePageAnnotationRequest";
 import type { UpdatePageAnnotationRequest } from "../protocol/UpdatePageAnnotationRequest";
+import { ApiError } from "./error";
 
 let baseUrl = "";
 
@@ -29,8 +30,7 @@ async function request(
   }
   const response = await fetch(`${baseUrl}${path}`, init);
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`${method} ${path} failed (${response.status}): ${text}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
   return response;
 }
