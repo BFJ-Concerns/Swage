@@ -69,8 +69,6 @@ struct GeminiBlob {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct GeminiFileData {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mime_type: Option<String>,
     file_uri: String,
 }
 
@@ -385,7 +383,6 @@ impl GoogleProvider {
                 text: None,
                 inline_data: None,
                 file_data: Some(GeminiFileData {
-                    mime_type: None,
                     file_uri: url.to_string(),
                 }),
                 function_call: None,
@@ -910,6 +907,25 @@ mod tests {
                 {"inlineData": {"mimeType": "image/png", "data": "cG5nLWJ5dGVz"}},
                 {"fileData": {"fileUri": "https://example.test/cat.png"}}
             ])
+        );
+    }
+
+    #[test]
+    fn convert_image_only_user_keeps_the_image_part() {
+        let message = ChatMessage::new_parts(
+            Role::User,
+            vec![ContentPart::ImageUrl {
+                url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+            }],
+        );
+
+        let json = serde_json::to_value(GoogleProvider::convert_messages(&[&message])).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([{
+                "role": "user",
+                "parts": [{"inlineData": {"mimeType": "image/png", "data": "cG5nLWJ5dGVz"}}]
+            }])
         );
     }
 

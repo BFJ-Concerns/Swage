@@ -2059,6 +2059,26 @@ mod tests {
     }
 
     #[test]
+    fn image_only_user_keeps_the_image_block() {
+        let message = ChatMessage::new_parts(
+            Role::User,
+            vec![ContentPart::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        );
+
+        let (_system, messages) = AnthropicProvider::to_anthropic_messages(&[message]);
+        let body = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "image", "source": {"type": "url", "url": "https://example.test/cat.png"}}]
+            })
+        );
+    }
+
+    #[test]
     fn provider_request_snapshot_uses_messages_wire_body() {
         let provider = AnthropicProvider::from_config(ProviderConfig::new(
             "key",
