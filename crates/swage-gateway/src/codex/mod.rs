@@ -178,6 +178,7 @@ pub async fn run_turn(
         }
         let _ = event_tx.send(AgentEvent::Error {
             message: error.to_string(),
+            provider_failure: matches!(error, AgentError::ProviderFailed(_)),
         });
     }
     result
