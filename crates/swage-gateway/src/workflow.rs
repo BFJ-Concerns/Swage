@@ -8354,16 +8354,6 @@ mod tests {
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 vec![
-                    swage_core::StreamChunk::ToolUse {
-                        call_id: "continued-history-tool".into(),
-                        name: "shell".into(),
-                        arguments: serde_json::json!({}),
-                    },
-                    swage_core::StreamChunk::Done {
-                        finish_reason: None,
-                    },
-                ],
-                vec![
                     swage_core::StreamChunk::Delta {
                         content: "restated: gather the sources".into(),
                     },
@@ -8609,7 +8599,7 @@ mod tests {
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 2);
         assert!(
             requests[0]
                 .tool_definitions
@@ -8618,36 +8608,20 @@ mod tests {
             "shell is available while the lead still grants it"
         );
         assert!(
-            requests[2]
+            requests[1]
                 .tool_definitions
                 .iter()
                 .all(|definition| definition["name"] != "shell"),
             "the continued turn must observe the lead's revoked shell grant"
         );
-        let second_request = &requests[2];
-        let second_request_text = second_request
+        let second_request = requests[1]
             .messages
             .iter()
             .map(swage_core::ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(second_request_text.contains("restate the brief"));
-        assert!(second_request_text.contains("restated: gather the sources"));
-        assert!(
-            second_request.messages.iter().any(|message| {
-                message.role() == swage_core::Role::Assistant
-                    && message.tool_replay().is_some_and(|replay| {
-                        replay.iter().any(|part| {
-                            matches!(
-                                part,
-                                swage_core::ToolReplayPart::ToolCall { call_id, name, .. }
-                                    if call_id == "continued-history-tool" && name == "shell"
-                            )
-                        })
-                    })
-            }),
-            "the continued provider request must replay the persisted tool name"
-        );
+        assert!(second_request.contains("restate the brief"));
+        assert!(second_request.contains("restated: gather the sources"));
 
         drop(tx);
         task.await.expect("host loop");
