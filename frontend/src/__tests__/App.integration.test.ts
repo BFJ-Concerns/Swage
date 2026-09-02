@@ -850,7 +850,7 @@ describe("App", () => {
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
-  it("starts the sidebar journey through the configured composer", async () => {
+  it("creates and navigates when the sidebar starts a conversation", async () => {
     const defaultSpace = makeSpace();
     const created: ConversationResponse = {
       id: "conv-new",
@@ -885,36 +885,16 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
-    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
-    const effortSelect = document.querySelector<HTMLSelectElement>('select[aria-label="Effort"]');
-    expect(effortSelect).not.toBeNull();
-    flushSync(() => {
-      effortSelect!.value = "high";
-      effortSelect!.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]');
-    expect(textarea).not.toBeNull();
-    flushSync(() => {
-      textarea!.value = "Start with deliberate reasoning";
-      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
-    flushSync(() => sendButton!.click());
-    await settleUi();
-
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
       defaultSpace.id,
-      "local:reasoning",
-      null,
-      "high",
+      undefined,
+      undefined,
+      undefined,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
-    expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Start with deliberate reasoning",
-    );
+    expect(document.querySelector(".message-display")).not.toBeNull();
   });
 
   it("connects exactly once when the composer auto-creates a conversation", async () => {
