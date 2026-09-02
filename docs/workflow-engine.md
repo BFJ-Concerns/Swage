@@ -331,3 +331,17 @@ Four mechanisms bound concurrent work:
   counter is above zero.
 - **Agent-call counter**: a lifetime count checked against the budget's
   `max_agent_calls` cap.
+
+## Carried workflows
+
+A workflow script can be carried by a skill instead of being authored as a
+standalone row in a space. In the workflow listing, a carried workflow's
+`carrying_skill` field names the skill that provides it. Carried workflows are
+immutable in place; an operator can shadow one by authoring a same-named
+workflow in the space.
+
+The shipped research skill carries the `research-sweep` workflow — the only
+workflow that ships with the gateway. Its internal roles (researcher, organiser,
+synthesist) are bare dispatches inside the script, not standalone agent
+definitions, so they do not appear in the agent registry or the
+start-conversation picker.

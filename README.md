@@ -102,7 +102,14 @@ default = "sonnet"
 [models.entries.sonnet]
 provider_id = "anthropic"
 model_id = "claude-sonnet-5"
+default_effort = "high"            # optional: off|minimal|low|medium|high|xhigh|max
 ```
+
+`default_effort` sets the reasoning effort for every turn using this model
+unless overridden at session start. Seven levels are available, from `off`
+(disable reasoning where the model supports it) through `max`. The gateway
+resolves the chosen level against the model's declared capability — see
+[Agents and permissions — Effort](docs/agents-and-permissions.md#effort).
 
 Set the key in the gateway's environment before starting it. Providers and
 models can also be managed from the web UI under Settings → Providers.
@@ -205,8 +212,8 @@ first:
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
   how a run survives a restart, and how its token budget is spent.
 - [Agents and permissions](docs/agents-and-permissions.md) — agent
-  definitions, operator guidance (`AGENTS.md`), what a tool call is allowed
-  to do, approvals, and sandbox isolation.
+  definitions, operator guidance (`AGENTS.md`), effort resolution, what a
+  tool call is allowed to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
   turn context inspector, the wire contract, and the verification gate.
 

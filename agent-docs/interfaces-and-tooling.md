@@ -32,6 +32,10 @@ The inspector panel displays:
 `ContextAssembled` WebSocket event use the same typed report; the frontend
 imports the generated `AssemblyReport.ts` projection.
 
+The report's `provider_visible` object also records the resolved effort
+for the turn (see [Agents and permissions — Effort](agents-and-permissions.md#effort)):
+what was requested, what the adapter sent, and any clamp or substitution.
+
 `swage-tui` has a terminal-UI equivalent (`ui/inspector.rs:64`), toggled by
 keybinding. It shows per-element fill bars and a budget percentage.
 
