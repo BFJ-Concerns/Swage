@@ -12,8 +12,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, Page, PageModule, PageTemplate,
-    PageTemplateModule,
+    NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput,
+    Page, PageModule, PageTemplate, PageTemplateModule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::PageStore;
@@ -259,6 +259,53 @@ impl PageStore for SqliteStorage {
         .await
     }
 
+    async fn create_page_template_with_modules(
+        &self,
+        template: NewPageTemplate,
+        modules: Vec<NewPageTemplateModuleInput>,
+    ) -> Result<PageTemplate, StorageError> {
+        self.with_conn(move |conn| {
+            let id = Uuid::new_v4();
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO page_templates (id, space_id, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![
+                    id.to_string(),
+                    template.space_id.to_string(),
+                    &template.name,
+                    &now_str,
+                ],
+            )?;
+            for module in modules {
+                tx.execute(
+                    "INSERT INTO page_template_modules
+                         (id, template_id, kind, position, source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        id.to_string(),
+                        &module.kind,
+                        module.position,
+                        &module.source,
+                        &now_str,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(PageTemplate {
+                id,
+                space_id: template.space_id,
+                name: template.name,
+                created_at: now,
+                updated_at: now,
+            })
+        })
+        .await
+    }
+
     async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
@@ -410,7 +457,10 @@ impl PageStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, NewSpace};
+    use crate::model::{
+        NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput,
+        NewSpace,
+    };
     use crate::store::SpaceStore;
 
     use super::*;
@@ -563,6 +613,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn template_creation_rolls_back_when_a_later_module_insert_fails() {
+        let (storage, space_id) = make_space().await;
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_template_module
+                     BEFORE INSERT ON page_template_modules
+                     WHEN NEW.source = 'reject this module'
+                     BEGIN SELECT RAISE(ABORT, 'forced template module failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+
+        let result = storage
+            .create_page_template_with_modules(
+                NewPageTemplate {
+                    space_id,
+                    name: "Broken template".into(),
+                },
+                vec![
+                    NewPageTemplateModuleInput {
+                        kind: "document".into(),
+                        position: 0,
+                        source: "this module lands first".into(),
+                    },
+                    NewPageTemplateModuleInput {
+                        kind: "document".into(),
+                        position: 1,
+                        source: "reject this module".into(),
+                    },
+                ],
+            )
+            .await;
+
+        assert!(result.is_err(), "the trigger rejects the later module");
+        assert!(
+            storage
+                .list_page_templates_by_space(space_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the template head rolls back"
+        );
+        let module_count: i64 = storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM page_template_modules", [], |row| {
+                    row.get(0)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(module_count, 0, "earlier template module rows roll back");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_page_forked_from_a_template_carries_its_modules_and_its_lineage() {
         let (storage, space_id) = make_space().await;
         let template_id = seeded_template(&storage, space_id).await;
@@ -611,6 +717,61 @@ mod tests {
             blank_read.forked_from_template_id, None,
             "a page created blank carries no lineage"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn page_fork_rolls_back_when_a_later_seed_insert_fails() {
+        let (storage, space_id) = make_space().await;
+        let template_id = seeded_template(&storage, space_id).await;
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_page_module
+                     BEFORE INSERT ON page_modules
+                     WHEN NEW.source = '## Blockers'
+                     BEGIN SELECT RAISE(ABORT, 'forced page module failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+
+        let result = storage
+            .create_page_from_template(
+                NewPage {
+                    space_id,
+                    title: "Broken fork".into(),
+                },
+                template_id,
+            )
+            .await;
+
+        assert!(result.is_err(), "the trigger rejects the later seed");
+        assert!(
+            storage
+                .list_pages_by_space(space_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the page head rolls back"
+        );
+        let (lineage_count, module_count): (i64, i64) = storage
+            .with_conn(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM pages WHERE forked_from_template_id IS NOT NULL",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM page_modules", [], |row| row.get(0))?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            lineage_count, 0,
+            "the fork lineage rolls back with the page"
+        );
+        assert_eq!(module_count, 0, "earlier seeded module rows roll back");
     }
 
     #[tokio::test(flavor = "multi_thread")]

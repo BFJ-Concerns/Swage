@@ -20,7 +20,7 @@ use swage_protocol::client::page::{
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
     NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, NewPageTemplate,
-    NewPageTemplateModule, PageAnnotation, PageModule,
+    NewPageTemplateModuleInput, PageAnnotation, PageModule,
 };
 
 use crate::error::{ApiError, Json, Path};
@@ -174,22 +174,23 @@ pub async fn create_page_template(
 
     let template = state
         .storage
-        .create_page_template(NewPageTemplate {
-            space_id,
-            name: name.to_string(),
-        })
+        .create_page_template_with_modules(
+            NewPageTemplate {
+                space_id,
+                name: name.to_string(),
+            },
+            request
+                .modules
+                .iter()
+                .enumerate()
+                .map(|(position, module)| NewPageTemplateModuleInput {
+                    kind: module.kind.clone().unwrap_or_else(|| "document".into()),
+                    position: position as i32,
+                    source: module.source.clone(),
+                })
+                .collect(),
+        )
         .await?;
-    for (position, module) in request.modules.iter().enumerate() {
-        state
-            .storage
-            .create_page_template_module(NewPageTemplateModule {
-                template_id: template.id,
-                kind: module.kind.clone().unwrap_or_else(|| "document".into()),
-                position: position as i32,
-                source: module.source.clone(),
-            })
-            .await?;
-    }
 
     state
         .storage
@@ -204,6 +205,11 @@ pub async fn create_page_template(
                 "space_id": template.space_id,
                 "name": name,
                 "module_count": request.modules.len(),
+                "modules": request.modules.iter().enumerate().map(|(position, module)| json!({
+                    "kind": module.kind.as_deref().unwrap_or("document"),
+                    "position": position,
+                    "source": module.source,
+                })).collect::<Vec<_>>(),
             }),
         })
         .await?;

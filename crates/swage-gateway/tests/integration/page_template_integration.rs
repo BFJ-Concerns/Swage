@@ -487,13 +487,22 @@ async fn template_creation_and_the_fork_each_land_an_audit_event() {
     let page_id = page["id"].as_str().unwrap().to_string();
 
     let events = storage.list_audit_events().await.unwrap();
+    let template_created = events
+        .iter()
+        .find(|event| {
+            event.entity_kind == "page_template"
+                && event.entity_id == template_id
+                && event.event_kind == "page_template_created"
+        })
+        .expect("the template creation is recorded");
+    assert_eq!(template_created.metadata["name"].as_str(), Some("Standup"));
     assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.entity_kind == "page_template" && event.entity_id == template_id)
-            .map(|event| event.event_kind.as_str())
-            .collect::<Vec<_>>(),
-        vec!["page_template_created"]
+        template_created.metadata["modules"],
+        json!([
+            { "kind": "document", "position": 0, "source": "## Yesterday" },
+            { "kind": "document", "position": 1, "source": "## Blockers" },
+        ]),
+        "the trail reconstructs the ordered seed configuration"
     );
 
     let created = events

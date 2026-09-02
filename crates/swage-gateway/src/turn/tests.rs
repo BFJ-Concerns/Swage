@@ -2956,6 +2956,13 @@ impl swage_storage::PageStore for MockStorage {
     ) -> Result<swage_storage::PageTemplate, StorageError> {
         unimplemented!()
     }
+    async fn create_page_template_with_modules(
+        &self,
+        _: swage_storage::NewPageTemplate,
+        _: Vec<swage_storage::NewPageTemplateModuleInput>,
+    ) -> Result<swage_storage::PageTemplate, StorageError> {
+        unimplemented!()
+    }
     async fn get_page_template(
         &self,
         _: Uuid,
