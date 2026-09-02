@@ -1221,9 +1221,10 @@ pub trait ProviderRoundStore: Send + Sync {
     ) -> Result<Vec<ProviderRoundRecord>, StorageError>;
 
     /// Record the outcome of every round of a turn still outstanding, for a
-    /// turn that has stopped and can receive no further response. The rounds
-    /// keep their empty completion time — no response ever arrived, and the
-    /// record does not invent one.
+    /// turn that has stopped and can receive no further response. Each round
+    /// ends here: the completion time is the moment the request became
+    /// unanswerable, which is a time that was observed, and the outcome says
+    /// that is the kind of end it was.
     async fn interrupt_outstanding_provider_rounds(
         &self,
         turn_id: Uuid,

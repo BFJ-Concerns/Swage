@@ -435,7 +435,7 @@ impl AppState {
 ///
 /// Replay re-dispatches an unfinished call under a new turn. The attempts it
 /// follows can no longer receive a provider response, so their open rounds
-/// are recorded as interrupted at the moment that becomes true — leaving them
+/// are ended as interrupted at the moment that becomes true — leaving them
 /// reading as outstanding would say a request might still come back when
 /// nothing can answer it.
 pub(crate) async fn record_agent_call_attempt(
@@ -456,11 +456,29 @@ pub(crate) async fn record_agent_call_attempt(
                  WorkflowAgentCallResolution: {error}"
             ))
         })?;
+    interrupt_outstanding_rounds(
+        storage,
+        superseded.into_iter().filter_map(|attempt| attempt.turn_id),
+    )
+    .await
+}
+
+/// End every round still outstanding on these turns as interrupted.
+///
+/// A round the interruption catches ends at the moment nothing can answer it
+/// any more — the re-dispatch, or the run's own end. That moment is observed,
+/// so the round carries it as its end alongside the outcome naming what kind
+/// of end it was; a round left without one would read as a request that had
+/// never finished at all.
+async fn interrupt_outstanding_rounds(
+    storage: &dyn Storage,
+    turns: impl IntoIterator<Item = Uuid>,
+) -> Result<(), swage_core::StorageError> {
     let interrupted = serde_json::to_value(
         swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Interrupted,
     )
     .map_err(|error| swage_core::StorageError::QueryFailed(error.to_string()))?;
-    for turn_id in superseded.into_iter().filter_map(|attempt| attempt.turn_id) {
+    for turn_id in turns {
         storage
             .interrupt_outstanding_provider_rounds(turn_id, interrupted.clone())
             .await?;
@@ -1850,6 +1868,9 @@ const PARK_TIMER_THRESHOLD_MS: u64 = 60_000;
 ///
 /// These workers did not fail — the run's own end stopped them — so each is
 /// settled with that cause rather than with a failure the worker never had.
+/// The same end reaches the provider requests they had out: nothing can
+/// answer those any more, so each is ended as interrupted here rather than
+/// left reading as a request still in flight.
 async fn settle_cancelled_workflow_journal(
     storage: &dyn Storage,
     run_id: Uuid,
@@ -1871,6 +1892,24 @@ async fn settle_cancelled_workflow_journal(
                 .into_iter()
                 .filter(|entry| entry.status == "started")
             {
+                match agent_call_attempt_turns(&entry) {
+                    Ok(turns) => {
+                        if let Err(error) = interrupt_outstanding_rounds(storage, turns).await {
+                            tracing::warn!(
+                                %run_id,
+                                journal_entry_id = %entry.id,
+                                %error,
+                                "could not end the cut-short worker's outstanding provider rounds"
+                            );
+                        }
+                    }
+                    Err(problem) => tracing::warn!(
+                        %run_id,
+                        journal_entry_id = %entry.id,
+                        %problem,
+                        "could not read the cut-short worker's attempts"
+                    ),
+                }
                 if let Err(error) = storage
                     .cut_short_workflow_journal_entry(entry.id, termination.clone(), message)
                     .await
@@ -16785,9 +16824,13 @@ mod tests {
             swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Interrupted,
             "the round the interruption caught reads interrupted, not still outstanding"
         );
+        let interrupted_end = rounds[1]
+            .completed_at
+            .expect("the interrupted round ends when the re-dispatch made it unanswerable");
         assert!(
-            rounds[1].completed_at.is_none(),
-            "no response came back, so the record invents no end time"
+            interrupted_end >= rounds[1].started_at,
+            "the interrupted round's end is the moment the interruption landed, \
+             after the request went out"
         );
         assert_eq!(
             rounds[2].outcome,
@@ -17040,6 +17083,22 @@ mod tests {
                 .prompt,
             "work the run interrupts",
             "a worker cut short still accounts for what it was asked to do"
+        );
+        let rounds = call.provider_rounds.as_ref().expect("provider rounds");
+        let caught = rounds
+            .last()
+            .expect("the round the cancel caught mid-flight");
+        assert_eq!(
+            caught.outcome,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Interrupted,
+            "the run's end reaches the request it had out: nothing can answer it any more"
+        );
+        let caught_end = caught
+            .completed_at
+            .expect("the round the run's end caught still ends, at the moment it was cut short");
+        assert!(
+            caught_end >= caught.started_at,
+            "the cut-short round's end is when the run ended, after its request went out"
         );
     }
 

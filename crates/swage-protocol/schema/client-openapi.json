@@ -5519,7 +5519,7 @@
         ]
       },
       "WorkflowProviderRound": {
-        "description": "One provider request round inside a worker call.\n\nA round with no `completed_at` is still outstanding: the request went to\nthe provider and no response has come back. A settled round names what\ncame back, so a tool loop (rounds settling with tool calls), a hung\nrequest (an outstanding round), and a slow response (a settled round with\na long span) are told apart from the record alone.",
+        "description": "One provider request round inside a worker call.\n\nA round with no `completed_at` is still outstanding: the request went to\nthe provider and no response has come back. A settled round names what\ncame back, so a tool loop (rounds settling with tool calls), a hung\nrequest (an outstanding round), and a slow response (a settled round with\na long span) are told apart from the record alone. A round the\ninterruption caught also ends — at the moment the request became\nunanswerable rather than at a response — and its outcome says so.",
         "properties": {
           "attempt": {
             "description": "Which attempt of the call ran this round, counting from 1. A call the\nrun's end interrupted and replay re-dispatched runs its rounds again\nunder a later attempt; the number is what keeps the two apart.",
@@ -5606,7 +5606,7 @@
             "type": "object"
           },
           {
-            "description": "The request went out and nothing can answer it any more: the attempt\nthat made it stopped, and the call was re-dispatched under a later\none. Distinct from `outstanding`, which is a request that may still\ncome back.",
+            "description": "The request went out and nothing can answer it any more: the attempt\nthat made it stopped, because the call was re-dispatched under a later\none or because the run's own end cut the worker short. Distinct from\n`outstanding`, which is a request that may still come back. The\nround's end time is when that became true, not when a response\narrived — none did.",
             "properties": {
               "outcome": {
                 "const": "interrupted",
