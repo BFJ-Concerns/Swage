@@ -115,3 +115,49 @@ pub struct TurnContextResponse {
     pub turn_id: Uuid,
     pub report: AssemblyReport,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AssemblyReport, DeclaredOmission};
+
+    #[test]
+    fn a_declared_omission_crosses_the_wire_as_its_element_and_reason() {
+        let mut report = AssemblyReport::new("focus");
+        report.declared_omissions.push(DeclaredOmission {
+            element: "working_norms".to_string(),
+            reason: "the operator instructions carry their own".to_string(),
+        });
+
+        let serialised = serde_json::to_value(&report).expect("serialise report");
+        assert_eq!(
+            serialised["declared_omissions"][0]["element"],
+            "working_norms"
+        );
+        assert_eq!(
+            serialised["declared_omissions"][0]["reason"],
+            "the operator instructions carry their own"
+        );
+
+        let parsed: AssemblyReport =
+            serde_json::from_value(serialised).expect("a serialised report round-trips");
+        assert_eq!(parsed.declared_omissions[0].element, "working_norms");
+    }
+
+    #[test]
+    fn a_report_without_declared_omissions_parses_with_none_recorded() {
+        let parsed: AssemblyReport = serde_json::from_value(serde_json::json!({
+            "assembly_name": "default",
+            "elements": [],
+            "total_tokens": 0,
+            "compaction_applied": [],
+            "warnings": [],
+            "errors": [],
+            "effective_tool_permissions": [],
+            "provider_visible": null,
+            "duration": {"secs": 0, "nanos": 0}
+        }))
+        .expect("a report omitting the field parses");
+
+        assert!(parsed.declared_omissions.is_empty());
+    }
+}
