@@ -253,6 +253,11 @@ fn compose(
         .collect();
     report.total_tokens = tokeniser.count_messages(&assembled);
     report.budget = config.budget;
+    // Accounted against what the context finally carries, restored baseline
+    // included — the same subtraction the default assembly reports.
+    report.budget_remaining = config
+        .budget
+        .map(|budget| budget as isize - report.total_tokens as isize);
     if let Some(budget) = config.budget
         && report.total_tokens > budget
     {
@@ -894,6 +899,14 @@ mod tests {
     }
 
     fn assemble_source(source: &str, elements: &[Box<dyn ContextElement>]) -> AssemblyOutput {
+        assemble_source_under(source, elements, None)
+    }
+
+    fn assemble_source_under(
+        source: &str,
+        elements: &[Box<dyn ContextElement>],
+        budget: Option<usize>,
+    ) -> AssemblyOutput {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("assemblies").join("focus.js");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -902,7 +915,10 @@ mod tests {
             "focus",
             Some(&path),
             elements,
-            &ContextConfig::default(),
+            &ContextConfig {
+                budget,
+                ..ContextConfig::default()
+            },
             &WordTokeniser,
             &BTreeMap::new(),
         )
@@ -913,6 +929,30 @@ mod tests {
         add(byName.prompts);
         add(byName.history);
         "#;
+
+    #[test]
+    fn budget_accounting_counts_the_restored_baseline() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source_under(HISTORY_AND_PROMPTS_ONLY, &elements, Some(1_000));
+
+        let composed: usize = output
+            .report
+            .elements
+            .iter()
+            .map(|element| element.token_count)
+            .sum();
+        assert_eq!(
+            output.report.elements.len(),
+            4,
+            "the restored baseline is part of what the budget is spent on"
+        );
+        assert_eq!(output.report.budget, Some(1_000));
+        assert_eq!(
+            output.report.budget_remaining,
+            Some(1_000 - composed as isize),
+            "the remaining budget is what is left after the restored context"
+        );
+    }
 
     #[test]
     fn an_undeclared_baseline_omission_is_restored_at_its_priority() {
