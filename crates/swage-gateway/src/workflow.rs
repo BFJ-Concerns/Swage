@@ -16388,16 +16388,39 @@ mod tests {
     async fn send_worker_call(
         tx: &mpsc::UnboundedSender<HostCommand>,
         request: AgentCallRequest,
+        resolved_working_directory: Option<ResolvedWorkerPlacement>,
     ) -> Result<AgentCallResult, WorkflowHostError> {
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
             request,
-            resolved_working_directory: None,
+            resolved_working_directory,
             cancellation: CancellationToken::new(),
             reply,
         })
         .expect("send agent call");
         receive.await.expect("agent reply")
+    }
+
+    /// A placement the space actually authorises: the directory is attached
+    /// as a trusted workspace, so the worker's turn re-authorises it rather
+    /// than failing closed on a path nothing grants.
+    async fn granted_worker_placement(
+        storage: &SqliteStorage,
+        space_id: Uuid,
+        directory: &std::path::Path,
+    ) -> ResolvedWorkerPlacement {
+        let attachment_id = grant_workspace(storage, space_id, directory).await;
+        let path = directory
+            .canonicalize()
+            .expect("canonical placement path")
+            .to_string_lossy()
+            .into_owned();
+        ResolvedWorkerPlacement {
+            path: path.clone(),
+            can_write: true,
+            authority_path: path,
+            authority_context_id: attachment_id,
+        }
     }
 
     fn only_agent_call(
@@ -16418,11 +16441,21 @@ mod tests {
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
-        let (_storage, state, run) = worker_call_record_fixture(provider).await;
+        let (storage, state, run) = worker_call_record_fixture(provider).await;
+        // The worker is placed where a real dispatch places one, so the
+        // record is read back against a placement that was actually
+        // resolved rather than against the absence of one.
+        let placement_directory = tempfile::tempdir().expect("placement directory");
+        let placement =
+            granted_worker_placement(&storage, run.space_id, placement_directory.path()).await;
         let (tx, task) = spawn_worker_call_host(state.clone(), &run);
-        send_worker_call(&tx, worker_call_request("read the briefing"))
-            .await
-            .expect("agent call");
+        send_worker_call(
+            &tx,
+            worker_call_request("read the briefing"),
+            Some(placement.clone()),
+        )
+        .await
+        .expect("agent call");
         drop(tx);
         task.await.expect("host loop");
 
@@ -16438,6 +16471,14 @@ mod tests {
         assert_eq!(
             dispatch.grants.as_deref(),
             Some(["file_read".to_string()].as_slice())
+        );
+        assert_eq!(
+            dispatch.placement,
+            Some(WorkflowWorkerPlacementRecord {
+                path: placement.path.clone(),
+                can_write: true,
+            }),
+            "the record carries where the worker was actually placed"
         );
         let resolved = dispatch.resolved.as_ref().expect("resolution record");
         assert!(resolved.model.is_some(), "the resolved model is recorded");
@@ -16484,7 +16525,7 @@ mod tests {
         });
         let (_storage, state, run) = worker_call_record_fixture(provider).await;
         let (tx, task) = spawn_worker_call_host(state.clone(), &run);
-        send_worker_call(&tx, worker_call_request("work without reported usage"))
+        send_worker_call(&tx, worker_call_request("work without reported usage"), None)
             .await
             .expect("agent call");
         drop(tx);
