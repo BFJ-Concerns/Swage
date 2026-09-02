@@ -39,13 +39,11 @@ fn gateway_state<'ctx>(
     tool: &str,
     ctx: &'ctx dyn ToolContext,
 ) -> Result<&'ctx AppState, ToolError> {
-    ctx.as_any()
-        .downcast_ref::<GatewayToolContext>()
-        .and_then(GatewayToolContext::app_state)
-        .ok_or_else(|| ToolError::ExecutionFailed {
-            name: tool.to_owned(),
-            message: "the schedule tools run only inside a gateway host turn".to_owned(),
-        })
+    super::require_gateway_state(
+        ctx,
+        tool,
+        "the schedule tools run only inside a gateway host turn",
+    )
 }
 
 fn invalid(tool: &str, message: impl Into<String>) -> ToolError {

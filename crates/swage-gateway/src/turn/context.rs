@@ -269,21 +269,7 @@ pub(crate) fn configuration_hierarchy(
     space_slug: &str,
     agent_id: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
-    let space = root.join("spaces").join(space_slug);
-    let mut hierarchy = vec![
-        (HierarchyLevel::Global, root.to_path_buf()),
-        (HierarchyLevel::Space, space),
-    ];
-    if let Some(agent_id) = agent_id.filter(|id| *id != RESERVED_WORKFLOW_AGENT_ID) {
-        hierarchy.push((
-            HierarchyLevel::Agent,
-            root.join("spaces")
-                .join(space_slug)
-                .join("agents")
-                .join(agent_id),
-        ));
-    }
-    hierarchy
+    swage_config::configuration_hierarchy(root, space_slug, agent_id)
 }
 
 /// Load space memory content by reading all `.md` files from the space's

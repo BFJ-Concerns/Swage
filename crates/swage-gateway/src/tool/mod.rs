@@ -35,3 +35,22 @@ pub mod workspace;
 pub use swage_tool::dispatch::ToolDispatcher;
 pub use swage_tool::registry::ToolRegistry;
 pub use swage_tool::tool::Tool;
+
+/// Resolve the gateway-owned state required by host tools while preserving the
+/// caller's tool name and user-facing failure wording.
+pub(crate) fn require_gateway_state<'ctx>(
+    context: &'ctx dyn swage_tool::context::ToolContext,
+    tool: &str,
+    message: impl Into<String>,
+) -> Result<&'ctx crate::state::AppState, swage_core::ToolError> {
+    use crate::tool_executor::GatewayToolContext;
+
+    context
+        .as_any()
+        .downcast_ref::<GatewayToolContext>()
+        .and_then(GatewayToolContext::app_state)
+        .ok_or_else(|| swage_core::ToolError::ExecutionFailed {
+            name: tool.to_owned(),
+            message: message.into(),
+        })
+}
