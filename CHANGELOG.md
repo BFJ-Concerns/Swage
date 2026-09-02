@@ -6,7 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Resumed workflow workers no longer replay tool calls to providers without a tool name.
+- Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
 
 ### Added
 
