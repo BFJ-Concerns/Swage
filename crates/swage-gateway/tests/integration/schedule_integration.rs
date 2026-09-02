@@ -35,8 +35,8 @@ use swage_protocol::client::schedule::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewScheduleRun, NewSpace, PageStore, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
-    SpaceStore, SqliteStorage, Storage,
+    NewScheduleRun, NewSpace, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    SqliteStorage,
 };
 
 /// Provider double serving both halves of the schedule domain: queued
@@ -855,13 +855,7 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
         .find(|delivery| delivery.run_id == Some(failed.id))
         .expect("a run failing before delivery records why it made no delivery");
     assert_eq!(no_delivery.status, "not_delivered");
-    assert!(
-        no_delivery
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("provider down")
-    );
+    assert_eq!(no_delivery.error, failed.error_message);
     assert_eq!(completed.trigger, ScheduleRunTrigger::Tick);
     assert_eq!(completed.state, ScheduleRunState::Completed);
     assert_eq!(
@@ -1509,6 +1503,7 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_space() {
         .space_store
         .create(NewSpace {
             name: "Elsewhere".into(),
+            slug: "elsewhere".parse().unwrap(),
         })
         .await
         .unwrap();
