@@ -15878,12 +15878,12 @@ mod tests {
             (
                 r#"await agent("bad schema", { schema: { type: 7 } });"#,
                 "agent_call",
-                "InvalidAgentSchemaError",
+                "agent schema is invalid",
             ),
             (
                 r#"await workflow("missing workflow", {});"#,
                 "workflow_call",
-                "WorkflowReferenceError",
+                "workflow script \"missing workflow\" was not found",
             ),
         ] {
             let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
