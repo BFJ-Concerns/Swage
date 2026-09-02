@@ -1138,8 +1138,8 @@ struct ArtifactBudgetSnapshot {
 
 impl ArtifactBudgetSnapshot {
     fn capture() -> io::Result<Self> {
-        let target_directory = cargo_target_directory()
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let target_directory =
+            cargo_target_directory().map_err(|error| io::Error::other(error.to_string()))?;
         Ok(Self {
             target: allocated_disk_usage(&target_directory)?,
             debug_deps: allocated_disk_usage(&target_directory.join("debug/deps"))?,
