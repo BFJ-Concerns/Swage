@@ -26,9 +26,9 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
-    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
-    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
-    WorkflowHostError, journal_args_hash, recover_started_effect,
+    EffectRecoveryHost, EngineLimits, GateRequest, HeldWorkerOpen, QUICKJS_ENGINE_VERSION,
+    ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
+    WorkflowHost, WorkflowHostError, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -449,6 +449,7 @@ fn journal_wire(
         "budget" => WorkflowJournalEntryKind::Budget,
         "terminal_budget" => WorkflowJournalEntryKind::TerminalBudget,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
+        "worker" => WorkflowJournalEntryKind::Worker,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
     let status = match entry.status.as_str() {
@@ -995,6 +996,18 @@ enum HostCommand {
     BudgetSnapshot {
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    OpenHeldWorker {
+        open: HeldWorkerOpen,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    CloseHeldWorker {
+        worker_id: Uuid,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    HeldWorkerStaleness {
+        worker_id: Uuid,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
 }
 
 struct ChannelWorkflowHost {
@@ -1244,6 +1257,215 @@ impl WorkflowHost for ChannelWorkflowHost {
             .await
             .map_err(|_| "workflow host dropped budget reply".to_string())?
     }
+
+    async fn open_held_worker(
+        &self,
+        open: HeldWorkerOpen,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::OpenHeldWorker { open, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped worker reply".to_string())?
+    }
+
+    async fn close_held_worker(
+        &self,
+        worker_id: Uuid,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::CloseHeldWorker { worker_id, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped worker reply".to_string())?
+    }
+
+    async fn held_worker_staleness(
+        &self,
+        worker_id: Uuid,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::HeldWorkerStaleness { worker_id, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped worker reply".to_string())?
+    }
+}
+
+/// A worker the script is holding open: what it was opened with, and when it
+/// was last active. `last_activity` marks the start of its most recent turn —
+/// turns are sequential, so a staleness reading always falls between turns,
+/// and measuring from the turn's start reports the idle gap conservatively
+/// (never shorter than it really is).
+struct HeldWorker {
+    open: HeldWorkerOpen,
+    last_activity: std::time::Instant,
+}
+
+/// Whether a turn may be sent to this worker.
+///
+/// Model, effort, placement and requested grants are settled when a worker is
+/// opened. Wanting a bigger model or more effort partway through is a fresh
+/// dispatch — a new worker with its own context — never a switch under a
+/// conversation the provider has already seen.
+fn check_held_worker_turn(
+    held_workers: &std::collections::HashMap<Uuid, HeldWorker>,
+    worker_id: Uuid,
+    request: &AgentCallRequest,
+) -> Result<(), String> {
+    let Some(worker) = held_workers.get(&worker_id) else {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} is not an open worker of this run"
+        ));
+    };
+    if request.model.is_some() && request.model != worker.open.model {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} was opened on model {:?}; \
+             escalating to {:?} is a fresh dispatch, not a mid-session switch",
+            worker.open.model, request.model
+        ));
+    }
+    if request.effort.is_some() && request.effort != worker.open.effort {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} was opened at effort {:?}; \
+             changing it to {:?} is a fresh dispatch, not a mid-session switch",
+            worker.open.effort, request.effort
+        ));
+    }
+    Ok(())
+}
+
+/// A worker's identity is the journal entry that opened it, so every later
+/// reference to the worker resolves to a row this run wrote.
+async fn complete_worker_open(state: &AppState, entry_id: Uuid) -> Result<Value, String> {
+    let result = serde_json::json!({ "worker_id": entry_id });
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map(|_| result)
+        .map_err(|error| error.to_string())
+}
+
+async fn complete_worker_close(
+    state: &AppState,
+    entry_id: Uuid,
+    worker_id: Uuid,
+    closed_by: &str,
+) -> Result<Value, String> {
+    let result = serde_json::json!({ "worker_id": worker_id, "closed_by": closed_by });
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map(|_| result)
+        .map_err(|error| error.to_string())
+}
+
+/// The worker's idle gap and the threshold of the route its model draws on,
+/// as recorded facts. A route declaring no threshold yields `stale: null`: the
+/// gap is still reported, and the script is told the verdict is unknown rather
+/// than handed a guess.
+fn held_worker_staleness_reading(
+    config: &swage_config::ResolvedConfig,
+    worker: &HeldWorker,
+) -> Value {
+    let idle_ms = worker.last_activity.elapsed().as_millis() as u64;
+    let route = swage_config::resolve_provider_route(
+        &config.models,
+        &config.providers,
+        worker.open.model.as_deref(),
+    );
+    let threshold_ms = route.and_then(|route| route.endpoint.worker_staleness_threshold_ms);
+    serde_json::json!({
+        "stale": threshold_ms.map(|threshold| idle_ms >= threshold),
+        "idle_ms": idle_ms,
+        "threshold_ms": threshold_ms,
+        "route": route.map(|route| route.provider_id),
+    })
+}
+
+/// Close every worker the run still holds open.
+///
+/// Run at every terminal outcome — return, throw, or cancellation — so a
+/// worker outlives its run by no path. A parked run is deliberately not
+/// terminal: it resumes, and its workers are stored sessions that must still
+/// be there when it does.
+async fn close_open_held_workers(storage: &dyn Storage, run_id: Uuid) {
+    let journal = match storage.list_workflow_journal(run_id).await {
+        Ok(journal) => journal,
+        Err(error) => {
+            tracing::warn!(%run_id, %error, "could not read journal to close held workers");
+            return;
+        }
+    };
+    let worker_id_of = |entry: &WorkflowJournalRecord| -> Option<Uuid> {
+        entry
+            .result
+            .as_ref()?
+            .get("worker_id")?
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+    };
+    let closed = journal
+        .iter()
+        .filter(|entry| {
+            entry.kind == "worker"
+                && entry.status == "completed"
+                && entry.request.get("action").and_then(Value::as_str) == Some("close")
+        })
+        .filter_map(worker_id_of)
+        .collect::<std::collections::HashSet<_>>();
+    let open = journal
+        .iter()
+        .filter(|entry| {
+            entry.kind == "worker"
+                && entry.status == "completed"
+                && entry.request.get("action").and_then(Value::as_str) == Some("open")
+        })
+        .filter_map(worker_id_of)
+        .filter(|worker_id| !closed.contains(worker_id))
+        .collect::<Vec<_>>();
+    let mut next_seq = journal.iter().map(|entry| entry.seq).max().unwrap_or(0) + 1;
+    for worker_id in open {
+        let request = serde_json::json!({
+            "action": "close", "worker_id": worker_id, "closed_by": "run_end",
+        });
+        let intent = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: next_seq,
+                kind: "worker".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await;
+        next_seq += 1;
+        match intent {
+            Ok(intent) => {
+                let result = serde_json::json!({ "worker_id": worker_id, "closed_by": "run_end" });
+                if let Err(error) = storage
+                    .complete_workflow_journal_entry(intent.id, result)
+                    .await
+                {
+                    tracing::warn!(%run_id, %worker_id, %error, "could not record held-worker closure");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%run_id, %worker_id, %error, "could not record held-worker closure");
+            }
+        }
+    }
 }
 
 async fn run_ephemeral_agent_call(
@@ -1359,12 +1581,18 @@ async fn run_ephemeral_agent_call(
                         session_ref.thread_id, session_ref.session_id
                     )
                 })?;
-            if let Some(model) = request.model.as_deref() {
-                state
-                    .storage
-                    .set_session_selected_model(session.id, Some(model.to_string()))
-                    .await
-                    .map_err(|error| error.to_string())?;
+            // A continued session keeps the model it was created with. The
+            // provider has already seen this conversation; swapping the model
+            // under it is a different worker, so ask for one.
+            if let Some(model) = request.model.as_deref()
+                && session.selected_model_id.as_deref() != Some(model)
+            {
+                return Err(format!(
+                    "AgentCallError: model {model:?} cannot be selected on a continued session \
+                     (it was created on {:?}); open a new worker to change model",
+                    session.selected_model_id
+                )
+                .into());
             }
             (session.id, thread.id)
         }
@@ -2033,6 +2261,12 @@ async fn run_host_commands_inner(
     // Wind-down is replay position, not run end-state. A transition later in
     // the journal must not classify earlier started calls as closing work.
     let mut winding_down = false;
+    // Held workers this run has open, by the journal entry id that opened
+    // them. A resumed run rebuilds this table by replaying the script's own
+    // session()/send()/close() calls, so it never needs to survive the
+    // process — which is what keeps a parked run free of resident state.
+    let mut held_workers: std::collections::HashMap<Uuid, HeldWorker> =
+        std::collections::HashMap::new();
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -2107,6 +2341,22 @@ async fn run_host_commands_inner(
                 cancellation,
                 reply,
             } => {
+                // A turn addressed to a held worker is checked against the
+                // table before anything is journalled: the worker must be one
+                // this run opened and has not closed, and the turn must not
+                // ask for a bigger model or more effort than the worker was
+                // opened with. Refusing here rather than in the shim means a
+                // direct agent() call carrying a session token cannot walk
+                // around it.
+                if let Some(worker_id) = request.worker {
+                    if let Err(error) = check_held_worker_turn(&held_workers, worker_id, &request) {
+                        let _ = reply.send(Err(WorkflowHostError::Message(error)));
+                        continue;
+                    }
+                    if let Some(worker) = held_workers.get_mut(&worker_id) {
+                        worker.last_activity = std::time::Instant::now();
+                    }
+                }
                 let resolved_working_directory = match resolve_agent_placement_command(
                     &state,
                     run_id,
@@ -3103,6 +3353,183 @@ async fn run_host_commands_inner(
                                 .await
                             }
                             Err(error) => Err(error.to_string()),
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            HostCommand::OpenHeldWorker { open, reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({
+                    "action": "open",
+                    "open": serde_json::to_value(&open).expect("held worker open serialises"),
+                });
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "worker" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed worker entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded worker failure".to_string())),
+                    // Started: the original run crashed between intent and
+                    // completion. The worker id is the entry id, so
+                    // re-completing lands the same identity it would have.
+                    Some(entry) => complete_worker_open(&state, entry.id).await,
+                    None => {
+                        match state
+                            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                run_id,
+                                seq: current_seq,
+                                kind: "worker".into(),
+                                args_hash: hash,
+                                request,
+                                effect_kind: None,
+                                idempotency_key: None,
+                                target_kind: None,
+                            })
+                            .await
+                        {
+                            Ok(intent) => complete_worker_open(&state, intent.id).await,
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                };
+                if let Ok(value) = result.as_ref()
+                    && let Some(worker_id) = value
+                        .get("worker_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                {
+                    held_workers.insert(
+                        worker_id,
+                        HeldWorker {
+                            open,
+                            last_activity: std::time::Instant::now(),
+                        },
+                    );
+                }
+                let _ = reply.send(result);
+            }
+            HostCommand::CloseHeldWorker { worker_id, reply } => {
+                // Closing a worker that was never open, or is already closed,
+                // is a script error and consumes no journal seq — the same
+                // treatment event-kind validation gets, so the verdict is
+                // identical live and on replay.
+                if !held_workers.contains_key(&worker_id) {
+                    let _ = reply.send(Err(format!(
+                        "HeldWorkerError: worker {worker_id} is not an open worker of this run"
+                    )));
+                    continue;
+                }
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({
+                    "action": "close", "worker_id": worker_id, "closed_by": "script",
+                });
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "worker" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed worker entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded worker failure".to_string())),
+                    Some(entry) => {
+                        complete_worker_close(&state, entry.id, worker_id, "script").await
+                    }
+                    None => {
+                        match state
+                            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                run_id,
+                                seq: current_seq,
+                                kind: "worker".into(),
+                                args_hash: hash,
+                                request,
+                                effect_kind: None,
+                                idempotency_key: None,
+                                target_kind: None,
+                            })
+                            .await
+                        {
+                            Ok(intent) => {
+                                complete_worker_close(&state, intent.id, worker_id, "script").await
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                };
+                if result.is_ok() {
+                    held_workers.remove(&worker_id);
+                }
+                let _ = reply.send(result);
+            }
+            HostCommand::HeldWorkerStaleness { worker_id, reply } => {
+                let Some(worker) = held_workers.get(&worker_id) else {
+                    let _ = reply.send(Err(format!(
+                        "HeldWorkerError: worker {worker_id} is not an open worker of this run"
+                    )));
+                    continue;
+                };
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({
+                    "action": "staleness", "worker_id": worker_id,
+                });
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "worker" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    // Replay returns the RECORDED reading. Idle time is
+                    // wall-clock, so a fresh measurement here would differ
+                    // from the one the script branched on live.
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed worker entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded worker failure".to_string())),
+                    existing => {
+                        let reading = held_worker_staleness_reading(&state.config, worker);
+                        match existing {
+                            Some(entry) => state
+                                .complete_workflow_journal_entry(entry.id, reading.clone())
+                                .await
+                                .map(|_| reading)
+                                .map_err(|error| error.to_string()),
+                            None => {
+                                match state
+                                    .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                        run_id,
+                                        seq: current_seq,
+                                        kind: "worker".into(),
+                                        args_hash: hash,
+                                        request,
+                                        effect_kind: None,
+                                        idempotency_key: None,
+                                        target_kind: None,
+                                    })
+                                    .await
+                                {
+                                    Ok(intent) => state
+                                        .complete_workflow_journal_entry(intent.id, reading.clone())
+                                        .await
+                                        .map(|_| reading)
+                                        .map_err(|error| error.to_string()),
+                                    Err(error) => Err(error.to_string()),
+                                }
+                            }
                         }
                     }
                 };
@@ -4900,6 +5327,9 @@ async fn launch_existing_run(
         if run_state == "cancelled" {
             settle_cancelled_workflow_journal(storage.as_ref(), run_id).await;
         }
+        // Every terminal path reaches here — the park case returned above —
+        // so no outcome leaves a worker held.
+        close_open_held_workers(storage.as_ref(), run_id).await;
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
                 Some(host_reference) => {
