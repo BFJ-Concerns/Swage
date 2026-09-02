@@ -7,7 +7,6 @@ use swage_tool::context::ToolContext;
 
 use crate::state::AppState;
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 
 const TOOL: &str = "session_values";
 

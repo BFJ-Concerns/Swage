@@ -12,7 +12,6 @@ use swage_tool::context::{ToolContext, serialise_tool_context};
 
 use super::{Tool, ToolDispatcher};
 use crate::tool::nested_tool_runtime::NestedToolRuntime;
-use crate::tool_executor::GatewayToolContext;
 
 pub struct PythonExecuteTool {
     runtime: Arc<PythonWorkerRuntime>,

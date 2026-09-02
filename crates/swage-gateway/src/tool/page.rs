@@ -26,7 +26,6 @@ use swage_tool::context::ToolContext;
 use crate::page;
 use crate::state::AppState;
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 
 const READ_TOOL: &str = "page_read";
 const WRITE_TOOL: &str = "page_write";
