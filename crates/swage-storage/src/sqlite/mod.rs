@@ -18,6 +18,7 @@ pub mod observation;
 pub mod orientation_card;
 pub mod page;
 pub mod page_annotation;
+pub mod provider_round;
 pub mod schedule;
 pub mod secret;
 pub mod session;

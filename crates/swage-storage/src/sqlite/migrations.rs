@@ -93,8 +93,42 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
         ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
+        ("059_worker_call_record", CREATE_WORKER_CALL_RECORD),
     ]
 }
+
+/// The per-call truth a run's record owes about its workers.
+///
+/// `dispatch_json` is written when the call is dispatched, before any
+/// provider work, so a worker that dies mid-run still leaves what it was
+/// asked to do; `dispatch_resolution_json` is stamped once the worker's turn
+/// resolved the options it actually ran with; `termination_json` names why a
+/// worker stopped, so the run's own end reaching into a live worker is not
+/// recorded as that worker failing. All three stay generic JSON — the
+/// contract lives in swage-protocol and is enforced at the projection.
+///
+/// `provider_rounds` records each provider request inside a turn. A row with
+/// no `completed_at` is an outstanding request; a settled row names what came
+/// back. Tool-call rows already carry the round that produced them, so the
+/// two join on (turn_id, round).
+const CREATE_WORKER_CALL_RECORD: &str = "
+    ALTER TABLE workflow_journal ADD COLUMN dispatch_json TEXT;
+    ALTER TABLE workflow_journal ADD COLUMN dispatch_resolution_json TEXT;
+    ALTER TABLE workflow_journal ADD COLUMN termination_json TEXT;
+
+    CREATE TABLE IF NOT EXISTS provider_rounds (
+        id           TEXT NOT NULL PRIMARY KEY,
+        turn_id      TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        round        INTEGER NOT NULL,
+        started_at   TEXT NOT NULL,
+        completed_at TEXT,
+        outcome_json TEXT NOT NULL,
+        UNIQUE (turn_id, round)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_provider_rounds_turn
+        ON provider_rounds(turn_id, round);
+";
 
 /// Annotations on a page's modules: the notes a user and an agent both hang
 /// on the same module, so neither has to describe a location to the other.

@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use swage_protocol::client::{settings::Effort, workflow::WorkerIsolation};
+use swage_protocol::client::{
+    settings::Effort,
+    workflow::{WorkerIsolation, WorkflowCallUsage},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -104,8 +107,10 @@ pub struct ResolvedWorkerPlacement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentCallResult {
     pub output: Value,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    /// What the call spent, or why that is not known. A call whose provider
+    /// reported no usage records the absence with its reason; it never
+    /// stands in as zero spend.
+    pub usage: WorkflowCallUsage,
     /// Host-resolved directory in which this worker ran. This is reported
     /// separately from the caller's journalled `cwd` request.
     #[serde(default)]

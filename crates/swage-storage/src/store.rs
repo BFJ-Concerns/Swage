@@ -16,7 +16,7 @@ use crate::model::{
     NewSpace, NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
     NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment,
     OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule,
-    PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
     SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
     ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
     WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
@@ -1154,6 +1154,65 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         run_id: Uuid,
     ) -> Result<Vec<WorkflowJournalRecord>, StorageError>;
+
+    /// Record what a call was dispatched with, before its work begins. The
+    /// entry's `args_hash` covers the serialised request and must stay
+    /// stable, so dispatch-time facts live in this field rather than in the
+    /// request.
+    async fn record_workflow_call_dispatch(
+        &self,
+        id: Uuid,
+        dispatch: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Stamp the options the dispatched worker's turn resolved for itself.
+    async fn record_workflow_call_resolution(
+        &self,
+        id: Uuid,
+        resolution: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Settle an entry whose work the run's own end stopped, recording the
+    /// cause. The stored status stays `failed` so replay keeps treating the
+    /// entry as terminal; the termination record is what tells a cut-short
+    /// worker from one that failed on its own.
+    async fn cut_short_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        termination: serde_json::Value,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
+}
+
+/// Store for the provider rounds inside a turn.
+///
+/// A round is opened when its request goes to the provider and settled when
+/// the round ends. An open round with no settlement is an outstanding
+/// request — the fact that distinguishes a hung provider from a tool loop.
+#[async_trait]
+pub trait ProviderRoundStore: Send + Sync {
+    /// Open a round. Idempotent on (turn_id, round) so a replayed round does
+    /// not fork the record.
+    async fn open_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<ProviderRoundRecord, StorageError>;
+
+    /// Settle an open round with what came back.
+    async fn settle_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Every round of a turn, oldest first.
+    async fn list_provider_rounds_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<ProviderRoundRecord>, StorageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1300,7 @@ pub trait Storage:
     + ScheduleStore
     + ChannelQueueStore
     + WorkflowStore
+    + ProviderRoundStore
     + PageStore
     + PageAnnotationStore
     + Send
@@ -1279,6 +1339,7 @@ impl<T> Storage for T where
         + ScheduleStore
         + ChannelQueueStore
         + WorkflowStore
+        + ProviderRoundStore
         + PageStore
         + PageAnnotationStore
         + Send
@@ -2564,6 +2625,54 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<WorkflowJournalRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn record_workflow_call_dispatch(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn record_workflow_call_resolution(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn cut_short_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+            _: &str,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ProviderRoundStore for StubStorage {
+        async fn open_provider_round(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: serde_json::Value,
+        ) -> Result<ProviderRoundRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn settle_provider_round(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_provider_rounds_by_turn(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ProviderRoundRecord>, StorageError> {
             unimplemented!()
         }
     }
