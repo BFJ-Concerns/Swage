@@ -145,7 +145,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    23,
+                    24,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
@@ -156,7 +156,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    24,
+                    25,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
