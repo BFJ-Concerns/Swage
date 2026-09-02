@@ -8,6 +8,7 @@
   import SpaceSelector from "./SpaceSelector.svelte";
   import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
   import type { DisplayPreferences } from "../display-preferences";
   import type { Route } from "../router";
   import type { DesktopRuntimeInfo } from "../runtime";
@@ -87,6 +88,7 @@
       selectedAgentId = "";
     }
   });
+  const workflowRunId = $derived(route?.workflowRunId ?? null);
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
@@ -121,7 +123,9 @@
   </header>
 {/if}
 
-{#if settingsMode}
+{#if workflowRunId}
+  <main class="workflow-run"><WorkflowRunDetail runId={workflowRunId} /></main>
+{:else if settingsMode}
   <!-- The settings window chrome lives here; the pages own their content only. -->
   <div class="settings-window">
     <header class="settings-chrome">
