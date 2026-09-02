@@ -1614,18 +1614,17 @@ async fn run_ephemeral_agent_call(
         grants: effective_call_tools.clone(),
         resolved: None,
     };
-    match serde_json::to_value(&dispatch) {
-        Ok(dispatch) => {
-            if let Err(error) = state
-                .storage
-                .record_workflow_call_dispatch(journal_entry_id, dispatch)
-                .await
-            {
-                tracing::warn!(%error, "failed to record agent call dispatch");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "failed to serialise agent call dispatch"),
-    }
+    // The record is constitutive, not a trace: a call that ran without one
+    // is a worker nobody can say what was asked of. Refusing to dispatch is
+    // the honest failure — starting anyway would spend a provider round that
+    // the account can never explain.
+    let dispatch_record = serde_json::to_value(&dispatch)
+        .map_err(|error| format!("failed to serialise agent call dispatch: {error}"))?;
+    state
+        .storage
+        .record_workflow_call_dispatch(journal_entry_id, dispatch_record)
+        .await
+        .map_err(|error| format!("failed to record agent call dispatch: {error}"))?;
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
@@ -5657,6 +5656,52 @@ mod tests {
     };
     use swage_workflow::AgentSessionRef;
 
+    /// A run and a started journal entry for a worker call, as the host
+    /// would have created them before dispatching one.
+    ///
+    /// A call's dispatch record attaches to its journal entry, so a fixture
+    /// driving `run_ephemeral_agent_call` needs a real entry rather than a
+    /// fresh UUID standing in for one.
+    async fn journalled_agent_call(storage: &SqliteStorage, space_id: Uuid) -> (Uuid, Uuid) {
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("agent call fixture".into()),
+                source_hash: source_hash("agent call fixture"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let request = serde_json::json!({"kind": "agent_call"});
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: swage_workflow::journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("started entry");
+        (run.id, entry.id)
+    }
+
     /// The research sweep as the shipped research skill carries it.
     fn research_sweep_source() -> &'static str {
         crate::shipped_skills::workflow_files("research")
@@ -6675,13 +6720,14 @@ mod tests {
             assembly: None,
         };
 
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let result = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             request(Some(vec!["workflow-specialist".into()])),
             None,
             CancellationToken::new(),
@@ -6708,13 +6754,14 @@ mod tests {
             "workflow child report should name the requested skill: {skills}"
         );
 
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let error = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             request(Some(vec!["missing-workflow-skill".into()])),
             None,
             CancellationToken::new(),
@@ -6775,7 +6822,7 @@ mod tests {
             "a workflow role is not a definition"
         );
 
-        let journal_entry_id = Uuid::new_v4();
+        let (gather_run_id, journal_entry_id) = journalled_agent_call(&storage, space.id).await;
         let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
             cwd: None,
             isolation: None,
@@ -6797,7 +6844,7 @@ mod tests {
         };
         let result = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            gather_run_id,
             space.id,
             &[],
             &[],
@@ -6843,13 +6890,14 @@ mod tests {
             Some(journal_entry_id.to_string().as_str())
         );
 
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let scoped = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             gather("Scope sources without recording", vec!["web_search"]),
             None,
             CancellationToken::new(),
@@ -9543,13 +9591,14 @@ mod tests {
             assembly: None,
         };
 
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let first = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             request(),
             None,
             CancellationToken::new(),
@@ -9613,13 +9662,14 @@ mod tests {
             })
             .await
             .expect("edit definition");
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let second = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             request(),
             None,
             CancellationToken::new(),
@@ -9647,13 +9697,14 @@ mod tests {
             task: Some("missing".into()),
             ..request()
         };
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let error = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             missing,
             None,
             CancellationToken::new(),
@@ -10831,13 +10882,14 @@ mod tests {
     async fn a_continuation_cannot_change_its_task_definition() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
         let error = run_ephemeral_agent_call(
             &state,
-            Uuid::new_v4(),
+            fixture_run_id,
             space.id,
             &[],
             &[],
-            Uuid::new_v4(),
+            fixture_entry_id,
             AgentCallRequest {
                 prompt: "continue".into(),
                 agent: None,
@@ -16470,12 +16522,18 @@ mod tests {
             })
             .await
             .expect("journal intent");
-        settle_cancelled_workflow_journal(
-            storage.as_ref(),
-            run.id,
-            WorkflowCutShortCause::RunCancelled,
-        )
-        .await;
+        // Cancel through the operator's own route rather than reaching for
+        // the settling helper: a parked run is the shape where a worker is
+        // genuinely still outstanding when the run is ended from outside.
+        storage
+            .update_workflow_run_state(run.id, "parked", None, None, None)
+            .await
+            .expect("park the run");
+        let cancelled = cancel_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("cancel the run")
+            .0;
+        assert_eq!(cancelled.state, WorkflowRunState::Cancelled);
 
         let settled = storage
             .list_workflow_journal(run.id)

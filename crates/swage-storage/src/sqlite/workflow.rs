@@ -734,14 +734,24 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<(), StorageError> {
         let dispatch = serde_json::to_string(&dispatch)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE workflow_journal SET dispatch_json=?2 WHERE id=?1",
-                params![id.to_string(), dispatch],
-            )?;
-            Ok(())
-        })
-        .await
+        let updated = self
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_journal SET dispatch_json=?2 WHERE id=?1",
+                    params![id.to_string(), dispatch],
+                )
+            })
+            .await?;
+        // An update that matches nothing means the entry this record belongs
+        // to is not there. Reporting success would leave the caller believing
+        // the account was written.
+        if updated == 0 {
+            return Err(StorageError::NotFound {
+                entity: "workflow journal entry".to_string(),
+                id: id.to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn record_workflow_call_resolution(
@@ -751,14 +761,24 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<(), StorageError> {
         let resolution = serde_json::to_string(&resolution)
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE workflow_journal SET dispatch_resolution_json=?2 WHERE id=?1",
-                params![id.to_string(), resolution],
-            )?;
-            Ok(())
-        })
-        .await
+        let updated = self
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workflow_journal SET dispatch_resolution_json=?2 WHERE id=?1",
+                    params![id.to_string(), resolution],
+                )
+            })
+            .await?;
+        // An update that matches nothing means the entry this record belongs
+        // to is not there. Reporting success would leave the caller believing
+        // the account was written.
+        if updated == 0 {
+            return Err(StorageError::NotFound {
+                entity: "workflow journal entry".to_string(),
+                id: id.to_string(),
+            });
+        }
+        Ok(())
     }
 
     async fn cut_short_workflow_journal_entry(
@@ -1216,6 +1236,29 @@ mod tests {
                 )
                 .await
                 .expect("unrelated event permits park")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dispatch_record_for_an_absent_entry_is_an_error_not_a_silent_success() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+
+        let error = storage
+            .record_workflow_call_dispatch(Uuid::new_v4(), serde_json::json!({"prompt": "go"}))
+            .await
+            .expect_err("a dispatch record with no entry to attach to must fail");
+        assert!(
+            matches!(error, StorageError::NotFound { .. }),
+            "expected the missing entry to be reported, got {error:?}"
+        );
+
+        let error = storage
+            .record_workflow_call_resolution(Uuid::new_v4(), serde_json::json!({"model": "m"}))
+            .await
+            .expect_err("a resolution record with no entry to attach to must fail");
+        assert!(
+            matches!(error, StorageError::NotFound { .. }),
+            "expected the missing entry to be reported, got {error:?}"
         );
     }
 }
