@@ -6,7 +6,9 @@ use std::{path::Path, sync::Arc, time::Instant};
 use serde_json::{Value, json};
 use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
-use swage_core::{ChatMessage, Effort, EffortCapability, EffortControl, ResolvedEffort, Role, StorageError};
+use swage_core::{
+    ChatMessage, Effort, EffortCapability, EffortControl, ResolvedEffort, Role, StorageError,
+};
 use swage_storage::{
     model::{AppendMessage, NewAuditEvent, NewToolCall, ThreadState, TurnState},
     store::Storage,
@@ -172,6 +174,12 @@ fn codex_effort(control: EffortControl) -> Option<String> {
     }
 }
 
+fn add_codex_effort(provider_request: &mut Value, effort: Option<&ResolvedEffort>) {
+    if let Some(effort) = effort.and_then(|effort| codex_effort(effort.control)) {
+        provider_request["effort"] = Value::String(effort);
+    }
+}
+
 pub async fn run_turn(
     state: AppState,
     request: CodexTurnRequest,
@@ -309,9 +317,7 @@ async fn run_turn_inner(
         "cwd": request.agent_config.working_directory,
         "outputSchema": request.agent_config.output_schema,
     });
-    if let Some(effort) = request.effort.as_ref().and_then(|effort| codex_effort(effort.control)) {
-        provider_request["effort"] = Value::String(effort);
-    }
+    add_codex_effort(&mut provider_request, request.effort.as_ref());
     let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
         turn_id: request.turn_id,
         round: 1,
@@ -963,6 +969,36 @@ mod tests {
             json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}}),
             json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}),
         ]
+    }
+
+    #[test]
+    fn resolved_codex_levels_and_clamps_reach_the_turn_start_request() {
+        for (requested, expected) in [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
+            (Effort::Max, "xhigh"),
+            (Effort::Off, "low"),
+        ] {
+            let resolved = swage_core::resolve_effort(
+                requested,
+                &effort_capability("gpt-5.3-codex").expect("documented Codex model"),
+            );
+            let mut request = json!({"threadId":"thread"});
+            add_codex_effort(&mut request, Some(&resolved));
+            assert_eq!(
+                request["effort"], expected,
+                "{requested} reaches the wire as resolved"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_omits_non_named_resolved_controls() {
+        let mut request = json!({"threadId":"thread"});
+        add_codex_effort(&mut request, None);
+        assert!(request.get("effort").is_none());
     }
 
     #[tokio::test]

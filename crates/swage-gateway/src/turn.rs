@@ -1664,16 +1664,20 @@ async fn process_turn_with_composition_and_focus(
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|error| GatewayError::ConfigError(format!("session effort is invalid: {error}")))?
-            .or_else(|| match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
-                Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
-                    .and_then(|(_, model)| model.default_effort),
-                None => config
-                    .models
-                    .entries
-                    .get(&config.models.default)
-                    .and_then(|model| model.default_effort),
-            }),
+            .map_err(|error| {
+                GatewayError::ConfigError(format!("session effort is invalid: {error}"))
+            })?
+            .or_else(
+                || match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+                    Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
+                        .and_then(|(_, model)| model.default_effort),
+                    None => config
+                        .models
+                        .entries
+                        .get(&config.models.default)
+                        .and_then(|model| model.default_effort),
+                },
+            ),
     };
     let model_name = config.default_model_id().to_string();
     let agent_handle = if is_codex_turn {

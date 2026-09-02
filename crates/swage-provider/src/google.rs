@@ -11,8 +11,8 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, EffortCapability,
-    EffortControl, FinishReason, ProviderError, Role, StreamChunk, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
+    EffortControl, FinishReason, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
@@ -49,12 +49,21 @@ struct GeminiThinkingConfig {
 /// catalogue declarations govern every other Google model.
 fn google_effort_capability(model: &str) -> Option<EffortCapability> {
     let model = model.trim().to_ascii_lowercase();
-    (model.starts_with("gemini-2.5-flash") || model.starts_with("gemini-2.5-flash-lite"))
-        .then_some(EffortCapability::Budget {
-            min_tokens: 0,
+    if model.starts_with("gemini-2.5-flash-lite") {
+        Some(EffortCapability::Budget {
+            min_tokens: 512,
             max_tokens: 24_576,
             can_disable: true,
         })
+    } else if model.starts_with("gemini-2.5-flash") {
+        Some(EffortCapability::Budget {
+            min_tokens: 1,
+            max_tokens: 24_576,
+            can_disable: true,
+        })
+    } else {
+        None
+    }
 }
 
 /// The request builder expresses an already-resolved control only.
@@ -1012,7 +1021,7 @@ mod tests {
             let budget = body["thinkingConfig"]["thinkingBudget"]
                 .as_u64()
                 .expect("resolved Google control is a numeric budget");
-            assert!(previous.is_none_or(|previous| budget >= previous));
+            assert!(previous.is_none_or(|previous| budget > previous));
             previous = Some(budget);
         }
     }
@@ -1063,7 +1072,11 @@ mod tests {
             "https://generativelanguage.googleapis.com",
         ));
         assert!(provider.effort_capability("gemini-2.5-flash").is_some());
-        assert!(provider.effort_capability("gemini-2.5-flash-lite").is_some());
+        assert!(
+            provider
+                .effort_capability("gemini-2.5-flash-lite")
+                .is_some()
+        );
         assert!(provider.effort_capability("gemini-2.5-pro").is_none());
         assert!(provider.effort_capability("gemini-3-pro").is_none());
     }
