@@ -1340,7 +1340,7 @@ async fn run_ephemeral_agent_call(
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
-    let (session_id, thread_id) = match request.session.as_ref() {
+    let (session_id, thread_id, persisted_skills) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
         // workers — an id from anywhere else (another run, an interactive
@@ -1386,6 +1386,41 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            let persisted_skills = session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills"))
+                .map(|skills| serde_json::from_value::<Vec<String>>(skills.clone()))
+                .transpose()
+                .map_err(|error| {
+                    format!(
+                        "AgentCallError: continued session has invalid requested skills: {error}"
+                    )
+                })?
+                .unwrap_or_default();
+            if let Some(requested_skills) = request.skills.as_ref()
+                && requested_skills != &persisted_skills
+            {
+                return Err(
+                    "AgentCallError: skills cannot be changed on a continued session; select them when creating the worker"
+                        .into(),
+                );
+            }
+            if !persisted_skills.is_empty() {
+                let space = state
+                    .space_store
+                    .get(space_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                crate::turn::resolve_requested_skills_for_agent(
+                    &space.slug,
+                    &session.agent_id,
+                    Some(crate::turn::resolve_swage_root(state)),
+                    &persisted_skills,
+                )
+                .map_err(|error| format!("AgentCallError: {error}"))?;
+            }
             if request.tools.is_some() {
                 let persisted_tools = session
                     .metadata
@@ -1424,7 +1459,7 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            (session.id, thread.id)
+            (session.id, thread.id, Some(persisted_skills))
         }
         None => {
             let agent_id = request
@@ -1506,7 +1541,7 @@ async fn run_ephemeral_agent_call(
             )
             .await
             .map_err(|error| error.to_string())?;
-            (session.id, thread.id)
+            (session.id, thread.id, None)
         }
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -1520,7 +1555,7 @@ async fn run_ephemeral_agent_call(
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
-        skills: request.skills.clone(),
+        skills: persisted_skills.or_else(|| request.skills.clone()),
     };
     // Boxed: the turn future carries the whole composed input and would
     // otherwise push this call's future past the large-future lint.
@@ -8411,6 +8446,15 @@ mod tests {
         let worker_directory = tempfile::tempdir().expect("worker directory");
         grant_workspace(&storage, space.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
+        let skill_dir = swage_home
+            .path()
+            .join("spaces/default/skills/workflow-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Workflow specialist\n---\nUse the persisted workflow specialist skill.\n",
+        )
+        .expect("write workflow skill");
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
@@ -8508,7 +8552,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
-                skills: None,
+                skills: Some(vec!["workflow-specialist".into()]),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -8550,6 +8594,13 @@ mod tests {
                 .and_then(|metadata| metadata.get(crate::turn::DISPATCH_BOUND_METADATA_KEY))
                 .and_then(Value::as_array),
             Some(&vec![Value::String("lead".into())]),
+        );
+        assert_eq!(
+            worker_session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills")),
+            Some(&serde_json::json!(["workflow-specialist"])),
         );
 
         // Revoke shell after the first worker turn. The continuation must
@@ -8713,6 +8764,10 @@ mod tests {
             .join("\n");
         assert!(second_request.contains("restate the brief"));
         assert!(second_request.contains("restated: gather the sources"));
+        assert!(
+            second_request.contains("Use the persisted workflow specialist skill."),
+            "the continued turn must compose the persisted skill selection: {second_request}"
+        );
 
         drop(tx);
         task.await.expect("host loop");
