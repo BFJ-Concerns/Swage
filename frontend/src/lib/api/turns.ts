@@ -13,6 +13,7 @@ export function setBaseUrl(url: string): void {
 
 import type { AssemblyReport } from "../protocol/AssemblyReport";
 import type { TurnContextResponse } from "../protocol/TurnContextResponse";
+import { ApiError } from "./error";
 
 export type TurnContextReport = AssemblyReport;
 
@@ -31,9 +32,7 @@ export async function fetchTurnContext(
     return null;
   }
   if (!response.ok) {
-    throw new Error(
-      `failed to load the turn's context report: HTTP ${response.status}`,
-    );
+    throw await ApiError.fromResponse(response, "GET", `/api/turns/${turnId}/context`);
   }
   const body = (await response.json()) as TurnContextResponse;
   return body.report;
