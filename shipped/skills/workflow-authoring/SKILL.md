@@ -208,9 +208,13 @@ while (pending.length > 0) {
   );
   ```
 
-  Today every error inside `parallel`/`pipeline` collapses to `null`,
-  including an author error such as an unknown option — so check the
-  run log when a whole fan-out comes back `null`.
+  Inside `parallel`/`pipeline`, a worker that fails collapses to `null`
+  and the other items proceed. An author error — an unknown option, an
+  invalid option value, a schema that does not compile, an unknown composed
+  workflow, non-JSON workflow arguments — does not: it is rejected at the
+  call itself, before any worker starts, and fails the run with the error
+  naming the call. A whole fan-out coming back `null` therefore means the
+  workers failed; check the run journal for their errors.
 
 ### Composing saved workflows
 
