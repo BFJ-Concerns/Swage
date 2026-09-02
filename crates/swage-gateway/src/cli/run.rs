@@ -87,6 +87,7 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
 
     ws.send(ClientEvent::SendMessage {
         content: message,
+        attachments: Vec::new(),
         thread_id: None,
         selected_model_id: args.model.clone(),
     })

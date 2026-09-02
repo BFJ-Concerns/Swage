@@ -341,6 +341,7 @@ mod tests {
         storage
             .create_message(NewMessage {
                 thread_id: parent_thread.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 content: "read it".into(),
@@ -352,6 +353,7 @@ mod tests {
         let assistant_message = storage
             .create_message(NewMessage {
                 thread_id: parent_thread.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 content: "done".into(),

@@ -16,10 +16,11 @@ use uuid::Uuid;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use swage_core::{
-    ApprovalTimeoutPolicy, ChatMessage, GatewayError, Role, ToolCall, ToolResult,
+    ApprovalTimeoutPolicy, ChatMessage, ContentPart, GatewayError, Role, ToolCall, ToolResult,
     build_tool_round_messages,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
+use swage_protocol::client::turn::MessageAttachment;
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -70,6 +71,107 @@ pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
 pub(crate) use swage_core::DispatchContextComposition;
+
+/// What a caller submits for one turn: the message text plus the content
+/// parts sent beside it. Every turn entry point takes this; a `String`
+/// converts, so a text-only caller passes its text unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnInput {
+    pub text: String,
+    pub attachments: Vec<MessageAttachment>,
+}
+
+impl TurnInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    pub fn with_attachments(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
+        Self {
+            text: text.into(),
+            attachments,
+        }
+    }
+}
+
+impl From<String> for TurnInput {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<&str> for TurnInput {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+/// The content parts a stored message carries, parsed against the wire
+/// contract. Storage keeps attachments as opaque JSON; a value outside the
+/// contract is a corrupt record and is refused loudly here, never dropped.
+pub(crate) fn message_attachments(
+    stored: &[serde_json::Value],
+) -> Result<Vec<MessageAttachment>, GatewayError> {
+    stored
+        .iter()
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                GatewayError::Storage(swage_core::StorageError::Corruption {
+                    message: format!("message attachment outside the wire contract: {error}"),
+                })
+            })
+        })
+        .collect()
+}
+
+/// The attachment values as storage records them: the wire representation
+/// verbatim, so the stored row and the client contract never disagree.
+pub(crate) fn attachment_records(attachments: &[MessageAttachment]) -> Vec<serde_json::Value> {
+    attachments
+        .iter()
+        .map(|attachment| serde_json::to_value(attachment).expect("attachments serialise"))
+        .collect()
+}
+
+/// The model-facing content parts for a submitted message: the text first,
+/// then one part per attachment in submission order.
+pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(1 + attachments.len());
+    parts.push(ContentPart::Text { text });
+    parts.extend(attachments.iter().map(|attachment| match attachment {
+        MessageAttachment::ImageUrl { url } => ContentPart::ImageUrl { url: url.clone() },
+    }));
+    parts
+}
+
+/// Refuse a submission whose attachments the configured provider cannot
+/// consume. The check runs before anything is persisted: a part the model
+/// would never see must fail the turn, not ride along silently.
+pub(crate) fn check_attachment_support(
+    capabilities: &crate::capabilities::WorkflowCapabilities,
+    attachments: &[MessageAttachment],
+) -> Result<(), GatewayError> {
+    for attachment in attachments {
+        match attachment {
+            MessageAttachment::ImageUrl { url } => {
+                if url.trim().is_empty() {
+                    return Err(GatewayError::ValidationError(
+                        "an image attachment needs a non-empty url".into(),
+                    ));
+                }
+                if !capabilities.vision {
+                    return Err(GatewayError::ValidationError(
+                        "the configured provider does not accept image attachments".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
@@ -639,7 +741,7 @@ pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -648,7 +750,7 @@ pub async fn process_turn(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -666,7 +768,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -680,7 +782,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -699,7 +801,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -714,7 +816,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -734,7 +836,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -750,7 +852,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -772,7 +874,7 @@ pub(crate) async fn process_turn_with_composition(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -788,7 +890,7 @@ pub(crate) async fn process_turn_with_composition(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -807,7 +909,7 @@ pub(crate) async fn process_turn_with_composition(
 
 #[tracing::instrument(
     name = "turn",
-    skip(state, content, ws_tx, subscription, composition, compaction_focus),
+    skip(state, input, ws_tx, subscription, composition, compaction_focus),
     fields(turn_id = tracing::field::Empty),
 )]
 #[allow(clippy::too_many_arguments)]
@@ -815,7 +917,7 @@ async fn process_turn_with_composition_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: TurnInput,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -829,6 +931,14 @@ async fn process_turn_with_composition_and_focus(
     compaction_focus: Option<String>,
     requested_model: Option<String>,
 ) -> Result<(), GatewayError> {
+    let TurnInput {
+        text: content,
+        attachments,
+    } = input;
+    // An attachment the provider cannot consume fails the turn before any
+    // record is written — a part the model never sees must not ride along.
+    check_attachment_support(&state.workflow_capabilities, &attachments)?;
+
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
         .storage
@@ -1100,6 +1210,7 @@ async fn process_turn_with_composition_and_focus(
             .storage
             .append_message(AppendMessage {
                 thread_id,
+                attachments: attachment_records(&attachments),
                 turn_id: Some(prepared_turn_id),
                 role: Role::User,
                 content: before_inbound.canonical_content.clone(),
@@ -1135,6 +1246,7 @@ async fn process_turn_with_composition_and_focus(
                 .storage
                 .append_message(AppendMessage {
                     thread_id,
+                    attachments: Vec::new(),
                     turn_id: Some(prepared_turn_id),
                     role: Role::User,
                     content: render_delegation_result(result),

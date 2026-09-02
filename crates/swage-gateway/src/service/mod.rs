@@ -831,6 +831,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "Hello!".to_string(),
@@ -912,6 +913,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "Hi".to_string(),
@@ -923,6 +925,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Hello!".to_string(),
@@ -1019,6 +1022,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "list files".into(),
@@ -1031,6 +1035,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "I'll run ls for you.".into(),
@@ -1113,6 +1118,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Ran python".into(),
@@ -1212,6 +1218,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Hello".into(),

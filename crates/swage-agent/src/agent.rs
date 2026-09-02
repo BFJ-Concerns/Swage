@@ -625,6 +625,7 @@ impl Agent {
                         .storage
                         .append_message(swage_storage::model::AppendMessage {
                             thread_id,
+                            attachments: Vec::new(),
                             turn_id: Some(turn.id),
                             role: Role::Assistant,
                             content: accumulated.clone(),
@@ -721,6 +722,7 @@ impl Agent {
         self.storage
             .append_message(swage_storage::model::AppendMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: safe_content.clone(),
@@ -1982,6 +1984,7 @@ impl Agent {
             .storage
             .append_message(swage_storage::model::AppendMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
                 content: safe_content.clone(),

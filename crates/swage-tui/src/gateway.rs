@@ -242,6 +242,7 @@ impl ConnectionManager {
         self.ws_required()?
             .send(ClientEvent::SendMessage {
                 content,
+                attachments: Vec::new(),
                 thread_id: None,
                 selected_model_id: None,
             })

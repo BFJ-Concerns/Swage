@@ -15,12 +15,14 @@ use crate::store::MessageStore;
 // ---------------------------------------------------------------------------
 
 /// Column order: id, thread_id, turn_id, role, content, position, agent_id,
-/// tool_call_id, tool_name, created_at  (10 columns, matching every SELECT).
+/// tool_call_id, tool_name, created_at, attachments (11 columns, matching
+/// every SELECT).
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
     let turn_id: Option<String> = row.get(2)?;
     let created: String = row.get(9)?;
+    let attachments: String = row.get(10)?;
 
     let role: String = row.get(3)?;
 
@@ -32,12 +34,27 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
         })?,
         content: row.get(4)?,
+        attachments: parse_attachments(&attachments)?,
         position: row.get(5)?,
         agent_id: row.get(6)?,
         tool_call_id: row.get(7)?,
         tool_name: row.get(8)?,
         created_at: parse_dt(&created)?,
     })
+}
+
+/// The stored attachment array. Storage holds the parts as opaque JSON; a
+/// column that is not a JSON array is corruption, reported as such rather
+/// than read as "no attachments".
+fn parse_attachments(stored: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
+    serde_json::from_str(stored).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
+fn encode_attachments(attachments: &[serde_json::Value]) -> rusqlite::Result<String> {
+    serde_json::to_string(attachments)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
@@ -68,8 +85,8 @@ impl MessageStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
@@ -81,12 +98,14 @@ impl MessageStore for SqliteStorage {
                     Option::<&str>::None, // tool_call_id — not in NewMessage; callers update separately
                     Option::<&str>::None, // tool_name — same
                     &now_str,
+                    encode_attachments(&message.attachments)?,
                 ],
             )?;
 
             Ok(Message {
                 id,
                 thread_id: message.thread_id,
+                attachments: message.attachments,
                 turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
@@ -115,8 +134,8 @@ impl MessageStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
@@ -128,12 +147,14 @@ impl MessageStore for SqliteStorage {
                     Option::<&str>::None,
                     Option::<&str>::None,
                     &now_str,
+                    encode_attachments(&message.attachments)?,
                 ],
             )?;
 
             Ok(Message {
                 id,
                 thread_id: message.thread_id,
+                attachments: message.attachments,
                 turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
@@ -151,7 +172,7 @@ impl MessageStore for SqliteStorage {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, thread_id, turn_id, role, content, position, agent_id,
-                        tool_call_id, tool_name, created_at
+                        tool_call_id, tool_name, created_at, attachments
                  FROM messages
                  WHERE thread_id = ?1
                  ORDER BY position ASC",
@@ -171,7 +192,7 @@ impl MessageStore for SqliteStorage {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT m.id, m.thread_id, m.turn_id, m.role, m.content, m.position, m.agent_id,
-                        m.tool_call_id, m.tool_name, m.created_at
+                        m.tool_call_id, m.tool_name, m.created_at, m.attachments
                  FROM messages m
                  JOIN threads t ON m.thread_id = t.id
                  WHERE t.session_id = ?1
@@ -189,7 +210,7 @@ impl MessageStore for SqliteStorage {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, thread_id, turn_id, role, content, position, agent_id,
-                        tool_call_id, tool_name, created_at
+                        tool_call_id, tool_name, created_at, attachments
                  FROM messages
                  WHERE id = ?1",
                 params![id.to_string()],
@@ -271,6 +292,8 @@ mod tests {
     fn new_msg(thread_id: Uuid, role: Role, content: &str, position: i32) -> NewMessage {
         NewMessage {
             thread_id,
+        attachments: Vec::new(),
+            attachments: Vec::new(),
             turn_id: None,
             role,
             content: content.into(),
@@ -282,11 +305,42 @@ mod tests {
     fn append_msg(thread_id: Uuid, role: Role, content: &str) -> AppendMessage {
         AppendMessage {
             thread_id,
+        attachments: Vec::new(),
+            attachments: Vec::new(),
             turn_id: None,
             role,
             content: content.into(),
             agent_id: "test-agent".to_string(),
         }
+    }
+
+    // --- attachments ---
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn append_stores_attachment_values_opaquely_and_reads_them_back() {
+        let (storage, _, thread_id) = make_thread().await;
+        let mut message = append_msg(thread_id, Role::User, "what is this?");
+        message.attachments = vec![
+            serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"}),
+        ];
+
+        let appended = storage.append_message(message).await.unwrap();
+        assert_eq!(appended.attachments.len(), 1);
+
+        let listed = storage.list_messages_by_thread(thread_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].attachments,
+            vec![serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"})]
+        );
+        let fetched = storage.get_message(appended.id).await.unwrap().unwrap();
+        assert_eq!(fetched.attachments, listed[0].attachments);
+
+        let plain = storage
+            .append_message(append_msg(thread_id, Role::Assistant, "a cat"))
+            .await
+            .unwrap();
+        assert!(plain.attachments.is_empty());
     }
 
     // --- create_message and list_by_thread ---
