@@ -115,6 +115,8 @@ function makeStreamingStore(
     get isStreaming() {
       return isStreaming;
     },
+    streamBelongsTo: () => true,
+    clearConversationOwnership: vi.fn(),
     get activeTurnGeneration() {
       return 0;
     },

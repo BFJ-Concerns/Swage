@@ -34,6 +34,10 @@ export interface StreamingStore {
   readonly isStreaming: boolean;
   /** Conversation that owns the current streamed turn, when one is active. */
   readonly activeConversationId?: string | null;
+  /** Whether live turn state belongs on the displayed conversation surface. */
+  streamBelongsTo(conversationId: string | null): boolean;
+  /** Forget ownership when no conversation remains selected. */
+  clearConversationOwnership(): void;
   /** Monotonic local identity for the current streamed projection. */
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
@@ -166,6 +170,15 @@ export function createStreamingStore(
     get activeConversationId(): string | null {
       return activeConversationId;
     },
+    streamBelongsTo(conversationId: string | null): boolean {
+      // A null conversation is the space-home composer. While it reports a
+      // busy state, that state is its conversation-creation window even if a
+      // completed turn left an older owner visible to a test double.
+      return conversationId === null || activeConversationId === conversationId;
+    },
+    clearConversationOwnership(): void {
+      activeConversationId = null;
+    },
     get activeTurnGeneration(): number {
       return activeTurnGeneration;
     },
@@ -297,6 +310,7 @@ export function createStreamingStore(
           streamedContentStore.set("");
           turnErrorStore.set(null);
           isStreamingStore.set(false);
+          activeConversationId = null;
           turnStartedAtStore.set(null);
           // Tool calls are now captured in the message history — clear live state.
           activeToolCallsStore.set([]);
@@ -309,6 +323,7 @@ export function createStreamingStore(
           settlePartialResponse("failed");
           turnErrorStore.set({ code: event.code, message: event.message });
           isStreamingStore.set(false);
+          activeConversationId = null;
           turnStartedAtStore.set(null);
           // activeToolCalls are preserved so the UI can show what was
           // in-flight when the error occurred.
@@ -331,6 +346,7 @@ export function createStreamingStore(
               : `Structured output validation failed after ${event.attempts} attempts.`,
           });
           isStreamingStore.set(false);
+          activeConversationId = null;
           turnStartedAtStore.set(null);
           providerRetryStore.set(null);
           break;
@@ -341,6 +357,7 @@ export function createStreamingStore(
           // to read what was generated before they stopped it).
           settlePartialResponse("interrupted");
           isStreamingStore.set(false);
+          activeConversationId = null;
           turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
           providerRetryStore.set(null);
@@ -353,6 +370,7 @@ export function createStreamingStore(
           settlePartialResponse("failed");
           turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           isStreamingStore.set(false);
+          activeConversationId = null;
           turnStartedAtStore.set(null);
           providerRetryStore.set(null);
           break;
@@ -446,6 +464,7 @@ export function createStreamingStore(
       // is authoritative only for the projection captured before reconnect.
       streamedContentStore.set("");
       isStreamingStore.set(false);
+      activeConversationId = null;
       turnStartedAtStore.set(null);
       activeToolCallsStore.set([]);
       providerRetryStore.set(null);
@@ -516,6 +535,8 @@ export function withConversationAutoCreate(
     get activeConversationId(): string | null | undefined {
       return base.activeConversationId;
     },
+    streamBelongsTo: (conversationId) => base.streamBelongsTo(conversationId),
+    clearConversationOwnership: () => base.clearConversationOwnership(),
     get activeTurnGeneration(): number {
       return base.activeTurnGeneration;
     },

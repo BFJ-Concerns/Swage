@@ -159,6 +159,11 @@
     void createAndNavigate();
   }
 
+  function clearActiveConversation(): void {
+    conversationStore.clearActiveConversation();
+    streamingStore.clearConversationOwnership();
+  }
+
   // Proxy that implements ConversationStore but overrides the two navigation-
   // bearing actions. All other methods delegate straight to the base store.
   const routerAwareStore: ConversationStore = {
@@ -180,7 +185,7 @@
       await createAndNavigate(selectedModelId, agentId, effort);
     },
     deleteConversation: (id) => conversationStore.deleteConversation(id),
-    clearActiveConversation: () => conversationStore.clearActiveConversation(),
+    clearActiveConversation,
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
     appendAssistantMessage: (msg) => conversationStore.appendAssistantMessage(msg),
@@ -219,7 +224,7 @@
       },
       clearActiveConversation: () => {
         connectionStore.disconnect();
-        conversationStore.clearActiveConversation();
+        clearActiveConversation();
       },
       selectConversation: selectAndNavigateOrThrow,
     },
@@ -382,7 +387,7 @@
       connectionStore.disconnect();
       // Drop the active conversation too: left in place, the old space's
       // conversation would keep rendering and the composer would send into it.
-      conversationStore.clearActiveConversation();
+      clearActiveConversation();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
       // Load the new space's conversations.

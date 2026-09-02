@@ -151,8 +151,7 @@
   const messages = $derived(store?.activeConversation?.messages ?? []);
   const hasConversation = $derived(store?.activeConversation != null);
   const streamBelongsToActiveConversation = $derived(
-    streamingStore?.activeConversationId === undefined ||
-      streamingStore.activeConversationId === store?.activeConversation?.id,
+    streamingStore?.streamBelongsTo(store?.activeConversation?.id ?? null) ?? false,
   );
   const isStreaming = $derived(
     (streamingStore?.isStreaming ?? false) && streamBelongsToActiveConversation,
