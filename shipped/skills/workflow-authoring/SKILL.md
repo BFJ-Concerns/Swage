@@ -97,6 +97,8 @@ return { reply };
   - `schema` — JSON Schema for a validated reply (object top level).
   - `maxAttempts` — schema retries before giving up (default 3).
   - `label` — names the worker in the run record.
+  - `identity: true` — return an identified result envelope for this call.
+  - `phase` — caller-supplied phase copied into an identified result envelope.
   - `tools` — call-scoped allow-list; it can only narrow the worker's
     effective grants, never widen them.
   - `skills` — named skills to activate for this worker.
@@ -122,9 +124,11 @@ return { reply };
   worker spawns; a non-string prompt throws a `TypeError`.
 - **Return contract:** without `schema`, the worker's final text (a
   string). With `schema`, the validated JSON value, or `null` when
-  `maxAttempts` is exhausted without one — treat `null` as an absent
-  result and check for it before using the value. Other failures throw
-  an `Error` whose `name` classifies it (`AgentCallError`,
+  `maxAttempts` is exhausted without one. With `identity: true`, a
+  settled call returns `{ label, phase, output, failure }`: a non-null
+  `failure` names a failed leg, while `output: null` with
+  `failure: null` is a genuine null result. Other failures throw an
+  `Error` whose `name` classifies it (`AgentCallError`,
   `AgentCallTimeoutError`, `BudgetExceededError`, …). Extraction reads a
   reply as the whole text parsed as JSON, or else the FIRST fenced code
   block — so tell workers: reason first if needed, then exactly one
