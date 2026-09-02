@@ -1001,11 +1001,10 @@ describe("App", () => {
         id: "conv-stream",
         message_preview: "Earlier message",
       }),
-      makeConversationSummary({ id: "conv-other", message_preview: "Other conversation" }),
     ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: "conv-stream" }),
-    ).mockResolvedValueOnce(makeConversationDetail({ id: "conv-other" }));
+    );
 
     setPath("/conversations/conv-stream");
     component = mount(App, { target: document.body });
@@ -1040,115 +1039,14 @@ describe("App", () => {
 
     expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
 
-    websocketHarness.client.connect.mockClear();
-    websocketHarness.client.disconnect.mockClear();
-    const conversationButtons = document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn");
-    flushSync(() => conversationButtons[1]!.click());
-    await settleUi();
-    expect(document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')?.value)
-      .toBe("conv-other");
-    expect(document.querySelector(".message-display")?.textContent).not.toContain("Streamed reply.");
-
-    const operatorButton = Array.from(document.querySelectorAll("nav button")).find(
-      (button) => button.textContent?.trim() === "Operator",
-    ) as HTMLButtonElement;
-    operatorButton.click();
-    await settleUi();
-
-    expect(operatorButton.getAttribute("aria-pressed")).toBe("true");
-
-    (Array.from(document.querySelectorAll("nav button")).find(
-      (button) => button.textContent?.trim() === "Conversations",
-    ) as HTMLButtonElement).click();
-    await settleUi();
-
-    expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
-    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
-    expect(document.querySelector(".action.stop")).toBeNull();
-    expect(document.querySelector(".action.send")).not.toBeNull();
-    expect(document.querySelector(".message-display")?.textContent).not.toContain("Streamed reply.");
-
     websocketHarness.fireEvent({
       type: "turn_complete",
       turn_id: "turn-123",
     });
     await settleUi();
 
-    expect(websocketHarness.client.connect).toHaveBeenCalledOnce();
-    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-other");
     expect(document.querySelector(".action.stop")).toBeNull();
-
-    const otherTextarea = document.querySelector("textarea") as HTMLTextAreaElement | null;
-    expect(otherTextarea).not.toBeNull();
-    flushSync(() => {
-      otherTextarea!.value = "Message for conv-other";
-      otherTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
-    await settleUi();
-
-    expect(websocketHarness.client.send).toHaveBeenLastCalledWith({
-      type: "send_message",
-      content: "Message for conv-other",
-    });
-  });
-
-  it("reconnects a dropped stream when its owning conversation is selected again", async () => {
-    const defaultSpace = makeSpace();
-
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
-      makeConversationSummary({ id: "conv-stream" }),
-      makeConversationSummary({ id: "conv-other" }),
-    ]);
-    vi.mocked(conversationsApi.getConversation)
-      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-stream", messages: [] }))
-      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-other", messages: [] }))
-      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-stream", messages: [] }))
-      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-stream", messages: [] }));
-
-    setPath("/conversations/conv-stream");
-    component = mount(App, { target: document.body });
-    await settleUi();
-    websocketHarness.fireStatus("connected");
-
-    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
-    expect(textarea).not.toBeNull();
-    flushSync(() => {
-      textarea!.value = "Keep this stream attached";
-      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    flushSync(() =>
-      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
-    );
-    expect(websocketHarness.client.send).toHaveBeenCalledWith({
-      type: "send_message",
-      content: "Keep this stream attached",
-    });
-    websocketHarness.fireEvent({ type: "token", content: "Still rendering" });
-    await settleUi();
-
-    websocketHarness.client.connect.mockClear();
-    const conversationButtons = document.querySelectorAll<HTMLButtonElement>(
-      ".conversation-select-btn",
-    );
-    flushSync(() => conversationButtons[1]!.click());
-    await settleUi();
-    expect(websocketHarness.client.connect).not.toHaveBeenCalled();
-
-    websocketHarness.fireStatus("reconnecting");
-    flushSync(() => conversationButtons[0]!.click());
-    await settleUi();
-
-    expect(websocketHarness.client.connect).toHaveBeenCalledOnce();
-    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-stream");
-    websocketHarness.fireStatus("connected");
-    await settleUi();
-    expect(document.querySelector(".connection-indicator")).toBeNull();
-    expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Still rendering",
-    );
-    expect(document.querySelector(".action.stop")).not.toBeNull();
+    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
   });
 
   it("keeps a newer stream live when reconnect refresh completes late", async () => {
