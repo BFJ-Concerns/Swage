@@ -4,7 +4,13 @@ import type { WorkflowCallUsage } from "./WorkflowCallUsage";
 import type { WorkflowProviderRound } from "./WorkflowProviderRound";
 import type { WorkflowWorkerTermination } from "./WorkflowWorkerTermination";
 
-export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null, input_tokens: bigint | null, output_tokens: bigint | null, served_model: string | null, usage: WorkflowCallUsage, termination: WorkflowWorkerTermination,
+export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null, served_model: string | null,
+/**
+ * What the call spent, or why that is not known. A call the provider
+ * reported no usage for reads as unavailable with a reason, so budget
+ * reconstruction never reads absence as zero spend.
+ */
+usage: WorkflowCallUsage, termination: WorkflowWorkerTermination,
 /**
  * What the call was dispatched with. Absent only for calls journalled
  * before the dispatch record existed.

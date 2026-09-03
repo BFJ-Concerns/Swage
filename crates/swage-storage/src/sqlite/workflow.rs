@@ -161,7 +161,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        created_at: time(row.get(18)?)?,
+        created_at: time(row.get(19)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
 }
@@ -400,7 +400,7 @@ impl WorkflowStore for SqliteStorage {
             .map(|tools| serde_json::to_string(&tools))
             .transpose()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'running', ?14, ?15, ?16, ?17, ?18, ?19)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, task, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'running', ?15, ?16, ?17, ?18, ?19, ?20)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.task, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -894,6 +894,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some("return null".into()),
             source_hash: Uuid::new_v4().to_string(),
             args: serde_json::Value::Null,
@@ -982,6 +983,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: None,
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
@@ -1009,6 +1011,7 @@ mod tests {
                 inline_workflow_name: Some("compiled-workflow".into()),
                 inline_workflow_version: Some(3),
                 carrying_skill: None,
+                task: None,
                 source: Some("return 3".into()),
                 source_hash: "inline-hash".into(),
                 args: serde_json::json!({}),
@@ -1128,6 +1131,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
@@ -1301,6 +1305,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),

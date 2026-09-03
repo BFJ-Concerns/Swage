@@ -5,6 +5,10 @@ import type { WorkflowRunState } from "./WorkflowRunState";
 
 export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null,
 /**
+ * Opaque identity declared by the workflow script for grouping its runs.
+ */
+task: string | null,
+/**
  * Source retained for runs whose workflow was not a saved script version.
  */
 source: string | null,
