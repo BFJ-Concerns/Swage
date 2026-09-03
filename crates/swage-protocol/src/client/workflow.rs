@@ -451,6 +451,9 @@ pub struct WorkflowAgentCallDetail {
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub served_model: Option<String>,
     pub usage: WorkflowCallUsage,
     pub termination: WorkflowWorkerTermination,
     /// What the call was dispatched with. Absent only for calls journalled

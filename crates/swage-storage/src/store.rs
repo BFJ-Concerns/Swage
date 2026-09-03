@@ -12,15 +12,16 @@ use crate::model::{
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
     NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
-    NewPageModule, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation,
-    NewSpace, NewTaskDefinition, NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent,
-    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript, NewWorkspaceAttachment,
-    OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule,
-    PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate,
-    SecretRecord, Session, SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput, NewSchedule,
+    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition,
+    NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page,
+    PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin,
+    ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1150,86 +1151,26 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         error_message: &str,
     ) -> Result<WorkflowJournalRecord, StorageError>;
-    async fn list_workflow_journal(
-        &self,
-        run_id: Uuid,
-    ) -> Result<Vec<WorkflowJournalRecord>, StorageError>;
-
-    /// Record what a call was dispatched with, before its work begins. The
-    /// entry's `args_hash` covers the serialised request and must stay
-    /// stable, so dispatch-time facts live in this field rather than in the
-    /// request.
     async fn record_workflow_call_dispatch(
         &self,
         id: Uuid,
         dispatch: serde_json::Value,
     ) -> Result<(), StorageError>;
-
-    /// Append one attempt of the call, stamped with the options its turn
-    /// resolved for itself. Appending rather than replacing is what keeps
-    /// the turn an interrupted attempt ran, so every attempt's provider
-    /// rounds stay reachable from the entry.
-    ///
-    /// Returns the attempts already recorded before this one, so the caller
-    /// can settle what the superseded attempts left outstanding.
     async fn record_workflow_call_attempt(
         &self,
         id: Uuid,
         attempt: serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, StorageError>;
-
-    /// Settle an entry whose work the run's own end stopped, recording the
-    /// cause. The stored status stays `failed` so replay keeps treating the
-    /// entry as terminal; the termination record is what tells a cut-short
-    /// worker from one that failed on its own.
     async fn cut_short_workflow_journal_entry(
         &self,
         id: Uuid,
         termination: serde_json::Value,
         error_message: &str,
     ) -> Result<WorkflowJournalRecord, StorageError>;
-}
-
-/// Store for the provider rounds inside a turn.
-///
-/// A round is opened when its request goes to the provider and settled when
-/// the round ends. An open round with no settlement is an outstanding
-/// request — the fact that distinguishes a hung provider from a tool loop.
-#[async_trait]
-pub trait ProviderRoundStore: Send + Sync {
-    /// Open a round. Idempotent on (turn_id, round) so a replayed round does
-    /// not fork the record.
-    async fn open_provider_round(
+    async fn list_workflow_journal(
         &self,
-        turn_id: Uuid,
-        round: i64,
-        outcome: serde_json::Value,
-    ) -> Result<ProviderRoundRecord, StorageError>;
-
-    /// Settle an open round with what came back.
-    async fn settle_provider_round(
-        &self,
-        turn_id: Uuid,
-        round: i64,
-        outcome: serde_json::Value,
-    ) -> Result<(), StorageError>;
-
-    /// Every round of a turn, oldest first.
-    async fn list_provider_rounds_by_turn(
-        &self,
-        turn_id: Uuid,
-    ) -> Result<Vec<ProviderRoundRecord>, StorageError>;
-
-    /// Record the outcome of every round of a turn still outstanding, for a
-    /// turn that has stopped and can receive no further response. Each round
-    /// ends here: the completion time is the moment the request became
-    /// unanswerable, which is a time that was observed, and the outcome says
-    /// that is the kind of end it was.
-    async fn interrupt_outstanding_provider_rounds(
-        &self,
-        turn_id: Uuid,
-        outcome: serde_json::Value,
-    ) -> Result<(), StorageError>;
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowJournalRecord>, StorageError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,6 +1184,31 @@ pub trait ProviderRoundStore: Send + Sync {
 /// Pages: agent-run tabs on a space assembled from module instances. The
 /// database is authoritative for page content; renderings derive from it.
 #[async_trait]
+pub trait ProviderRoundStore: Send + Sync {
+    async fn open_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<ProviderRoundRecord, StorageError>;
+    async fn settle_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError>;
+    async fn list_provider_rounds_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<ProviderRoundRecord>, StorageError>;
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError>;
+}
+
+#[async_trait]
 pub trait PageStore: Send + Sync {
     async fn create_page(&self, page: NewPage) -> Result<Page, StorageError>;
     async fn get_page(&self, id: Uuid) -> Result<Option<Page>, StorageError>;
@@ -1255,6 +1221,41 @@ pub trait PageStore: Send + Sync {
     /// Replace a module instance's source, advancing the owning page's
     /// updated_at in the same write.
     async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError>;
+    async fn create_page_template(
+        &self,
+        template: NewPageTemplate,
+    ) -> Result<PageTemplate, StorageError>;
+    /// Create a template and every module it seeds in one transaction, so a
+    /// reader can never observe a partially configured template.
+    async fn create_page_template_with_modules(
+        &self,
+        template: NewPageTemplate,
+        modules: Vec<NewPageTemplateModuleInput>,
+    ) -> Result<PageTemplate, StorageError>;
+    async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError>;
+    /// A space's templates, oldest first.
+    async fn list_page_templates_by_space(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<PageTemplate>, StorageError>;
+    async fn create_page_template_module(
+        &self,
+        module: NewPageTemplateModule,
+    ) -> Result<PageTemplateModule, StorageError>;
+    /// A template's module rows in position order.
+    async fn list_page_template_modules(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<PageTemplateModule>, StorageError>;
+    /// Create a page seeded from a template's modules, recording the fork's
+    /// origin on the page. The page row and its seeded modules land in one
+    /// write, so a half-seeded page cannot be observed. The copied rows are
+    /// the page's own from birth — later edits on either side do not cross.
+    async fn create_page_from_template(
+        &self,
+        page: NewPage,
+        template_id: Uuid,
+    ) -> Result<Page, StorageError>;
 }
 
 /// Annotations on a page's modules: the notes a user and an agent both hang
@@ -1284,7 +1285,14 @@ pub trait PageAnnotationStore: Send + Sync {
         body: &str,
         tags: &[String],
     ) -> Result<(), StorageError>;
-    async fn delete_page_annotation(&self, id: Uuid) -> Result<(), StorageError>;
+    /// Delete an annotation, advance its page timestamp, and append its
+    /// provenance event in one transaction. `false` means another writer
+    /// removed the annotation first, so no audit event was written.
+    async fn delete_page_annotation_with_audit(
+        &self,
+        annotation: PageAnnotation,
+        audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError>;
 }
 
 pub trait Storage:
@@ -2077,6 +2085,47 @@ mod tests {
         async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn create_page_template(
+            &self,
+            _: NewPageTemplate,
+        ) -> Result<PageTemplate, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_template_with_modules(
+            &self,
+            _: NewPageTemplate,
+            _: Vec<NewPageTemplateModuleInput>,
+        ) -> Result<PageTemplate, StorageError> {
+            unimplemented!()
+        }
+        async fn get_page_template(&self, _: Uuid) -> Result<Option<PageTemplate>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_page_templates_by_space(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<PageTemplate>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_template_module(
+            &self,
+            _: NewPageTemplateModule,
+        ) -> Result<PageTemplateModule, StorageError> {
+            unimplemented!()
+        }
+        async fn list_page_template_modules(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<PageTemplateModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_page_from_template(
+            &self,
+            _: NewPage,
+            _: Uuid,
+        ) -> Result<Page, StorageError> {
+            unimplemented!()
+        }
     }
 
     #[async_trait]
@@ -2107,7 +2156,11 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
+        async fn delete_page_annotation_with_audit(
+            &self,
+            _: PageAnnotation,
+            _: NewAuditEvent,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
@@ -2642,61 +2695,6 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<WorkflowJournalRecord>, StorageError> {
-            unimplemented!()
-        }
-        async fn record_workflow_call_dispatch(
-            &self,
-            _: Uuid,
-            _: serde_json::Value,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn record_workflow_call_attempt(
-            &self,
-            _: Uuid,
-            _: serde_json::Value,
-        ) -> Result<Vec<serde_json::Value>, StorageError> {
-            unimplemented!()
-        }
-        async fn cut_short_workflow_journal_entry(
-            &self,
-            _: Uuid,
-            _: serde_json::Value,
-            _: &str,
-        ) -> Result<WorkflowJournalRecord, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl ProviderRoundStore for StubStorage {
-        async fn open_provider_round(
-            &self,
-            _: Uuid,
-            _: i64,
-            _: serde_json::Value,
-        ) -> Result<ProviderRoundRecord, StorageError> {
-            unimplemented!()
-        }
-        async fn settle_provider_round(
-            &self,
-            _: Uuid,
-            _: i64,
-            _: serde_json::Value,
-        ) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn list_provider_rounds_by_turn(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<ProviderRoundRecord>, StorageError> {
-            unimplemented!()
-        }
-        async fn interrupt_outstanding_provider_rounds(
-            &self,
-            _: Uuid,
-            _: serde_json::Value,
-        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }

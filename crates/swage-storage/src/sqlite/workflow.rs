@@ -68,9 +68,9 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     let parent_run_id: Option<String> = row.get(2)?;
     let script_version_id: Option<String> = row.get(4)?;
     let script_id: Option<String> = row.get(5)?;
-    let final_output: Option<String> = row.get(14)?;
-    let handover: Option<String> = row.get(15)?;
-    let completed_at: Option<String> = row.get(19)?;
+    let final_output: Option<String> = row.get(15)?;
+    let handover: Option<String> = row.get(16)?;
+    let completed_at: Option<String> = row.get(20)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
         space_id: uuid(row.get(1)?)?,
@@ -81,34 +81,25 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
         script_name: row.get(6)?,
         script_version: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
         carrying_skill: row.get(8)?,
-        source: row.get(9)?,
-        source_hash: row.get(10)?,
-        args: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                11,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        budget: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| {
+        task: row.get(9)?,
+        source: row.get(10)?,
+        source_hash: row.get(11)?,
+        args: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 12,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        state: row.get(13)?,
+        budget: serde_json::from_str(&row.get::<_, String>(13)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                13,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state: row.get(14)?,
         final_output: final_output
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    14,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?,
-        handover: handover
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(|error| {
@@ -118,44 +109,54 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(16)?,
-        engine_version: row.get(17)?,
-        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(20)?).map_err(
-            |error| {
+        handover: handover
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    20,
+                    16,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            },
-        )?,
-        dispatch_bound_task_definition_ids: serde_json::from_str(&row.get::<_, String>(21)?)
-            .map_err(|error| {
+            })?,
+        error_message: row.get(17)?,
+        engine_version: row.get(18)?,
+        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(21)?).map_err(
+            |error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     21,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            })?,
-        wake_at: row.get::<_, Option<String>>(22)?.map(time).transpose()?,
-        inherited_worker_placement: row
-            .get::<_, Option<String>>(23)?
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
+            },
+        )?,
+        dispatch_bound_task_definition_ids: serde_json::from_str(&row.get::<_, String>(22)?)
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    23,
+                    22,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?,
-        workflow_call_tools: row
+        wake_at: row.get::<_, Option<String>>(23)?.map(time).transpose()?,
+        inherited_worker_placement: row
             .get::<_, Option<String>>(24)?
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     24,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        workflow_call_tools: row
+            .get::<_, Option<String>>(25)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    25,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
@@ -171,7 +172,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json";
+    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 

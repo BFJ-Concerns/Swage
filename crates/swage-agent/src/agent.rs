@@ -283,6 +283,7 @@ impl Agent {
                     self.fail_turn_and_idle(turn.id, thread_id).await;
                     let _ = event_tx.send(AgentEvent::Error {
                         message: error.to_string(),
+                        provider_failure: false,
                     });
                     return Err(error);
                 }
@@ -716,6 +717,7 @@ impl Agent {
                 self.fail_turn_and_idle(turn.id, thread_id).await;
                 let _ = event_tx.send(AgentEvent::Error {
                     message: e.to_string(),
+                    provider_failure: false,
                 });
                 return Err(e);
             }
@@ -870,7 +872,10 @@ impl Agent {
                                 round,
                                 outcome: ProviderRoundOutcome::Failed { message: message.clone() },
                             });
-                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: message.clone(),
+                                provider_failure: true,
+                            });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
                             ));
@@ -882,7 +887,10 @@ impl Agent {
                                 round,
                                 outcome: ProviderRoundOutcome::Failed { message: message.clone() },
                             });
-                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: message.clone(),
+                                provider_failure: true,
+                            });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::ProviderAnomaly(message),
                             ));

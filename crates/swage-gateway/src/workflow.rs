@@ -674,6 +674,16 @@ fn journal_wire(
             session_id: from_result("session_id").or(resolved.and_then(|r| r.session_id)),
             thread_id: from_result("thread_id").or(resolved.and_then(|r| r.thread_id)),
             turn_id: from_result("turn_id").or(resolved.and_then(|r| r.turn_id)),
+            input_tokens: result
+                .and_then(|value| value.get("input_tokens"))
+                .and_then(Value::as_u64),
+            output_tokens: result
+                .and_then(|value| value.get("output_tokens"))
+                .and_then(Value::as_u64),
+            served_model: result
+                .and_then(|value| value.get("served_model"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             usage,
             termination: termination.clone(),
             dispatch,
@@ -1104,6 +1114,7 @@ impl GatewayWorkflowLauncher {
             inline_identity,
             source,
             argument_schema,
+            None,
             args,
             budget.unwrap_or_default(),
             delivery_grant,
@@ -1717,7 +1728,7 @@ async fn run_ephemeral_agent_call(
     };
     // Boxed: the turn future carries the whole composed input and would
     // otherwise push this call's future past the large-future lint.
-    let mut processing = Box::pin(crate::turn::process_turn_with_composition(
+    let mut processing = Box::pin(crate::turn::process_turn_with_composition_and_model(
         state,
         session_id,
         Some(thread_id),
@@ -1732,6 +1743,9 @@ async fn run_ephemeral_agent_call(
         crate::turn::TurnAttendance::Unattended,
         composition,
         Some(journal_entry_id),
+        request.model.clone(),
+        None,
+        false,
     ));
     let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
     tokio::select! {
@@ -1771,6 +1785,12 @@ async fn run_ephemeral_agent_call(
             // timeout is surfaced to the workflow journal.
             if let Err(error) = processing.await {
                 tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
+            }
+            let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap_or_default();
+            if let Some(turn) = turns.into_iter().max_by_key(|turn| turn.created_at)
+                && let Err(error) = interrupt_outstanding_rounds(state.storage.as_ref(), [turn.id]).await
+            {
+                tracing::warn!(%error, turn_id = %turn.id, "timed-out agent turn left provider rounds unsettled");
             }
             return Err(format!(
                 "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
@@ -1843,12 +1863,16 @@ async fn run_ephemeral_agent_call(
             (None, None) => WorkflowCallUsage::Unavailable {
                 reason: WorkflowUsageUnavailableReason::ProviderReportedNoUsage,
             },
-            (input, output) => WorkflowCallUsage::Known {
-                input_tokens: input.unwrap_or(0).max(0) as u64,
-                output_tokens: output.unwrap_or(0).max(0) as u64,
+            (Some(input), Some(output)) => WorkflowCallUsage::Known {
+                input_tokens: input.max(0) as u64,
+                output_tokens: output.max(0) as u64,
+            },
+            _ => WorkflowCallUsage::Unavailable {
+                reason: WorkflowUsageUnavailableReason::ProviderReportedNoUsage,
             },
         },
         working_directory: resolved_working_directory.map(|placement| placement.path),
+        served_model: None,
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
@@ -4458,6 +4482,7 @@ async fn complete_workflow_call_entry(
                         .map(|identity| identity.name.clone()),
                     inline_workflow_version: inline_identity.map(|identity| identity.version),
                     carrying_skill: script.carrying_skill.clone(),
+                    task: None,
                     source: script
                         .script_version_id
                         .is_none()
@@ -4835,6 +4860,7 @@ async fn start_run(
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
     argument_schema: Option<Value>,
+    task: Option<String>,
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
@@ -4866,6 +4892,7 @@ async fn start_run(
                 .map(|identity| identity.name.clone()),
             inline_workflow_version: inline_identity.map(|identity| identity.version),
             carrying_skill,
+            task,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
             args,
@@ -5372,6 +5399,7 @@ pub async fn start_inline_run(
             None,
             request.source,
             None,
+            None,
             request.args,
             request.budget.unwrap_or_default(),
             None,
@@ -5404,6 +5432,7 @@ pub async fn start_saved_run(
             script.inline_identity(),
             script.source,
             script.argument_schema,
+            None,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,

@@ -6,7 +6,9 @@ use std::{path::Path, sync::Arc, time::Instant};
 use serde_json::{Value, json};
 use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
-use swage_core::{ChatMessage, Role, StorageError};
+use swage_core::{
+    ChatMessage, Effort, EffortCapability, EffortControl, ResolvedEffort, Role, StorageError,
+};
 use swage_storage::{
     model::{AppendMessage, NewAuditEvent, NewToolCall, ThreadState, TurnState},
     store::Storage,
@@ -142,6 +144,7 @@ pub struct CodexTurnRequest {
     pub turn_id: Uuid,
     pub agent_id: String,
     pub model: String,
+    pub effort: Option<ResolvedEffort>,
     pub user_message: String,
     pub assembled_context: Vec<ChatMessage>,
     pub agent_config: AgentConfig,
@@ -149,6 +152,32 @@ pub struct CodexTurnRequest {
     pub dispatcher: Arc<ToolDispatcher>,
     pub event_tx: mpsc::UnboundedSender<AgentEvent>,
     pub cancellation: CancellationToken,
+}
+
+/// Codex's app-server accepts the documented named per-turn effort control
+/// for current Codex models. Other route model ids defer to the catalogue.
+pub fn effort_capability(model: &str) -> Option<EffortCapability> {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("gpt-5.")
+        .then_some(EffortCapability::Levels {
+            levels: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh],
+            can_disable: false,
+        })
+}
+
+fn codex_effort(control: EffortControl) -> Option<String> {
+    match control {
+        EffortControl::Level { level } => Some(level.as_str().to_string()),
+        EffortControl::Disabled | EffortControl::Budget { .. } | EffortControl::Omitted => None,
+    }
+}
+
+fn add_codex_effort(provider_request: &mut Value, effort: Option<&ResolvedEffort>) {
+    if let Some(effort) = effort.and_then(|effort| codex_effort(effort.control)) {
+        provider_request["effort"] = Value::String(effort);
+    }
 }
 
 pub async fn run_turn(
@@ -178,6 +207,7 @@ pub async fn run_turn(
         }
         let _ = event_tx.send(AgentEvent::Error {
             message: error.to_string(),
+            provider_failure: matches!(error, AgentError::ProviderFailed(_)),
         });
     }
     result
@@ -280,7 +310,7 @@ async fn run_turn_inner(
         };
 
     let sandbox_policy = sandbox_policy(&request.permissions, &request.agent_config.allowed_paths);
-    let provider_request = json!({
+    let mut provider_request = json!({
         "threadId": codex_thread_id,
         "input": [{"type":"text", "text":request.user_message}],
         "sandboxPolicy": sandbox_policy,
@@ -288,6 +318,7 @@ async fn run_turn_inner(
         "cwd": request.agent_config.working_directory,
         "outputSchema": request.agent_config.output_schema,
     });
+    add_codex_effort(&mut provider_request, request.effort.as_ref());
     let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
         turn_id: request.turn_id,
         round: 1,
@@ -306,6 +337,7 @@ async fn run_turn_inner(
     let mut response_text = String::new();
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
+    let mut usage_reported = false;
     let mut tool_count = 0u32;
     let mut active_items = HashMap::<String, Value>::new();
     let mut tool_tasks = JoinSet::new();
@@ -387,6 +419,7 @@ async fn run_turn_inner(
                         let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
                         input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(input_tokens);
                         output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(output_tokens);
+                        usage_reported = true;
                     }
                     "turn/completed" => {
                         let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
@@ -432,14 +465,16 @@ async fn run_turn_inner(
         .storage
         .update_response(request.turn_id, &response_text)
         .await?;
-    state
-        .storage
-        .update_tokens(
-            request.turn_id,
-            i64::from(input_tokens),
-            i64::from(output_tokens),
-        )
-        .await?;
+    if usage_reported {
+        state
+            .storage
+            .update_tokens(
+                request.turn_id,
+                i64::from(input_tokens),
+                i64::from(output_tokens),
+            )
+            .await?;
+    }
     state
         .storage
         .append_message(AppendMessage {
@@ -459,6 +494,18 @@ async fn run_turn_inner(
         .storage
         .update_state(request.thread_id, ThreadState::Idle)
         .await?;
+    let _ = request.event_tx.send(AgentEvent::ProviderRoundSettled {
+        turn_id: request.turn_id,
+        round: 0,
+        outcome: swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+    });
+    let _ = request.event_tx.send(AgentEvent::ProviderRoundSettled {
+        turn_id: request.turn_id,
+        round: 1,
+        outcome: swage_agent::ProviderRoundOutcome::Responded {
+            tool_calls: tool_count,
+        },
+    });
     let _ = request.event_tx.send(AgentEvent::TurnCompleted {
         turn_id: request.turn_id,
         input_tokens,
@@ -841,13 +888,42 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_with_audit_failure(scenario, dispatcher, permissions, false).await
+        run_scripted_turn_with_effort(scenario, dispatcher, permissions, None).await
+    }
+
+    async fn run_scripted_turn_with_effort(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        effort: Option<ResolvedEffort>,
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
+    ) {
+        run_scripted_turn_inner(scenario, dispatcher, permissions, effort, false).await
     }
 
     async fn run_scripted_turn_with_audit_failure(
         scenario: Value,
         dispatcher: ToolDispatcher,
         permissions: PermissionConfig,
+        fail_audit_writes: bool,
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
+    ) {
+        run_scripted_turn_inner(scenario, dispatcher, permissions, None, fail_audit_writes).await
+    }
+
+    async fn run_scripted_turn_inner(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        effort: Option<ResolvedEffort>,
         fail_audit_writes: bool,
     ) -> (
         Result<OutboundMessage, AgentError>,
@@ -904,6 +980,7 @@ mod tests {
             turn_id: turn.id,
             agent_id: "gateway".to_string(),
             model: "fake-codex".to_string(),
+            effort,
             user_message: "scripted turn".to_string(),
             assembled_context: Vec::new(),
             agent_config: AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
@@ -938,6 +1015,105 @@ mod tests {
             json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}}),
             json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}),
         ]
+    }
+
+    #[tokio::test]
+    async fn resolved_codex_levels_and_clamps_reach_the_turn_start_request() {
+        for (requested, expected) in [
+            (Effort::Low, "low"),
+            (Effort::Medium, "medium"),
+            (Effort::High, "high"),
+            (Effort::Xhigh, "xhigh"),
+            (Effort::Max, "xhigh"),
+            (Effort::Off, "low"),
+        ] {
+            let resolved = swage_core::resolve_effort(
+                requested,
+                &effort_capability("gpt-5.3-codex").expect("documented Codex model"),
+            );
+            let notifications = successful_turn_notifications();
+            let scenario = json!({"keepOpen":true,"steps":[
+                {
+                    "receive":{"method":"thread/start"},
+                    "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+                },
+                {
+                    "receive":{"method":"turn/start","params":{"effort":expected}},
+                    "send":[
+                        {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                        notifications[0].clone(),
+                        notifications[1].clone()
+                    ]
+                }
+            ]});
+            let result = run_scripted_turn_with_effort(
+                scenario,
+                ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+                permissions(&[], &[]),
+                Some(resolved),
+            )
+            .await
+            .0;
+            assert_eq!(
+                result.expect("scripted Codex turn succeeds").response,
+                "done"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_omits_non_named_resolved_controls() {
+        for (control_name, control) in [
+            ("omitted", EffortControl::Omitted),
+            ("budget", EffortControl::Budget { tokens: 512 }),
+            ("disabled", EffortControl::Disabled),
+        ] {
+            let notifications = successful_turn_notifications();
+            let scenario = json!({"keepOpen":true,"steps":[
+                {
+                    "receive":{"method":"thread/start"},
+                    "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+                },
+                {
+                    "receive":{"method":"turn/start"},
+                    "send":[
+                        {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                        notifications[0].clone(),
+                        notifications[1].clone()
+                    ]
+                }
+            ]});
+            let resolved = ResolvedEffort {
+                requested: Effort::Minimal,
+                control,
+                clamped_to: None,
+                note: None,
+            };
+            let (result, _, _, events) = run_scripted_turn_with_effort(
+                scenario,
+                ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+                permissions(&[], &[]),
+                Some(resolved),
+            )
+            .await;
+            assert_eq!(
+                result.expect("scripted Codex turn succeeds").response,
+                "done"
+            );
+            let turn_start = events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::ProviderRequestPrepared { request, .. } => request
+                        .get("params")
+                        .filter(|_| request["method"] == "turn/start"),
+                    _ => None,
+                })
+                .expect("production turn/start request was sent");
+            assert!(
+                turn_start.get("effort").is_none(),
+                "a resolved {control_name} control is absent from the production turn/start request"
+            );
+        }
     }
 
     #[tokio::test]
