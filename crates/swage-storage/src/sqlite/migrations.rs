@@ -92,16 +92,30 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
-        (
-            "058_workflow_captured_sources",
-            ADD_WORKFLOW_CAPTURED_SOURCES,
-        ),
-        (
-            "059_workflow_captured_sources_grant",
-            ADD_WORKFLOW_CAPTURED_SOURCES_GRANT,
-        ),
+        ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
+        ("059_page_templates", CREATE_PAGE_TEMPLATE_TABLES),
     ]
 }
+
+/// Annotations on a page's modules: the notes a user and an agent both hang
+/// on the same module, so neither has to describe a location to the other.
+/// Anchoring is at module grain and only there — `module_id` names the module
+/// the note hangs on, and every note has one. Nothing addresses the page as a
+/// whole, and nothing addresses a position inside a module's content.
+const CREATE_PAGE_ANNOTATION_TABLE: &str = "
+CREATE TABLE IF NOT EXISTS page_annotations (
+    id          TEXT NOT NULL PRIMARY KEY,
+    page_id     TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    module_id   TEXT NOT NULL REFERENCES page_modules(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL,
+    tags        TEXT NOT NULL,
+    author      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_annotations_page ON page_annotations(page_id);
+CREATE INDEX IF NOT EXISTS idx_page_annotations_module ON page_annotations(module_id);
+";
 
 /// Pages — agent-run tabs on a space — and their module instances. The
 /// database is authoritative for page content; the alpha wipe-and-rebuild
@@ -126,6 +140,35 @@ CREATE TABLE IF NOT EXISTS page_modules (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_page_modules_page ON page_modules(page_id);
+";
+
+/// Page templates — the reusable module shapes a space keeps, and the
+/// lineage a page carries from the template it was forked from. A template's
+/// modules seed the new page's own rows at creation; the fork is a real page
+/// from birth, so lineage is a recorded origin and never a live projection
+/// (neither side's later edits reach the other). Templates are space-local.
+const CREATE_PAGE_TEMPLATE_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS page_templates (
+    id          TEXT NOT NULL PRIMARY KEY,
+    space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_templates_space ON page_templates(space_id);
+CREATE TABLE IF NOT EXISTS page_template_modules (
+    id          TEXT NOT NULL PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES page_templates(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_template_modules_template
+    ON page_template_modules(template_id);
+ALTER TABLE pages ADD COLUMN forked_from_template_id TEXT REFERENCES page_templates(id) ON DELETE SET NULL;
+ALTER TABLE pages ADD COLUMN forked_at TEXT;
 ";
 
 /// Delegated-child usage aggregated onto the delegating turn: a billing
@@ -185,6 +228,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         inline_workflow_name TEXT,
         inline_workflow_version INTEGER,
         carrying_skill       TEXT,
+        task                 TEXT,
         source               TEXT,
         source_hash          TEXT NOT NULL,
         args_json            TEXT NOT NULL,
@@ -206,7 +250,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, inline_workflow_id,
-        inline_workflow_name, inline_workflow_version, carrying_skill,
+        inline_workflow_name, inline_workflow_version, carrying_skill, task,
         source, source_hash, args_json,
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
@@ -216,7 +260,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     )
     SELECT
         id, space_id, script_version_id, inline_workflow_id,
-        inline_workflow_name, inline_workflow_version, NULL,
+        inline_workflow_name, inline_workflow_version, NULL, NULL,
         source, source_hash, args_json,
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
@@ -269,7 +313,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'terminal_budget', 'captured_sources', 'wind_down')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
@@ -329,40 +373,6 @@ const ADD_WORKFLOW_RUN_PARENTAGE: &str = "
     ALTER TABLE workflow_journal_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
         ON workflow_journal(run_id, seq);
-";
-
-/// Captured-source reads are journalled so replay uses the corpus view its
-/// original script execution observed.
-const ADD_WORKFLOW_CAPTURED_SOURCES: &str = "
-    CREATE TABLE workflow_journal_captured_sources_new (
-        id                TEXT NOT NULL PRIMARY KEY,
-        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
-        seq               INTEGER NOT NULL,
-        completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'wind_down', 'captured_sources')),
-        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
-        args_hash         TEXT NOT NULL,
-        request_json      TEXT NOT NULL,
-        result_json       TEXT,
-        error_message     TEXT,
-        effect_kind       TEXT,
-        idempotency_key   TEXT,
-        target_kind       TEXT,
-        started_at        TEXT NOT NULL,
-        completed_at      TEXT,
-        UNIQUE (run_id, seq),
-        UNIQUE (run_id, completed_order)
-    );
-    INSERT INTO workflow_journal_captured_sources_new SELECT * FROM workflow_journal;
-    DROP TABLE workflow_journal;
-    ALTER TABLE workflow_journal_captured_sources_new RENAME TO workflow_journal;
-    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
-        ON workflow_journal(run_id, seq);
-";
-
-const ADD_WORKFLOW_CAPTURED_SOURCES_GRANT: &str = "
-    ALTER TABLE workflow_scripts
-        ADD COLUMN captured_sources_grant INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Per-turn context assembly report, stored as raw JSON to avoid coupling the
@@ -760,7 +770,7 @@ const COMPLETE_SCHEMA: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_single_default
         ON spaces(is_default) WHERE is_default = 1;
 
-    -- Devices: local or paired machines available for tool execution.
+    -- Devices: local or paired devices available for tool execution.
     CREATE TABLE IF NOT EXISTS devices (
         device_id              TEXT NOT NULL PRIMARY KEY,
         label                TEXT,
@@ -1002,6 +1012,9 @@ const COMPLETE_SCHEMA: &str = "
         thread_id    TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
         role         TEXT    NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
         content      TEXT    NOT NULL,
+        -- Content parts submitted beside the text, as a JSON array of the
+        -- client wire's tagged attachment values; '[]' for text-only rows.
+        attachments  TEXT    NOT NULL DEFAULT '[]',
         position     INTEGER NOT NULL,
         agent_id     TEXT    NOT NULL,
         tool_call_id TEXT,
@@ -1043,6 +1056,8 @@ const COMPLETE_SCHEMA: &str = "
         name                TEXT NOT NULL,
         description         TEXT NOT NULL,
         delivery_grant_json TEXT,
+        captured_sources_grant INTEGER NOT NULL DEFAULT 0,
+        authoring_session_id TEXT,
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL,
         UNIQUE (space_id, name)
@@ -1065,6 +1080,7 @@ const COMPLETE_SCHEMA: &str = "
         inline_workflow_name TEXT,
         inline_workflow_version INTEGER,
         carrying_skill      TEXT,
+        task                TEXT,
         source              TEXT,
         source_hash         TEXT NOT NULL,
         args_json           TEXT NOT NULL,

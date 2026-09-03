@@ -32,8 +32,10 @@ A run progresses through these states:
 Three entry points create runs — an HTTP endpoint with inline source, an HTTP
 endpoint referencing a saved script, and a programmatic launcher used by agent
 dispatch — and all converge on a shared `start_run` path that validates the
-budget, enforces a hard limit of four concurrent active runs, and persists the
-run record before launching.
+budget, checks an active-run cap of four, and persists the
+run record before launching. The cap is a soft admission gate on `start_run`
+callers: child runs created through composition and resumed runs bypass it,
+and concurrent `start_run` calls race the async mutex without serialisation.
 
 The launch path (`launch_existing_run`) is shared between new and resumed runs.
 It loads the journal replay, computes initial token and call counts from
@@ -49,7 +51,7 @@ Map/Set, and regular expressions, but no `Date`, `setTimeout`, `fetch`, or
 `process`. `Math.random` throws to prevent non-deterministic branching, since
 replay depends on the script producing the same host-call sequence.
 
-A script may open with `export const defaults = { ... }` to set default
+A script may open with `export const defaults = { ... };` to set default
 options (agent name, model, schema) merged into every `agent()` and
 `agentStart()` call. Call-site values override; unset fields fall through to
 the default.
@@ -57,11 +59,15 @@ the default.
 ### Agent calls
 
 `agent(prompt, options)` makes a synchronous (awaited) call and returns the
-agent's output. `agentStart(prompt, options)` dispatches a call and returns a
-handle immediately — the handle's `.done`, `.session`, and `.result` fields
-update on completion. `wait({ watches, timerMs })` races a set of handles
-against a journalled timer: the first handle to complete or the timer to fire
-wins, and the result says which.
+agent's output. When a call supplies `schema` and every validation attempt is
+exhausted, it returns `null`; provider, turn, budget, and other call failures
+still throw. `agentStart(prompt, options)` dispatches a call and returns a
+handle immediately — the handle's `.done`, `.session`, `.result`, and
+`.workingDirectory` fields update on completion, with the same `null` result
+for schema exhaustion. `workingDirectory` is the host-resolved directory where
+the child ran, including a provisioned isolated worktree. `wait({ watches,
+timerMs })` races a set of handles against a journalled timer: the first handle
+to complete or the timer to fire wins, and the result says which.
 
 The optional `tools` array narrows a fresh worker call to the named tools. It
 is intersected with the worker's effective grants and therefore cannot grant
@@ -124,7 +130,9 @@ as `started` — the journal records which leg actually won.
 
 Delivery effects carry an `idempotency_key` and an `effect_kind` that
 determines the recovery strategy when a `started` effect entry is found on
-replay. `IdempotencyKey` resends directly (the key makes re-delivery safe).
+replay. `IdempotencyKey` resends directly without probing. Re-delivery is only safe
+when the receiver implements duplicate suppression keyed on the idempotency
+key; the strategy assumes this, it does not provide it.
 `CheckBeforeRedo` probes for evidence of prior delivery first, falling back
 to resend only when the probe finds nothing.
 
@@ -145,16 +153,25 @@ to 4).
 
 ### Wind-down
 
-Each new agent call reserves one equal share of the working partition per
-declared `max_agent_calls`, or per `max_concurrent_agent_calls` slot when no
-total call count is declared. The reservation is an admission estimate; the
-call's actual token usage replaces it at settlement. Wind-down triggers when a
-new agent call (or a journalled `budgetSnapshot()`) finds the working
-partition's remaining capacity has dropped below that estimate. At that point:
+Each new working-partition agent call reserves one equal share of the working
+partition per declared `max_agent_calls`, or per `max_concurrent_agent_calls`
+slot when no total call count is declared. The reservation is an admission
+estimate; the call's actual token usage replaces it at settlement. After
+wind-down, closing-partition calls use a larger estimate computed from the full
+`max_total_tokens` ceiling rather than the working partition's share — shrinking
+the estimate a second time would admit work the closing partition cannot fund.
+
+Wind-down triggers when a new agent call or a journalled `budgetSnapshot()`
+finds the working partition's remaining capacity has dropped below that
+estimate. At that point:
 
 1. A `wind_down` journal entry is written with a budget reading.
 2. The `closing_limit` latches to `spent + reserved_closing_tokens`.
-3. The triggering call is refused with `BudgetWindDownError`.
+
+When an agent call triggers the transition, that call is refused with
+`BudgetWindDownError`. When `budgetSnapshot()` triggers it, the snapshot
+succeeds and returns a reading with `winding_down: true` — it is the next
+agent call that is refused, not the snapshot itself.
 
 After wind-down, new agent calls are admitted against `closing_limit` rather
 than `max_total_tokens`. When the closing partition is also exhausted, calls
@@ -305,8 +322,8 @@ run's wire representation.
 
 Four mechanisms bound concurrent work:
 
-- **Active-run limit**: at most four runs execute concurrently across the
-  gateway.
+- **Active-run cap**: `start_run` checks the count of active runs and rejects
+  new runs beyond four. Child runs and resumed runs bypass this check.
 - **Agent-call semaphore**: each run holds a per-run semaphore (default size 4)
   gating concurrent agent dispatches.
 - **In-flight counter**: tracks outstanding agent calls, workflow calls, and
@@ -314,3 +331,37 @@ Four mechanisms bound concurrent work:
   counter is above zero.
 - **Agent-call counter**: a lifetime count checked against the budget's
   `max_agent_calls` cap.
+
+## Carried workflows
+
+A workflow script can be carried by a skill instead of being authored as a
+standalone row in a space. In the workflow listing, a carried workflow's
+`carrying_skill` field names the skill that provides it. Carried workflows are
+immutable in place; an operator can shadow one by authoring a same-named
+workflow in the space.
+
+Each shipped skill carries its own workflows. When a skill is active on a
+session, its carried workflows become available, and any available workflow
+starts by name through `workflow_run`. The research skill carries
+`research-sweep`.
+
+### Running a research sweep
+
+To run a research sweep, activate the research skill on the session, then
+dispatch the carried workflow:
+
+```json
+{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+```
+
+- **`topic`** — what to research, as the user phrased it.
+- **`purpose`** — what the findings must serve; the synthesis is judged
+  against this, so it should carry the user's actual need.
+- **`maxSources`** — optional ceiling on sources gathered (default 8).
+
+The sweep runs unattended: sources are gathered as immutable observations,
+an organising pass signposts what landed using `knowledge_curate_orientation`
+(which can author, supersede, and retire orientation cards), and a synthesis
+pass delivers cited findings. The sweep's internal roles — scout, gatherers,
+organiser, synthesist — are bare dispatches inside the script, not standalone
+agent definitions.

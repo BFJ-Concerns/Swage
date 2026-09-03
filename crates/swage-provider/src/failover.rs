@@ -11,8 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, EffortCapability, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use tokio::time::Instant;
 
@@ -189,6 +189,15 @@ impl LlmProvider for FailoverProvider {
             },
             |&idx| self.providers[idx].provider_request_snapshot(request, stream),
         )
+    }
+
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        // The capability of the provider a completion would try first —
+        // the one whose control the resolved effort will reach.
+        let order = self.compute_try_order(Some(model));
+        order
+            .first()
+            .and_then(|&idx| self.providers[idx].effort_capability(model))
     }
 
     async fn count_tokens(
@@ -1599,6 +1608,13 @@ mod tests {
             serde_json::json!({"provider": self.0, "stream": stream})
         }
 
+        fn effort_capability(&self, _: &str) -> Option<EffortCapability> {
+            Some(EffortCapability::Levels {
+                levels: vec![swage_core::Effort::Low],
+                can_disable: false,
+            })
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1634,6 +1650,15 @@ mod tests {
             failover.count_tokens(&completion_req()).await.unwrap(),
             Some(42)
         );
+    }
+
+    #[test]
+    fn effort_capability_delegates_to_the_first_provider_in_try_order() {
+        let failover = FailoverProvider::new(
+            vec![Arc::new(CountingProbe("probe"))],
+            FailoverConfig::default(),
+        );
+        assert!(failover.effort_capability("probe").is_some());
     }
 
     #[test]

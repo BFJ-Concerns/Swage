@@ -24,6 +24,9 @@ pub mod registry;
 
 mod tool_schema;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use provider::{LlmProvider, ProviderConfig, UnsupportedLlmProvider};
 pub use registry::{Registry, RegistryError, ResolvedModel};
 pub use voice::{

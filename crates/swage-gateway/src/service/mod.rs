@@ -3,6 +3,7 @@ mod conversation;
 mod session_variable;
 mod space;
 mod task_definition;
+mod workflow_script;
 mod workspace_attachment;
 
 pub use agent_definition::*;
@@ -10,7 +11,16 @@ pub use conversation::*;
 pub use session_variable::*;
 pub use space::*;
 pub use task_definition::*;
+pub use workflow_script::*;
 pub use workspace_attachment::*;
+
+/// Whether an identifier is a non-empty lowercase ASCII slug.
+pub(crate) fn is_lowercase_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
 
 #[cfg(test)]
 use serde_json::Value as JsonValue;
@@ -27,17 +37,20 @@ mod tests {
     use uuid::Uuid;
 
     use swage_core::{compact_tool_arguments_for_model, compact_tool_result_for_model};
-    use swage_storage::model::{NewMessage, NewToolCall, NewTurn, TurnState};
     use swage_storage::sqlite::SqliteStorage;
+    use swage_storage::{
+        AuditStore,
+        model::{NewMessage, NewToolCall, NewTurn, TurnState},
+    };
 
     use super::*;
-    use crate::turn::tests::MockStorage;
+    use crate::turn::tests::{MockProvider, MockStorage};
 
     fn make_service() -> ConversationService {
         let storage = Arc::new(MockStorage::new());
         ConversationService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
         )
     }
 
@@ -50,22 +63,27 @@ mod tests {
         compact_tool_result_for_model(raw, false)
     }
 
-    async fn make_workspace_service() -> (WorkspaceAttachmentService, Uuid) {
+    async fn make_workspace_service() -> (WorkspaceAttachmentService, Arc<SqliteStorage>, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
         let space = storage
             .get_or_create_default()
             .await
             .expect("default space should exist");
-        let service = WorkspaceAttachmentService::new(
+        let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
         );
-        (service, space.id)
+        let service = WorkspaceAttachmentService::from_state(state);
+        (service, storage, space.id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_persists_canonical_path() {
-        let (service, space_id) = make_workspace_service().await;
+        let (service, _storage, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         std::fs::create_dir(&workspace).expect("workspace dir");
@@ -96,8 +114,79 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_attachment_mutations_record_audit_events() {
+        let (service, storage, space_id) = make_workspace_service().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("audited");
+        std::fs::create_dir(&workspace).expect("workspace dir");
+
+        let attached = service
+            .attach_workspace(
+                space_id,
+                CreateWorkspaceAttachmentRequest {
+                    path: workspace.to_string_lossy().into_owned(),
+                    label: None,
+                    set_as_default: false,
+                    active_session_id: None,
+                    permissions: vec![],
+                    is_trusted: false,
+                },
+            )
+            .await
+            .expect("workspace should attach");
+        service
+            .set_trust(
+                space_id,
+                attached.id,
+                UpdateWorkspaceTrustRequest { is_trusted: true },
+            )
+            .await
+            .expect("workspace trust should update");
+        service
+            .detach_workspace(space_id, attached.id)
+            .await
+            .expect("workspace should detach");
+
+        let mut events = storage
+            .list_audit_events()
+            .await
+            .expect("audit events")
+            .into_iter()
+            .filter(|event| {
+                event.entity_kind == "workspace_attachment"
+                    && event.entity_id == attached.id.to_string()
+            })
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| {
+            event.metadata["action"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        });
+
+        assert_eq!(events.len(), 3, "each mutation must be recorded");
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.metadata["action"].as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("attach_workspace"),
+                Some("detach_workspace"),
+                Some("set_workspace_trust"),
+            ]
+        );
+        let trusted = events
+            .iter()
+            .find(|event| event.metadata["action"] == "set_workspace_trust")
+            .expect("trust event");
+        assert_eq!(trusted.metadata["prior_state"]["is_trusted"], false);
+        assert_eq!(trusted.metadata["new_state"]["is_trusted"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_workspaces_persists_missing_folder_state() {
-        let (service, space_id) = make_workspace_service().await;
+        let (service, _storage, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         std::fs::create_dir(&workspace).expect("workspace dir");
@@ -138,7 +227,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_can_become_space_default() {
-        let (service, space_id) = make_workspace_service().await;
+        let (service, _storage, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("default");
         std::fs::create_dir(&workspace).expect("workspace dir");
@@ -170,7 +259,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_can_become_session_active_workspace() {
-        let (service, space_id) = make_workspace_service().await;
+        let (service, _storage, space_id) = make_workspace_service().await;
         let session = service
             .storage
             .create_session(NewSession {
@@ -212,7 +301,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_rejects_duplicate_canonical_path() {
-        let (service, space_id) = make_workspace_service().await;
+        let (service, _storage, space_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         let symlink = temp.path().join("alias");
@@ -582,20 +671,22 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_conversation_accepts_a_shipped_research_agent() {
+    async fn fresh_space_conversation_rejects_a_workflow_role_name() {
         let (svc, storage) = make_definition_service();
 
-        let resp = svc
+        // A shipped workflow's roles are bare dispatches inside its script,
+        // never definitions; the picker and the creation selector see only
+        // authored rows plus the shipped default.
+        let error = svc
             .create_conversation_from_request(CreateConversationRequest {
                 selected_model_id: None,
                 agent_id: Some("synthesist".to_string()),
                 effort: None,
             })
             .await
-            .expect("shipped definition should be selectable without an authored row");
+            .expect_err("a workflow role name is not a selectable definition");
 
-        let session = storage.get_session(resp.id).await.unwrap().unwrap();
-        assert_eq!(session.agent_id, "synthesist");
+        assert!(matches!(error, GatewayError::ValidationError(_)));
         assert!(
             storage
                 .list_agent_definitions(None)
@@ -740,6 +831,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "Hello!".to_string(),
@@ -821,6 +913,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "Hi".to_string(),
@@ -832,6 +925,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Hello!".to_string(),
@@ -928,6 +1022,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
                 content: "list files".into(),
@@ -940,6 +1035,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "I'll run ls for you.".into(),
@@ -1022,6 +1118,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Ran python".into(),
@@ -1121,6 +1218,7 @@ default_effort = "high"
         svc.storage
             .create_message(NewMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
                 content: "Hello".into(),

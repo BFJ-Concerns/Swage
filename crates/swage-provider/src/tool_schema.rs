@@ -133,13 +133,16 @@ fn stripped_constraint_summary(keyword: &str, value: &Value) -> String {
     match keyword {
         "oneOf" => format!(
             "oneOf ({})",
-            describe_schema_choices(value, "exactly one of")
+            describe_schema_choices(value, "exactly one of", "or")
         ),
         "anyOf" => format!(
             "anyOf ({})",
-            describe_schema_choices(value, "at least one of")
+            describe_schema_choices(value, "at least one of", "or")
         ),
-        "allOf" => format!("allOf ({})", describe_schema_choices(value, "all of")),
+        "allOf" => format!(
+            "allOf ({})",
+            describe_schema_choices(value, "all of", "and")
+        ),
         "items" => describe_item_constraint(value),
         "const" | "minLength" | "pattern" => {
             format!("{keyword} ({})", describe_constant(value))
@@ -149,7 +152,7 @@ fn stripped_constraint_summary(keyword: &str, value: &Value) -> String {
     }
 }
 
-fn describe_schema_choices(value: &Value, quantifier: &str) -> String {
+fn describe_schema_choices(value: &Value, quantifier: &str, connector: &str) -> String {
     let Some(choices) = value.as_array() else {
         return "an additional locally validated choice".to_string();
     };
@@ -159,7 +162,10 @@ fn describe_schema_choices(value: &Value, quantifier: &str) -> String {
         .take(MAX_DESCRIBED_SCHEMA_CHOICES)
         .map(describe_schema_choice)
         .collect();
-    let description = format!("{quantifier}: {}", summaries.join("; or "));
+    let description = format!(
+        "{quantifier}: {}",
+        summaries.join(&format!("; {connector} "))
+    );
 
     if choices.len() > MAX_DESCRIBED_SCHEMA_CHOICES {
         format!("{description}; remaining alternatives are validated locally")
@@ -408,6 +414,50 @@ mod tests {
         assert!(description.contains("requires `kind`, `integration`, `account`, `conversation`"));
         assert!(description.contains("`kind` must be \"local_storage\""));
         assert!(description.contains("requires `kind`, `url`"));
+    }
+
+    #[test]
+    fn provider_tool_schema_preserves_anyof_and_allof_guidance_without_sending_hostile_keywords() {
+        let schema = json!({
+            "type": "object",
+            "anyOf": [
+                {"required": ["url"]},
+                {"required": ["query"]}
+            ],
+            "allOf": [
+                {"required": ["source"]},
+                {"properties": {"source": {"type": "string"}}}
+            ]
+        });
+
+        let projected = provider_tool_schema(&schema);
+
+        assert!(projected.get("anyOf").is_none());
+        assert!(projected.get("allOf").is_none());
+        let description = projected["description"].as_str().unwrap();
+        assert!(
+            description.contains("anyOf (at least one of: requires `url`; or requires `query`)")
+        );
+        assert!(description.contains(
+            "allOf (all of: requires `source`; and an additional locally validated alternative)"
+        ));
+    }
+
+    #[test]
+    fn provider_tool_schema_explains_all_of_requirements_conjunctively() {
+        let schema = json!({
+            "allOf": [
+                {"required": ["kind"]},
+                {"required": ["payload"]}
+            ]
+        });
+
+        let projected = provider_tool_schema(&schema);
+        let description = projected["description"].as_str().unwrap();
+
+        assert!(description.contains("all of"));
+        assert!(description.contains("requires `kind`; and requires `payload`"));
+        assert!(!description.contains("requires `kind`; or requires `payload`"));
     }
 
     #[test]

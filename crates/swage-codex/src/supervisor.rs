@@ -92,6 +92,12 @@ impl AppServerSupervisor {
     /// This keeps protocol scenario tests on the same `ensure_running()` path
     /// without launching a platform process merely to join two duplex streams.
     #[doc(hidden)]
+    /// The directory the Codex process is given as `CODEX_HOME` — where the
+    /// CLI keeps its own auth store and session state.
+    pub fn state_dir(&self) -> PathBuf {
+        self.config.state_dir.clone()
+    }
+
     pub fn with_client(config: AppServerConfig, client: AppServerClient) -> Arc<Self> {
         let supervisor = Self::new(config);
         if let Ok(mut state) = supervisor.state.try_lock() {

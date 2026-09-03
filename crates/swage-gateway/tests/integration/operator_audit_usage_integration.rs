@@ -198,6 +198,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
     let message = storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: Some(turn.id),
             role: swage_core::Role::User,
             content: "message needle".into(),

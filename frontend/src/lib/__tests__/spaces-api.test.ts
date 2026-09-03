@@ -131,7 +131,9 @@ describe("createSpace", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "My Space" }),
+        // The generated client sends the wire contract whole: the view
+        // type's optional description is the wire's required one.
+        body: JSON.stringify({ description: "", name: "My Space" }),
       }),
     );
     expect(result.id).toBe("proj-1");

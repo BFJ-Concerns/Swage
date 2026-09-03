@@ -31,6 +31,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export channel link code request");
     client::channel::ChannelLinkCodeResponse::export_all(&cfg)
         .expect("export channel link code response");
+    client::error::ApiErrorBody::export_all(&cfg).expect("export api error body");
     client::websocket::ClientEvent::export_all(&cfg).expect("export client events");
     client::websocket::ServerEvent::export_all(&cfg).expect("export server events");
     client::space::CreateSpaceRequest::export_all(&cfg).expect("export create space");
@@ -40,6 +41,15 @@ fn typescript_bindings_are_regenerated() {
     client::page::WritePageModuleRequest::export_all(&cfg).expect("export write page module");
     client::page::PageResponse::export_all(&cfg).expect("export page");
     client::page::PageListResponse::export_all(&cfg).expect("export pages");
+    client::page::CreatePageAnnotationRequest::export_all(&cfg)
+        .expect("export create page annotation");
+    client::page::UpdatePageAnnotationRequest::export_all(&cfg)
+        .expect("export update page annotation");
+    client::page::DeletePageAnnotationResponse::export_all(&cfg)
+        .expect("export delete page annotation");
+    client::page::CreatePageTemplateRequest::export_all(&cfg).expect("export create page template");
+    client::page::PageTemplateResponse::export_all(&cfg).expect("export page template");
+    client::page::PageTemplateListResponse::export_all(&cfg).expect("export page templates");
     client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
@@ -58,6 +68,7 @@ fn typescript_bindings_are_regenerated() {
     client::turn::SendMessageRequest::export_all(&cfg).expect("export send message");
     client::turn::MessageResponse::export_all(&cfg).expect("export message response");
     client::settings::SettingsResponse::export_all(&cfg).expect("export settings");
+    client::settings::EffortCapability::export_all(&cfg).expect("export effort capability");
     client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
     client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
     client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
@@ -98,6 +109,8 @@ fn typescript_bindings_are_regenerated() {
         .expect("export workflow update");
     client::workflow::WorkflowScriptListResponse::export_all(&cfg)
         .expect("export workflow scripts");
+    client::workflow::WorkflowArgumentContract::export_all(&cfg)
+        .expect("export workflow argument contract");
     client::workflow::StartWorkflowRunRequest::export_all(&cfg)
         .expect("export workflow run request");
     client::workflow::StartInlineWorkflowRunRequest::export_all(&cfg)
@@ -118,7 +131,7 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
     client::skill::SkillListResponse::export_all(&cfg).expect("export skill catalogue");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
-    hosting::MachineHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
+    hosting::DeviceHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
@@ -168,6 +181,22 @@ fn trim_generated_typescript(directory: &Path) {
             + "\n";
         std::fs::write(path, normalised).expect("normalise generated TypeScript file");
     }
+}
+
+/// The OpenAPI document and the TypeScript client are projections of the
+/// route manifest; like the schema, they are rewritten in place so drift
+/// shows as a dirty tree at the gate.
+#[test]
+fn client_route_projections_are_regenerated() {
+    let document = serde_json::to_string_pretty(&client::openapi::document())
+        .expect("openapi document serialises")
+        + "\n";
+    let document_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client-openapi.json");
+    std::fs::write(&document_path, document).expect("write openapi document");
+
+    let client_path = repo_root().join("frontend/src/lib/protocol/client.ts");
+    std::fs::write(&client_path, client::typescript_client::render())
+        .expect("write generated client");
 }
 
 #[test]

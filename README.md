@@ -102,10 +102,37 @@ default = "sonnet"
 [models.entries.sonnet]
 provider_id = "anthropic"
 model_id = "claude-sonnet-5"
+default_effort = "high"            # optional: off|minimal|low|medium|high|xhigh|max
 ```
+
+`default_effort` sets the reasoning effort for every turn using this model
+unless overridden at session start. Seven levels are available, from `off`
+(disable reasoning where the model supports it) through `max`. The gateway
+resolves the chosen level against the model's declared capability — see
+[Agents and permissions — Effort](docs/agents-and-permissions.md#effort).
 
 Set the key in the gateway's environment before starting it. Providers and
 models can also be managed from the web UI under Settings → Providers.
+
+### Credentials beyond environment variables
+
+The `api_key_env` field shown above is a legacy convenience: a direct
+environment-variable read at startup, with a deprecation warning. The
+governed alternative is `api_key_secret_ref`, which resolves through the
+gateway's secret manager — every access is audited and the resolved value is
+redacted from logs.
+
+The secret manager supports three backends: `managed` (encrypted in the
+gateway's store), `env` (an environment variable), and `file` (a file on
+the gateway host, re-read on every access so externally refreshed tokens
+stay current). A file-backed secret can optionally narrow into a JSON
+document with a JSON pointer — useful when a tool's own auth store keeps
+multiple tokens in one file. The Codex CLI's OAuth tokens are registered
+this way at startup, so they resolve and redact through the governed system
+without being copied out of the harness's own `auth.json`.
+
+See [Provider credentials](docs/interfaces-and-tooling.md#provider-credentials)
+for the creation journey and request shape.
 
 `SWAGE_HOME` overrides the whole data root (config, database, logs) — useful
 for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.
@@ -197,16 +224,26 @@ gateway; point it at a non-default port with
 
 ## Going deeper
 
-Three pages in [`docs/`](docs/) cover the parts of the system a newcomer
-meets first:
+The [`docs/`](docs/) pages cover the parts of the system a newcomer meets
+first:
 
+- [First session](docs/first-session.md) — opening a space, attaching a
+  repository as a workspace, and trusting it so its guidance reaches agents.
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
   how a run survives a restart, and how its token budget is spent.
 - [Agents and permissions](docs/agents-and-permissions.md) — agent
-  definitions, operator guidance (`AGENTS.md`), what a tool call is allowed
-  to do, approvals, and sandbox isolation.
+  definitions, operator guidance (`AGENTS.md`), effort resolution, what a
+  tool call is allowed to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
-  turn context inspector, the wire contract, and the verification gate.
+  turn context inspector, image attachments, the API error contract, the
+  wire contract and its projections, and the verification gate.
+
+Every failed API response carries a `{"code","message"}` body whose code
+vocabulary is defined in the protocol crate. The manifested client-surface
+routes are documented in an OpenAPI 3.1 document at
+`crates/swage-protocol/schema/client-openapi.json`, generated from a route
+manifest that also drives the TypeScript client and a router-coverage test;
+the manifest is growing to cover the full surface.
 
 [`docs/README.md`](docs/README.md) indexes the set, and
 [`docs/architecture-flow.svg`](docs/architecture-flow.svg) is the

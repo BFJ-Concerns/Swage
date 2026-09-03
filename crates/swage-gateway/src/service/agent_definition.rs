@@ -48,7 +48,9 @@ fn gateway_definition() -> NewAgentDefinition {
 /// Resolve the single definition every runtime consumer should use.
 ///
 /// Authored space and global rows retain storage's established precedence.
-/// Shipped definitions are the final fallback and never become stored rows.
+/// The shipped `gateway` default is the only definition that exists without
+/// a row: nothing else ships as a global definition (a shipped workflow's
+/// roles live inside its script as bare dispatches).
 pub async fn resolve_effective_agent_definition(
     storage: &dyn Storage,
     agent_id: &str,
@@ -60,26 +62,17 @@ pub async fn resolve_effective_agent_definition(
             is_builtin: true,
         }));
     }
-    if let Some(definition) = storage
+    Ok(storage
         .resolve_agent_definition(agent_id, space_id)
         .await
         .map_err(GatewayError::from)?
-    {
-        return Ok(Some(stored_definition(definition)));
-    }
-    Ok(
-        crate::builtin_agent_definitions::find_by_name(agent_id).map(|definition| {
-            EffectiveAgentDefinition {
-                definition: definition.clone(),
-                is_builtin: true,
-            }
-        }),
-    )
+        .map(stored_definition))
 }
 
 /// Read the effective registry for a space. Space definitions shadow global
 /// definitions with the same id; definitions from every other space remain
-/// invisible. The shipped gateway agent is present without requiring a row.
+/// invisible. The shipped gateway agent is the only entry present without a
+/// row.
 pub async fn effective_agent_definitions(
     storage: &dyn Storage,
     space_id: Uuid,
@@ -98,15 +91,6 @@ pub async fn effective_agent_definitions(
         .map_err(GatewayError::from)?
     {
         effective.insert(definition.id.clone(), stored_definition(definition));
-    }
-
-    for definition in crate::builtin_agent_definitions::all() {
-        effective
-            .entry(definition.id.clone())
-            .or_insert_with(|| EffectiveAgentDefinition {
-                definition: definition.clone(),
-                is_builtin: true,
-            });
     }
 
     // `gateway` is a reserved creation selector whose behaviour is supplied
@@ -246,11 +230,7 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
             "an agent definition needs an id".into(),
         ));
     }
-    if !definition
-        .id
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
+    if !super::is_lowercase_identifier(&definition.id) {
         return Err(GatewayError::ValidationError(
             "agent ids are lowercase ASCII letters, digits, and hyphens".into(),
         ));
@@ -418,7 +398,7 @@ mod validation_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn effective_registry_merges_scopes_and_shipped_definitions() {
+    async fn effective_registry_merges_scopes_around_the_shipped_default() {
         let storage = SqliteStorage::in_memory().unwrap();
         let current = storage
             .create(NewSpace {
@@ -457,80 +437,36 @@ mod validation_tests {
             .map(|entry| entry.definition.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            ids,
-            vec![
-                "gateway",
-                "global-only",
-                "organiser",
-                "researcher",
-                "shared",
-                "synthesist"
-            ]
-        );
+        assert_eq!(ids, vec!["gateway", "global-only", "shared"]);
         assert!(effective[0].is_builtin);
         assert_eq!(effective[0].definition.display_name, "Swage default");
-        assert!(effective[2].is_builtin);
-        assert!(effective[3].is_builtin);
-        assert_eq!(effective[4].definition.instructions, "local");
-        assert!(effective[5].is_builtin);
+        assert!(!effective[1].is_builtin);
+        assert_eq!(effective[2].definition.instructions, "local");
     }
 
+    /// Nothing ships as a global definition: a fresh store resolves only the
+    /// `gateway` default, and a shipped workflow's role names are not
+    /// definitions a session can select.
     #[tokio::test(flavor = "multi_thread")]
-    async fn authored_definitions_shadow_shipped_definitions_at_each_scope() {
+    async fn a_fresh_store_holds_only_the_shipped_default() {
         let storage = SqliteStorage::in_memory().unwrap();
         let space = storage.get_or_create_default().await.unwrap();
 
-        let fresh = resolve_effective_agent_definition(&storage, "researcher", space.id)
+        let effective = effective_agent_definitions(&storage, space.id)
             .await
-            .unwrap()
-            .expect("shipped researcher");
-        assert!(fresh.is_builtin);
+            .unwrap();
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].definition.id, "gateway");
+        assert!(effective[0].is_builtin);
 
-        let mut global = definition("researcher");
-        global.instructions = "global researcher".into();
-        storage.upsert_agent_definition(global).await.unwrap();
-        let resolved = resolve_effective_agent_definition(&storage, "researcher", space.id)
-            .await
-            .unwrap()
-            .expect("global researcher");
-        assert!(!resolved.is_builtin);
-        assert_eq!(resolved.definition.instructions, "global researcher");
-
-        let mut local = definition("researcher");
-        local.space_id = Some(space.id);
-        local.instructions = "space researcher".into();
-        storage.upsert_agent_definition(local).await.unwrap();
-        let resolved = resolve_effective_agent_definition(&storage, "researcher", space.id)
-            .await
-            .unwrap()
-            .expect("space researcher");
-        assert!(!resolved.is_builtin);
-        assert_eq!(resolved.definition.instructions, "space researcher");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn shipped_definitions_are_not_rows_and_survive_store_deletion() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
-
-        assert!(
-            storage
-                .list_agent_definitions(None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            !storage
-                .delete_agent_definition("organiser", None)
-                .await
-                .unwrap()
-        );
-        let resolved = resolve_effective_agent_definition(&storage, "organiser", space.id)
-            .await
-            .unwrap()
-            .expect("shipped organiser remains resolvable");
-        assert!(resolved.is_builtin);
+        for role in ["researcher", "organiser", "synthesist"] {
+            assert!(
+                resolve_effective_agent_definition(&storage, role, space.id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{role} must not resolve without an authored row"
+            );
+        }
     }
 }

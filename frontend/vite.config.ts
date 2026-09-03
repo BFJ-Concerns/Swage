@@ -9,6 +9,11 @@ export default defineConfig({
   plugins: [svelte()],
   test: {
     include: ["src/**/*.test.ts"],
+    // Node 26 ships an experimental `localStorage` global that is inert
+    // unless `--localstorage-file` is given; jsdom fills only absent globals,
+    // so the inert one would shadow the window's working store. Start the
+    // test workers without it.
+    execArgv: ["--no-experimental-webstorage"],
     // Use jsdom so Svelte components can mount and query the DOM in tests.
     environment: "jsdom",
     environmentOptions: {

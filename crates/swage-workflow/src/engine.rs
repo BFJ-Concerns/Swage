@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use serde_json::Value;
+
 use rquickjs::{
-    AsyncContext, AsyncRuntime, CatchResultExt, Function, Promise,
+    AsyncContext, AsyncRuntime, CatchResultExt, Context, Function, Promise, Runtime,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
     prelude::Async,
 };
@@ -67,6 +69,12 @@ pub struct ScriptCapabilities {
 pub struct ScriptMeta {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Opaque identity used to group records of runs of the same task.
+    /// Header metadata stays outside the caged runtime.
+    pub task: Option<String>,
+    /// Optional JSON Schema governing the value passed as this workflow's
+    /// arguments. Header metadata stays outside the caged runtime.
+    pub argument_schema: Option<Value>,
 }
 
 /// Read an optional leading portable `export const meta = { … };` header.
@@ -77,6 +85,8 @@ pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
     Ok(ScriptMeta {
         name: meta_string_field(object, "name"),
         description: meta_string_field(object, "description"),
+        task: meta_string_field(object, "task"),
+        argument_schema: meta_json_field(object, "argumentSchema")?,
     })
 }
 
@@ -111,6 +121,14 @@ fn split_meta_header(source: &str) -> Result<Option<(&str, &str)>, String> {
 /// Extract a double-quoted portable metadata value from either JavaScript or
 /// JSON object syntax. The portable runtime emits unquoted JavaScript keys.
 fn meta_string_field(object: &str, field: &str) -> Option<String> {
+    meta_value_range(object, field)
+        .and_then(|(start, end)| serde_json::from_str(&object[start..end]).ok())
+}
+
+/// Locate a metadata value without confusing nested commas for another field.
+/// Both string metadata and JSON-valued metadata use this one walk so their
+/// JavaScript-header handling stays identical.
+fn meta_value_range(object: &str, field: &str) -> Option<(usize, usize)> {
     let bytes = object.as_bytes();
     let mut index = 1;
     while index < bytes.len() {
@@ -125,7 +143,7 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
             let key_start = index;
             while bytes
                 .get(index)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$'))
             {
                 index += 1;
             }
@@ -145,15 +163,27 @@ fn meta_string_field(object: &str, field: &str) -> Option<String> {
         while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
             index += 1;
         }
-        let value = (bytes.get(index) == Some(&b'"'))
-            .then(|| json_string_at(object, index))
-            .flatten();
-        if key == field {
-            return value.map(|(value, _)| value);
+        let value_start = index;
+        let mut value_end = skip_meta_value(object, index);
+        if bytes.get(value_end.saturating_sub(1)) == Some(&b',') {
+            value_end -= 1;
         }
-        index = skip_meta_value(object, index);
+        if key == field {
+            return Some((value_start, value_end));
+        }
+        index = value_end;
     }
     None
+}
+
+/// Read one metadata value as JSON. Schema values deliberately use JSON even
+/// though metadata accepts JavaScript-style unquoted keys around them: JSON
+/// Schema itself is a JSON document and must be portable across script hosts.
+fn meta_json_field(object: &str, field: &str) -> Result<Option<Value>, String> {
+    meta_value_range(object, field)
+        .map(|(start, end)| serde_json::from_str(&object[start..end]))
+        .transpose()
+        .map_err(|error| format!("workflow meta {field} must be valid JSON Schema: {error}"))
 }
 
 /// Return the decoded JSON string at `start` and the first byte after it.
@@ -362,6 +392,22 @@ pub struct WorkflowEngine {
     limits: EngineLimits,
 }
 
+/// Parse a workflow through the same header extraction and async-function body
+/// grammar that execution uses, without evaluating its body.
+pub fn parse_workflow(source: &str) -> Result<(), String> {
+    let (_, source) = extract_defaults(source)?;
+    let runtime = Runtime::new().map_err(|error| error.to_string())?;
+    let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+    let source = serde_json::to_string(source).expect("workflow source serialises");
+    context.with(|ctx| {
+        ctx.eval::<(), _>(format!(
+            "Object.getPrototypeOf(async function() {{}}).constructor({source});"
+        ))
+        .catch(&ctx)
+        .map_err(|error| error.to_string())
+    })
+}
+
 impl WorkflowEngine {
     pub const fn new(limits: EngineLimits) -> Self {
         Self { limits }
@@ -475,9 +521,9 @@ impl WorkflowEngine {
                                                 "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
                                             }).to_string();
                                         }
-                                        // The worker's continuation token rides beside the
-                                        // output so `agentStart` handles can expose it
-                                        // without touching agent()'s bare-value contract.
+                                        // Worker metadata rides beside the output so
+                                        // `agentStart` handles can expose it without
+                                        // touching agent()'s bare-value contract.
                                         let session = result
                                             .session_id
                                             .zip(result.thread_id)
@@ -485,12 +531,24 @@ impl WorkflowEngine {
                                                 "session_id": session_id,
                                                 "thread_id": thread_id,
                                             }));
-                                        serde_json::json!({"ok": true, "value": result.output, "session": session}).to_string()
+                                        serde_json::json!({
+                                            "ok": true,
+                                            "value": result.output,
+                                            "session": session,
+                                            "working_directory": result.working_directory,
+                                        }).to_string()
+                                    }
+                                    Err(WorkflowHostError::SchemaExhausted { .. }) => {
+                                        // Exhausting a schema's validation attempts is a
+                                        // script-visible absence, not an ordinary agent
+                                        // failure. Keep this typed so other failures throw.
+                                        serde_json::json!({"ok": true, "value": null, "session": null}).to_string()
                                     }
                                     Err(error) => {
                                         let (host_reference, error) = match error {
                                             WorkflowHostError::AgentCall { host_reference, message } => (Some(host_reference), message),
                                             WorkflowHostError::Message(message) => (None, message),
+                                            WorkflowHostError::SchemaExhausted { .. } => unreachable!("schema exhaustion is handled above"),
                                         };
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
@@ -841,7 +899,11 @@ impl WorkflowEngine {
                                 }
                                 throw error;
                             }
-                            return { value: response.value, session: response.session ?? null };
+                            return {
+                                value: response.value,
+                                session: response.session ?? null,
+                                workingDirectory: response.working_directory ?? null,
+                            };
                         };
                         // Script-level defaults fill options a call site leaves
                         // unset; only *defined* call-site values override, so a
@@ -857,7 +919,7 @@ impl WorkflowEngine {
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "tools", "model", "effort", "timeoutMs",
+                                "agent", "task", "tools", "skills", "model", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label",
                                 "session", "elements", "variables", "assembly",
                             ]);
@@ -884,6 +946,9 @@ impl WorkflowEngine {
                                 ...(merged.tools === undefined || merged.tools === null
                                     ? {}
                                     : { tools: merged.tools.map(String) }),
+                                ...(merged.skills === undefined || merged.skills === null
+                                    ? {}
+                                    : { skills: merged.skills.map(String) }),
                                 model: merged.model ?? null,
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
@@ -941,12 +1006,14 @@ impl WorkflowEngine {
                                 label: request.label,
                                 done: false,
                                 session: request.session ?? null,
+                                workingDirectory: null,
                             };
                             handle.result = __agent(prompt, JSON.stringify(request))
                                 .then((json) => {
                                     const response = unwrapAgentResponse(json);
                                     handle.done = true;
                                     handle.session = response.session ?? handle.session;
+                                    handle.workingDirectory = response.workingDirectory;
                                     return response.value;
                                 }, (error) => {
                                     handle.done = true;
@@ -1180,6 +1247,7 @@ mod tests {
                 output: json!("ok"),
                 input_tokens: 0,
                 output_tokens: 0,
+                working_directory: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1226,6 +1294,7 @@ mod tests {
                     .expect("scripted output"),
                 input_tokens: 1,
                 output_tokens: 1,
+                working_directory: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1311,10 +1380,13 @@ mod tests {
             _: CancellationToken,
         ) -> Result<AgentCallResult, WorkflowHostError> {
             self.agent_requests.lock().expect("requests").push(request);
+            let working_directory = resolved_placement
+                .as_ref()
+                .map(|placement| placement.path.clone());
             self.resolved_working_directories
                 .lock()
                 .expect("resolved paths")
-                .push(resolved_placement.map(|placement| placement.path));
+                .push(working_directory.clone());
             if self.agent_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.agent_delay_ms)).await;
             }
@@ -1328,6 +1400,7 @@ mod tests {
                 output,
                 input_tokens: 1,
                 output_tokens: 1,
+                working_directory,
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
@@ -1339,13 +1412,14 @@ mod tests {
             request: &AgentCallRequest,
             _: CancellationToken,
         ) -> Result<Option<crate::host::ResolvedWorkerPlacement>, String> {
+            let worker_number = self.placement_requests.lock().expect("placements").len();
             self.placement_requests
                 .lock()
                 .expect("placements")
                 .push((request.cwd.clone(), request.isolation));
             Ok(match request.isolation {
                 Some(_) => Some(crate::host::ResolvedWorkerPlacement {
-                    path: "/runtime/worktrees/worker-0".into(),
+                    path: format!("/runtime/worktrees/worker-{worker_number}"),
                     can_write: true,
                     authority_path: request.cwd.clone().unwrap_or_default(),
                     authority_context_id: uuid::Uuid::nil(),
@@ -1518,6 +1592,14 @@ mod tests {
         assert_eq!(requests[1].agent.as_deref(), Some("worker"));
     }
 
+    #[test]
+    fn shipped_build_verify_parses() {
+        parse_workflow(include_str!(
+            "../../../shipped/skills/assembly/workflows/build-verify.js"
+        ))
+        .expect("shipped build-verify workflow parses");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn portable_meta_header_is_ignored_when_the_script_runs() {
         let output = WorkflowEngine::new(EngineLimits::default())
@@ -1538,7 +1620,9 @@ mod tests {
             .unwrap(),
             ScriptMeta {
                 name: Some("portable".into()),
-                description: Some("runs unchanged".into())
+                description: Some("runs unchanged".into()),
+                task: None,
+                argument_schema: None,
             }
         );
     }
@@ -1558,6 +1642,8 @@ mod tests {
             ScriptMeta {
                 name: Some("json".into()),
                 description: Some("quoted keys".into()),
+                task: None,
+                argument_schema: None,
             }
         );
         assert_eq!(
@@ -1565,7 +1651,71 @@ mod tests {
             ScriptMeta {
                 name: Some("javascript".into()),
                 description: Some("bare keys".into()),
+                task: None,
+                argument_schema: None,
             }
+        );
+
+        let dollar_key_form = script_meta(
+            r#"export const meta = { $name: "dollar", description: "valid JavaScript key" };"#,
+        )
+        .expect("JavaScript metadata with a dollar key");
+        assert_eq!(dollar_key_form.name.as_deref(), None);
+        assert_eq!(
+            dollar_key_form.description.as_deref(),
+            Some("valid JavaScript key")
+        );
+    }
+
+    #[test]
+    fn portable_meta_header_reads_an_argument_schema() {
+        let meta = script_meta(
+            r#"export const meta = { name: "constrained", argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} };"#,
+        )
+        .expect("portable metadata");
+
+        assert_eq!(
+            meta.argument_schema,
+            Some(json!({
+                "type": "object",
+                "required": ["task"],
+                "properties": {"task": {"type": "string"}}
+            }))
+        );
+    }
+
+    #[test]
+    fn portable_meta_header_reads_an_opaque_task_identity() {
+        let meta =
+            script_meta(r#"export const meta = { task: "run-task-identity", name: "identity" };"#)
+                .expect("portable metadata");
+
+        assert_eq!(meta.task.as_deref(), Some("run-task-identity"));
+    }
+
+    #[test]
+    fn workflow_authoring_guide_teaches_a_parseable_argument_schema() {
+        let guide = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
+        let script_surface = guide
+            .split_once("## The script surface")
+            .expect("script surface section")
+            .1;
+        let example = script_surface
+            .split_once("```js\n")
+            .expect("JavaScript example")
+            .1
+            .split_once("\n```")
+            .expect("complete JavaScript example")
+            .0;
+
+        let meta = script_meta(example).expect("documented metadata must parse");
+        assert_eq!(
+            meta.argument_schema,
+            Some(json!({
+                "type": "object",
+                "required": ["topic"],
+                "properties": {"topic": {"type": "string"}}
+            }))
         );
     }
 
@@ -1666,6 +1816,7 @@ mod tests {
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
                     schema: { type: "object" }, maxAttempts: 2, label: "inspect",
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
+                    skills: ["code-review", "testing"],
                     elements: ["current-work"], variables: { owner: "operator" }, assembly: "focused",
                 }); return null;"#,
                 "null",
@@ -1691,6 +1842,10 @@ mod tests {
         );
         assert_eq!(request.variables.as_ref().unwrap()["owner"], "operator");
         assert_eq!(request.assembly.as_deref(), Some("focused"));
+        assert_eq!(
+            request.skills.as_deref(),
+            Some(["code-review".to_string(), "testing".to_string()].as_slice())
+        );
     }
 
     #[tokio::test]
@@ -1845,6 +2000,41 @@ mod tests {
         assert_eq!(
             host.resolved_working_directories.lock().unwrap()[0].as_deref(),
             Some("/runtime/worktrees/worker-0")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_start_handles_report_distinct_resolved_directories_for_isolated_siblings() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const left = agentStart("inspect left", { cwd: "/repo", isolation: "worktree" });
+                const right = agentStart("inspect right", { cwd: "/repo", isolation: "worktree" });
+                await Promise.all([left.result, right.result]);
+                return { left: left.workingDirectory, right: right.workingDirectory };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(host.clone()),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("isolated sibling calls");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "left": "/runtime/worktrees/worker-0",
+                "right": "/runtime/worktrees/worker-1",
+            })
+        );
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.cwd.as_deref() == Some("/repo"))
         );
     }
 
@@ -2506,8 +2696,42 @@ mod tests {
         assert_eq!(host.peak.load(Ordering::SeqCst), 2);
     }
 
+    /// A small write → review → deliver script: the delivery capability
+    /// fires only on the reviewer's acceptance, and only with the reviewed
+    /// text.
+    const WRITE_REVIEW_DELIVER: &str = r#"
+const draft = await agent(args.writerPrompt, {
+  agent: args.writerAgent,
+  label: "Write draft",
+});
+
+const review = await agent(
+  `Review the draft below. Return JSON with {"accepted": boolean, "content": string}.\n\n${draft}`,
+  {
+    agent: args.reviewerAgent,
+    label: "Review draft",
+    schema: {
+      type: "object",
+      required: ["accepted", "content"],
+      properties: {
+        accepted: { type: "boolean" },
+        content: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+);
+
+if (!review.accepted) {
+  throw new Error("Reviewer rejected the draft");
+}
+
+await deliver({ content: review.content }, { target: args.deliveryTarget });
+return review.content;
+"#;
+
     #[tokio::test(flavor = "current_thread")]
-    async fn committed_write_review_deliver_example_posts_reviewed_content() {
+    async fn write_review_deliver_script_posts_reviewed_content() {
         let host = Arc::new(FakeHost {
             outputs: Mutex::new(VecDeque::from([
                 json!("unchecked draft"),
@@ -2518,7 +2742,7 @@ mod tests {
             spent: 2,
             remaining: Some(8),
         });
-        let source = include_str!("../../../examples/workflows/write-review-deliver.js");
+        let source = WRITE_REVIEW_DELIVER;
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 source,
@@ -2528,7 +2752,7 @@ mod tests {
                 ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
             )
             .await
-            .expect("committed example runs");
+            .expect("write-review-deliver script runs");
 
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
@@ -2541,7 +2765,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn committed_write_review_deliver_example_does_not_post_rejection() {
+    async fn write_review_deliver_script_does_not_post_rejection() {
         let host = Arc::new(FakeHost {
             outputs: Mutex::new(VecDeque::from([
                 json!("unchecked draft"),
@@ -2552,7 +2776,7 @@ mod tests {
             spent: 2,
             remaining: None,
         });
-        let source = include_str!("../../../examples/workflows/write-review-deliver.js");
+        let source = WRITE_REVIEW_DELIVER;
         let result = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 source,

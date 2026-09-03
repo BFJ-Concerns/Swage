@@ -239,8 +239,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, EffortCapability, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 struct ArcProvider(Arc<dyn LlmProvider>);
@@ -257,6 +257,10 @@ impl LlmProvider for ArcProvider {
         stream: bool,
     ) -> serde_json::Value {
         self.0.provider_request_snapshot(request, stream)
+    }
+
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        self.0.effort_capability(model)
     }
 
     async fn count_tokens(

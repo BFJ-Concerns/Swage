@@ -18,6 +18,10 @@ pub enum ClientEvent {
     /// Send a message to the conversation, triggering a provider turn.
     SendMessage {
         content: String,
+        /// Content parts submitted beside the text, in order; absent means
+        /// text only. The same contract as `SubmitTurnRequest.attachments`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<super::turn::MessageAttachment>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         thread_id: Option<Uuid>,

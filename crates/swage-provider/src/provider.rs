@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use swage_config::MaskedString;
 use swage_core::{
-    CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, EffortCapability, ProviderError, StreamChunk,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Whether a stream chunk commits the current provider attempt because response
@@ -200,6 +200,18 @@ pub trait LlmProvider: Send + Sync {
     /// The model identifier this provider is configured to use.
     fn model_id(&self) -> &str;
 
+    /// The effort control the named model accepts through this provider,
+    /// when the adapter knows it. The catalogue's own declaration for the
+    /// model takes precedence; this is the adapter's account of the
+    /// provider's documented control for models it recognises. `None`
+    /// means the adapter cannot say, and resolution treats the model as
+    /// having no control. Every decorating or forwarding impl delegates
+    /// explicitly — a default method is invisible to a wrapper.
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        let _ = model;
+        None
+    }
+
     /// Return the provider-visible request body for a completion request.
     ///
     /// Concrete providers override this with their exact wire conversion. The
@@ -330,6 +342,10 @@ use std::sync::Arc;
 impl LlmProvider for Arc<dyn LlmProvider> {
     fn model_id(&self) -> &str {
         (**self).model_id()
+    }
+
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        (**self).effort_capability(model)
     }
 
     fn provider_request_snapshot(

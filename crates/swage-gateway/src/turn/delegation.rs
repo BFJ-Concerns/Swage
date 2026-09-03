@@ -12,8 +12,9 @@ use super::{
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
     execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
     load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
-    operator_guidance_rules, resolve_authorised_worker_directory, resolve_swage_root,
-    select_context_assembly, shutdown_sandbox_guard,
+    operator_guidance_rules, resolve_authorised_worker_directory,
+    resolve_requested_skills_for_agent, resolve_swage_root, select_context_assembly,
+    shutdown_sandbox_guard,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -30,6 +31,31 @@ pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &s
     digest.update(delegate_call_id.as_bytes());
     let digest = digest.finalize();
     Uuid::from_bytes(digest[..16].try_into().expect("SHA-256 prefix"))
+}
+
+/// Add the host-resolved child directory to the completion the dispatcher
+/// receives. The delegate request retains its verbatim requested `cwd`; this
+/// is the separately recorded outcome of host-side placement.
+async fn record_delegation_working_directory(
+    state: &AppState,
+    result: &mut swage_storage::AgentMessage,
+    placement: Option<&ResolvedWorkerDirectory>,
+) -> Result<(), AgentError> {
+    let Some(placement) = placement else {
+        return Ok(());
+    };
+    let Some(payload) = result.payload.as_object_mut() else {
+        return Ok(());
+    };
+    payload.insert(
+        "working_directory".into(),
+        serde_json::Value::String(placement.path.to_string_lossy().into_owned()),
+    );
+    state
+        .storage
+        .update_agent_message_payload(result.id, result.payload.clone())
+        .await?;
+    Ok(())
 }
 
 struct GatewayDelegatedContextAssembler {
@@ -84,8 +110,10 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             Some(&self.swage_root),
             false,
             &self.config.declared_skills,
+            self.composition.skills.as_deref().unwrap_or_default(),
         )
-        .await;
+        .await
+        .map_err(AgentError::InvalidConfig)?;
         let context_choices = select_context_assembly(
             &self.state,
             &self.config,
@@ -124,7 +152,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         )
         .await;
         let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
-        let hierarchy = configuration_hierarchy(&self.swage_root, &self.space.slug, &self.agent_id);
+        let hierarchy =
+            configuration_hierarchy(&self.swage_root, &self.space.slug, Some(&self.agent_id));
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,
@@ -260,31 +289,13 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
                 "delegated context snapshot is invalid JSON: {error}"
             ))
         })?;
-        match event {
-            AgentEvent::ProviderRequestPrepared { round, request, .. } => {
-                match super::redact_provider_visible_request(&self.state, request).await {
-                    Ok(request) => {
-                        super::append_provider_visible_request(&mut report, round, request)
-                    }
-                    Err(error) => {
-                        tracing::error!(%turn_id, %round, %error, "delegated provider-visible request capture omitted because secret redaction was unavailable");
-                        super::append_provider_visible_capture_error(&mut report, round);
-                    }
-                }
-            }
-            AgentEvent::ProviderResponseCaptured { round, witness, .. } => {
-                super::append_provider_visible_response(&mut report, round, witness);
-            }
-            AgentEvent::ProviderReasoningCaptured {
-                round,
-                content,
-                details,
-                ..
-            } => {
-                super::append_provider_visible_reasoning(&mut report, round, content, details);
-            }
-            _ => unreachable!("non-diagnostic events returned above"),
-        }
+        super::apply_provider_snapshot_event(
+            &self.state,
+            &mut report,
+            event,
+            super::ProviderSnapshotCapturePath::Delegated,
+        )
+        .await;
         self.record(session_id, turn_id, &report).await
     }
 }
@@ -317,6 +328,21 @@ impl GatewayDelegationHandler {
     }
 }
 
+fn delegate_message_payload(
+    composition: DispatchContextComposition,
+    task: &str,
+    task_definition: Option<&str>,
+) -> Result<serde_json::Value, AgentError> {
+    let mut payload = serde_json::to_value(composition).map_err(|error| {
+        AgentError::InvalidConfig(format!(
+            "failed to encode delegated context composition: {error}"
+        ))
+    })?;
+    payload["task"] = serde_json::json!(task);
+    payload["task_definition"] = serde_json::json!(task_definition);
+    Ok(payload)
+}
+
 #[async_trait::async_trait]
 impl DelegationHandler for GatewayDelegationHandler {
     async fn handle_delegation(
@@ -327,6 +353,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         context: Option<serde_json::Value>,
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
+        skills: Option<Vec<String>>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
@@ -394,6 +421,13 @@ impl DelegationHandler for GatewayDelegationHandler {
             }
             None => target_resolved,
         };
+        resolve_requested_skills_for_agent(
+            &space.slug,
+            target_agent_id,
+            Some(resolve_swage_root(&self.state)),
+            skills.as_deref().unwrap_or_default(),
+        )
+        .map_err(AgentError::InvalidConfig)?;
 
         let mut bound_agent_ids = dispatch_bound_agent_ids_for_turn(&self.state, sender_turn_id)
             .await
@@ -570,13 +604,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
 
-        let mut payload = serde_json::to_value(composition).map_err(|error| {
-            AgentError::InvalidConfig(format!(
-                "failed to encode delegated context composition: {error}"
-            ))
-        })?;
-        payload["task"] = serde_json::json!(task);
-        payload["task_definition"] = serde_json::json!(task_definition);
+        let mut payload = delegate_message_payload(composition, task, task_definition)?;
         payload["placement"] = serde_json::json!({
             "cwd": placement.as_ref().map(|placement| &placement.path),
             "requested_cwd": cwd,
@@ -622,7 +650,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         match completion_mode {
             DelegateCompletionMode::Wait => {
                 let child_cancel_token = cancel_token.child_token();
-                let result_msg = match executor
+                let mut result_msg = match executor
                     .execute_delegation(
                         &delegate_msg,
                         Some(sender_turn_id),
@@ -649,6 +677,22 @@ impl DelegationHandler for GatewayDelegationHandler {
                         return Err(error);
                     }
                 };
+                if let Err(error) = record_delegation_working_directory(
+                    &self.state,
+                    &mut result_msg,
+                    placement.as_ref(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        delegate_message_id = %delegate_msg.id,
+                        error = ?error,
+                        "failed to record delegated working directory"
+                    );
+                    // The child turn has already completed successfully.
+                    // Keep its result deliverable when the supplementary
+                    // audit annotation cannot be persisted.
+                }
                 shutdown_sandbox_guard(
                     &target_sandbox_guard,
                     "failed to shut down delegated sandbox",
@@ -677,6 +721,8 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
                 let detached_router = router.clone();
                 let worktree_host = Arc::clone(&self.state.worktree_host);
+                let state = self.state.clone();
+                let placement = placement.clone();
 
                 tokio::spawn(async move {
                     let result = executor
@@ -703,7 +749,23 @@ impl DelegationHandler for GatewayDelegationHandler {
                         // execute_delegation has persisted the Result as Pending.
                         // The parent's next turn owns its delivery: Step 7 appends
                         // it to the parent thread before claiming it Delivered.
-                        Ok(result_msg) => {
+                        Ok(mut result_msg) => {
+                            if let Err(error) = record_delegation_working_directory(
+                                &state,
+                                &mut result_msg,
+                                placement.as_ref(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    delegate_message_id = %delegate_message_id,
+                                    error = ?error,
+                                    "failed to record detached delegation working directory"
+                                );
+                                // Recording the supplementary directory must
+                                // not turn a completed child turn into a
+                                // failed delegation result.
+                            }
                             if result_msg.payload.get("error").is_none()
                                 && let Some(owner_id) = worktree_owner_id
                             {

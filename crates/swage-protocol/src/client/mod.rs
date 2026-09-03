@@ -6,16 +6,20 @@ pub mod channel;
 pub mod context;
 pub mod conversation;
 pub mod delivery;
+pub mod error;
 pub mod knowledge;
 pub mod material;
+pub mod openapi;
 pub mod page;
 pub mod provider_signin;
 pub mod recovery;
+pub mod routes;
 pub mod schedule;
 pub mod settings;
 pub mod skill;
 pub mod space;
 pub mod turn;
+pub mod typescript_client;
 pub mod voice;
 pub mod websocket;
 pub mod workflow;
@@ -31,6 +35,7 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    api_error: error::ApiErrorBody,
     client_event: websocket::ClientEvent,
     server_event: websocket::ServerEvent,
     voice_capabilities: voice::VoiceCapabilitiesResponse,
@@ -42,8 +47,14 @@ pub struct ClientSurface {
     create_space_request: space::CreateSpaceRequest,
     create_page_request: page::CreatePageRequest,
     write_page_module_request: page::WritePageModuleRequest,
+    create_page_annotation_request: page::CreatePageAnnotationRequest,
+    update_page_annotation_request: page::UpdatePageAnnotationRequest,
+    delete_page_annotation_response: page::DeletePageAnnotationResponse,
     page: page::PageResponse,
     page_list: page::PageListResponse,
+    create_page_template_request: page::CreatePageTemplateRequest,
+    page_template: page::PageTemplateResponse,
+    page_template_list: page::PageTemplateListResponse,
     update_space_request: space::UpdateSpaceRequest,
     space_list: space::SpaceListResponse,
     create_workspace_attachment_request: space::CreateWorkspaceAttachmentRequest,
@@ -58,15 +69,21 @@ pub struct ClientSurface {
     conversation_thread: conversation::ConversationThreadDetail,
     turn_context: context::TurnContextResponse,
     submit_turn: turn::SubmitTurnRequest,
+    message_attachment: turn::MessageAttachment,
     submit_turn_response: turn::SubmitTurnResponse,
     turn_poll: turn::TurnPollResponse,
     send_message: turn::SendMessageRequest,
     message_response: turn::MessageResponse,
     settings: settings::SettingsResponse,
+    effort_capability: settings::EffortCapability,
     skills: skill::SkillListResponse,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
+    save_provider_settings: settings::SaveProviderSettings,
     restart_status: settings::RestartStatusResponse,
+    provider_sign_in_state: provider_signin::ProviderSignInState,
+    start_provider_sign_in_request: provider_signin::StartProviderSignInRequest,
+    start_provider_sign_in_response: provider_signin::StartProviderSignInResponse,
     create_attachment_request: material::CreateAttachmentRequest,
     queued_attachment: material::QueuedAttachmentResponse,
     attachment_list: material::AttachmentListResponse,
@@ -83,12 +100,10 @@ pub struct ClientSurface {
     schedule_run: schedule::ScheduleRun,
     schedule_run_list: schedule::ScheduleRunListResponse,
     trigger_schedule_response: schedule::TriggerScheduleResponse,
-    start_provider_sign_in_request: provider_signin::StartProviderSignInRequest,
-    start_provider_sign_in_response: provider_signin::StartProviderSignInResponse,
-    provider_sign_in_state: provider_signin::ProviderSignInState,
     create_workflow_script_request: workflow::CreateWorkflowScriptRequest,
     update_workflow_script_request: workflow::UpdateWorkflowScriptRequest,
     workflow_script_list: workflow::WorkflowScriptListResponse,
+    workflow_argument_contract: workflow::WorkflowArgumentContract,
     start_workflow_run_request: workflow::StartWorkflowRunRequest,
     start_inline_workflow_run_request: workflow::StartInlineWorkflowRunRequest,
     post_workflow_run_event_request: workflow::PostWorkflowRunEventRequest,

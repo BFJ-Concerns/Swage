@@ -9,11 +9,10 @@
 #![allow(clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::ProcessEnvGuard;
+use crate::support::{ProcessEnvGuard, WsStream, start_live_server, ws_collect_until_with};
 
 /// RAII guard that sets SWAGE_HOME for a test and restores it on drop.
 struct SwageHomeGuard {
@@ -28,20 +27,15 @@ impl SwageHomeGuard {
     }
 }
 
-use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
 use tower::ServiceExt;
 
-use swage_core::{
-    CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk, TokenUsage,
-    ToolCompletionRequest, ToolCompletionResponse,
-};
+use swage_core::{FinishReason, StreamChunk, TokenUsage};
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
@@ -52,55 +46,12 @@ const WEBSOCKET_EVENT_DEADLINE: Duration = Duration::from_secs(120);
 // Mock provider — streams tokens with usage metadata
 // ---------------------------------------------------------------------------
 
-/// A provider that streams a fixed response with token usage data.
-struct FixedResponseProvider {
-    response_text: String,
-    requests: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
-}
-
-impl FixedResponseProvider {
-    fn new(text: &str) -> Self {
-        Self {
-            response_text: text.to_string(),
-            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
-        }
-    }
-
-    fn with_capture(text: &str) -> (Self, Arc<std::sync::Mutex<Vec<CompletionRequest>>>) {
-        let provider = Self::new(text);
-        let requests = Arc::clone(&provider.requests);
-        (provider, requests)
-    }
-}
-
-#[async_trait]
-impl LlmProvider for FixedResponseProvider {
-    fn model_id(&self) -> &str {
-        "mock-skills-model"
-    }
-
-    async fn complete(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<CompletionResponse, ProviderError> {
-        unimplemented!("not used in streaming tests")
-    }
-
-    async fn complete_with_tools(
-        &self,
-        _request: ToolCompletionRequest,
-    ) -> Result<ToolCompletionResponse, ProviderError> {
-        unimplemented!("not used in streaming tests")
-    }
-
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        self.requests.lock().unwrap().push(request);
-        let chunks = vec![
+fn fixed_response_provider(text: &str) -> crate::support::CapturingProvider {
+    crate::support::CapturingProvider::repeating(
+        "mock-skills-model",
+        vec![
             StreamChunk::Delta {
-                content: self.response_text.clone(),
+                content: text.to_string(),
             },
             StreamChunk::Usage(TokenUsage {
                 input_tokens: 100,
@@ -109,9 +60,32 @@ impl LlmProvider for FixedResponseProvider {
             StreamChunk::Done {
                 finish_reason: Some(FinishReason::Stop),
             },
-        ];
-        Box::pin(futures::stream::iter(chunks))
-    }
+        ],
+    )
+    .0
+}
+
+fn fixed_response_provider_with_capture(
+    text: &str,
+) -> (
+    crate::support::CapturingProvider,
+    Arc<std::sync::Mutex<Vec<swage_core::CompletionRequest>>>,
+) {
+    crate::support::CapturingProvider::repeating(
+        "mock-skills-model",
+        vec![
+            StreamChunk::Delta {
+                content: text.to_string(),
+            },
+            StreamChunk::Usage(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+            }),
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -119,7 +93,7 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let _env_guard = SwageHomeGuard::set(root);
-    let (provider, requests) = FixedResponseProvider::with_capture("Commission ready.");
+    let (provider, requests) = fixed_response_provider_with_capture("Commission ready.");
     let (router, addr, storage) =
         start_test_server_with_config(provider, swage_config::ResolvedConfig::default()).await;
     let space = swage_storage::store::SpaceStore::get_or_create_default(storage.as_ref())
@@ -133,7 +107,7 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(catalogue["skills"].as_array().unwrap().len(), 5);
+    assert_eq!(catalogue["skills"].as_array().unwrap().len(), 6);
     assert!(
         catalogue["skills"]
             .as_array()
@@ -231,12 +205,7 @@ async fn start_test_server_with_config(
     );
     let router = build_router(state);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let serve_router = router.clone();
-    tokio::spawn(async move {
-        axum::serve(listener, serve_router).await.unwrap();
-    });
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     (router, addr, storage)
 }
@@ -263,9 +232,6 @@ type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tungstenite::Message,
 >;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
 
 async fn connect_ws(addr: SocketAddr, conversation_id: &str) -> (WsSink, WsStream) {
     let url = format!("ws://{addr}/api/conversations/{conversation_id}/ws");
@@ -279,30 +245,6 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
     sink.send(tungstenite::Message::Text(payload.to_string().into()))
         .await
         .expect("ws send should succeed");
-}
-
-/// Collect WebSocket events through the named terminal event.
-async fn ws_collect_until(
-    stream: &mut WsStream,
-    terminal_event: &str,
-    timeout: Duration,
-) -> Vec<Value> {
-    let mut events = Vec::new();
-    tokio::time::timeout(timeout, async {
-        loop {
-            let event = ws_recv_lenient(stream)
-                .await
-                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
-            let reached_terminal = event["type"] == terminal_event;
-            events.push(event);
-            if reached_terminal {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
-    events
 }
 
 /// Wait for a specific event type, ignoring interleaved stream events.
@@ -379,7 +321,7 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
 
     let config = swage_config::ResolvedConfig::default();
     let (router, addr, _storage) =
-        start_test_server_with_config(FixedResponseProvider::new("I'll review the code."), config)
+        start_test_server_with_config(fixed_response_provider("I'll review the code."), config)
             .await;
 
     // Create a conversation.
@@ -403,7 +345,13 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
     .await;
 
     // Collect events — expecting SkillActivated, ContextAssembled, Token(s), TurnComplete.
-    let events = ws_collect_until(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
+    let events = ws_collect_until_with(
+        &mut stream,
+        "turn_complete",
+        WEBSOCKET_EVENT_DEADLINE,
+        |stream| Box::pin(ws_recv_lenient(stream)),
+    )
+    .await;
 
     // Verify SkillActivated event was sent.
     let skill_activated = events
@@ -477,7 +425,7 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (router, addr, _storage) =
-        start_test_server_with_config(FixedResponseProvider::new("Hello! How can I help?"), config)
+        start_test_server_with_config(fixed_response_provider("Hello! How can I help?"), config)
             .await;
 
     // Create a conversation — agent-level skills should auto-activate.
@@ -500,7 +448,13 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     )
     .await;
 
-    let events = ws_collect_until(&mut stream, "turn_complete", WEBSOCKET_EVENT_DEADLINE).await;
+    let events = ws_collect_until_with(
+        &mut stream,
+        "turn_complete",
+        WEBSOCKET_EVENT_DEADLINE,
+        |stream| Box::pin(ws_recv_lenient(stream)),
+    )
+    .await;
 
     // Assembly report should include the agent-level skill without explicit activation.
     let context_assembled = events
@@ -554,7 +508,7 @@ async fn activated_skill_persists_across_multiple_turns() {
 
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (provider, requests) = FixedResponseProvider::with_capture("Let me help.");
+    let (provider, requests) = fixed_response_provider_with_capture("Let me help.");
     let (router, addr, _storage) = start_test_server_with_config(provider, config).await;
 
     let (status, body) = http(&router, "POST", "/api/conversations").await;
@@ -678,7 +632,7 @@ async fn deactivating_agent_level_skill_returns_error() {
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (router, addr, _storage) =
-        start_test_server_with_config(FixedResponseProvider::new("ok"), config).await;
+        start_test_server_with_config(fixed_response_provider("ok"), config).await;
 
     let (status, body) = http(&router, "POST", "/api/conversations").await;
     assert_eq!(status, StatusCode::CREATED);
@@ -693,7 +647,10 @@ async fn deactivating_agent_level_skill_returns_error() {
     )
     .await;
 
-    let events = ws_collect_until(&mut stream, "error", WEBSOCKET_EVENT_DEADLINE).await;
+    let events = ws_collect_until_with(&mut stream, "error", WEBSOCKET_EVENT_DEADLINE, |stream| {
+        Box::pin(ws_recv_lenient(stream))
+    })
+    .await;
     let error = events
         .iter()
         .find(|e| e["type"] == "error")
@@ -750,7 +707,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (router, _addr, storage) =
-        start_test_server_with_config(FixedResponseProvider::new("ok"), config).await;
+        start_test_server_with_config(fixed_response_provider("ok"), config).await;
 
     // Get the default space ID for the query parameter.
     use swage_storage::store::SpaceStore;
