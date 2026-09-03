@@ -73,14 +73,17 @@ impl Tool for WorkflowHoldTool {
         let session_id = Uuid::parse_str(ctx.session_id())
             .map_err(|_| failed("the calling session id is invalid"))?;
 
+        // Both actions are confined to the caller's own space: a hold they
+        // cannot see is not one they can settle.
+        let session = state
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|error| failed(error.to_string()))?
+            .ok_or_else(|| failed("the calling session no longer exists"))?;
+
         match action {
             "list" => {
-                let session = state
-                    .storage
-                    .get_session(session_id)
-                    .await
-                    .map_err(|error| failed(error.to_string()))?
-                    .ok_or_else(|| failed("the calling session no longer exists"))?;
                 let holds = state
                     .storage
                     .list_open_workflow_run_holds(session.space_id)
@@ -112,6 +115,7 @@ impl Tool for WorkflowHoldTool {
                 let response = answer_run_hold(
                     state,
                     AnswerWorkflowRunHoldRequest { hold_id, verdict },
+                    Some(session.space_id),
                     RunEventSource {
                         surface: "agent",
                         agent_id: Some(ctx.agent_id().to_owned()),

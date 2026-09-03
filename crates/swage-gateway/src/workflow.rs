@@ -4370,9 +4370,16 @@ pub(crate) async fn run_hold_projections(
 /// The one answering service behind the granted tool. Attribution is the
 /// caller's own, never a parameter, and an answer outside the hold's set is
 /// recorded and refused with feedback rather than reaching the script.
+/// Settle a hold with a verdict, attributed to whoever offered it.
+///
+/// `caller_space` is the space the answerer is confined to; a hold on a run
+/// in any other space is not theirs to settle and reads as absent, exactly
+/// as it does when they list. `None` is for surfaces that are not confined
+/// to one space at all.
 pub(crate) async fn answer_run_hold(
     state: &AppState,
     request: AnswerWorkflowRunHoldRequest,
+    caller_space: Option<Uuid>,
     source: RunEventSource,
 ) -> Result<AnswerWorkflowRunHoldResponse, ApiError> {
     let hold = state
@@ -4387,6 +4394,9 @@ pub(crate) async fn answer_run_hold(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", hold.run_id))?;
+    if caller_space.is_some_and(|space_id| space_id != run.space_id) {
+        return Err(ApiError::not_found("workflow run hold", request.hold_id));
+    }
     if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
         return Err(ApiError::conflict(format!(
             "workflow run {} is already {}",
@@ -12029,6 +12039,93 @@ mod tests {
     "#;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_is_invisible_and_unanswerable_from_another_space() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let elsewhere = swage_storage::SpaceStore::create(
+            storage.as_ref(),
+            swage_storage::model::NewSpace {
+                name: "elsewhere".into(),
+                slug: "elsewhere".parse().expect("slug"),
+            },
+        )
+        .await
+        .expect("a second space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: HOLD_SCRIPT.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let hold_id = wait_for_open_hold(&storage, started.id).await;
+
+        let (_session, _turn_id, base, ws_tx) =
+            hold_answering_context(&storage, &state, elsewhere.id, "outsider").await;
+        let context = crate::tool_executor::GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+
+        let listed = crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({"action": "list"}),
+            &context,
+        )
+        .await
+        .expect("list open holds");
+        assert!(
+            listed["holds"].as_array().expect("holds").is_empty(),
+            "a hold in another space is not the caller's to see"
+        );
+
+        let refused = crate::tool::Tool::execute(
+            &crate::tool::hold::WorkflowHoldTool,
+            serde_json::json!({
+                "action": "answer",
+                "hold_id": hold_id.to_string(),
+                "verdict": "ship",
+            }),
+            &context,
+        )
+        .await
+        .expect_err("a hold in another space is not the caller's to settle");
+        assert!(
+            refused.to_string().contains("workflow run hold"),
+            "the refusal names the hold as absent, not the space: {refused}"
+        );
+
+        let hold = storage
+            .get_workflow_run_hold(hold_id)
+            .await
+            .expect("read the hold back")
+            .expect("the hold still exists");
+        assert_eq!(hold.state, "open", "the decision keeps waiting");
+        assert!(hold.verdict.is_none(), "no verdict was attributed");
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("read the run back")
+            .expect("the run still exists");
+        assert_eq!(run.state, "parked", "the run was not resumed from outside");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_held_run_parks_until_an_agent_answers_it_through_the_tool() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -13351,6 +13448,7 @@ mod tests {
                 hold_id,
                 verdict: "ship".into(),
             },
+            None,
             RunEventSource {
                 surface: "operator",
                 agent_id: None,
