@@ -40,8 +40,9 @@ pub struct ThresholdEvaluation {
 /// model that will receive the completion.
 ///
 /// `threshold_known_exceeded` preserves a previously established native-token
-/// breach if a later provider count is unavailable. Estimate-only breaches do
-/// not set that flag and continue to fall back to the local estimate.
+/// breach if a later provider count is unavailable, unless the current
+/// text-only prompt has a byte upper bound within the threshold. Estimate-only
+/// breaches do not set that flag and continue to fall back to the local estimate.
 pub async fn exceeds_threshold_with_model(
     messages: &[ChatMessage],
     threshold: &CompactionThreshold,
@@ -51,9 +52,7 @@ pub async fn exceeds_threshold_with_model(
 ) -> ThresholdEvaluation {
     match threshold {
         CompactionThreshold::TokenCount(max_tokens) => {
-            if !threshold_known_exceeded
-                && token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens)
-            {
+            if token_count_byte_upper_bound(messages).is_some_and(|bound| bound <= *max_tokens) {
                 return ThresholdEvaluation {
                     exceeds: false,
                     native_breach: false,
@@ -647,6 +646,10 @@ mod tests {
         ChatMessage::new(role, text)
     }
 
+    fn image_msg(role: Role, url: &str) -> ChatMessage {
+        ChatMessage::new_parts(role, vec![ContentPart::ImageUrl { url: url.into() }])
+    }
+
     fn stub_storage() -> Arc<dyn Storage> {
         Arc::new(SqliteStorage::in_memory().expect("test storage should initialise"))
     }
@@ -1097,11 +1100,14 @@ mod tests {
 
     #[tokio::test]
     async fn known_native_breach_is_not_cleared_when_recount_fails() {
+        // Image parts have no byte upper bound, so no tier can reach a prompt
+        // that is provably within the threshold and every check falls through
+        // to the failing native recount.
         let messages = vec![
-            text_msg(Role::User, "a"),
-            text_msg(Role::Assistant, "b"),
-            text_msg(Role::User, "c"),
-            text_msg(Role::Assistant, "d"),
+            image_msg(Role::User, "https://example.test/a"),
+            image_msg(Role::Assistant, "https://example.test/b"),
+            image_msg(Role::User, "https://example.test/c"),
+            image_msg(Role::Assistant, "https://example.test/d"),
         ];
         let storage = stub_storage();
         let provider = TransientCountFailureProvider::new();
@@ -1120,6 +1126,37 @@ mod tests {
         .expect_err("a failed native recount cannot clear the known breach");
 
         assert!(matches!(error, AgentError::CompactionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn known_native_breach_is_cleared_when_compaction_proves_the_prompt_safe() {
+        let messages = vec![
+            text_msg(Role::User, &"a".repeat(100)),
+            text_msg(Role::Assistant, &"b".repeat(100)),
+            text_msg(Role::User, &"c".repeat(100)),
+            text_msg(Role::Assistant, &"d".repeat(100)),
+        ];
+        let storage = stub_storage();
+        let provider = SummaryProvider::new("brief");
+
+        let (compacted, record) = compact_with_model(
+            messages,
+            &CompactionThreshold::TokenCount(300),
+            provider.as_ref(),
+            storage.as_ref(),
+            Uuid::new_v4(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("a text-only compacted prompt below the byte bound must not require recounting");
+
+        assert_eq!(compacted.len(), 3);
+        assert_eq!(
+            record.expect("summarisation is recorded").actual_strategy,
+            "summarisation"
+        );
     }
 
     #[tokio::test]
