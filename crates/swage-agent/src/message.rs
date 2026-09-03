@@ -155,8 +155,9 @@ pub struct TurnRequest {
     /// Optional pre-created Pending turn to reuse instead of creating a fresh
     /// turn record inside the agent runtime.
     pub existing_turn_id: Option<Uuid>,
-    /// Per-turn provider reasoning effort override.
-    pub effort: Option<swage_core::Effort>,
+    /// The turn's effort, already resolved against the effective model's
+    /// declared capability; the provider expresses its control as is.
+    pub effort: Option<swage_core::ResolvedEffort>,
     /// Cooperative cancellation token — the gateway signals this when the client
     /// disconnects or a shutdown is requested.
     pub cancellation_token: CancellationToken,

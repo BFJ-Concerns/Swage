@@ -199,12 +199,23 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     );
     state.voice_provider = voice_provider;
     state.telegram = telegram;
+    // The Codex CLI's auth store lives under a Swage-owned state directory;
+    // registering it as file-backed secrets brings the harness's own tokens
+    // under governance — audited resolution and redaction — without moving
+    // them. Registration precedes sign-in, so the store need not exist yet.
+    if let Err(error) = state
+        .secret_manager
+        .register_codex_auth_store(&state.codex_supervisor.state_dir())
+        .await
+    {
+        eprintln!("Failed to register the Codex auth store as governed secrets: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = recover_worktrees_after_crash(&state).await {
         eprintln!("Worktree startup recovery failed: {error}");
         std::process::exit(1);
     }
     state.start_agent_message_expiry();
-    crate::device::register_local_device(&state).await;
     if let Err(error) = crate::device::restore_registered_devices(&state).await {
         eprintln!("Failed to restore devices: {error}");
         std::process::exit(1);
@@ -701,6 +712,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(PageWriteTool),
         Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
+        Arc::new(crate::tool::workflow_save::WorkflowSaveTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),
         Arc::new(AgentMemoryTool),
@@ -1133,6 +1145,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some("return null".into()),
             source_hash: source_hash.into(),
             args: Value::Null,

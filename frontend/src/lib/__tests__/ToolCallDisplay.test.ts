@@ -226,6 +226,25 @@ describe("error state (status='error')", () => {
   });
 });
 
+describe("rejected approval state (status='rejected')", () => {
+  it("uses the same failed treatment as an error", () => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: {
+        toolCall: makeErrorCall({
+          result: "Tool call rejected: reviewer denied access",
+          status: "rejected",
+        }),
+        isLive: false,
+      },
+    });
+
+    const root = document.querySelector(".tool-call");
+    expect(root?.classList.contains("error")).toBe(true);
+    expect(root?.querySelector(".error-icon")?.textContent).toBe("✗");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Collapsible result
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 import { fromStore, get, writable } from "svelte/store";
 
 import type { ConnectionStatus, ServerEvent } from "../types";
+import type { MessageAttachment } from "../protocol/MessageAttachment";
 import { createWebSocketClient } from "../api/websocket";
 import type { WebSocketClient } from "../api/websocket";
 
@@ -15,7 +16,11 @@ export interface ConnectionStore {
   readonly errorMessage: string | null;
   connectTo(conversationId: string): void;
   disconnect(): void;
-  sendMessage(content: string, selectedModelId?: string | null): void;
+  sendMessage(
+    content: string,
+    selectedModelId?: string | null,
+    attachments?: MessageAttachment[],
+  ): void;
   cancelTurn(): void;
   onServerEvent(handler: (event: ServerEvent) => void): void;
 }
@@ -96,10 +101,15 @@ export function createConnectionStore(
       wsClient.disconnect();
     },
 
-    sendMessage(content: string, selectedModelId?: string | null): void {
+    sendMessage(
+      content: string,
+      selectedModelId?: string | null,
+      attachments?: MessageAttachment[],
+    ): void {
       wsClient.send({
         type: "send_message",
         content,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
         ...(selectedModelId ? { selected_model_id: selectedModelId } : {}),
       });
     },

@@ -47,8 +47,6 @@ pub mod audit;
 pub mod automated_turn;
 pub mod background_loop;
 pub mod browser;
-mod builtin_agent_definitions;
-mod builtin_workflows;
 pub mod capabilities;
 pub mod capability_bundle;
 pub mod channel_gateway;
@@ -101,8 +99,66 @@ pub(crate) mod test_support {
         path::{Path, PathBuf},
     };
 
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use swage_core::ToolError;
+    use swage_tool::{context::ToolContext, tool::Tool};
+
     static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static XDG_RUNTIME_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Minimal named tool for tests that exercise dispatcher selection only.
+    pub(crate) struct NamedTool {
+        name: &'static str,
+        result: NamedToolResult,
+    }
+
+    enum NamedToolResult {
+        Sentinel,
+        EchoArguments,
+    }
+
+    impl NamedTool {
+        pub(crate) fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                result: NamedToolResult::Sentinel,
+            }
+        }
+
+        pub(crate) fn echoing(name: &'static str) -> Self {
+            Self {
+                name,
+                result: NamedToolResult::EchoArguments,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Test tool"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            arguments: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            Ok(match self.result {
+                NamedToolResult::Sentinel => json!({ "unexpected": "execution" }),
+                NamedToolResult::EchoArguments => arguments,
+            })
+        }
+    }
 
     /// Serialises tests that mutate `SWAGE_HOME`, which is process-wide state.
     pub(crate) struct SwageHomeGuard {
@@ -189,6 +245,115 @@ pub(crate) mod test_support {
             } else {
                 unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{
+            process::{Command, Stdio},
+            thread,
+            time::{Duration, Instant},
+        };
+
+        use super::{SwageHomeGuard, XdgRuntimeDirGuard};
+
+        const CHILD_TIMEOUT: Duration = Duration::from_secs(2);
+
+        #[test]
+        fn guards_can_be_acquired_in_either_order() {
+            for child_test in [
+                "test_support::tests::home_then_runtime_child",
+                "test_support::tests::runtime_then_home_child",
+            ] {
+                let mut child = Command::new(
+                    std::env::current_exe().expect("current test executable should resolve"),
+                )
+                .args(["--exact", child_test, "--ignored", "--nocapture"])
+                .env_remove("SWAGE_HOME")
+                .env_remove("XDG_RUNTIME_DIR")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("isolated guard regression child should start");
+
+                let deadline = Instant::now() + CHILD_TIMEOUT;
+                let status = loop {
+                    if let Some(status) = child
+                        .try_wait()
+                        .expect("isolated guard regression child should be inspectable")
+                    {
+                        break status;
+                    }
+                    if Instant::now() >= deadline {
+                        child
+                            .kill()
+                            .expect("deadlocked guard child should be killable");
+                        let output = child
+                            .wait_with_output()
+                            .expect("killed guard child output should be readable");
+                        panic!(
+                            "{child_test} deadlocked while acquiring independent environment guards; stdout:\n{}\nstderr:\n{}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr),
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                };
+                let output = child
+                    .wait_with_output()
+                    .expect("guard child output should be readable");
+                assert!(
+                    status.success(),
+                    "{child_test} failed; stdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                    "{child_test} did not report exactly one passing child test; stdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+        }
+
+        #[test]
+        #[ignore = "run in an isolated child process by guards_can_be_acquired_in_either_order"]
+        fn home_then_runtime_child() {
+            let home = SwageHomeGuard::new();
+            assert_eq!(
+                std::env::var_os("SWAGE_HOME").as_deref(),
+                Some(home.path().as_os_str())
+            );
+            let runtime = XdgRuntimeDirGuard::new();
+            assert_eq!(
+                std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+                Some(runtime.path().as_os_str())
+            );
+            drop(runtime);
+            drop(home);
+            assert!(std::env::var_os("SWAGE_HOME").is_none());
+            assert!(std::env::var_os("XDG_RUNTIME_DIR").is_none());
+        }
+
+        #[test]
+        #[ignore = "run in an isolated child process by guards_can_be_acquired_in_either_order"]
+        fn runtime_then_home_child() {
+            let runtime = XdgRuntimeDirGuard::new();
+            assert_eq!(
+                std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+                Some(runtime.path().as_os_str())
+            );
+            let home = SwageHomeGuard::new();
+            assert_eq!(
+                std::env::var_os("SWAGE_HOME").as_deref(),
+                Some(home.path().as_os_str())
+            );
+            drop(home);
+            drop(runtime);
+            assert!(std::env::var_os("SWAGE_HOME").is_none());
+            assert!(std::env::var_os("XDG_RUNTIME_DIR").is_none());
         }
     }
 }

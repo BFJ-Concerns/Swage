@@ -95,7 +95,7 @@ impl Tool for RunEventPostTool {
         .await
         .map_err(|error| ToolError::ExecutionFailed {
             name: TOOL.into(),
-            message: error.0.to_string(),
+            message: error.message().to_owned(),
         })?;
         serde_json::to_value(response).map_err(|error| ToolError::ExecutionFailed {
             name: TOOL.into(),
@@ -124,6 +124,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: "test".into(),
                 args: Value::Null,

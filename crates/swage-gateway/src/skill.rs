@@ -58,10 +58,7 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
 
     // Validate: only lowercase ASCII letters, digits, and hyphens are allowed.
     // Anything else (uppercase, `/`, `.`, etc.) is treated as a non-command.
-    if !candidate
-        .chars()
-        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
-    {
+    if !crate::service::is_lowercase_identifier(candidate) {
         return SlashCommandResult::NotACommand;
     }
 
@@ -88,7 +85,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 #[cfg(test)]
-static TEST_SPACE_SKILL_ROOTS: std::sync::LazyLock<
+pub(crate) static TEST_SKILL_ROOTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<Uuid, std::path::PathBuf>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
@@ -206,22 +203,34 @@ pub(crate) async fn discover_available_for_space(
         .await
         .map_err(|error| format!("failed to load space {space_id}: {error}"))?
         .ok_or_else(|| format!("space {space_id} was not found"))?;
-    let space_dir = root.join("spaces").join(space.slug);
-    let agent_dir = match agent_id {
-        Some(agent) => {
-            if !agent_scope_is_visible(state, space_id, agent)
-                .await
-                .map_err(|error| error.to_string())?
-            {
-                return Err(format!(
-                    "no agent definition named '{agent}' is visible to space {space_id}"
-                ));
-            }
-            Some(space_dir.join("agents").join(agent))
-        }
-        None => None,
-    };
-    Ok(SkillManager::discover_available(root, &space_dir, agent_dir.as_deref()).0)
+    if let Some(agent) = agent_id
+        && !agent_scope_is_visible(state, space_id, agent)
+            .await
+            .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "no agent definition named '{agent}' is visible to space {space_id}"
+        ));
+    }
+    Ok(discover_available_for_scope(root, &space.slug, agent_id))
+}
+
+/// Discover the effective skills for a configured space and optional agent.
+///
+/// The filesystem layout and reserved workflow-agent rule are shared by
+/// context assembly, the HTTP catalogue, and storage-backed discovery.
+pub(crate) fn discover_available_for_scope(
+    root: &Path,
+    space_slug: &str,
+    agent_id: Option<&str>,
+) -> Vec<SkillDefinition> {
+    let hierarchy = crate::turn::configuration_hierarchy(root, space_slug, agent_id);
+    let space_dir = &hierarchy[1].1;
+    let agent_dir = hierarchy
+        .iter()
+        .find(|(level, _)| *level == HierarchyLevel::Agent)
+        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
+    SkillManager::discover_available(root, space_dir, agent_dir).0
 }
 
 pub(crate) async fn discover_available_for_space_from_config(
@@ -235,7 +244,7 @@ pub(crate) async fn discover_available_for_space_from_config(
 
 #[cfg(test)]
 fn skill_root_for_space(space_id: Uuid) -> Option<std::path::PathBuf> {
-    TEST_SPACE_SKILL_ROOTS
+    TEST_SKILL_ROOTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get(&space_id)
@@ -248,44 +257,41 @@ fn skill_root_for_space(_space_id: Uuid) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(test)]
-pub(crate) struct SpaceSkillRootGuard {
-    space_id: Uuid,
+pub(crate) struct TestSkillRootGuard {
+    id: Uuid,
     _root: Option<tempfile::TempDir>,
 }
 
 #[cfg(test)]
-impl SpaceSkillRootGuard {
-    pub(crate) fn at(space_id: Uuid, root: &Path) -> Self {
-        TEST_SPACE_SKILL_ROOTS
+impl TestSkillRootGuard {
+    pub(crate) fn at(id: Uuid, root: &Path) -> Self {
+        TEST_SKILL_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(space_id, root.to_path_buf());
-        Self {
-            space_id,
-            _root: None,
-        }
+            .insert(id, root.to_path_buf());
+        Self { id, _root: None }
     }
 
-    pub(crate) fn empty(space_id: Uuid) -> Self {
+    pub(crate) fn empty(id: Uuid) -> Self {
         let root = tempfile::TempDir::new().expect("temp skill root");
-        TEST_SPACE_SKILL_ROOTS
+        TEST_SKILL_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .insert(space_id, root.path().to_path_buf());
+            .insert(id, root.path().to_path_buf());
         Self {
-            space_id,
+            id,
             _root: Some(root),
         }
     }
 }
 
 #[cfg(test)]
-impl Drop for SpaceSkillRootGuard {
+impl Drop for TestSkillRootGuard {
     fn drop(&mut self) {
-        TEST_SPACE_SKILL_ROOTS
+        TEST_SKILL_ROOTS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remove(&self.space_id);
+            .remove(&self.id);
     }
 }
 
@@ -335,14 +341,13 @@ impl SkillManager {
                 Err(warning) => warnings.push(warning),
             }
         }
+        // Shipped definitions sit at lowest precedence: after every authored
+        // skill at the same level, so an operator's global skill carrying a
+        // workflow of the same name as a shipped one wins the name.
         authored.sort_by(|left, right| {
-            let specificity = |level: &HierarchyLevel| match level {
-                HierarchyLevel::Agent => 0,
-                HierarchyLevel::Space => 1,
-                HierarchyLevel::Global => 2,
-            };
-            specificity(&left.level)
-                .cmp(&specificity(&right.level))
+            swage_config::skill::level_specificity(&left.level)
+                .cmp(&swage_config::skill::level_specificity(&right.level))
+                .then_with(|| left.shipped.cmp(&right.shipped))
                 .then_with(|| left.name.cmp(&right.name))
         });
         (authored, warnings)
@@ -778,7 +783,7 @@ mod tests {
         for name in ["global-skill", "space-skill", "agent-skill"] {
             assert!(skills.iter().any(|skill| skill.name == name));
         }
-        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 5);
+        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 6);
         assert!(warnings.is_empty());
     }
 
@@ -793,7 +798,7 @@ mod tests {
 
         let (skills, _) = SkillManager::discover_available(root_dir.path(), space_dir.path(), None);
 
-        assert_eq!(skills.len(), 7);
+        assert_eq!(skills.len(), 8);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
     }
 

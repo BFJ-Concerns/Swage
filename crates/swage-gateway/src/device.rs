@@ -23,9 +23,6 @@ use swage_tool::dispatch::ToolDispatcher;
 
 use crate::secret::SecretManager;
 use crate::state::AppState;
-use crate::tool::workspace::resolve_workspace_root;
-
-pub const LOCAL_DEVICE_ID: &str = "local";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -94,48 +91,18 @@ struct TransportBackedDeviceState {
     workspace_roots: Vec<PathBuf>,
 }
 
-pub fn make_local_device(
-    config: &swage_config::ResolvedConfig,
-    dispatcher: &ToolDispatcher,
-) -> RegisteredDevice {
-    let workspace_root = resolve_workspace_root(config);
-    RegisteredDevice {
-        device_id: LOCAL_DEVICE_ID.to_string(),
-        label: Some("Local machine".to_string()),
-        kind: DeviceKind::Local,
-        base_url: None,
-        shared_token_secret_ref: None,
-        workspace_root: workspace_root.clone(),
-        workspace_roots: vec![workspace_root],
-        capabilities: dispatcher
-            .registry()
-            .list()
-            .into_iter()
-            .map(ToOwned::to_owned)
-            .collect(),
-        registered_at: Utc::now(),
-    }
-}
-
-pub async fn register_local_device(state: &AppState) {
-    let local_device = make_local_device(&state.config, state.tool_dispatcher.as_ref());
-    let mut runtime = state.devices.lock().await;
-    runtime
-        .devices
-        .insert(local_device.device_id.clone(), local_device);
-}
-
 pub async fn register_remote_device(
     state: &AppState,
     request: RegisterDeviceRequest,
 ) -> Result<RegisteredDevice, swage_core::GatewayError> {
+    let kind = remote_registration_kind(&request.kind)?;
     let workspace_root = PathBuf::from(&request.workspace_root);
     let workspace_roots =
         normalise_workspace_roots(workspace_root.clone(), request.workspace_roots);
     let device = RegisteredDevice {
         device_id: request.device_id,
         label: request.label.clone(),
-        kind: DeviceKind::from_str(&request.kind).unwrap_or(DeviceKind::AttachedDevice),
+        kind,
         base_url: Some(request.base_url),
         shared_token_secret_ref: Some(request.shared_token_secret_ref),
         workspace_root,
@@ -169,10 +136,10 @@ pub async fn register_remote_device(
         .insert(device.device_id.clone(), device.clone());
     drop(runtime);
 
-    crate::presence::upsert_machine_heartbeat(
+    crate::presence::upsert_device_heartbeat(
         state,
-        crate::presence::MachineHeartbeatRequest {
-            machine_id: device.device_id.clone(),
+        crate::presence::DeviceHeartbeatRequest {
+            device_id: device.device_id.clone(),
             label: device.label.clone(),
             stale_after_secs: 30,
         },
@@ -180,6 +147,22 @@ pub async fn register_remote_device(
     .await;
 
     Ok(device)
+}
+
+/// Parse the kind at the shared remote-registration boundary.
+///
+/// Local execution has no remote producer, so pairing and recovery imports
+/// must receive the same refusal as HTTP registration.
+fn remote_registration_kind(value: &str) -> Result<DeviceKind, swage_core::GatewayError> {
+    let kind = DeviceKind::from_str(value.trim()).map_err(|_| {
+        swage_core::GatewayError::ValidationError(format!("unknown device kind '{value}'"))
+    })?;
+    if kind == DeviceKind::Local {
+        return Err(swage_core::GatewayError::ValidationError(
+            "a local device has no remote producer to register".into(),
+        ));
+    }
+    Ok(kind)
 }
 
 pub async fn restore_registered_devices(state: &AppState) -> Result<(), swage_core::StorageError> {
@@ -270,17 +253,7 @@ fn select_device(
         }
     }
 
-    if let Some(local) = devices.get(LOCAL_DEVICE_ID) {
-        return Some(local.clone());
-    }
-
-    let mut attached_devices = devices
-        .values()
-        .filter(|device| device.kind != DeviceKind::Local)
-        .cloned()
-        .collect::<Vec<_>>();
-    attached_devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
-    attached_devices.into_iter().next()
+    None
 }
 
 pub async fn execute_on_remote_device(
@@ -557,6 +530,7 @@ mod tests {
     use std::sync::Arc;
     use swage_core::ToolError;
     use swage_storage::SqliteStorage;
+    use swage_storage::store::DeviceStore;
     use swage_tool::context::{MockToolContext, UserInfo};
     use swage_tool::tool::Tool;
     use uuid::Uuid;
@@ -580,6 +554,43 @@ mod tests {
             capabilities: vec!["device_identity".to_string()],
             registered_at: Utc::now(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_registration_rejects_a_local_kind_without_a_producer() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let error = register_remote_device(
+            &state,
+            RegisterDeviceRequest {
+                device_id: "unbacked-local".into(),
+                label: None,
+                kind: "local".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                shared_token_secret_ref: "secret://managed/test".into(),
+                workspace_root: "/workspace".into(),
+                workspace_roots: vec![],
+                capabilities: vec![],
+            },
+        )
+        .await
+        .expect_err("remote registration must not create an unbacked local device");
+        assert!(
+            error
+                .to_string()
+                .contains("a local device has no remote producer to register")
+        );
+        assert!(
+            storage.list_devices().await.unwrap().is_empty(),
+            "the shared registration owner must refuse before persistence"
+        );
     }
 
     struct ObservingTool;
@@ -656,8 +667,8 @@ mod tests {
     fn select_device_prefers_metadata_backend_kind() {
         let devices = HashMap::from([
             (
-                LOCAL_DEVICE_ID.to_string(),
-                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
+                "local".to_string(),
+                registered_device("local", DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
@@ -682,8 +693,8 @@ mod tests {
     fn select_device_prefers_explicit_device_id_over_backend_kind() {
         let devices = HashMap::from([
             (
-                LOCAL_DEVICE_ID.to_string(),
-                registered_device(LOCAL_DEVICE_ID, DeviceKind::Local),
+                "local".to_string(),
+                registered_device("local", DeviceKind::Local),
             ),
             (
                 "docker-a".to_string(),
@@ -705,6 +716,26 @@ mod tests {
         .expect("device should resolve");
 
         assert_eq!(selected.device_id, "docker-a");
+    }
+
+    #[test]
+    fn select_device_leaves_local_turns_unrouted_when_only_remote_devices_exist() {
+        let devices = HashMap::from([(
+            "ssh-a".to_string(),
+            registered_device("ssh-a", DeviceKind::Ssh),
+        )]);
+
+        assert!(select_device(&devices, None).is_none());
+        assert!(
+            select_device(
+                &devices,
+                Some(&serde_json::json!({"execution_backend": "local"})),
+            )
+            .is_none()
+        );
+        assert!(
+            select_device(&devices, Some(&serde_json::json!({"device_id": "local"})),).is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
