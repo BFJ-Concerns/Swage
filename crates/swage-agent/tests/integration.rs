@@ -1097,7 +1097,7 @@ async fn output_schema_uses_the_last_valid_json_value() {
     let (storage, space, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
-            content: "```json\n{\"answer\": 7}\n```\nFinal: {\"answer\":\"ok\"}".into(),
+            content: "```json\n{\"answer\":\"draft\"}\n```\nFinal: {\"answer\":\"ok\"}".into(),
         },
         StreamChunk::Done {
             finish_reason: Some(FinishReason::Stop),
@@ -1133,6 +1133,37 @@ async fn output_schema_uses_the_last_valid_json_value() {
         1,
         "the later valid value avoids a retry"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_schema_accepts_a_scalar_json_value() {
+    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "Final result:\n```json\n\"done\"\n```".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]]));
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a").with_output_schema(json!({"type": "string"}), 1))
+        .provider(provider.clone())
+        .storage(storage)
+        .build()
+        .expect("agent");
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(space.id, session.id, thread.id, "Return a string", None),
+            event_tx,
+        )
+        .await
+        .expect("a schema-valid scalar should satisfy the output contract");
+
+    assert_eq!(outbound.structured_output, Some(json!("done")));
+    assert_eq!(provider.call_count(), 1, "valid scalar JSON avoids a retry");
 }
 
 #[tokio::test(flavor = "multi_thread")]
