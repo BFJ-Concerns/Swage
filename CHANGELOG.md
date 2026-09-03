@@ -4,6 +4,10 @@ All notable changes to Swage are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
+
 ### Added
 
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.

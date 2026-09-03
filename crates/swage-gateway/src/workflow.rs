@@ -8528,6 +8528,16 @@ mod tests {
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "continued-history-tool".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![
                     swage_core::StreamChunk::Delta {
                         content: "restated: gather the sources".into(),
                     },
@@ -8780,7 +8790,7 @@ mod tests {
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(
             requests[0]
                 .tool_definitions
@@ -8789,23 +8799,72 @@ mod tests {
             "shell is available while the lead still grants it"
         );
         assert!(
-            requests[1]
+            requests[2]
                 .tool_definitions
                 .iter()
                 .all(|definition| definition["name"] != "shell"),
             "the continued turn must observe the lead's revoked shell grant"
         );
-        let second_request = requests[1]
+        let second_request = &requests[2];
+        let anthropic =
+            swage_provider::anthropic::AnthropicProvider::new("test-key", "claude-test");
+        let outbound = swage_provider::LlmProvider::provider_request_snapshot(
+            &anthropic,
+            second_request,
+            true,
+        );
+        if let Some(path) = std::env::var_os("SWAGE_PROVIDER_REQUEST_CAPTURE") {
+            std::fs::write(
+                path,
+                serde_json::to_vec_pretty(&outbound["body"])
+                    .expect("serialise outbound provider request"),
+            )
+            .expect("write outbound provider request capture");
+        }
+        let second_request_text = second_request
             .messages
             .iter()
             .map(swage_core::ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(second_request.contains("restate the brief"));
-        assert!(second_request.contains("restated: gather the sources"));
+        assert!(second_request_text.contains("restate the brief"));
+        assert!(second_request_text.contains("restated: gather the sources"));
         assert!(
-            second_request.contains("Use the persisted workflow specialist skill."),
-            "the continued turn must compose the persisted skill selection: {second_request}"
+            second_request_text.contains("Use the persisted workflow specialist skill."),
+            "the continued turn must compose the persisted skill selection: {second_request_text}"
+        );
+        let replayed_tool_names = second_request
+            .messages
+            .iter()
+            .filter_map(swage_core::ChatMessage::tool_replay)
+            .flat_map(|replay| replay.iter())
+            .filter_map(|part| match part {
+                swage_core::ToolReplayPart::ToolCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replayed_tool_names, vec!["shell"]);
+        assert!(
+            replayed_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every replayed tool_use entry in the continued provider request must carry its name"
+        );
+        let outbound_tool_names = outbound["body"]["messages"]
+            .as_array()
+            .expect("Anthropic request messages")
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(outbound_tool_names, vec!["shell"]);
+        assert!(
+            outbound_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every tool_use in the Anthropic outbound body must carry its persisted name"
         );
 
         drop(tx);
