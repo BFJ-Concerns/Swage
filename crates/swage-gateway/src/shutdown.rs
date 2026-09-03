@@ -29,7 +29,7 @@ use tokio::time;
 use tracing::{info, warn};
 
 use swage_core::{ApprovalTimeoutPolicy, StorageError};
-use swage_storage::model::{ApprovalState, TurnState};
+use swage_storage::model::{ApprovalState, ThreadState, TurnState};
 use swage_storage::store::{SpaceStore, Storage};
 
 use crate::state::AppState;
@@ -126,6 +126,20 @@ pub async fn recover_orphaned_turns(
                         thread_id = %turn.thread_id,
                         "Recovered orphaned turn from a previous shutdown"
                     );
+
+                    // Recovery runs before new work can begin. Read the persisted
+                    // thread state at the recovery point: an orphaned worker can
+                    // only be replayed after its Processing → Idle transition. Do
+                    // this before terminalising the turn so a failed reset leaves
+                    // the turn recoverable on the next startup.
+                    if storage
+                        .get(thread.id)
+                        .await?
+                        .is_some_and(|persisted| persisted.state == ThreadState::Processing)
+                    {
+                        storage.update_state(thread.id, ThreadState::Idle).await?;
+                    }
+
                     storage
                         .update_turn_state(turn.id, TurnState::Interrupted)
                         .await?;

@@ -49,6 +49,9 @@
   }: Props = $props();
 
   const activeConversation = $derived(conversationStore.activeConversation);
+  const activeStream = $derived(
+    streamingStore.streamFor?.(activeConversation?.id ?? null),
+  );
 
   // The sessions the switcher offers. A conversation that is active but not
   // yet in the loaded list (just created, list not refreshed) still needs an
@@ -96,8 +99,8 @@
   </header>
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
   <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
-  {#if streamingStore.pendingApproval}
-    <ApprovalCard approval={streamingStore.pendingApproval} />
+  {#if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
+    <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
   {:else}
     <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
   {/if}
