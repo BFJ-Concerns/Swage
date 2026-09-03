@@ -187,8 +187,14 @@ fn compose(
     let mut blocks: Vec<ComposedBlock> = Vec::with_capacity(added.len());
     let mut offset = 0usize;
     for block in added {
-        let slice = messages[offset..offset + block.message_count].to_vec();
-        offset += block.message_count;
+        // The counts are checked against the output before composition; the
+        // slice stays saturating so a malformed account can never index past
+        // the messages it describes.
+        let end = offset
+            .saturating_add(block.message_count)
+            .min(messages.len());
+        let slice = messages[offset.min(end)..end].to_vec();
+        offset = end;
         blocks.push(ComposedBlock {
             name: block.name,
             source: block.source,
@@ -375,11 +381,145 @@ struct AddedBlock {
     message_count: usize,
 }
 
+/// The host's own account of a run, serialised after the script returns:
+/// the composed messages and the records `add()` and `omit()` created. None
+/// of it is reachable from the script's scope, so it describes what the host
+/// observed rather than what the script left behind.
 #[derive(serde::Deserialize)]
 struct ScriptBookkeeping {
+    output: Vec<RawMessage>,
     added: Vec<AddedBlock>,
     omitted: Vec<DeclaredOmission>,
 }
+
+/// The host side of every assembly run, evaluated before the script source is
+/// parsed.
+///
+/// It cages the runtime, turns the supplied element projection into frozen
+/// objects with an identity the host alone can attribute, and evaluates to a
+/// runner function. The runner holds the run's bookkeeping — the output list,
+/// the `add()` records, the `omit()` declarations and the session values — in
+/// its own closure and takes the script as an argument, so the script's scope
+/// chain reaches the globals and nothing else. Builtins the host depends on
+/// are captured here, while they are still the originals.
+const HOST_PRELUDE: &str = r#"
+(() => {
+    delete globalThis.eval;
+    if (typeof Math !== "undefined") {
+        Math.random = () => {
+            throw new Error("Math.random is not available in assemblies; composition must be deterministic");
+        };
+    }
+
+    const freeze = Object.freeze;
+    const isArray = Array.isArray;
+    const stringify = JSON.stringify;
+    const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+    const replace = Function.prototype.call.bind(String.prototype.replace);
+    const push = Function.prototype.call.bind(Array.prototype.push);
+    const weakGet = Function.prototype.call.bind(WeakMap.prototype.get);
+    const weakSet = Function.prototype.call.bind(WeakMap.prototype.set);
+
+    const slot = /\{\{([a-z0-9-]+)\}\}/g;
+    const variables = globalThis.__variables;
+    delete globalThis.__variables;
+    const valueFor = name => (hasOwn(variables, name) ? variables[name] : undefined);
+    const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
+    globalThis.ctx = freeze({ variable: valueFor });
+
+    // Element identity the script cannot forge or transfer: the host maps
+    // each supplied object — and each copy `render()` returns — to the index
+    // of the element it actually came from.
+    const suppliedElements = globalThis.elements;
+    const elementIndices = new WeakMap();
+    for (let index = 0; index < suppliedElements.length; index += 1) {
+        const element = suppliedElements[index];
+        weakSet(elementIndices, element, index);
+        if (element.rendersSessionValues) {
+            Object.defineProperty(element, "render", {
+                enumerable: false,
+                value: () => {
+                    const messages = [];
+                    for (let m = 0; m < element.messages.length; m += 1) {
+                        const message = element.messages[m];
+                        push(messages, freeze({
+                            role: message.role,
+                            text: replace(message.text, slot, (_match, name) => renderedValueFor(name)),
+                        }));
+                    }
+                    freeze(messages);
+                    const rendered = freeze({
+                        name: element.name,
+                        priority: element.priority,
+                        source: element.source,
+                        tokenCount: element.tokenCount,
+                        messages,
+                    });
+                    weakSet(elementIndices, rendered, index);
+                    return rendered;
+                },
+            });
+        }
+        delete element.rendersSessionValues;
+        for (let m = 0; m < element.messages.length; m += 1) {
+            freeze(element.messages[m]);
+        }
+        freeze(element.messages);
+        freeze(element);
+    }
+    freeze(suppliedElements);
+
+    return script => {
+        const output = [];
+        const added = [];
+        const omitted = [];
+        globalThis.add = value => {
+            const isElement = value !== null
+                && typeof value === "object"
+                && !isArray(value)
+                && isArray(value.messages);
+            const messages = isArray(value) ? value : isElement ? value.messages : null;
+            if (!isArray(messages)) {
+                throw new Error("add() takes an element from `elements` or an array of {role, text} messages");
+            }
+            for (let m = 0; m < messages.length; m += 1) {
+                const message = messages[m];
+                if (message === null
+                    || typeof message !== "object"
+                    || typeof message.role !== "string"
+                    || typeof message.text !== "string") {
+                    throw new Error("each message needs a string role and text");
+                }
+                push(output, { role: message.role, text: message.text });
+            }
+            const index = weakGet(elementIndices, value);
+            push(added, {
+                name: isElement && typeof value.name === "string" ? value.name : "script",
+                source: isElement && typeof value.source === "string" ? value.source : "composed by the assembly script",
+                priority: isElement && typeof value.priority === "number" ? value.priority : 0,
+                elementIndex: index === undefined ? null : index,
+                messageCount: messages.length,
+            });
+        };
+        globalThis.omit = (name, reason) => {
+            if (typeof name !== "string" || name.length === 0) {
+                throw new Error("omit() takes the name of the element to leave out");
+            }
+            if (typeof reason !== "string" || reason.trim().length === 0) {
+                throw new Error(`omit("${name}") needs a reason for leaving the element out`);
+            }
+            push(omitted, { element: name, reason });
+        };
+        try {
+            script();
+        } finally {
+            delete globalThis.add;
+            delete globalThis.omit;
+        }
+        return stringify({ output, added, omitted });
+    };
+})()
+"#;
 
 /// Execute the script against a read-only projection of the elements,
 /// returning the composed message list and per-add attribution.
@@ -434,21 +574,6 @@ fn run_script(
     let variables_json = serde_json::to_string(variables).map_err(|error| error.to_string())?;
 
     context.with(|ctx| -> Result<ScriptOutcome, String> {
-        // The cage: no eval, no ambient nondeterminism. Assemblies must be
-        // pure functions of their elements.
-        ctx.eval::<(), _>(
-            r#"
-            delete globalThis.eval;
-            if (typeof Math !== "undefined") {
-                Math.random = () => {
-                    throw new Error("Math.random is not available in assemblies; composition must be deterministic");
-                };
-            }
-            globalThis.__output = [];
-            "#,
-        )
-        .map_err(|error| format!("cage setup failed: {error}"))?;
-
         let globals = ctx.globals();
         globals
             .set(
@@ -458,111 +583,76 @@ fn run_script(
             )
             .map_err(|error| error.to_string())?;
         globals
-            .set("__variables", ctx.json_parse(variables_json.as_bytes()).map_err(|error| error.to_string())?)
+            .set(
+                "__variables",
+                ctx.json_parse(variables_json.as_bytes())
+                    .map_err(|error| error.to_string())?,
+            )
             .map_err(|error| error.to_string())?;
-        let bookkeeping_json: String = ctx.eval(r#"
-            (() => {
-            const slot = /\{\{([a-z0-9-]+)\}\}/g;
-            const variables = globalThis.__variables;
-            const valueFor = name => Object.prototype.hasOwnProperty.call(variables, name)
-                ? variables[name]
-                : undefined;
-            const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
-            globalThis.ctx = Object.freeze({ variable: valueFor });
-                const suppliedElements = globalThis.elements;
-                const suppliedElementIndices = new WeakMap(
-                    suppliedElements.map((element, index) => [element, index]),
-                );
-                for (const element of suppliedElements) {
-                    if (element.rendersSessionValues) {
-                        Object.defineProperty(element, "render", {
-                            enumerable: false,
-                            value: () => {
-                                const rendered = {
-                                    ...element,
-                                    messages: element.messages.map(message => ({
-                                        ...message,
-                                        text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
-                                    })),
-                                };
-                                suppliedElementIndices.set(rendered, suppliedElementIndices.get(element));
-                                for (const message of rendered.messages) {
-                                    Object.freeze(message);
-                                }
-                                Object.freeze(rendered.messages);
-                                Object.freeze(rendered);
-                                return rendered;
-                            },
-                        });
-                    }
-                    delete element.rendersSessionValues;
-                    for (const message of element.messages) {
-                        Object.freeze(message);
-                    }
-                    Object.freeze(element.messages);
-                    Object.freeze(element);
-                }
-                Object.freeze(suppliedElements);
-                const added = [];
-                globalThis.add = (value) => {
-                    const isElement = value && !Array.isArray(value) && Array.isArray(value.messages);
-                    const messages = Array.isArray(value) ? value : isElement ? value.messages : null;
-                    if (!Array.isArray(messages)) {
-                        throw new Error("add() takes an element from `elements` or an array of {role, text} messages");
-                    }
-                    for (const message of messages) {
-                        if (typeof message.role !== "string" || typeof message.text !== "string") {
-                            throw new Error("each message needs a string role and text");
-                        }
-                        globalThis.__output.push({ role: message.role, text: message.text });
-                    }
-                    added.push({
-                        name: isElement && typeof value.name === "string" ? value.name : "script",
-                        source: isElement && typeof value.source === "string" ? value.source : "composed by the assembly script",
-                        priority: isElement && typeof value.priority === "number" ? value.priority : 0,
-                        elementIndex: suppliedElementIndices.get(value) ?? null,
-                        messageCount: messages.length,
-                    });
-                };
-                const omitted = [];
-                globalThis.omit = (name, reason) => {
-                    if (typeof name !== "string" || name.length === 0) {
-                        throw new Error("omit() takes the name of the element to leave out");
-                    }
-                    if (typeof reason !== "string" || reason.trim().length === 0) {
-                        throw new Error(`omit("${name}") needs a reason for leaving the element out`);
-                    }
-                    omitted.push({ element: name, reason });
-                };
-                try {
-                    {source}
-                } finally {
-                    delete globalThis.add;
-                    delete globalThis.omit;
-                    delete globalThis.__variables;
-                }
-                return JSON.stringify({ added, omitted });
-            })()
-        "#.replace("{source}", source))
-            .map_err(|error| script_error(&ctx, error))?;
 
-        let output_json: String = ctx
-            .eval("JSON.stringify(globalThis.__output)")
+        // The host prelude runs before the script source is even parsed: it
+        // cages the runtime, freezes the element projection, and returns the
+        // runner that owns the run's bookkeeping.
+        let runner: rquickjs::Function = ctx
+            .eval(HOST_PRELUDE)
+            .map_err(|error| format!("cage setup failed: {}", script_error(&ctx, error)))?;
+
+        // The script body becomes a function of its own, defined at global
+        // scope. Nothing the host keeps is in that scope chain, so `added`,
+        // `omitted`, the output list and the session values have no name the
+        // script can reach: `add`, `omit`, `ctx` and `elements` are the whole
+        // surface.
+        ctx.eval::<(), _>(format!(
+            "globalThis.__assemblyScript = function () {{\n{source}\n}};"
+        ))
+        .map_err(|error| script_error(&ctx, error))?;
+        let script: rquickjs::Function = globals
+            .get("__assemblyScript")
+            .map_err(|error| error.to_string())?;
+        ctx.eval::<(), _>("delete globalThis.__assemblyScript;")
+            .map_err(|error| error.to_string())?;
+
+        let bookkeeping_json: String = runner
+            .call((script,))
             .map_err(|error| script_error(&ctx, error))?;
-        let raw: Vec<RawMessage> =
-            serde_json::from_str(&output_json).map_err(|error| error.to_string())?;
-        let messages = raw
+        let ScriptBookkeeping {
+            output,
+            added,
+            omitted: declared,
+        } = serde_json::from_str(&bookkeeping_json).map_err(|error| error.to_string())?;
+
+        let messages = output
             .into_iter()
-            .map(|message| {
-                Ok(ChatMessage::new(
-                    parse_role(&message.role)?,
-                    &message.text,
-                ))
-            })
+            .map(|message| Ok(ChatMessage::new(parse_role(&message.role)?, &message.text)))
             .collect::<Result<Vec<_>, String>>()?;
 
-        let ScriptBookkeeping { added, omitted: declared } =
-            serde_json::from_str(&bookkeeping_json).map_err(|error| error.to_string())?;
+        // The host wrote these records, but they still cross a JSON boundary,
+        // so composition's assumptions about them are checked here rather
+        // than trusted: the per-block counts must partition the output
+        // exactly, and an attributed element index must name a real element.
+        let counted = added
+            .iter()
+            .try_fold(0usize, |total, block| {
+                total.checked_add(block.message_count)
+            })
+            .ok_or_else(|| "assembly bookkeeping overflowed its message count".to_owned())?;
+        if counted != messages.len() {
+            return Err(format!(
+                "assembly bookkeeping accounts for {counted} messages but the \
+                 composition produced {}",
+                messages.len()
+            ));
+        }
+        if let Some(block) = added.iter().find(|block| {
+            block
+                .element_index
+                .is_some_and(|index| index >= elements.len())
+        }) {
+            return Err(format!(
+                "assembly bookkeeping attributed '{}' to an element outside the turn",
+                block.name
+            ));
+        }
 
         Ok(ScriptOutcome {
             messages,
@@ -1123,6 +1213,162 @@ mod tests {
                 .any(|warning| warning.contains("orientation") && warning.contains("restored")),
             "the forged entry must be reported as restored: {:?}",
             output.report.warnings
+        );
+    }
+
+    #[test]
+    fn the_script_scope_cannot_reach_the_hosts_add_records() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.prompts);
+            add(byName.history);
+            added.push({
+                name: "orientation",
+                source: "forged",
+                priority: 0,
+                elementIndex: 0,
+                messageCount: 0,
+            });
+            "#,
+            &elements,
+        );
+
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Atelier")),
+            "an add record the script wrote itself must not suppress the floor"
+        );
+    }
+
+    #[test]
+    fn the_script_scope_cannot_reach_the_hosts_session_values() {
+        let elements: Vec<Box<dyn ContextElement>> =
+            vec![Box::new(BriefingElement::new(ResolvedNamedElement {
+                name: "current-work".into(),
+                level: HierarchyLevel::Global,
+                path: PathBuf::from("test"),
+                content: "Task: {{task}}".into(),
+            }))];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assemblies").join("focus.js");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+            variables.task = "forged value";
+            add(elements[0].render());
+            "#,
+        )
+        .unwrap();
+
+        let output = assemble_named(
+            "focus",
+            Some(&path),
+            &elements,
+            &ContextConfig::default(),
+            &WordTokeniser,
+            &BTreeMap::from([("task".to_owned(), "audit storage".to_owned())]),
+        );
+
+        assert_eq!(output.messages[0].text_content(), "Task: audit storage");
+        assert!(
+            output
+                .messages
+                .iter()
+                .all(|message| !message.text_content().contains("forged value")),
+            "the session values a render() reads are the host's, not the script's"
+        );
+    }
+
+    #[test]
+    fn the_composed_output_cannot_be_altered_after_a_valid_add() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.orientation);
+            globalThis.__output[0].text = "forged orientation";
+            add(byName.prompts);
+            add(byName.history);
+            "#,
+            &elements,
+        );
+
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Atelier")),
+            "the genuine orientation content still reaches the context"
+        );
+        assert!(
+            output
+                .messages
+                .iter()
+                .all(|message| !message.text_content().contains("forged orientation")),
+            "an added element's messages are not the script's to rewrite"
+        );
+    }
+
+    #[test]
+    fn an_add_record_counting_past_the_output_is_an_error_not_a_panic() {
+        let elements = baseline_bearing_elements();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assemble_source(
+                r#"
+                const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+                add(byName.orientation);
+                add(byName.prompts);
+                add(byName.history);
+                globalThis.__output.pop();
+                "#,
+                &elements,
+            )
+        }));
+
+        let output = result.expect("a malformed message account must not panic");
+        assert_eq!(output.report.errors.len(), 1, "the run fails open");
+        assert!(
+            output.report.errors[0].message.contains("failed"),
+            "the malformed run is reported as a script failure, got {:?}",
+            output.report.errors[0].message
+        );
+    }
+
+    #[test]
+    fn composition_survives_an_add_record_wider_than_its_messages() {
+        let elements = baseline_bearing_elements();
+        let outcome = ScriptOutcome {
+            messages: vec![ChatMessage::new(Role::System, "one message")],
+            added: vec![AddedBlock {
+                name: "prompts".into(),
+                source: "test".into(),
+                priority: 0,
+                element_index: Some(2),
+                message_count: 9,
+            }],
+            declared: Vec::new(),
+        };
+
+        let output = compose(
+            "focus",
+            outcome,
+            &elements,
+            &ContextConfig::default(),
+            &WordTokeniser,
+            &BTreeMap::new(),
+        );
+
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("one message")),
+            "the messages the account does cover are still composed"
         );
     }
 
