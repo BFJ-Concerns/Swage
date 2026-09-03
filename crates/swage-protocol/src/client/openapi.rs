@@ -49,16 +49,12 @@ pub fn document() -> Value {
 
 fn operation(route: &Route) -> Value {
     let parameters: Vec<Value> = route
-        .path_parameters()
-        .into_iter()
-        .map(|name| {
-            json!({
-                "name": name,
-                "in": "path",
-                "required": true,
-                "schema": {"type": "string", "format": "uuid"},
-            })
-        })
+        .path_parameters
+        .iter()
+        .map(|parameter| parameter_value(parameter.name, "path", true, parameter.kind))
+        .chain(route.query_parameters.iter().map(|parameter| {
+            parameter_value(parameter.name, "query", parameter.required, parameter.kind)
+        }))
         .collect();
     let mut responses = Map::new();
     responses.insert(
@@ -83,11 +79,30 @@ fn operation(route: &Route) -> Value {
     });
     if let Some(request) = route.request.as_ref() {
         operation["requestBody"] = json!({
-            "required": true,
+            "required": !route.request_optional,
             "content": {"application/json": {"schema": component_ref(request)}},
         });
     }
     operation
+}
+
+fn parameter_value(
+    name: &str,
+    location: &str,
+    required: bool,
+    kind: super::routes::ParameterType,
+) -> Value {
+    let mut schema =
+        Map::from_iter([(String::from("type"), Value::String(String::from("string")))]);
+    if let Some(format) = kind.openapi_format() {
+        schema.insert(String::from("format"), Value::String(String::from(format)));
+    }
+    json!({
+        "name": name,
+        "in": location,
+        "required": required,
+        "schema": schema,
+    })
 }
 
 fn component_ref(name: &str) -> Value {
@@ -162,6 +177,19 @@ mod tests {
         );
         assert_eq!(delete["parameters"][0]["name"], "id");
         assert_eq!(delete["parameters"][0]["schema"]["format"], "uuid");
+    }
+
+    #[test]
+    fn string_path_and_optional_query_parameters_render_from_route_metadata() {
+        let document = document();
+        let discover = &document["paths"]["/api/settings/providers/{id}/models"]["get"];
+        assert_eq!(discover["parameters"][0]["name"], "id");
+        assert_eq!(discover["parameters"][0]["in"], "path");
+        assert_eq!(discover["parameters"][0]["schema"]["type"], "string");
+        assert!(discover["parameters"][0]["schema"].get("format").is_none());
+        assert_eq!(discover["parameters"][1]["name"], "q");
+        assert_eq!(discover["parameters"][1]["in"], "query");
+        assert_eq!(discover["parameters"][1]["required"], false);
     }
 
     #[test]

@@ -56,28 +56,37 @@ impl WorktreeHost {
         }
         let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
         self.retained.lock().await.extend(paths.iter().cloned());
-        let owner_root = self.config.root.join(owner_id.to_string());
-        let claimed = paths
-            .into_iter()
-            .filter(|path| path.starts_with(&owner_root))
-            .collect::<HashSet<_>>();
-        if claimed.is_empty() || !owner_root.is_dir() {
-            return;
+        let mut claims = HashMap::<PathBuf, HashSet<PathBuf>>::new();
+        for path in paths {
+            let owner_root = path
+                .strip_prefix(&self.config.root)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .map(|owner| self.config.root.join(owner.as_os_str()))
+                .unwrap_or_else(|| self.config.root.join(owner_id.to_string()));
+            if path.starts_with(&owner_root) {
+                claims.entry(owner_root).or_default().insert(path);
+            }
         }
-        let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
-        let mut recorded = read_retained_placements(&marker).await;
-        recorded.extend(claimed);
-        let mut lines = recorded
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        lines.sort();
-        if let Err(error) = tokio::fs::write(&marker, lines.join("\n") + "\n").await {
-            tracing::warn!(
-                path = %marker.display(),
-                %error,
-                "could not claim the run's retained placements on disk; they survive only until this gateway stops"
-            );
+        for (owner_root, claimed) in claims {
+            if !owner_root.is_dir() {
+                continue;
+            }
+            let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
+            let mut recorded = read_retained_placements(&marker).await;
+            recorded.extend(claimed);
+            let mut lines = recorded
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            lines.sort();
+            if let Err(error) = tokio::fs::write(&marker, lines.join("\n") + "\n").await {
+                tracing::warn!(
+                    path = %marker.display(),
+                    %error,
+                    "could not claim the run's retained placements on disk; they survive only until this gateway stops"
+                );
+            }
         }
     }
 
@@ -560,7 +569,8 @@ mod tests {
         let alongside = host.provision(claimed_owner, 1, &repo).await.unwrap();
         let swept = host.provision(swept_owner, 0, &repo).await.unwrap();
 
-        host.retain(claimed_owner, &[claimed.to_string_lossy().into_owned()])
+        let terminal_run = Uuid::new_v4();
+        host.retain(terminal_run, &[claimed.to_string_lossy().into_owned()])
             .await;
         host.shutdown().await;
 

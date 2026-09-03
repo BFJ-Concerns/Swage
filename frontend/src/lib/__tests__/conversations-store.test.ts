@@ -151,6 +151,37 @@ describe("selectConversation", () => {
     expect(loadingDuringFetch).toBe(true);
     expect(store.isLoading).toBe(false);
   });
+
+  it("uses the fetched detail as authoritative after an off-screen partial response", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-a"),
+      makeSummary("conv-b"),
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-b"));
+    await store.selectConversation("conv-b");
+
+    store.appendAssistantMessage({
+      content: "Partial response",
+      timestamp: "2026-01-01T00:00:01Z",
+      turn_state: "failed",
+    }, "conv-a");
+
+    vi.mocked(api.getConversation).mockResolvedValueOnce({
+      ...makeDetail("conv-a"),
+      messages: [{
+        role: "assistant",
+        content: "Partial response",
+        timestamp: "2026-01-01T00:00:02Z",
+        turn_state: "failed",
+      }],
+    });
+    await store.selectConversation("conv-a");
+
+    expect(store.activeConversation?.messages).toHaveLength(1);
+    expect(store.activeConversation?.messages[0]?.timestamp).toBe("2026-01-01T00:00:02Z");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1056,12 +1056,40 @@
       },
       "CreatePageRequest": {
         "properties": {
+          "template_id": {
+            "default": null,
+            "description": "Seed the new page from a template of the same space. Absent creates a\nblank page. The seeded modules are the page's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string"
           }
         },
         "required": [
           "title"
+        ],
+        "type": "object"
+      },
+      "CreatePageTemplateRequest": {
+        "description": "Create a reusable page shape for a space, with its module rows in the\norder they will seed.",
+        "properties": {
+          "modules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PageTemplateModuleInput"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -1186,6 +1214,18 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      },
+      "DeletePageAnnotationResponse": {
+        "description": "Confirms that an annotation was removed.",
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
         ],
         "type": "object"
       },
@@ -2176,6 +2216,23 @@
             "format": "date-time",
             "type": "string"
           },
+          "forked_at": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "forked_from_template_id": {
+            "default": null,
+            "description": "The template this page was forked from, if any — the recorded origin\nof its seeded shape. Absent on a page created blank.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -2225,6 +2282,123 @@
         "required": [
           "id",
           "title",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "PageTemplateListResponse": {
+        "properties": {
+          "templates": {
+            "items": {
+              "$ref": "#/components/schemas/PageTemplateSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "templates"
+        ],
+        "type": "object"
+      },
+      "PageTemplateModuleInput": {
+        "properties": {
+          "kind": {
+            "default": null,
+            "description": "Module kind for the seeded instance (\"document\" first).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "PageTemplateModuleView": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "position",
+          "source"
+        ],
+        "type": "object"
+      },
+      "PageTemplateResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/PageTemplateModuleView"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "space_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "space_id",
+          "name",
+          "created_at",
+          "updated_at",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "PageTemplateSummary": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
           "updated_at"
         ],
         "type": "object"
@@ -4947,6 +5121,12 @@
               "null"
             ]
           },
+          "served_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "session_id": {
             "format": "uuid",
             "type": [
@@ -5331,59 +5511,6 @@
         ],
         "type": "string"
       },
-      "WorkflowPartialResult": {
-        "description": "A completed worker's output recovered from a run that never returned.",
-        "properties": {
-          "journal_entry_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "output": true,
-          "placement": {
-            "description": "Where the work was done, still on disk.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "journal_entry_id",
-          "seq",
-          "output"
-        ],
-        "type": "object"
-      },
-      "WorkflowPartialResults": {
-        "description": "The completed work a run that never returned left behind. The type is the\npartial marking: these outputs are the run's recoverable work, never its\nresult, and `reason` says what stopped the run from producing one.",
-        "properties": {
-          "reason": {
-            "type": "string"
-          },
-          "results": {
-            "items": {
-              "$ref": "#/components/schemas/WorkflowPartialResult"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "reason",
-          "results"
-        ],
-        "type": "object"
-      },
       "WorkflowRun": {
         "properties": {
           "args": true,
@@ -5467,16 +5594,12 @@
           "state": {
             "$ref": "#/components/schemas/WorkflowRunState"
           },
-          "terminal_account": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkflowRunTerminalAccount"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going."
+          "task": {
+            "description": "Opaque identity declared by the workflow script for grouping its runs.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5523,88 +5646,6 @@
           "wake_metrics"
         ],
         "type": "object"
-      },
-      "WorkflowRunEnding": {
-        "description": "How a run ended. Every ending path names itself here, so no reader has to\ninfer a run's end from silence or from the absence of a result.",
-        "oneOf": [
-          {
-            "description": "The script returned its result.",
-            "properties": {
-              "ending": {
-                "const": "returned",
-                "type": "string"
-              }
-            },
-            "required": [
-              "ending"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The script threw, or the engine failed the run.",
-            "properties": {
-              "ending": {
-                "const": "threw",
-                "type": "string"
-              },
-              "error": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "ending",
-              "error"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "An operator or a parent run cancelled it.",
-            "properties": {
-              "ending": {
-                "const": "cancelled",
-                "type": "string"
-              }
-            },
-            "required": [
-              "ending"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The working token allowance ran out and the run ended under\nwind-down rather than on its own terms.",
-            "properties": {
-              "ending": {
-                "const": "wound_down",
-                "type": "string"
-              },
-              "error": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "ending",
-              "error"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The gateway died with the run in flight and the run could not be\nresumed. The reason is why the resume was refused.",
-            "properties": {
-              "ending": {
-                "const": "interrupted_without_resume",
-                "type": "string"
-              },
-              "reason": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "ending",
-              "reason"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "WorkflowRunEvent": {
         "properties": {
@@ -5807,38 +5848,6 @@
           }
         ]
       },
-      "WorkflowRunTerminalAccount": {
-        "description": "The one terminal record of a run: what ended it, where every worker stood,\nand — when the script never returned — the completed work still recoverable\nfrom it.",
-        "properties": {
-          "ending": {
-            "$ref": "#/components/schemas/WorkflowRunEnding"
-          },
-          "partial_results": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkflowPartialResults"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Present exactly when the run ended without its script returning."
-          },
-          "settled_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "workers": {
-            "$ref": "#/components/schemas/WorkflowWorkerPartition"
-          }
-        },
-        "required": [
-          "ending",
-          "workers",
-          "settled_at"
-        ],
-        "type": "object"
-      },
       "WorkflowScript": {
         "properties": {
           "argument_contract": {
@@ -5947,145 +5956,6 @@
         ],
         "type": "object"
       },
-      "WorkflowWorkerAccount": {
-        "description": "One worker's standing in the run's terminal account.",
-        "properties": {
-          "agent_definition_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "journal_entry_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "placement": {
-            "description": "The directory the worker ran in — the worktree kept rather than torn\ndown when the run did not return, so its work is still on disk.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "seq": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "termination": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/WorkflowWorkerTermination"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Absent for a worker that settled on its own account."
-          }
-        },
-        "required": [
-          "journal_entry_id",
-          "seq"
-        ],
-        "type": "object"
-      },
-      "WorkflowWorkerPartition": {
-        "description": "Every worker the run dispatched, sorted by how it stood when the run\nended. A worker appears in exactly one list.",
-        "properties": {
-          "cut_short": {
-            "items": {
-              "$ref": "#/components/schemas/WorkflowWorkerAccount"
-            },
-            "type": "array"
-          },
-          "done": {
-            "items": {
-              "$ref": "#/components/schemas/WorkflowWorkerAccount"
-            },
-            "type": "array"
-          },
-          "failed": {
-            "items": {
-              "$ref": "#/components/schemas/WorkflowWorkerAccount"
-            },
-            "type": "array"
-          },
-          "unsettled": {
-            "items": {
-              "$ref": "#/components/schemas/WorkflowWorkerAccount"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "done",
-          "failed",
-          "cut_short",
-          "unsettled"
-        ],
-        "type": "object"
-      },
-      "WorkflowWorkerTermination": {
-        "description": "Why a worker stopped when it did not settle on its own account.\n\nShared contract: the run's terminal account partitions workers by it, and\na worker call's own record names the same cause, so \"the run ended me\" and\n\"I failed\" are never the same fact wearing one name.",
-        "oneOf": [
-          {
-            "description": "The worker's own failure, in the words its journal entry recorded.",
-            "properties": {
-              "cause": {
-                "const": "failed",
-                "type": "string"
-              },
-              "error": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "cause",
-              "error"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "The run's ending reached this worker before it settled. `detail`\ncarries the settling error the run wrote over it.",
-            "properties": {
-              "cause": {
-                "const": "cut_short",
-                "type": "string"
-              },
-              "detail": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "cause"
-            ],
-            "type": "object"
-          },
-          {
-            "description": "Nothing ever recorded an outcome for this worker — the run's end left\nno process alive to settle it.",
-            "properties": {
-              "cause": {
-                "const": "unsettled",
-                "type": "string"
-              }
-            },
-            "required": [
-              "cause"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "WorkspaceAttachmentListResponse": {
         "properties": {
           "workspaces": {
@@ -6189,6 +6059,562 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/conversations/{id}": {
+      "delete": {
+        "operationId": "delete_conversation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete a conversation."
+      },
+      "get": {
+        "operationId": "get_conversation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a conversation."
+      }
+    },
+    "/api/page-annotations/{annotation_id}": {
+      "delete": {
+        "operationId": "delete_page_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletePageAnnotationResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete a page annotation."
+      },
+      "post": {
+        "operationId": "update_page_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePageAnnotationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Update a page annotation."
+      }
+    },
+    "/api/page-templates/{template_id}": {
+      "get": {
+        "operationId": "get_page_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageTemplateResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a page template."
+      }
+    },
+    "/api/pages/{page_id}": {
+      "get": {
+        "operationId": "get_page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "page_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a page."
+      }
+    },
+    "/api/pages/{page_id}/annotations": {
+      "post": {
+        "operationId": "create_page_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "page_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePageAnnotationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a page annotation."
+      }
+    },
+    "/api/pages/{page_id}/modules": {
+      "post": {
+        "operationId": "write_page_module",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "page_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WritePageModuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageModuleView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Write a page module."
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "get_settings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read gateway settings."
+      },
+      "put": {
+        "operationId": "save_settings",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Save gateway settings."
+      }
+    },
+    "/api/settings/providers/{id}/models": {
+      "get": {
+        "operationId": "discover_provider_models",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDiscoveryResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Discover models for a configured provider."
+      },
+      "post": {
+        "operationId": "discover_draft_provider_models",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveProviderSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDiscoveryResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Discover models for draft provider settings."
+      }
+    },
+    "/api/settings/providers/{id}/sign-in": {
+      "delete": {
+        "operationId": "sign_out_provider",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSignInState"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Sign out a provider."
+      },
+      "get": {
+        "operationId": "get_provider_sign_in_state",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSignInState"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read provider sign-in state."
+      },
+      "post": {
+        "operationId": "start_provider_sign_in",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartProviderSignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartProviderSignInResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Start provider sign-in."
+      }
+    },
+    "/api/settings/restart": {
+      "post": {
+        "operationId": "restart_gateway",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartStatusResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Restart the gateway."
+      }
+    },
+    "/api/settings/restart-required": {
+      "get": {
+        "operationId": "get_restart_status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestartStatusResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read restart status."
+      }
+    },
     "/api/spaces": {
       "get": {
         "operationId": "list_spaces",
@@ -6334,6 +6760,254 @@
           }
         },
         "summary": "Update a space's name or description."
+      }
+    },
+    "/api/spaces/{space_id}/page-templates": {
+      "get": {
+        "operationId": "list_page_templates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "space_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageTemplateListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List page templates in a space."
+      },
+      "post": {
+        "operationId": "create_page_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "space_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePageTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageTemplateResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a page template in a space."
+      }
+    },
+    "/api/spaces/{space_id}/pages": {
+      "get": {
+        "operationId": "list_pages",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "space_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List pages in a space."
+      },
+      "post": {
+        "operationId": "create_page",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "space_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a page in a space."
+      }
+    },
+    "/api/spaces/{space_id}/sessions": {
+      "get": {
+        "operationId": "list_space_sessions",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "space_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List conversations in a space."
+      },
+      "post": {
+        "operationId": "create_space_session",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "space_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConversationRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a conversation in a space."
+      }
+    },
+    "/api/turns/{id}/context": {
+      "get": {
+        "operationId": "get_turn_context",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnContextResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a turn context report."
       }
     }
   }

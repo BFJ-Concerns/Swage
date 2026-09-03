@@ -49,6 +49,9 @@
     "create_page_request": {
       "$ref": "#/$defs/CreatePageRequest"
     },
+    "create_page_template_request": {
+      "$ref": "#/$defs/CreatePageTemplateRequest"
+    },
     "create_schedule_request": {
       "$ref": "#/$defs/CreateScheduleRequest"
     },
@@ -60,6 +63,9 @@
     },
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
+    },
+    "delete_page_annotation_response": {
+      "$ref": "#/$defs/DeletePageAnnotationResponse"
     },
     "effort_capability": {
       "$ref": "#/$defs/EffortCapability"
@@ -88,6 +94,12 @@
     "page_list": {
       "$ref": "#/$defs/PageListResponse"
     },
+    "page_template": {
+      "$ref": "#/$defs/PageTemplateResponse"
+    },
+    "page_template_list": {
+      "$ref": "#/$defs/PageTemplateListResponse"
+    },
     "post_workflow_run_event_request": {
       "$ref": "#/$defs/PostWorkflowRunEventRequest"
     },
@@ -108,6 +120,9 @@
     },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
+    },
+    "save_provider_settings": {
+      "$ref": "#/$defs/SaveProviderSettings"
     },
     "save_settings": {
       "$ref": "#/$defs/SaveSettingsRequest"
@@ -245,8 +260,12 @@
     "write_page_module_request",
     "create_page_annotation_request",
     "update_page_annotation_request",
+    "delete_page_annotation_response",
     "page",
     "page_list",
+    "create_page_template_request",
+    "page_template",
+    "page_template_list",
     "update_space_request",
     "space_list",
     "create_workspace_attachment_request",
@@ -271,7 +290,11 @@
     "skills",
     "save_settings",
     "model_discovery",
+    "save_provider_settings",
     "restart_status",
+    "provider_sign_in_state",
+    "start_provider_sign_in_request",
+    "start_provider_sign_in_response",
     "create_attachment_request",
     "queued_attachment",
     "attachment_list",
@@ -288,9 +311,6 @@
     "schedule_run",
     "schedule_run_list",
     "trigger_schedule_response",
-    "start_provider_sign_in_request",
-    "start_provider_sign_in_response",
-    "provider_sign_in_state",
     "create_workflow_script_request",
     "update_workflow_script_request",
     "workflow_script_list",
@@ -1352,12 +1372,40 @@
     "CreatePageRequest": {
       "type": "object",
       "properties": {
+        "template_id": {
+          "description": "Seed the new page from a template of the same space. Absent creates a\nblank page. The seeded modules are the page's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
         "title": {
           "type": "string"
         }
       },
       "required": [
         "title"
+      ]
+    },
+    "CreatePageTemplateRequest": {
+      "description": "Create a reusable page shape for a space, with its module rows in the\norder they will seed.",
+      "type": "object",
+      "properties": {
+        "modules": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PageTemplateModuleInput"
+          }
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
       ]
     },
     "CreateScheduleRequest": {
@@ -1482,6 +1530,18 @@
       },
       "required": [
         "path"
+      ]
+    },
+    "DeletePageAnnotationResponse": {
+      "description": "Confirms that an annotation was removed.",
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
       ]
     },
     "DeliveryRoutingRequest": {
@@ -2472,6 +2532,23 @@
           "type": "string",
           "format": "date-time"
         },
+        "forked_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
+        "forked_from_template_id": {
+          "description": "The template this page was forked from, if any — the recorded origin\nof its seeded shape. Absent on a page created blank.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid",
+          "default": null
+        },
         "id": {
           "type": "string",
           "format": "uuid"
@@ -2521,6 +2598,123 @@
       "required": [
         "id",
         "title",
+        "updated_at"
+      ]
+    },
+    "PageTemplateListResponse": {
+      "type": "object",
+      "properties": {
+        "templates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageTemplateSummary"
+          }
+        }
+      },
+      "required": [
+        "templates"
+      ]
+    },
+    "PageTemplateModuleInput": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Module kind for the seeded instance (\"document\" first).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
+    "PageTemplateModuleView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "position",
+        "source"
+      ]
+    },
+    "PageTemplateResponse": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PageTemplateModuleView"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "space_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "space_id",
+        "name",
+        "created_at",
+        "updated_at",
+        "modules"
+      ]
+    },
+    "PageTemplateSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
         "updated_at"
       ]
     },
@@ -5243,6 +5437,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "served_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "session_id": {
           "type": [
             "string",
@@ -5626,59 +5826,6 @@
         "failed"
       ]
     },
-    "WorkflowPartialResult": {
-      "description": "A completed worker's output recovered from a run that never returned.",
-      "type": "object",
-      "properties": {
-        "journal_entry_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "output": true,
-        "placement": {
-          "description": "Where the work was done, still on disk.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "journal_entry_id",
-        "seq",
-        "output"
-      ]
-    },
-    "WorkflowPartialResults": {
-      "description": "The completed work a run that never returned left behind. The type is the\npartial marking: these outputs are the run's recoverable work, never its\nresult, and `reason` says what stopped the run from producing one.",
-      "type": "object",
-      "properties": {
-        "reason": {
-          "type": "string"
-        },
-        "results": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkflowPartialResult"
-          }
-        }
-      },
-      "required": [
-        "reason",
-        "results"
-      ]
-    },
     "WorkflowRun": {
       "type": "object",
       "properties": {
@@ -5763,15 +5910,11 @@
         "state": {
           "$ref": "#/$defs/WorkflowRunState"
         },
-        "terminal_account": {
-          "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WorkflowRunTerminalAccount"
-            },
-            {
-              "type": "null"
-            }
+        "task": {
+          "description": "Opaque identity declared by the workflow script for grouping its runs.",
+          "type": [
+            "string",
+            "null"
           ]
         }
       },
@@ -5817,88 +5960,6 @@
         "run",
         "journal",
         "wake_metrics"
-      ]
-    },
-    "WorkflowRunEnding": {
-      "description": "How a run ended. Every ending path names itself here, so no reader has to\ninfer a run's end from silence or from the absence of a result.",
-      "oneOf": [
-        {
-          "description": "The script returned its result.",
-          "type": "object",
-          "properties": {
-            "ending": {
-              "type": "string",
-              "const": "returned"
-            }
-          },
-          "required": [
-            "ending"
-          ]
-        },
-        {
-          "description": "The script threw, or the engine failed the run.",
-          "type": "object",
-          "properties": {
-            "ending": {
-              "type": "string",
-              "const": "threw"
-            },
-            "error": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "ending",
-            "error"
-          ]
-        },
-        {
-          "description": "An operator or a parent run cancelled it.",
-          "type": "object",
-          "properties": {
-            "ending": {
-              "type": "string",
-              "const": "cancelled"
-            }
-          },
-          "required": [
-            "ending"
-          ]
-        },
-        {
-          "description": "The working token allowance ran out and the run ended under\nwind-down rather than on its own terms.",
-          "type": "object",
-          "properties": {
-            "ending": {
-              "type": "string",
-              "const": "wound_down"
-            },
-            "error": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "ending",
-            "error"
-          ]
-        },
-        {
-          "description": "The gateway died with the run in flight and the run could not be\nresumed. The reason is why the resume was refused.",
-          "type": "object",
-          "properties": {
-            "ending": {
-              "type": "string",
-              "const": "interrupted_without_resume"
-            },
-            "reason": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "ending",
-            "reason"
-          ]
-        }
       ]
     },
     "WorkflowRunEvent": {
@@ -6102,38 +6163,6 @@
         }
       ]
     },
-    "WorkflowRunTerminalAccount": {
-      "description": "The one terminal record of a run: what ended it, where every worker stood,\nand — when the script never returned — the completed work still recoverable\nfrom it.",
-      "type": "object",
-      "properties": {
-        "ending": {
-          "$ref": "#/$defs/WorkflowRunEnding"
-        },
-        "partial_results": {
-          "description": "Present exactly when the run ended without its script returning.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WorkflowPartialResults"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "settled_at": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "workers": {
-          "$ref": "#/$defs/WorkflowWorkerPartition"
-        }
-      },
-      "required": [
-        "ending",
-        "workers",
-        "settled_at"
-      ]
-    },
     "WorkflowScript": {
       "type": "object",
       "properties": {
@@ -6240,145 +6269,6 @@
         "gate_suppressions",
         "events_posted",
         "events_pending"
-      ]
-    },
-    "WorkflowWorkerAccount": {
-      "description": "One worker's standing in the run's terminal account.",
-      "type": "object",
-      "properties": {
-        "agent_definition_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "journal_entry_id": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "placement": {
-          "description": "The directory the worker ran in — the worktree kept rather than torn\ndown when the run did not return, so its work is still on disk.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "seq": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
-        },
-        "termination": {
-          "description": "Absent for a worker that settled on its own account.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/WorkflowWorkerTermination"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "journal_entry_id",
-        "seq"
-      ]
-    },
-    "WorkflowWorkerPartition": {
-      "description": "Every worker the run dispatched, sorted by how it stood when the run\nended. A worker appears in exactly one list.",
-      "type": "object",
-      "properties": {
-        "cut_short": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkflowWorkerAccount"
-          }
-        },
-        "done": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkflowWorkerAccount"
-          }
-        },
-        "failed": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkflowWorkerAccount"
-          }
-        },
-        "unsettled": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/WorkflowWorkerAccount"
-          }
-        }
-      },
-      "required": [
-        "done",
-        "failed",
-        "cut_short",
-        "unsettled"
-      ]
-    },
-    "WorkflowWorkerTermination": {
-      "description": "Why a worker stopped when it did not settle on its own account.\n\nShared contract: the run's terminal account partitions workers by it, and\na worker call's own record names the same cause, so \"the run ended me\" and\n\"I failed\" are never the same fact wearing one name.",
-      "oneOf": [
-        {
-          "description": "The worker's own failure, in the words its journal entry recorded.",
-          "type": "object",
-          "properties": {
-            "cause": {
-              "type": "string",
-              "const": "failed"
-            },
-            "error": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "cause",
-            "error"
-          ]
-        },
-        {
-          "description": "The run's ending reached this worker before it settled. `detail`\ncarries the settling error the run wrote over it.",
-          "type": "object",
-          "properties": {
-            "cause": {
-              "type": "string",
-              "const": "cut_short"
-            },
-            "detail": {
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "cause"
-          ]
-        },
-        {
-          "description": "Nothing ever recorded an outcome for this worker — the run's end left\nno process alive to settle it.",
-          "type": "object",
-          "properties": {
-            "cause": {
-              "type": "string",
-              "const": "unsettled"
-            }
-          },
-          "required": [
-            "cause"
-          ]
-        }
       ]
     },
     "WorkspaceAttachmentListResponse": {

@@ -68,9 +68,9 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     let parent_run_id: Option<String> = row.get(2)?;
     let script_version_id: Option<String> = row.get(4)?;
     let script_id: Option<String> = row.get(5)?;
-    let final_output: Option<String> = row.get(14)?;
-    let handover: Option<String> = row.get(15)?;
-    let completed_at: Option<String> = row.get(19)?;
+    let final_output: Option<String> = row.get(15)?;
+    let handover: Option<String> = row.get(16)?;
+    let completed_at: Option<String> = row.get(20)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
         space_id: uuid(row.get(1)?)?,
@@ -81,34 +81,25 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
         script_name: row.get(6)?,
         script_version: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
         carrying_skill: row.get(8)?,
-        source: row.get(9)?,
-        source_hash: row.get(10)?,
-        args: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                11,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?,
-        budget: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| {
+        task: row.get(9)?,
+        source: row.get(10)?,
+        source_hash: row.get(11)?,
+        args: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 12,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        state: row.get(13)?,
+        budget: serde_json::from_str(&row.get::<_, String>(13)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                13,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state: row.get(14)?,
         final_output: final_output
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    14,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?,
-        handover: handover
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(|error| {
@@ -118,38 +109,37 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(16)?,
-        engine_version: row.get(17)?,
-        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(20)?).map_err(
-            |error| {
+        handover: handover
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    20,
+                    16,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            },
-        )?,
-        dispatch_bound_task_definition_ids: serde_json::from_str(&row.get::<_, String>(21)?)
-            .map_err(|error| {
+            })?,
+        error_message: row.get(17)?,
+        engine_version: row.get(18)?,
+        dispatch_bound_agent_ids: serde_json::from_str(&row.get::<_, String>(21)?).map_err(
+            |error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     21,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            })?,
-        wake_at: row.get::<_, Option<String>>(22)?.map(time).transpose()?,
-        inherited_worker_placement: row
-            .get::<_, Option<String>>(23)?
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
+            },
+        )?,
+        dispatch_bound_task_definition_ids: serde_json::from_str(&row.get::<_, String>(22)?)
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    23,
+                    22,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
             })?,
-        workflow_call_tools: row
+        wake_at: row.get::<_, Option<String>>(23)?.map(time).transpose()?,
+        inherited_worker_placement: row
             .get::<_, Option<String>>(24)?
             .map(|value| serde_json::from_str(&value))
             .transpose()
@@ -160,7 +150,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        terminal_account: row
+        workflow_call_tools: row
             .get::<_, Option<String>>(25)?
             .map(|value| serde_json::from_str(&value))
             .transpose()
@@ -171,7 +161,18 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                     Box::new(error),
                 )
             })?,
-        created_at: time(row.get(18)?)?,
+        terminal_account: row
+            .get::<_, Option<String>>(26)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    26,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        created_at: time(row.get(19)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
 }
@@ -182,7 +183,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    carrying_skill, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json";
+    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
@@ -389,7 +390,7 @@ impl WorkflowStore for SqliteStorage {
             .map(|tools| serde_json::to_string(&tools))
             .transpose()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'running', ?14, ?15, ?16, ?17, ?18, ?19)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, task, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'running', ?15, ?16, ?17, ?18, ?19, ?20)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.task, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -562,7 +563,7 @@ impl WorkflowStore for SqliteStorage {
         self.with_conn(move |conn| {
             conn.execute(
                 "UPDATE workflow_runs SET terminal_account_json=?2 \
-                 WHERE id=?1 AND terminal_account_json IS NULL",
+                 WHERE id=?1 AND (terminal_account_json IS NULL OR state='running')",
                 params![id.to_string(), account],
             )?;
             Ok(())
@@ -746,6 +747,7 @@ impl WorkflowStore for SqliteStorage {
         })
         .await
     }
+
 }
 
 #[cfg(test)]
@@ -779,6 +781,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some("return null".into()),
             source_hash: Uuid::new_v4().to_string(),
             args: serde_json::Value::Null,
@@ -867,6 +870,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: None,
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
@@ -894,6 +898,7 @@ mod tests {
                 inline_workflow_name: Some("compiled-workflow".into()),
                 inline_workflow_version: Some(3),
                 carrying_skill: None,
+                task: None,
                 source: Some("return 3".into()),
                 source_hash: "inline-hash".into(),
                 args: serde_json::json!({}),
@@ -1013,6 +1018,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),

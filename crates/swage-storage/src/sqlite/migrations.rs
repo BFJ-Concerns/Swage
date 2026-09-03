@@ -93,6 +93,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
         ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
+        ("059_page_templates", CREATE_PAGE_TEMPLATE_TABLES),
     ]
 }
 
@@ -139,6 +140,35 @@ CREATE TABLE IF NOT EXISTS page_modules (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_page_modules_page ON page_modules(page_id);
+";
+
+/// Page templates — the reusable module shapes a space keeps, and the
+/// lineage a page carries from the template it was forked from. A template's
+/// modules seed the new page's own rows at creation; the fork is a real page
+/// from birth, so lineage is a recorded origin and never a live projection
+/// (neither side's later edits reach the other). Templates are space-local.
+const CREATE_PAGE_TEMPLATE_TABLES: &str = "
+CREATE TABLE IF NOT EXISTS page_templates (
+    id          TEXT NOT NULL PRIMARY KEY,
+    space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_templates_space ON page_templates(space_id);
+CREATE TABLE IF NOT EXISTS page_template_modules (
+    id          TEXT NOT NULL PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES page_templates(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_page_template_modules_template
+    ON page_template_modules(template_id);
+ALTER TABLE pages ADD COLUMN forked_from_template_id TEXT REFERENCES page_templates(id) ON DELETE SET NULL;
+ALTER TABLE pages ADD COLUMN forked_at TEXT;
 ";
 
 /// Delegated-child usage aggregated onto the delegating turn: a billing
@@ -198,6 +228,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         inline_workflow_name TEXT,
         inline_workflow_version INTEGER,
         carrying_skill       TEXT,
+        task                 TEXT,
         source               TEXT,
         source_hash          TEXT NOT NULL,
         args_json            TEXT NOT NULL,
@@ -225,7 +256,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, inline_workflow_id,
-        inline_workflow_name, inline_workflow_version, carrying_skill,
+        inline_workflow_name, inline_workflow_version, carrying_skill, task,
         source, source_hash, args_json,
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
@@ -235,7 +266,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     )
     SELECT
         id, space_id, script_version_id, inline_workflow_id,
-        inline_workflow_name, inline_workflow_version, NULL,
+        inline_workflow_name, inline_workflow_version, NULL, NULL,
         source, source_hash, args_json,
         budget_json, state, final_output_json, NULL, error_message, engine_version,
         created_at, completed_at, parent_run_id, parent_seq,
@@ -1054,6 +1085,7 @@ const COMPLETE_SCHEMA: &str = "
         inline_workflow_name TEXT,
         inline_workflow_version INTEGER,
         carrying_skill      TEXT,
+        task                TEXT,
         source              TEXT,
         source_hash         TEXT NOT NULL,
         args_json           TEXT NOT NULL,
