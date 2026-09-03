@@ -417,9 +417,9 @@ describe("App", () => {
       first,
       second,
     ]);
-    vi.mocked(conversationsApi.getConversation)
-      .mockResolvedValueOnce(makeConversationDetail({ id: second.id }))
-      .mockResolvedValueOnce(makeConversationDetail({ id: first.id }));
+    vi.mocked(conversationsApi.getConversation).mockImplementation(async (id) =>
+      makeConversationDetail({ id }),
+    );
 
     setPath(`/conversations/${first.id}`);
     window.history.pushState(null, "", `/conversations/${second.id}`);
@@ -437,7 +437,9 @@ describe("App", () => {
     await settleUi();
 
     expect(window.location.pathname).toBe(`/conversations/${first.id}`);
-    expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1),
+    );
     expect(websocketHarness.client.connect).toHaveBeenCalledWith(first.id);
   });
 
@@ -1165,22 +1167,24 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain("Reply for B");
     expect(document.querySelector(".action.stop")).toBeNull();
 
+    // A completes while B remains selected. The real App wiring must settle
+    // A, release its retained socket, and leave B's connection usable.
+    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-a" }, "conv-a");
+    await settleUi();
+
+    expect(aClient.disconnect).toHaveBeenCalledOnce();
+    expect(bClient.disconnect).not.toHaveBeenCalled();
+    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for B");
+    expect(document.querySelector(".action.send")).not.toBeNull();
+
     const refreshedConversationButtons = document.querySelectorAll<HTMLButtonElement>(
       ".conversation-select-btn",
     );
     flushSync(() => refreshedConversationButtons[0]!.click());
     await settleUi();
+
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Reply for A while B is selected",
-    );
-    expect(document.querySelector(".action.stop")).not.toBeNull();
-
-    websocketHarness.fireEvent({ type: "token", content: " continues" }, "conv-a");
-    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-a" }, "conv-a");
-    await settleUi();
-
-    expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Reply for A while B is selected continues",
     );
     expect(document.querySelector(".action.stop")).toBeNull();
   });

@@ -64,7 +64,11 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent, conversationId?: string): void;
-  reconcileAfterReconnect(recoveredTurnGeneration: number): void;
+  reconcileAfterReconnect(
+    recoveredTurnGeneration: number,
+    conversationId?: string | null,
+    recoveredMessages?: MessageView[],
+  ): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
   cancelTurn(): void;
 }
@@ -95,7 +99,7 @@ export interface StreamingStoreOptions {
       >;
       turn_id?: string;
       tool_calls?: ToolCallView[];
-    }): void;
+    }, conversationId?: string | null): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
@@ -216,18 +220,13 @@ export function createStreamingStore(
     turn_id?: string,
     tool_calls?: ToolCallView[],
   ): void {
-    // The conversation store projects only its selected conversation. The
-    // durable gateway response remains authoritative off-screen; never append
-    // an owner’s completion to whichever conversation happens to be visible.
-    if (conversationId !== currentConversationId()) return;
-
     options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
       turn_state,
       ...(turn_id === undefined ? {} : { turn_id }),
       ...(tool_calls === undefined ? {} : { tool_calls }),
-    });
+    }, conversationId);
   }
 
   // Commits any accumulated content to the conversation store. Called when a
@@ -522,10 +521,14 @@ export function createStreamingStore(
       }
     },
 
-    reconcileAfterReconnect(recoveredTurnGeneration: number): void {
-      const ownerId = currentConversationId();
+    reconcileAfterReconnect(
+      recoveredTurnGeneration: number,
+      conversationId = currentConversationId(),
+      recoveredMessages = options?.conversationStore?.activeConversation?.messages,
+    ): void {
+      const ownerId = conversationId;
       const stream = streams.get(ownerId);
-      const lastMessage = options?.conversationStore?.activeConversation?.messages.at(-1);
+      const lastMessage = recoveredMessages?.at(-1);
       if (
         !stream ||
         !get(stream.isStreamingStore) ||
@@ -648,7 +651,8 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
-    reconcileAfterReconnect: (turnGeneration) => base.reconcileAfterReconnect(turnGeneration),
+    reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages) =>
+      base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages),
     cancelTurn: () => base.cancelTurn(),
 
     startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void {

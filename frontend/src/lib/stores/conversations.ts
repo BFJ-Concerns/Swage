@@ -36,7 +36,7 @@ export interface ConversationStore {
     >;
     turn_id?: string;
     tool_calls?: MessageView["tool_calls"];
-  }): void;
+  }, conversationId?: string | null): void;
   refreshActiveConversation(): Promise<void>;
 }
 
@@ -88,6 +88,22 @@ export function createConversationStore(): ConversationStore {
     );
   }
 
+  const offscreenMessages = new Map<string, MessageView[]>();
+
+  function mergeOffscreenMessages(conversation: ConversationDetail): ConversationDetail {
+    const pending = offscreenMessages.get(conversation.id) ?? [];
+    if (pending.length === 0) return conversation;
+    const messages = [...conversation.messages];
+    for (const message of pending) {
+      const present = messages.some((existing) =>
+        (message.turn_id && existing.turn_id === message.turn_id) ||
+        (existing.timestamp === message.timestamp && existing.role === message.role),
+      );
+      if (!present) messages.push(message);
+    }
+    return { ...conversation, messages };
+  }
+
   function appendMessage(
     message: {
       role: MessageView["role"];
@@ -97,27 +113,40 @@ export function createConversationStore(): ConversationStore {
       turn_id?: string;
       tool_calls?: MessageView["tool_calls"];
     },
+    conversationId?: string | null,
   ): void {
     const activeConversation = get(activeConversationStore);
-    if (!activeConversation) return;
+    const ownerId = conversationId ?? activeConversation?.id;
+    if (!ownerId) return;
+
+    const appendedMessage: MessageView = {
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+      turn_state: message.turn_state,
+      ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
+      ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
+    };
+
+    if (activeConversation?.id !== ownerId) {
+      offscreenMessages.set(ownerId, [
+        ...(offscreenMessages.get(ownerId) ?? []),
+        appendedMessage,
+      ]);
+      updateConversationSummary(ownerId, message);
+      return;
+    }
 
     activeConversationStore.set({
       ...activeConversation,
       last_activity: message.timestamp,
       messages: [
         ...activeConversation.messages,
-        {
-          role: message.role,
-          content: message.content,
-          timestamp: message.timestamp,
-          turn_state: message.turn_state,
-          ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
-          ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
-        },
+        appendedMessage,
       ],
     });
 
-    updateConversationSummary(activeConversation.id, message);
+    updateConversationSummary(ownerId, message);
   }
 
   return {
@@ -155,7 +184,7 @@ export function createConversationStore(): ConversationStore {
     async selectConversation(id) {
       isLoadingStore.set(true);
       try {
-        activeConversationStore.set(await api.getConversation(id));
+        activeConversationStore.set(mergeOffscreenMessages(await api.getConversation(id)));
       } finally {
         isLoadingStore.set(false);
       }
@@ -224,7 +253,7 @@ export function createConversationStore(): ConversationStore {
       });
     },
 
-    appendAssistantMessage(message) {
+    appendAssistantMessage(message, conversationId) {
       appendMessage({
         role: "assistant",
         content: message.content,
@@ -232,7 +261,7 @@ export function createConversationStore(): ConversationStore {
         turn_state: message.turn_state,
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
-      });
+      }, conversationId);
     },
 
     async refreshActiveConversation() {

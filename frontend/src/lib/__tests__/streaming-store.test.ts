@@ -29,6 +29,7 @@ import {
   createStreamingStore,
   withConversationAutoCreate,
 } from "../stores/streaming";
+import type { ServerEvent } from "../types";
 
 // ---------------------------------------------------------------------------
 // Mock dependency factories
@@ -60,6 +61,7 @@ function createMockConnectionStore() {
   return {
     sendMessage: vi.fn(),
     cancelTurn: vi.fn(),
+    setStreamActive: vi.fn(),
   };
 }
 
@@ -269,7 +271,10 @@ describe("turn_complete", () => {
 
     expect(store.streamFor?.("conv-a").isStreaming).toBe(false);
     expect(store.streamFor?.("conv-b").streamedContent).toBe("");
-    expect(appendAssistantMessage).not.toHaveBeenCalled();
+    expect(appendAssistantMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "Answer for A", turn_id: "turn-a" }),
+      "conv-a",
+    );
   });
 
   it("keeps concurrent turns in their owning conversation projections", () => {
@@ -302,6 +307,7 @@ describe("turn_complete", () => {
     store.handleServerEvent({ type: "turn_complete", turn_id: "turn-b" }, "conv-b");
     expect(appendAssistantMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ content: "B reply", turn_id: "turn-b" }),
+      "conv-b",
     );
 
     activeConversation = { id: "conv-a", messages: [] };
@@ -310,6 +316,7 @@ describe("turn_complete", () => {
 
     expect(appendAssistantMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({ content: "A first and last", turn_id: "turn-a" }),
+      "conv-a",
     );
     expect(connection.sendMessage).toHaveBeenLastCalledWith(
       "conv-b",
@@ -482,6 +489,38 @@ describe("error events", () => {
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("partial answer");
+  });
+
+  const offscreenTerminalEvents: ServerEvent[] = [
+    { type: "error", code: "provider_error", message: "stopped" },
+    { type: "output_schema_failed", turn_id: "turn-a", attempts: 1, errors: [] },
+    { type: "shutdown", reason: "stopped" },
+  ];
+
+  it.each(offscreenTerminalEvents)("settles an off-screen partial response with its owning conversation for %o", (event) => {
+    let activeConversation = { id: "conv-a", messages: [] };
+    const appendAssistantMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage,
+      },
+    });
+
+    store.startTurn("Question for A");
+    store.handleServerEvent({ type: "token", content: "Partial A" }, "conv-a");
+    activeConversation = { id: "conv-b", messages: [] };
+    store.handleServerEvent(event, "conv-a");
+
+    expect(appendAssistantMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "Partial A", turn_state: "failed" }),
+      "conv-a",
+    );
+    expect(store.streamFor?.("conv-a").streamedContent).toBe("");
+    expect(store.streamFor?.("conv-a").isStreaming).toBe(false);
   });
 
   it("does not push an empty assistant message when no tokens arrived", () => {
@@ -1079,9 +1118,13 @@ describe("withConversationAutoCreate", () => {
 
     return {
       store,
+      base,
       connection,
       createConversation,
-      settleCreate: (id: string | null) => settleCreate(id),
+      settleCreate: (id: string | null) => {
+        if (id) conversation.activeConversation.id = id;
+        settleCreate(id);
+      },
     };
   }
 
@@ -1097,7 +1140,7 @@ describe("withConversationAutoCreate", () => {
   });
 
   it("creates a conversation first when none is active, then starts the turn", async () => {
-    const { store, connection, createConversation, settleCreate } =
+    const { store, base, connection, createConversation, settleCreate } =
       createWrappedStore(() => false);
 
     store.startTurn("first message", "model-a", "researcher", "high");
@@ -1109,11 +1152,13 @@ describe("withConversationAutoCreate", () => {
     settleCreate("conv-9");
     await vi.waitFor(() =>
       expect(connection.sendMessage).toHaveBeenCalledWith(
-        "test-conversation",
+        "conv-9",
         "first message",
         "model-a",
       ),
     );
+    expect(base.streamFor?.("conv-9").isStreaming).toBe(true);
+    expect(connection.setStreamActive).toHaveBeenCalledWith("conv-9", true);
   });
 
   it("reports streaming during the creation window and ignores a second send", async () => {

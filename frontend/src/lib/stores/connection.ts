@@ -4,7 +4,7 @@
 // connection status for the UI indicator and manages connect/disconnect
 // as the active conversation changes.
 
-import { fromStore, get, writable } from "svelte/store";
+import { fromStore, writable } from "svelte/store";
 
 import type { ConnectionStatus, ServerEvent } from "../types";
 import type { MessageAttachment } from "../protocol/MessageAttachment";
@@ -31,10 +31,10 @@ export interface ConnectionStore {
 export interface ConnectionStoreOptions {
   // Injectable factory for testing — defaults to createWebSocketClient().
   wsClientFactory?: () => WebSocketClient;
-  // Called when a dropped connection successfully reconnects. Typically bound
-  // to conversationStore.refreshActiveConversation() at wiring time so the
-  // active conversation is re-fetched from HTTP after any state drift.
-  onReconnect?: () => void;
+  // Called when a dropped connection successfully reconnects. The owner is
+  // carried through so an off-screen conversation is reconciled rather than
+  // whichever conversation happens to be selected at that moment.
+  onReconnect?: (conversationId: string) => void;
 }
 
 export function createConnectionStore(
@@ -74,12 +74,12 @@ export function createConnectionStore(
       for (const handler of serverEventHandlers) handler(event, conversationId);
     });
     client.onStatusChange((newStatus) => {
+      const wasReconnecting = statuses.get(conversationId) === "reconnecting";
       statuses.set(conversationId, newStatus);
-      if (conversationId !== selectedConversationId) return;
-      const previousStatus = get(statusStore);
-      if (previousStatus === "reconnecting" && newStatus === "connected") {
-        options?.onReconnect?.();
+      if (wasReconnecting && newStatus === "connected") {
+        options?.onReconnect?.(conversationId);
       }
+      if (conversationId !== selectedConversationId) return;
       errorMessageStore.set(
         newStatus === "error"
           ? "Connection failed. This conversation may already be open in another tab."
