@@ -139,6 +139,9 @@ pub enum ProviderProtocol {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 pub struct ProviderSettings {
     pub protocol: ProviderProtocol,
+    #[serde(default)]
+    #[ts(optional)]
+    pub worker_staleness_threshold_ms: Option<u64>,
     pub base_url: Option<String>,
     pub api_key_secret_ref: Option<String>,
     pub api_key_env: Option<String>,
@@ -150,6 +153,9 @@ pub struct ProviderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SaveProviderSettings {
     pub protocol: ProviderProtocol,
+    #[serde(default)]
+    #[ts(optional)]
+    pub worker_staleness_threshold_ms: Option<u64>,
     pub base_url: Option<String>,
     pub api_key_secret_ref: Option<String>,
     pub api_key_env: Option<String>,

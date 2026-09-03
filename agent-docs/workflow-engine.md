@@ -79,6 +79,10 @@ override, but `undefined` at the call site falls back to the default.
 |---|---|---|
 | `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. |
+| `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `effort`, `cwd`, `isolation`, `label`. |
+| `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
+| `staleness(worker)` | `Promise<StalenessReading>` | Returns `{stale, idleMs, thresholdMs, route}` from a journalled reading. |
+| `close(worker)` | `Promise<void>` | Closes a held worker. Repeated calls with the same JS worker object are no-ops. |
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
@@ -102,6 +106,51 @@ not fall back. A completed `agent_call` result records `served_model`, the
 catalogue model that actually served the call. Continuation calls ignore
 `fallbackModel` and never make a fallback attempt; they use the worker's
 persisted model selection, including a fallback selected at creation.
+
+### Held workers
+
+Use a held worker when successive tasks need the same worker's accumulated
+conversation:
+
+```js
+const reviewer = await session({
+  agent: "reviewer",
+  skills: ["source-checking"],
+  model: "careful",
+});
+
+await send(reviewer, "Inspect the evidence.");
+const reading = await staleness(reviewer);
+if (reading.stale !== true) {
+  await send(reviewer, "Now assess the conclusion.", { maxAttempts: 2 });
+}
+await close(reviewer);
+```
+
+`session()` fixes `agent`, `task`, `tools`, `skills`, `model`, `effort`,
+`cwd`, and `isolation` at creation. The host resolves an omitted model and
+effort at that point, so later configuration changes do not move the worker to
+a different route. Script defaults contribute only creation fields when
+opening a worker; per-turn defaults such as `maxAttempts` do not make
+`session()` fail.
+
+`send()` accepts only `schema`, `maxAttempts`, `timeoutMs`, and `label` for the
+new turn. A worker takes one turn at a time; a concurrent `send()` is refused
+rather than queued. Each successful turn updates the worker's continuation
+token and returns the turn output. Sending to a closed worker is refused.
+Requested grants are fixed, but effective authority is re-derived at every
+turn.
+
+`staleness()` reports idle time since the last completed turn and compares it
+with `worker_staleness_threshold_ms` on the worker's provider route. Test
+`reading.stale === true` before treating the worker as stale. `null` means the
+route has no threshold and the verdict is unknown; it does not mean fresh.
+The reading is journalled, so replay returns the value on which the original
+script branched.
+
+Call `close()` on the success path so the journal records intent. Run-ending
+return, throw, and cancellation also close every worker still open. Parking is
+not a run-ending path: a parked run retains its workers for replay and resume.
 
 ### Composition bounds
 

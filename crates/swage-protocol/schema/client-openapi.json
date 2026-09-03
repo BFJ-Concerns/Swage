@@ -2548,6 +2548,15 @@
               "string",
               "null"
             ]
+          },
+          "worker_staleness_threshold_ms": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2858,6 +2867,15 @@
             "default": null,
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "worker_staleness_threshold_ms": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           }
