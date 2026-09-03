@@ -347,6 +347,7 @@ mod tests {
             space.id,
             CreatePageRequest {
                 title: "Daily delivery".into(),
+                template_id: None,
             },
         )
         .await
@@ -428,6 +429,7 @@ mod tests {
             other_space.id,
             CreatePageRequest {
                 title: "Other page".into(),
+                template_id: None,
             },
         )
         .await
