@@ -325,9 +325,17 @@ async fn run_turn_inner(
     let mut tool_count = 0u32;
     for attempt in 0..=request.agent_config.max_output_retries {
         response_text.clear();
+        // A retry corrects the shape of the previous answer. The user request
+        // and every tool call it already made stay in the retained thread, so
+        // resubmitting it here would repeat its side effects.
+        let input = if attempt == 0 {
+            request.user_message.clone()
+        } else {
+            "Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema.".to_string()
+        };
         let mut provider_request = json!({
             "threadId": codex_thread_id,
-            "input": [{"type":"text", "text":request.user_message}],
+            "input": [{"type":"text", "text":input}],
             "sandboxPolicy": sandbox_policy,
             "approvalPolicy": "on-request",
             "cwd": request.agent_config.working_directory,
@@ -1201,8 +1209,8 @@ mod tests {
                 "receive":{"method":"thread/start"},
                 "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
             },
-            {"receive":{"method":"turn/start"},"send":invalid_turn("first")},
-            {"receive":{"method":"turn/start"},"send":invalid_turn("second")}
+            {"receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"scripted turn"}]}},"send":invalid_turn("first")},
+            {"receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema."}]}},"send":invalid_turn("second")}
         ]});
         let config = AgentConfig::new("gateway")
             .with_workspace("/work", vec!["/work".into()])
