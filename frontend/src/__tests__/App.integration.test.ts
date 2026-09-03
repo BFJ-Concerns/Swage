@@ -1135,6 +1135,15 @@ describe("App", () => {
     expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".action.send")).not.toBeNull();
 
+    // A's socket remains live after B becomes the visible conversation. Its
+    // event must retain that ownership at the App wiring seam rather than be
+    // attributed to whichever conversation happens to be selected.
+    websocketHarness.fireEvent({ type: "token", content: " while B is selected" }, "conv-a");
+    await settleUi();
+    expect(document.querySelector(".message-display")?.textContent).not.toContain(
+      "while B is selected",
+    );
+
     const BTextarea = document.querySelector<HTMLTextAreaElement>("textarea");
     flushSync(() => {
       BTextarea!.value = "Message for B";
@@ -1161,14 +1170,18 @@ describe("App", () => {
     );
     flushSync(() => refreshedConversationButtons[0]!.click());
     await settleUi();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for A");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Reply for A while B is selected",
+    );
     expect(document.querySelector(".action.stop")).not.toBeNull();
 
     websocketHarness.fireEvent({ type: "token", content: " continues" }, "conv-a");
     websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-a" }, "conv-a");
     await settleUi();
 
-    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for A continues");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Reply for A while B is selected continues",
+    );
     expect(document.querySelector(".action.stop")).toBeNull();
   });
 
