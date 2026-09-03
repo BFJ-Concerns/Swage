@@ -37,6 +37,8 @@ export interface ConversationStore {
     turn_id?: string;
     tool_calls?: MessageView["tool_calls"];
   }, conversationId?: string | null): void;
+  /** Install a fetched snapshot only when its owner is still selected. */
+  replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
 }
 
@@ -88,20 +90,10 @@ export function createConversationStore(): ConversationStore {
     );
   }
 
-  const offscreenMessages = new Map<string, MessageView[]>();
-
-  function mergeOffscreenMessages(conversation: ConversationDetail): ConversationDetail {
-    const pending = offscreenMessages.get(conversation.id) ?? [];
-    if (pending.length === 0) return conversation;
-    const messages = [...conversation.messages];
-    for (const message of pending) {
-      const present = messages.some((existing) =>
-        (message.turn_id && existing.turn_id === message.turn_id) ||
-        (existing.timestamp === message.timestamp && existing.role === message.role),
-      );
-      if (!present) messages.push(message);
+  function replaceActiveConversationIfCurrent(conversation: ConversationDetail): void {
+    if (get(activeConversationStore)?.id === conversation.id) {
+      activeConversationStore.set(conversation);
     }
-    return { ...conversation, messages };
   }
 
   function appendMessage(
@@ -129,10 +121,6 @@ export function createConversationStore(): ConversationStore {
     };
 
     if (activeConversation?.id !== ownerId) {
-      offscreenMessages.set(ownerId, [
-        ...(offscreenMessages.get(ownerId) ?? []),
-        appendedMessage,
-      ]);
       updateConversationSummary(ownerId, message);
       return;
     }
@@ -184,7 +172,10 @@ export function createConversationStore(): ConversationStore {
     async selectConversation(id) {
       isLoadingStore.set(true);
       try {
-        activeConversationStore.set(mergeOffscreenMessages(await api.getConversation(id)));
+        // The server is authoritative for an off-screen conversation. Terminal
+        // stream events update its summary only; retaining synthetic messages
+        // here duplicates partial errors that have no stable turn identity.
+        activeConversationStore.set(await api.getConversation(id));
       } finally {
         isLoadingStore.set(false);
       }
@@ -264,12 +255,16 @@ export function createConversationStore(): ConversationStore {
       }, conversationId);
     },
 
+    replaceActiveConversationIfCurrent(conversation) {
+      replaceActiveConversationIfCurrent(conversation);
+    },
+
     async refreshActiveConversation() {
       // Called after WebSocket reconnect to reconcile any state changes
       // that happened while the connection was down.
       const activeConversation = get(activeConversationStore);
       if (!activeConversation) return;
-      activeConversationStore.set(await api.getConversation(activeConversation.id));
+      replaceActiveConversationIfCurrent(await api.getConversation(activeConversation.id));
     },
   };
 }

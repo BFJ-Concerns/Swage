@@ -135,6 +135,23 @@ describe("disconnect", () => {
 
     expect(store.status).toBe("disconnected");
   });
+
+  it("deselects only the selected client and retains an off-screen stream", () => {
+    const a = createMockWsClient();
+    const b = createMockWsClient();
+    const clients = [a, b];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+    });
+
+    store.connectTo("conv-a");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+    store.deselect?.();
+
+    expect(a.disconnect).not.toHaveBeenCalled();
+    expect(b.disconnect).toHaveBeenCalledOnce();
+  });
 });
 
 describe("sendMessage", () => {

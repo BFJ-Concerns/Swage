@@ -17,6 +17,8 @@ export interface ConnectionStore {
   connectTo(conversationId: string): void;
   /** Mark whether a conversation needs its client retained off-screen. */
   setStreamActive?(conversationId: string, active: boolean): void;
+  /** Release the selected client if it is not retained by an active stream. */
+  deselect?(): void;
   disconnect(): void;
   sendMessage(
     conversationId: string,
@@ -126,6 +128,13 @@ export function createConnectionStore(
       } else {
         streamingConversations.delete(conversationId);
       }
+      releaseInactiveClients();
+    },
+
+    deselect(): void {
+      selectedConversationId = null;
+      errorMessageStore.set(null);
+      statusStore.set("disconnected");
       releaseInactiveClients();
     },
 

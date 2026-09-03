@@ -1104,7 +1104,16 @@ describe("App", () => {
     vi.mocked(conversationsApi.getConversation)
       .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }))
       .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }))
-      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }));
+      .mockResolvedValueOnce(makeConversationDetail({
+        id: "conv-a",
+        messages: [{
+          role: "assistant",
+          content: "Reply for A while B is selected",
+          timestamp: "2026-04-07T12:04:00Z",
+          turn_state: "completed",
+          turn_id: "turn-a",
+        }],
+      }));
 
     setPath("/conversations/conv-a");
     component = mount(App, { target: document.body });
@@ -1186,6 +1195,119 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Reply for A while B is selected",
     );
+    expect(document.querySelector(".action.stop")).toBeNull();
+  });
+
+  it("returns to a still-streaming conversation after clearing the route without replacing its client", async () => {
+    const defaultSpace = makeSpace();
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-a" }),
+      makeConversationSummary({ id: "conv-b" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }));
+
+    setPath("/conversations/conv-a");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "Keep streaming";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    websocketHarness.fireEvent({ type: "token", content: "First A token" }, "conv-a");
+    await settleUi();
+
+    const aClient = websocketHarness.clientFor("conv-a")!;
+    aClient.connect.mockClear();
+    const buttons = document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn");
+    flushSync(() => buttons[1]!.click());
+    await settleUi();
+    flushSync(() => document.querySelector<HTMLButtonElement>(".new-btn")!.click());
+    await settleUi();
+    flushSync(() => document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[0]!.click());
+    await settleUi();
+
+    expect(websocketHarness.clientFor("conv-a")).toBe(aClient);
+    expect(aClient.connect).not.toHaveBeenCalled();
+    expect(aClient.disconnect).not.toHaveBeenCalled();
+    websocketHarness.fireEvent({ type: "token", content: " Second A token" }, "conv-a");
+    await settleUi();
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "First A token Second A token",
+    );
+    expect(document.querySelector(".action.stop")).not.toBeNull();
+  });
+
+  it("reconciles an off-screen reconnect with its owner without changing B", async () => {
+    const defaultSpace = makeSpace();
+    let resolveRecovery!: (conversation: ConversationDetail) => void;
+    const recovery = new Promise<ConversationDetail>((resolve) => {
+      resolveRecovery = resolve;
+    });
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-a" }),
+      makeConversationSummary({ id: "conv-b" }),
+    ]);
+    vi.mocked(conversationsApi.getConversation)
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }))
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }))
+      .mockReturnValueOnce(recovery)
+      .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }));
+
+    setPath("/conversations/conv-a");
+    component = mount(App, { target: document.body });
+    await settleUi();
+    websocketHarness.fireStatus("connected");
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "A needs recovery";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    websocketHarness.fireEvent({ type: "token", content: "Partial A" }, "conv-a");
+    await settleUi();
+
+    flushSync(() => document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[1]!.click());
+    await settleUi();
+    const bClient = websocketHarness.clientFor("conv-b")!;
+    bClient.disconnect.mockClear();
+    websocketHarness.fireStatus("reconnecting", "conv-a");
+    websocketHarness.fireStatus("connected", "conv-a");
+    await settleUi();
+
+    expect(document.querySelector(".message-display")?.textContent).not.toContain("Partial A");
+    expect(document.querySelector(".action.stop")).toBeNull();
+    expect(document.querySelector(".action.send")).not.toBeNull();
+
+    expect(bClient.disconnect).not.toHaveBeenCalled();
+
+    // Return to A before its reconnect snapshot resolves. The ordinary
+    // selection fetch is older; the recovery must replace it when it lands.
+    flushSync(() => document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[0]!.click());
+    await settleUi();
+    resolveRecovery(makeConversationDetail({
+      id: "conv-a",
+      messages: [{
+        role: "assistant",
+        content: "Recovered A",
+        timestamp: "2026-04-07T12:04:00Z",
+        turn_state: "completed",
+        turn_id: "turn-a",
+      }],
+    }));
+    await settleUi();
+    expect(document.querySelector(".message-display")?.textContent).toContain("Recovered A");
     expect(document.querySelector(".action.stop")).toBeNull();
   });
 
