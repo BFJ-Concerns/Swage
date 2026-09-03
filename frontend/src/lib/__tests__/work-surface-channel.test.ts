@@ -91,4 +91,22 @@ describe("work-surface channel", () => {
     expect(FakeSocket.last).toBe(second);
     vi.useRealTimers();
   });
+
+  it("notifies subscribers only after a reconnect succeeds", () => {
+    vi.useFakeTimers();
+    installFakeSocket();
+    const channel = createWorkSurfaceChannel({ wsBaseUrl: "ws://gateway" });
+    const reconnected = vi.fn();
+    channel.onReconnect(reconnected);
+
+    const first = FakeSocket.last!;
+    first.onopen?.();
+    expect(reconnected).not.toHaveBeenCalled();
+    first.onclose?.();
+    vi.advanceTimersByTime(1_000);
+    FakeSocket.last?.onopen?.();
+    expect(reconnected).toHaveBeenCalledTimes(1);
+    channel.close();
+    vi.useRealTimers();
+  });
 });

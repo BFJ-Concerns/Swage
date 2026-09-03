@@ -1146,6 +1146,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some("return null".into()),
             source_hash: source_hash.into(),
             args: Value::Null,

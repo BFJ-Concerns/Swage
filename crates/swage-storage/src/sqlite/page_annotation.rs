@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewPageAnnotation, PageAnnotation};
+use crate::model::{NewAuditEvent, NewPageAnnotation, PageAnnotation};
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::page::{parse_dt, parse_uuid};
 use crate::store::PageAnnotationStore;
@@ -145,13 +145,45 @@ impl PageAnnotationStore for SqliteStorage {
         .await
     }
 
-    async fn delete_page_annotation(&self, id: Uuid) -> Result<(), StorageError> {
+    async fn delete_page_annotation_with_audit(
+        &self,
+        annotation: PageAnnotation,
+        audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError> {
         self.with_conn(move |conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let deleted = tx.execute(
                 "DELETE FROM page_annotations WHERE id = ?1",
-                params![id.to_string()],
+                params![annotation.id.to_string()],
             )?;
-            Ok(())
+            if deleted == 0 {
+                return Ok(false);
+            }
+
+            let now_str = Utc::now().to_rfc3339();
+            tx.execute(
+                "UPDATE pages SET updated_at = ?1 WHERE id = ?2",
+                params![&now_str, annotation.page_id.to_string()],
+            )?;
+            let metadata_json = serde_json::to_string(&audit_event.metadata)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            tx.execute(
+                "INSERT INTO audit_events (
+                    id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    audit_event.id,
+                    audit_event.session_id.map(|id| id.to_string()),
+                    audit_event.entity_kind,
+                    audit_event.entity_id,
+                    audit_event.event_kind,
+                    audit_event.summary,
+                    metadata_json,
+                    now_str,
+                ],
+            )?;
+            tx.commit()?;
+            Ok(true)
         })
         .await
     }

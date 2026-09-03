@@ -14,6 +14,7 @@ import type {
   ConversationResponse,
 } from "../types";
 import * as generated from "../protocol/client";
+import { ApiError } from "./error";
 
 // Base URL prepended to every request. Defaults to "" so requests resolve to
 // the same origin — the Vite dev proxy then forwards /api/* to the gateway.
@@ -50,7 +51,7 @@ async function request(
   const response = await fetch(`${baseUrl}${path}`, init);
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${method} ${path}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
 
   return response;
