@@ -153,7 +153,8 @@ impl EffectiveWorkflow {
     }
 }
 
-fn carried_workflows(
+async fn carried_workflows(
+    state: &AppState,
     space_id: Uuid,
     skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
@@ -174,7 +175,14 @@ fn carried_workflows(
                 ) {
                     Ok(workflow) => workflows.push(workflow),
                     Err(error) => {
-                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                        record_carried_workflow_exclusion(
+                            state,
+                            space_id,
+                            &skill.name,
+                            name,
+                            &error,
+                        )
+                        .await;
                     }
                 }
             }
@@ -225,12 +233,43 @@ fn carried_workflows(
             match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
                 Ok(workflow) => workflows.push(workflow),
                 Err(error) => {
-                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    record_carried_workflow_exclusion(state, space_id, &skill.name, name, &error)
+                        .await;
                 }
             }
         }
     }
     Ok(workflows)
+}
+
+async fn record_carried_workflow_exclusion(
+    state: &AppState,
+    space_id: Uuid,
+    skill_name: &str,
+    workflow_name: &str,
+    error: &str,
+) {
+    tracing::warn!(%error, skill = skill_name, workflow = workflow_name, "excluding carried workflow with invalid metadata");
+    if let Err(audit_error) = state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "workflow_script".into(),
+            entity_id: format!("{skill_name}/{workflow_name}"),
+            event_kind: "excluded".into(),
+            summary: "Excluded carried workflow with invalid metadata".into(),
+            metadata: serde_json::json!({
+                "space_id": space_id,
+                "skill": skill_name,
+                "workflow": workflow_name,
+                "error": error,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(%audit_error, skill = skill_name, workflow = workflow_name, "could not audit carried workflow exclusion");
+    }
 }
 
 async fn discover_skills_for_space(
@@ -289,7 +328,8 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    Ok(carried_workflows(space_id, skills)?
+    Ok(carried_workflows(state, space_id, skills)
+        .await?
         .into_iter()
         .find(|workflow| workflow.name == name))
 }
@@ -354,7 +394,7 @@ async fn list_effective_workflows(
     // Carried workflows arrive in skill precedence order (the discovery
     // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
-    for workflow in carried_workflows(space_id, skills)? {
+    for workflow in carried_workflows(state, space_id, skills).await? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
@@ -553,9 +593,35 @@ fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudge
 }
 
 const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
+const TERMINAL_BUDGET_WRITE_ATTEMPTS: usize = 3;
 
 fn is_positional_journal_entry(entry: &WorkflowJournalRecord) -> bool {
     entry.kind != "terminal_budget"
+}
+
+async fn complete_terminal_budget_entry(
+    state: &AppState,
+    entry_id: Uuid,
+    reading: Value,
+) -> Result<(), String> {
+    let mut last_error = None;
+    for _ in 0..TERMINAL_BUDGET_WRITE_ATTEMPTS {
+        match state
+            .complete_workflow_journal_entry(entry_id, reading.clone())
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    let error = last_error.expect("the bounded retry loop always attempts a write");
+    state
+        .fail_workflow_journal_entry(entry_id, &error)
+        .await
+        .map_err(|failure| {
+            format!("{error}; could not mark terminal budget entry failed: {failure}")
+        })?;
+    Err(error)
 }
 
 async fn record_terminal_budget(
@@ -587,11 +653,7 @@ async fn record_terminal_budget(
                 .unwrap_or_else(|| "recorded terminal budget failure".into())),
             "started" => {
                 let reading = terminal_budget_reading(&*accounting.lock().await, budget);
-                state
-                    .complete_workflow_journal_entry(entry.id, reading.clone())
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                complete_terminal_budget_entry(state, entry.id, reading).await
             }
             other => Err(format!("unknown terminal budget entry status: {other}")),
         };
@@ -616,11 +678,7 @@ async fn record_terminal_budget(
         })
         .await
         .map_err(|error| error.to_string())?;
-    state
-        .complete_workflow_journal_entry(intent.id, reading)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    complete_terminal_budget_entry(state, intent.id, reading).await
 }
 
 fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
@@ -1282,7 +1340,7 @@ async fn run_ephemeral_agent_call(
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
-    let (session_id, thread_id) = match request.session.as_ref() {
+    let (session_id, thread_id, persisted_skills) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
         // workers — an id from anywhere else (another run, an interactive
@@ -1328,6 +1386,41 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            let persisted_skills = session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills"))
+                .map(|skills| serde_json::from_value::<Vec<String>>(skills.clone()))
+                .transpose()
+                .map_err(|error| {
+                    format!(
+                        "AgentCallError: continued session has invalid requested skills: {error}"
+                    )
+                })?
+                .unwrap_or_default();
+            if let Some(requested_skills) = request.skills.as_ref()
+                && requested_skills != &persisted_skills
+            {
+                return Err(
+                    "AgentCallError: skills cannot be changed on a continued session; select them when creating the worker"
+                        .into(),
+                );
+            }
+            if !persisted_skills.is_empty() {
+                let space = state
+                    .space_store
+                    .get(space_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                crate::turn::resolve_requested_skills_for_agent(
+                    &space.slug,
+                    &session.agent_id,
+                    Some(crate::turn::resolve_swage_root(state)),
+                    &persisted_skills,
+                )
+                .map_err(|error| format!("AgentCallError: {error}"))?;
+            }
             if request.tools.is_some() {
                 let persisted_tools = session
                     .metadata
@@ -1366,7 +1459,7 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            (session.id, thread.id)
+            (session.id, thread.id, Some(persisted_skills))
         }
         None => {
             let agent_id = request
@@ -1448,7 +1541,7 @@ async fn run_ephemeral_agent_call(
             )
             .await
             .map_err(|error| error.to_string())?;
-            (session.id, thread.id)
+            (session.id, thread.id, None)
         }
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -1462,7 +1555,7 @@ async fn run_ephemeral_agent_call(
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
-        skills: request.skills.clone(),
+        skills: persisted_skills.or_else(|| request.skills.clone()),
     };
     // Boxed: the turn future carries the whole composed input and would
     // otherwise push this call's future past the large-future lint.
@@ -4478,11 +4571,11 @@ pub async fn update_script(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    if resolve_workflow_by_id(&state, id, None)
+    let workflow = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
-        .is_some_and(|workflow| workflow.immutable)
-    {
+        .ok_or_else(|| ApiError::not_found("workflow script", id))?;
+    if workflow.immutable {
         return Err(ApiError::conflict(
             "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
@@ -5753,6 +5846,16 @@ mod tests {
             !list.scripts.iter().any(|script| script.name == "invalid"),
             "the malformed carried workflow must be excluded: {list:?}"
         );
+        let audit = storage
+            .list_audit_events()
+            .await
+            .expect("carried-workflow audit records");
+        assert!(audit.iter().any(|event| {
+            event.entity_kind == "workflow_script"
+                && event.event_kind == "excluded"
+                && event.metadata["skill"] == "invalid-meta"
+                && event.metadata["workflow"] == "invalid"
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5855,6 +5958,29 @@ mod tests {
         assert_eq!(run.carrying_skill.as_deref(), Some("research"));
         assert_eq!(run.source.as_deref(), Some(embedded));
         assert_eq!(run.source_hash, source_hash(embedded));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn updating_an_absent_workflow_script_returns_not_found() {
+        let (state, _) = workflow_test_state();
+        let missing = Uuid::new_v4();
+
+        let error = update_script(
+            State(state),
+            Path(missing),
+            Json(UpdateWorkflowScriptRequest {
+                description: Some("still absent".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("an absent workflow script must remain absent");
+
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::NotFound
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8320,6 +8446,15 @@ mod tests {
         let worker_directory = tempfile::tempdir().expect("worker directory");
         grant_workspace(&storage, space.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
+        let skill_dir = swage_home
+            .path()
+            .join("spaces/default/skills/workflow-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Workflow specialist\n---\nUse the persisted workflow specialist skill.\n",
+        )
+        .expect("write workflow skill");
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
@@ -8417,7 +8552,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
-                skills: None,
+                skills: Some(vec!["workflow-specialist".into()]),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -8459,6 +8594,13 @@ mod tests {
                 .and_then(|metadata| metadata.get(crate::turn::DISPATCH_BOUND_METADATA_KEY))
                 .and_then(Value::as_array),
             Some(&vec![Value::String("lead".into())]),
+        );
+        assert_eq!(
+            worker_session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills")),
+            Some(&serde_json::json!(["workflow-specialist"])),
         );
 
         // Revoke shell after the first worker turn. The continuation must
@@ -8622,6 +8764,10 @@ mod tests {
             .join("\n");
         assert!(second_request.contains("restate the brief"));
         assert!(second_request.contains("restated: gather the sources"));
+        assert!(
+            second_request.contains("Use the persisted workflow specialist skill."),
+            "the continued turn must compose the persisted skill selection: {second_request}"
+        );
 
         drop(tx);
         task.await.expect("host loop");
@@ -14838,6 +14984,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        let mut events = state.broadcast.subscribe();
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
@@ -14868,7 +15015,16 @@ mod tests {
             .into_iter()
             .find(|entry| entry.kind == "terminal_budget")
             .expect("terminal budget intent");
-        assert_eq!(terminal.status, "started");
+        assert_eq!(terminal.status, "failed");
+        let event = loop {
+            if let ServerEvent::WorkflowEntryCompleted { event } =
+                events.recv().await.expect("terminal journal broadcast")
+                && event.entry.id == terminal.id
+            {
+                break event;
+            }
+        };
+        assert_eq!(event.entry.status, WorkflowJournalEntryStatus::Failed);
     }
 
     #[tokio::test(flavor = "multi_thread")]
