@@ -892,7 +892,7 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_inner(scenario, dispatcher, permissions, effort, false).await
+        run_scripted_turn_inner(scenario, dispatcher, permissions, effort, false, None).await
     }
 
     async fn run_scripted_turn_with_audit_failure(
@@ -906,7 +906,31 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_inner(scenario, dispatcher, permissions, None, fail_audit_writes).await
+        run_scripted_turn_inner(
+            scenario,
+            dispatcher,
+            permissions,
+            None,
+            fail_audit_writes,
+            None,
+        )
+        .await
+    }
+
+    async fn run_scripted_turn_with_schema(
+        scenario: Value,
+        schema: Value,
+    ) -> Result<OutboundMessage, AgentError> {
+        run_scripted_turn_inner(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+            None,
+            false,
+            Some(schema),
+        )
+        .await
+        .0
     }
 
     async fn run_scripted_turn_inner(
@@ -915,6 +939,7 @@ mod tests {
         permissions: PermissionConfig,
         effort: Option<ResolvedEffort>,
         fail_audit_writes: bool,
+        output_schema: Option<Value>,
     ) -> (
         Result<OutboundMessage, AgentError>,
         Vec<Value>,
@@ -964,6 +989,11 @@ mod tests {
             .await
         });
         let (event_tx, mut events) = mpsc::unbounded_channel();
+        let mut agent_config =
+            AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]);
+        if let Some(schema) = output_schema {
+            agent_config = agent_config.with_output_schema(schema, 0);
+        }
         let request = CodexTurnRequest {
             session_id,
             thread_id: thread.id,
@@ -973,7 +1003,7 @@ mod tests {
             effort,
             user_message: "scripted turn".to_string(),
             assembled_context: Vec::new(),
-            agent_config: AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+            agent_config,
             permissions,
             dispatcher: Arc::new(dispatcher),
             event_tx,
@@ -1005,6 +1035,37 @@ mod tests {
             json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}}),
             json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}),
         ]
+    }
+
+    #[tokio::test]
+    async fn codex_output_schema_uses_the_last_valid_json_value() {
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"Draft:\n```json\n{\"answer\":\"draft\"}\n```\nFinal: {\"answer\":\"done\"}"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}
+                ]
+            }
+        ]});
+        let result = run_scripted_turn_with_schema(
+            scenario,
+            json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+        )
+        .await
+        .expect("the final schema-valid Codex value should win");
+
+        assert_eq!(result.structured_output, Some(json!({"answer": "done"})));
     }
 
     #[tokio::test]

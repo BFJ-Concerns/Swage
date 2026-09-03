@@ -5,7 +5,7 @@
 //! text so schema validation can choose the final value that fulfils its
 //! contract.
 
-/// Return every non-overlapping object or array that starts in the response.
+/// Return every non-overlapping JSON value that starts in the response.
 ///
 /// Markdown fences are not syntax here: JSON grammar recognises their contents
 /// directly. Once a complete candidate is found, its interior is skipped so a
@@ -17,7 +17,11 @@ pub fn extract_json_values(text: &str) -> Vec<serde_json::Value> {
         let Some(start) = text[offset..]
             .char_indices()
             .find_map(|(index, character)| {
-                matches!(character, '{' | '[').then_some(offset + index)
+                matches!(
+                    character,
+                    '{' | '[' | '"' | '-' | '0'..='9' | 't' | 'f' | 'n'
+                )
+                .then_some(offset + index)
             })
         else {
             break;
@@ -153,6 +157,22 @@ mod tests {
             vec![
                 serde_json::json!({"phase": "draft"}),
                 serde_json::json!({"phase": "final"}),
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_every_json_value_kind() {
+        assert_eq!(
+            extract_json_values("values: \"done\" true false null -2 42 3.5e2"),
+            vec![
+                serde_json::json!("done"),
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::Value::Null,
+                serde_json::json!(-2),
+                serde_json::json!(42),
+                serde_json::json!(350.0),
             ]
         );
     }
