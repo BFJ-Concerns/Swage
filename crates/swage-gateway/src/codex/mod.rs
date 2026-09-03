@@ -411,7 +411,7 @@ async fn run_turn_inner(
                             if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
                                 let _ = request.event_tx.send(AgentEvent::ProviderReasoningCaptured {
                                     turn_id: request.turn_id,
-                                    round: 0,
+                                    round: attempt as usize + 1,
                                     content: delta.to_string(),
                                     details: None,
                                 });
@@ -1200,6 +1200,7 @@ mod tests {
         let invalid_turn = |turn_id: &str| {
             vec![
                 json!({"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":turn_id}}}),
+                json!({"jsonrpc":"2.0","method":"item/reasoning/textDelta","params":{"delta":"reasoning"}}),
                 json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}}),
                 json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":turn_id,"status":"completed"}}}),
             ]
@@ -1248,6 +1249,17 @@ mod tests {
                 ..
             }
         )));
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ProviderReasoningCaptured { round, .. } => Some(*round),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "reasoning must remain attributed to the provider turn that emitted it"
+        );
     }
 
     #[tokio::test]
