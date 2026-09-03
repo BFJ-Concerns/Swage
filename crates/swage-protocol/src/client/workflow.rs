@@ -230,6 +230,8 @@ pub struct WorkflowRun {
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
     pub carrying_skill: Option<String>,
+    /// Opaque identity declared by the workflow script for grouping its runs.
+    pub task: Option<String>,
     /// Source retained for runs whose workflow was not a saved script version.
     pub source: Option<String>,
     /// SHA-256 of the exact source executed by this run.
@@ -298,6 +300,7 @@ pub struct WorkflowAgentCallDetail {
     pub turn_id: Option<Uuid>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub served_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -319,6 +322,7 @@ pub enum WorkflowJournalResult {
         input_tokens: u64,
         output_tokens: u64,
         working_directory: Option<String>,
+        served_model: Option<String>,
         session_id: Option<Uuid>,
         thread_id: Option<Uuid>,
         turn_id: Option<Uuid>,

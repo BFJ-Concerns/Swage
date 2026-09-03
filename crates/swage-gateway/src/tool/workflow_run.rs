@@ -300,10 +300,13 @@ mod tests {
         assert_eq!(detail.run.source.as_deref(), Some(source));
         assert_eq!(detail.run.source_hash, expected_hash);
 
-        let crate::error::Json(list) =
-            crate::workflow::list_runs(axum::extract::State(state), crate::error::Path(space.id))
-                .await
-                .expect("list runs");
+        let crate::error::Json(list) = crate::workflow::list_runs(
+            axum::extract::State(state),
+            crate::error::Path(space.id),
+            axum::extract::Query(crate::workflow::WorkflowRunListQuery::default()),
+        )
+        .await
+        .expect("list runs");
         let listed = list
             .runs
             .iter()

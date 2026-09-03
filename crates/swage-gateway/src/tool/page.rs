@@ -269,6 +269,9 @@ impl Tool for PageWriteTool {
                 space_id,
                 CreatePageRequest {
                     title: title.to_string(),
+                    // The tool creates blank pages; forking from a template
+                    // is the surface's affordance.
+                    template_id: None,
                 },
             )
             .await
