@@ -10374,6 +10374,18 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        let base_commit = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("read repository base")
+                .stdout,
+        )
+        .expect("base commit is UTF-8")
+        .trim()
+        .to_string();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let space = storage.get_or_create_default().await.unwrap();
         grant_workspace(storage.as_ref(), space.id, &repo).await;
@@ -10477,9 +10489,33 @@ mod tests {
                 .map(std::path::PathBuf::from)
                 .expect("worker call records its host-resolved directory")
         };
+        let completion_for = |prompt: &str| {
+            journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call" && entry.request["prompt"] == prompt)
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result.get("worktree"))
+                .cloned()
+                .map(serde_json::from_value::<swage_workflow::WorktreeCompletion>)
+                .transpose()
+                .expect("worktree completion record is well formed")
+                .expect("isolated worker call persists its worktree completion")
+        };
         let first_path = path_for("write first-marker");
         let second_path = path_for("write second-marker");
         let unchanged_path = path_for("leave worktree unchanged");
+        for prompt in ["write first-marker", "write second-marker"] {
+            let completion = completion_for(prompt);
+            assert_eq!(completion.base_commit, base_commit);
+            assert_eq!(completion.tip_commit, base_commit);
+            assert!(completion.changed);
+            assert!(!completion.removed);
+        }
+        let unchanged_completion = completion_for("leave worktree unchanged");
+        assert_eq!(unchanged_completion.base_commit, base_commit);
+        assert_eq!(unchanged_completion.tip_commit, base_commit);
+        assert!(!unchanged_completion.changed);
+        assert!(unchanged_completion.removed);
         assert!(
             first_path.join("first-marker").exists(),
             "the first marker remains inside its changed worktree"
