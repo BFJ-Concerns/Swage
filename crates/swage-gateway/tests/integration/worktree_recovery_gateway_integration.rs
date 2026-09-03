@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
-use std::{collections::HashSet, os::unix::fs::PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
-use swage_gateway::worktree::{WorktreeConfig, WorktreeHost};
+use swage_gateway::worktree::{WorktreeConfig, WorktreeHost, WorktreeRecoveryClaims};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -96,7 +96,7 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
         ),
     );
     let recovered = WorktreeHost::new(WorktreeConfig { root: root.clone() })
-        .recover(&HashSet::new())
+        .recover(&WorktreeRecoveryClaims::default())
         .await
         .unwrap();
     let inspection_order = tokio::fs::read_to_string(&command_log).await.unwrap();

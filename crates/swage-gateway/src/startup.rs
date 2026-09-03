@@ -359,14 +359,11 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
 
 /// Recover crash-stranded worktrees after durable workflow state is available.
 ///
-/// Workflow runs that the wake loop can replay retain their durable placement
-/// directories; all other registered gateway worktrees are reclaimed.
+/// Workflow runs that can replay retain their owner directories. Finalised
+/// changed worker paths also remain available for later integration.
 async fn recover_worktrees_after_crash(state: &crate::state::AppState) -> Result<usize, String> {
-    let replayable_worktree_owners = state.replayable_worktree_owner_ids().await?;
-    state
-        .worktree_host
-        .recover(&replayable_worktree_owners)
-        .await
+    let claims = state.worktree_recovery_claims().await?;
+    state.worktree_host.recover(&claims).await
 }
 
 async fn create_voice_provider(
@@ -1085,7 +1082,7 @@ mod tests {
     };
     use swage_storage::{
         SqliteStorage,
-        model::NewWorkflowRun,
+        model::{NewWorkflowJournalIntent, NewWorkflowRun},
         store::{AuditStore, SpaceStore, Storage, WorkflowStore},
     };
     use tokio::net::TcpListener;
@@ -1095,7 +1092,7 @@ mod tests {
     struct RecordedEvents(Arc<Mutex<Vec<String>>>);
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn startup_recovery_reclaims_terminal_and_retains_replayable_worktree_owners() {
+    async fn startup_recovery_retains_replayable_and_finalised_changed_worktrees() {
         let fixture = tempfile::tempdir().expect("fixture");
         let repo = fixture.path().join("repo");
         std::fs::create_dir(&repo).expect("repository directory");
@@ -1180,6 +1177,34 @@ mod tests {
             .update_workflow_run_state(terminal.id, "failed", None, None, Some("test failure"))
             .await
             .expect("fail run");
+        let failed_with_result = storage
+            .create_workflow_run(new_run("startup-recovery-failed-result"))
+            .await
+            .expect("failed workflow run with result");
+        storage
+            .update_workflow_run_state(
+                failed_with_result.id,
+                "failed",
+                None,
+                None,
+                Some("failure after worker completion"),
+            )
+            .await
+            .expect("fail run after worker completion");
+        let completed_with_result = storage
+            .create_workflow_run(new_run("startup-recovery-completed-result"))
+            .await
+            .expect("completed workflow run with result");
+        storage
+            .update_workflow_run_state(
+                completed_with_result.id,
+                "completed",
+                Some(Value::Null),
+                None,
+                None,
+            )
+            .await
+            .expect("complete run with worker result");
         let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
@@ -1204,13 +1229,81 @@ mod tests {
             .provision(terminal.id, 0, &repo)
             .await
             .expect("provision terminal worktree");
+        let failed_result_worktree = state
+            .worktree_host
+            .provision(failed_with_result.id, 0, &repo)
+            .await
+            .expect("provision failed-run result worktree");
+        let completed_result_worktree = state
+            .worktree_host
+            .provision(completed_with_result.id, 0, &repo)
+            .await
+            .expect("provision completed-run result worktree");
+        std::fs::write(failed_result_worktree.path.join("failed-change"), "changed")
+            .expect("change failed-run worktree");
+        std::fs::write(
+            completed_result_worktree.path.join("completed-change"),
+            "changed",
+        )
+        .expect("change completed-run worktree");
+        let failed_completion = state
+            .worktree_host
+            .finish(failed_with_result.id, 0)
+            .await
+            .expect("finalise failed-run worktree");
+        let completed_completion = state
+            .worktree_host
+            .finish(completed_with_result.id, 0)
+            .await
+            .expect("finalise completed-run worktree");
+        for (run_id, path, completion) in [
+            (
+                failed_with_result.id,
+                &failed_result_worktree.path,
+                failed_completion,
+            ),
+            (
+                completed_with_result.id,
+                &completed_result_worktree.path,
+                completed_completion,
+            ),
+        ] {
+            let entry = storage
+                .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                    run_id,
+                    seq: 0,
+                    kind: "agent_call".into(),
+                    args_hash: "test".into(),
+                    request: json!({"prompt": "completed worker"}),
+                    effect_kind: None,
+                    idempotency_key: None,
+                    target_kind: None,
+                })
+                .await
+                .expect("journal completed worker");
+            storage
+                .complete_workflow_journal_entry(
+                    entry.id,
+                    json!({
+                        "working_directory": path,
+                        "worktree": {
+                            "base_commit": completion.base_commit,
+                            "tip_commit": completion.tip_commit,
+                            "changed": completion.changed,
+                            "removed": completion.removed,
+                        }
+                    }),
+                )
+                .await
+                .expect("persist completed worker result");
+        }
 
         assert_eq!(
             recover_worktrees_after_crash(&state)
                 .await
                 .expect("startup recovery"),
             1,
-            "startup must reclaim terminal worktrees and retain replayable worktrees"
+            "startup must reclaim only the unclaimed terminal worktree"
         );
         assert!(
             worktree.path.exists(),
@@ -1222,7 +1315,15 @@ mod tests {
         );
         assert!(
             !terminal_worktree.path.exists(),
-            "terminal worktree must be reclaimed at startup"
+            "an unfinished terminal worktree must be reclaimed at startup"
+        );
+        assert!(
+            failed_result_worktree.path.exists(),
+            "a changed worker must survive when its workflow later fails"
+        );
+        assert!(
+            completed_result_worktree.path.exists(),
+            "a completed run's changed worker must survive for integration"
         );
         assert!(
             !terminal_worktree
@@ -1253,6 +1354,20 @@ mod tests {
             !String::from_utf8_lossy(&registrations.stdout)
                 .contains(&format!("worktree {}", terminal_worktree.path.display())),
             "terminal Git registration must be reclaimed at startup"
+        );
+        assert!(
+            String::from_utf8_lossy(&registrations.stdout).contains(&format!(
+                "worktree {}",
+                failed_result_worktree.path.display()
+            )),
+            "failed-run completion registration must survive startup recovery"
+        );
+        assert!(
+            String::from_utf8_lossy(&registrations.stdout).contains(&format!(
+                "worktree {}",
+                completed_result_worktree.path.display()
+            )),
+            "completed-run registration must survive startup recovery"
         );
 
         state.worktree_host.shutdown().await;
