@@ -5,14 +5,12 @@
 // compaction and warnings. The gateway records it at assembly time; this
 // client only ever reads it back.
 
-let baseUrl = "";
-
 export function setBaseUrl(url: string): void {
-  baseUrl = url;
+  generated.setClientBaseUrl(url);
 }
 
 import type { AssemblyReport } from "../protocol/AssemblyReport";
-import type { TurnContextResponse } from "../protocol/TurnContextResponse";
+import * as generated from "../protocol/client";
 import { ApiError } from "./error";
 
 export type TurnContextReport = AssemblyReport;
@@ -27,13 +25,12 @@ export type TurnContextReport = AssemblyReport;
 export async function fetchTurnContext(
   turnId: string,
 ): Promise<TurnContextReport | null> {
-  const response = await fetch(`${baseUrl}/api/turns/${turnId}/context`);
-  if (response.status === 404) {
-    return null;
+  try {
+    return (await generated.getTurnContext(turnId)).report;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return null;
+    }
+    throw error;
   }
-  if (!response.ok) {
-    throw await ApiError.fromResponse(response, "GET", `/api/turns/${turnId}/context`);
-  }
-  const body = (await response.json()) as TurnContextResponse;
-  return body.report;
 }
