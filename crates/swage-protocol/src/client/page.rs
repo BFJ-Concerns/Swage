@@ -24,6 +24,7 @@ pub struct CreatePageRequest {
 pub struct CreatePageTemplateRequest {
     pub name: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub modules: Vec<PageTemplateModuleInput>,
 }
 

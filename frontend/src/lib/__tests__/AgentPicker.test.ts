@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 
 import AgentPicker from "../components/AgentPicker.svelte";
 import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
@@ -56,5 +56,41 @@ describe("AgentPicker", () => {
       "Review companion",
       "Project agent",
     ]);
+  });
+
+  it("addresses each definition by its own id and reports the chosen one", () => {
+    let selectedAgentId = "";
+    component = mount(AgentPicker, {
+      target: document.body,
+      props: {
+        definitions: [
+          definition("default", "Swage default", true),
+          definition("reviewer", "Review companion", true),
+          definition("project", "Project agent", false),
+        ],
+        // Getter/setter pair stands in for `bind:selectedAgentId`, so the
+        // value the picker writes back is observable from the test.
+        get selectedAgentId() {
+          return selectedAgentId;
+        },
+        set selectedAgentId(value: string) {
+          selectedAgentId = value;
+        },
+      },
+    });
+
+    const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]')!;
+    const values = Array.from(picker.options, (option) => option.value);
+    // The empty value stands for the builtin default; every other option
+    // carries its definition's id, so no two options select the same agent.
+    expect(values).toEqual(["", "reviewer", "project"]);
+    expect(new Set(values).size).toBe(values.length);
+
+    flushSync(() => {
+      picker.value = "project";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(selectedAgentId).toBe("project");
   });
 });
