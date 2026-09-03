@@ -2316,6 +2316,7 @@ mod tests {
             ))
             .json(&swage_protocol::client::settings::SaveProviderSettings {
                 protocol: swage_protocol::client::settings::ProviderProtocol::Anthropic,
+                worker_staleness_threshold_ms: None,
                 base_url: None,
                 api_key_secret_ref: None,
                 api_key_env: None,

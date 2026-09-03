@@ -1124,7 +1124,18 @@ impl WorkflowEngine {
                             return worker;
                         };
                         globalThis.session = async (options = {}) => {
-                            const merged = mergeDefaults(options);
+                            // Script-wide defaults may also contain per-turn
+                            // controls such as maxAttempts. Opening a worker
+                            // consumes only creation defaults; send() applies
+                            // turn controls when there is a turn to govern.
+                            const allDefaults = mergeDefaults({});
+                            const merged = {};
+                            for (const key of workerCreationOptions) {
+                                if (allDefaults[key] !== undefined) merged[key] = allDefaults[key];
+                            }
+                            for (const key of Object.keys(options)) {
+                                if (options[key] !== undefined) merged[key] = options[key];
+                            }
                             for (const key of Object.keys(merged)) {
                                 if (!workerCreationOptions.has(key)) {
                                     throw heldWorkerError(
@@ -1153,10 +1164,11 @@ impl WorkflowEngine {
                                     ? {} : { label: String(merged.label) }),
                             };
                             const opened = unwrapHostResponse(await __workerOpen(JSON.stringify(open)));
+                            const creation = opened.creation ?? open;
                             return {
                                 workerId: opened.worker_id,
-                                label: open.label ?? null,
-                                creation: open,
+                                label: creation.label ?? null,
+                                creation,
                                 session: null,
                                 turns: 0,
                                 closed: false,
@@ -1935,6 +1947,40 @@ mod tests {
                 "route": {"provider_id": "proxy", "endpoint": "relay", "model": "strong"},
             })
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_open_ignores_turn_only_script_defaults() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!("done")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                export const defaults = { agent: "reviewer", maxAttempts: 7 };
+                const worker = await session();
+                const result = await send(worker, "work");
+                await close(worker);
+                return result;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("turn-only defaults do not make session() reject the workflow");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!("done")
+        );
+        assert_eq!(
+            host.opened_workers.lock().unwrap()[0].agent.as_deref(),
+            Some("reviewer")
+        );
+        assert_eq!(host.agent_requests.lock().unwrap()[0].max_attempts, 7);
     }
 
     #[tokio::test(flavor = "current_thread")]

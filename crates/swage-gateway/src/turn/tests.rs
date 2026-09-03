@@ -9632,6 +9632,14 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
                 finish_reason: None,
             },
         ],
+        vec![
+            StreamChunk::Delta {
+                content: "final scouting summary".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
@@ -9672,11 +9680,27 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .expect("list child sessions");
     assert_eq!(sessions_after_first.len(), 1);
     let child_session_id = sessions_after_first[0].id;
-
-    handler
+    let child_thread = storage
+        .list_by_session(child_session_id)
+        .await
+        .expect("list child threads")
+        .into_iter()
+        .next()
+        .expect("named child thread");
+    let active_turn = storage
+        .create_turn(NewTurn {
+            thread_id: child_thread.id,
+            agent_id: "agent-b".into(),
+            state: TurnState::Processing,
+            user_input: Some("simulated active detached task".into()),
+            parent_turn_id: Some(parent_turn.id),
+        })
+        .await
+        .expect("create active child turn");
+    let concurrent = handler
         .handle_delegation(
             "agent-b",
-            "now report what you found",
+            "must wait for the active turn",
             None,
             None,
             None,
@@ -9684,6 +9708,46 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             None,
             Some("scout"),
             DispatchContextComposition::default(),
+            "delegate-concurrent",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    assert!(
+        concurrent
+            .err()
+            .is_some_and(|error| error.to_string().contains("sequential")),
+        "a named child cannot begin another turn while one is active"
+    );
+    assert_eq!(
+        captured_requests.lock().expect("captured requests").len(),
+        1,
+        "the concurrent continuation is refused before provider dispatch"
+    );
+    storage
+        .update_turn_state(active_turn.id, TurnState::Completed)
+        .await
+        .expect("settle simulated child turn");
+
+    handler
+        .handle_delegation(
+            "agent-b",
+            "now report what you found",
+            Some("must-not-replace-the-original-task"),
+            None,
+            Some("/must/not/replace/the/original/location".into()),
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            Some(vec!["must-not-replace-original-skills".into()]),
+            Some("scout"),
+            DispatchContextComposition {
+                elements: Some(vec!["must-not-replace-original-elements".into()]),
+                variables: None,
+                assembly: Some("must-not-replace-original-assembly".into()),
+                skills: Some(vec!["must-not-replace-original-composition-skills".into()]),
+            },
             "delegate-second",
             "agent-a",
             parent_turn.id,
@@ -9720,6 +9784,47 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
     );
     drop(requests);
 
+    handler
+        .handle_delegation(
+            "agent-b",
+            "give me the final summary",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-third",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("third delegation completes");
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(requests.len(), 3, "three child turns ran");
+    let third = requests[2]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for retained in [
+        "scout the eastern approach",
+        "the eastern approach is clear",
+        "now report what you found",
+        "as I said, the eastern approach",
+    ] {
+        assert!(
+            third.contains(retained),
+            "the third turn must retain every earlier task and response ({retained:?}): {third}"
+        );
+    }
+    drop(requests);
+
     let parent = storage
         .get_session(session.id)
         .await
@@ -9733,6 +9838,22 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .expect("the parent records the child it named");
     assert_eq!(registered["agent_id"], "agent-b");
     assert_eq!(registered["session_id"], child_session_id.to_string());
+    let child_metadata = sessions_after_second[0]
+        .metadata
+        .as_ref()
+        .expect("named child keeps creation metadata");
+    assert_eq!(
+        child_metadata[super::delegation::DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        child_metadata[super::delegation::DELEGATED_CHILD_SKILLS_METADATA_KEY],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        child_metadata[super::delegation::DELEGATED_CHILD_COMPOSITION_METADATA_KEY],
+        serde_json::json!({})
+    );
 
     let mismatch = handler
         .handle_delegation(
@@ -9760,6 +9881,20 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
     assert!(
         mismatch.to_string().contains("scout"),
         "the refusal names the child: {mismatch}"
+    );
+    assert_eq!(
+        storage
+            .list_sessions_by_agent_id("agent-c")
+            .await
+            .expect("list agent-c sessions")
+            .len(),
+        0,
+        "a name collision must be refused before creating the replacement child"
+    );
+    assert_eq!(
+        captured_requests.lock().expect("captured requests").len(),
+        3,
+        "a name collision must be refused before provider dispatch"
     );
 }
 
@@ -10008,6 +10143,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
             None,
             None,
             Some(vec!["validated-skill".into()]),
+            None,
             DispatchContextComposition {
                 skills: Some(vec!["composition-skill".into()]),
                 ..Default::default()
