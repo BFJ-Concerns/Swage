@@ -300,6 +300,7 @@ pub struct WorkflowAgentCallDetail {
     pub turn_id: Option<Uuid>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub served_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
