@@ -31,9 +31,9 @@ const PER_MESSAGE_TOKEN_OVERHEAD_BYTES: u64 = 16;
 
 /// Result of checking a prompt against its compaction threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ThresholdEvaluation {
-    pub(crate) exceeds: bool,
-    pub(crate) native_breach: bool,
+pub struct ThresholdEvaluation {
+    pub exceeds: bool,
+    pub native_breach: bool,
 }
 
 /// Check whether the message history exceeds the compaction threshold for the
@@ -42,7 +42,7 @@ pub(crate) struct ThresholdEvaluation {
 /// `threshold_known_exceeded` preserves a previously established native-token
 /// breach if a later provider count is unavailable. Estimate-only breaches do
 /// not set that flag and continue to fall back to the local estimate.
-pub(crate) async fn exceeds_threshold_with_model(
+pub async fn exceeds_threshold_with_model(
     messages: &[ChatMessage],
     threshold: &CompactionThreshold,
     provider: &dyn LlmProvider,
