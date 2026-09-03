@@ -31,6 +31,12 @@ pub struct WorktreeCompletion {
     pub removed: bool,
 }
 
+#[derive(Debug, Default)]
+pub struct WorktreeRecoveryClaims {
+    pub replayable_owner_ids: HashSet<Uuid>,
+    pub retained_paths: HashSet<PathBuf>,
+}
+
 pub struct WorktreeHost {
     config: WorktreeConfig,
     inner: Mutex<HashMap<(Uuid, u64), ProvisionedWorktree>>,
@@ -104,16 +110,11 @@ impl WorktreeHost {
         tokio::fs::create_dir_all(path.parent().expect("worktree path has a parent"))
             .await
             .map_err(|error| format!("cannot create worktree root: {error}"))?;
+        let target = restored_base_commit.as_deref().unwrap_or("HEAD");
         let output = Command::new("git")
-            .args([
-                "-C",
-                &repo.to_string_lossy(),
-                "worktree",
-                "add",
-                "--detach",
-                &path.to_string_lossy(),
-                "HEAD",
-            ])
+            .args(["-C", &repo.to_string_lossy(), "worktree", "add", "--detach"])
+            .arg(&path)
+            .arg(target)
             .stdin(Stdio::null())
             .output()
             .await
@@ -183,17 +184,15 @@ impl WorktreeHost {
 
     /// Reclaim worktrees left behind by a gateway that did not shut down.
     ///
-    /// Workflow owners that replay from their durable journal are retained for
-    /// the wake loop. Failed, cancelled, and delegated-worker owners have no
-    /// such live replay claim and are reclaimed.
-    pub async fn recover(&self, retained_owner_ids: &HashSet<Uuid>) -> Result<usize, String> {
-        self.recover_with_git(retained_owner_ids, Path::new("git"))
-            .await
+    /// Replayable owners retain every checkout needed by the wake loop. Exact
+    /// finalised paths retain changed worker results for later integration.
+    pub async fn recover(&self, claims: &WorktreeRecoveryClaims) -> Result<usize, String> {
+        self.recover_with_git(claims, Path::new("git")).await
     }
 
     async fn recover_with_git(
         &self,
-        retained_owner_ids: &HashSet<Uuid>,
+        claims: &WorktreeRecoveryClaims,
         git: &Path,
     ) -> Result<usize, String> {
         let mut owners = match tokio::fs::read_dir(&self.config.root).await {
@@ -221,7 +220,7 @@ impl WorktreeHost {
             let Ok(owner_id) = Uuid::parse_str(&owner.file_name().to_string_lossy()) else {
                 continue;
             };
-            if !owner_type.is_dir() || retained_owner_ids.contains(&owner_id) {
+            if !owner_type.is_dir() || claims.replayable_owner_ids.contains(&owner_id) {
                 continue;
             }
             let owner_path = owner.path();
@@ -266,6 +265,11 @@ impl WorktreeHost {
                         continue;
                     }
                 };
+                if claims.retained_paths.contains(&path)
+                    || claims.retained_paths.contains(&canonical_path)
+                {
+                    continue;
+                }
                 let listed = match Command::new(git)
                     .args([
                         "-C",
@@ -564,7 +568,7 @@ mod tests {
             .unwrap();
 
         let recovered = WorktreeHost::new(config.clone())
-            .recover(&HashSet::new())
+            .recover(&WorktreeRecoveryClaims::default())
             .await
             .unwrap();
 
@@ -599,7 +603,12 @@ mod tests {
         tokio::fs::write(&root, "not a directory").await.unwrap();
         let host = WorktreeHost::new(WorktreeConfig { root: root.clone() });
 
-        assert_eq!(host.recover(&HashSet::new()).await.unwrap(), 0);
+        assert_eq!(
+            host.recover(&WorktreeRecoveryClaims::default())
+                .await
+                .unwrap(),
+            0
+        );
         assert_eq!(
             tokio::fs::read_to_string(root).await.unwrap(),
             "not a directory"
@@ -623,14 +632,125 @@ mod tests {
         });
 
         assert_eq!(
-            host.recover_with_git(&HashSet::new(), &temp.path().join("missing-git"))
-                .await
-                .unwrap(),
+            host.recover_with_git(
+                &WorktreeRecoveryClaims::default(),
+                &temp.path().join("missing-git")
+            )
+            .await
+            .unwrap(),
             0
         );
         assert!(
             candidate.exists(),
             "a candidate must remain untouched when Git inspection cannot start"
         );
+    }
+
+    #[tokio::test]
+    async fn restore_recreates_a_missing_worktree_at_its_recorded_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        tokio::fs::create_dir(&repo).await.unwrap();
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+            );
+        }
+        tokio::fs::write(repo.join("seed"), "seed").await.unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+
+        let config = WorktreeConfig {
+            root: temp.path().join("worktrees"),
+        };
+        let owner_id = Uuid::new_v4();
+        let original = WorktreeHost::new(config.clone())
+            .provision(owner_id, 0, &repo)
+            .await
+            .unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "remove", "--force"])
+                .arg(&original.path)
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        tokio::fs::write(repo.join("later"), "later").await.unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "later"])
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "later"])
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+        let advanced_head = git_stdout(&repo, ["rev-parse", "HEAD"]).await.unwrap();
+        assert_ne!(advanced_head, original.base_commit);
+
+        let restored_host = WorktreeHost::new(config);
+        let restored = restored_host
+            .restore(
+                owner_id,
+                0,
+                &repo,
+                &original.path,
+                Some(original.base_commit.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(restored.base_commit, original.base_commit);
+        assert_eq!(
+            git_stdout(&restored.path, ["rev-parse", "HEAD"])
+                .await
+                .unwrap(),
+            original.base_commit
+        );
+        restored_host.cleanup_owner(owner_id).await;
     }
 }
