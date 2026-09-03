@@ -7,7 +7,7 @@
 
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -71,6 +71,9 @@ pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
 pub(crate) use swage_core::DispatchContextComposition;
+
+/// Internal workflow-only witness that an agent reported a provider failure.
+pub(crate) type ProviderFailureObserver = Arc<StdMutex<Option<String>>>;
 
 /// What a caller submits for one turn: the message text plus the content
 /// parts sent beside it. Every turn entry point takes this; a `String`
@@ -875,10 +878,13 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         None,
         compaction_focus,
         requested_model,
+        None,
+        false,
     )
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_composition(
     state: &AppState,
@@ -913,6 +919,54 @@ pub(crate) async fn process_turn_with_composition(
         agent_call_scope,
         None,
         None,
+        None,
+        false,
+    )
+    .await
+}
+
+/// Process a composed turn with a call-scoped model selection. Workflow calls
+/// use this to make their journalled model choice explicit without changing
+/// the session's durable selection for an ordinary one-off turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_composition_and_model(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    input: impl Into<TurnInput>,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
+    agent_call_scope: Option<Uuid>,
+    requested_model: Option<String>,
+    provider_failure_observer: Option<ProviderFailureObserver>,
+    reuse_persisted_input: bool,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        input.into(),
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        composition,
+        agent_call_scope,
+        None,
+        requested_model,
+        provider_failure_observer,
+        reuse_persisted_input,
     )
     .await
 }
@@ -940,6 +994,8 @@ async fn process_turn_with_composition_and_focus(
     agent_call_scope: Option<Uuid>,
     compaction_focus: Option<String>,
     requested_model: Option<String>,
+    provider_failure_observer: Option<ProviderFailureObserver>,
+    reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
     let TurnInput {
         text: content,
@@ -1212,24 +1268,26 @@ async fn process_turn_with_composition_and_focus(
         .await?;
     }
 
-    record_failed_turn_and_release_on_error(
-        state,
-        session_id,
-        prepared_turn_id,
-        state
-            .storage
-            .append_message(AppendMessage {
-                thread_id,
-                attachments: attachment_records(&attachments),
-                turn_id: Some(prepared_turn_id),
-                role: Role::User,
-                content: before_inbound.canonical_content.clone(),
-                agent_id: session.agent_id.clone(),
-            })
-            .await
-            .map_err(GatewayError::from),
-    )
-    .await?;
+    if !reuse_persisted_input {
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id,
+                    attachments: attachment_records(&attachments),
+                    turn_id: Some(prepared_turn_id),
+                    role: Role::User,
+                    content: before_inbound.canonical_content.clone(),
+                    agent_id: session.agent_id.clone(),
+                })
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?;
+    }
 
     // Step 7: Deliver completed detached delegations. A detached child's
     // Result waits in this agent's mailbox until its parent next turns;
@@ -1655,8 +1713,45 @@ async fn process_turn_with_composition_and_focus(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
+    let requested_effort = match effort_override {
+        Some(effort) => Some(effort),
+        None => session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("effort"))
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                GatewayError::ConfigError(format!("session effort is invalid: {error}"))
+            })?
+            .or_else(
+                || match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+                    Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
+                        .and_then(|(_, model)| model.default_effort),
+                    None => config
+                        .models
+                        .entries
+                        .get(&config.models.default)
+                        .and_then(|model| model.default_effort),
+                },
+            ),
+    };
     let model_name = config.default_model_id().to_string();
     let agent_handle = if is_codex_turn {
+        let effort = requested_effort.map(|requested| {
+            let capability = config
+                .models
+                .entries
+                .get(&config.models.default)
+                .and_then(|model| model.capabilities.effort.clone())
+                .or_else(|| crate::codex::effort_capability(&model_name))
+                .unwrap_or(swage_core::EffortCapability::None);
+            swage_core::resolve_effort(requested, &capability)
+        });
+        if let Some(resolved) = effort.as_ref() {
+            record_effort_snapshot(&mut report_json, resolved);
+        }
         let session_approval_grants = state
             .session_approval_grants
             .lock()
@@ -1675,6 +1770,7 @@ async fn process_turn_with_composition_and_focus(
             turn_id: prepared_turn_id,
             agent_id: session.agent_id.clone(),
             model: model_name.clone(),
+            effort,
             user_message: before_inbound.canonical_content.clone(),
             assembled_context: assembled_messages,
             agent_config,
@@ -1726,30 +1822,6 @@ async fn process_turn_with_composition_and_focus(
                     "agent construction failed: {error}"
                 )));
             }
-        };
-        let requested_effort = match effort_override {
-            Some(effort) => Some(effort),
-            None => session
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("effort"))
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| {
-                    GatewayError::ConfigError(format!("session effort is invalid: {error}"))
-                })?
-                .or_else(|| {
-                    match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
-                        Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
-                            .and_then(|(_, model)| model.default_effort),
-                        None => config
-                            .models
-                            .entries
-                            .get(&config.models.default)
-                            .and_then(|model| model.default_effort),
-                    }
-                }),
         };
         // The intent is resolved once, here, against the effective model's
         // declared capability; adapters express the resolved control. The
@@ -2151,7 +2223,14 @@ async fn process_turn_with_composition_and_focus(
                     structured_output: structured_output.clone(),
                 });
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error {
+                message,
+                provider_failure,
+            } => {
+                if provider_failure && let Some(observer) = provider_failure_observer.as_ref() {
+                    *observer.lock().unwrap_or_else(|error| error.into_inner()) =
+                        Some(message.clone());
+                }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_error".to_string(),
                     message,
