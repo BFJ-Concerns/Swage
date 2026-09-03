@@ -43,12 +43,15 @@ pub async fn work_surface_ws_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_connection(socket, state))
+    // The upgrade future runs only after the handshake. Subscribe now so a
+    // page update that immediately follows the request is buffered for the
+    // connection task instead of disappearing in that window.
+    let receiver = state.broadcast.subscribe();
+    ws.on_upgrade(move |socket| handle_connection(socket, receiver))
 }
 
-async fn handle_connection(socket: WebSocket, state: AppState) {
+async fn handle_connection(socket: WebSocket, mut receiver: broadcast::Receiver<ServerEvent>) {
     let (mut ws_sink, mut ws_stream) = socket.split();
-    let mut bcast_rx = state.broadcast.subscribe();
 
     loop {
         tokio::select! {
@@ -61,7 +64,7 @@ async fn handle_connection(socket: WebSocket, state: AppState) {
                 }
             }
 
-            result = bcast_rx.recv() => {
+            result = receiver.recv() => {
                 match result {
                     Ok(event) => {
                         if !is_work_surface_signal(&event) {
