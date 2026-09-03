@@ -34,7 +34,8 @@ use swage_protocol::client::schedule::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, SqliteStorage,
+    NewScheduleRun, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    SqliteStorage, TurnState,
 };
 
 /// Provider double serving both halves of the schedule domain: queued
@@ -1892,6 +1893,83 @@ async fn trigger_on_unknown_schedule_is_a_request_error() {
 // ---------------------------------------------------------------------------
 // Atomic overlap guard, concurrent racers (item 3)
 // ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_self_wake_rearms_after_the_calling_turn_and_then_fires() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("self-wake.db"),
+        MockProvider::new(vec![MockProvider::text_round("awake after the turn")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let active_turn = state
+        .storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("wake me when this turn is over".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let due_at = Utc::now() - Duration::seconds(1);
+    let created = schedule::create_schedule(
+        &state,
+        create_request(
+            "resume after the active turn",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            continuation(session_id),
+        ),
+        ScheduleCreator::Agent {
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(tick_to_completion(&state, Utc::now()).await, 1);
+    let skipped = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].state, ScheduleRunState::Skipped);
+    assert_eq!(skipped[0].skip_reason, Some(SkipReason::Overlap));
+    let rearmed = state
+        .storage
+        .get_schedule(created.id)
+        .await
+        .unwrap()
+        .expect("self-wake schedule");
+    assert_eq!(rearmed.status, ScheduleStatus::Active);
+    let retry_at = rearmed
+        .next_run_at
+        .expect("an overlapping self-wake must be re-armed");
+
+    state
+        .storage
+        .update_turn_state(active_turn.id, TurnState::Completed)
+        .await
+        .unwrap();
+    assert_eq!(tick_to_completion(&state, retry_at).await, 1);
+
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[1].state, ScheduleRunState::Completed);
+    assert_eq!(runs[1].output_text.as_deref(), Some("awake after the turn"));
+    assert_eq!(
+        state
+            .storage
+            .get_schedule(created.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ScheduleStatus::Completed
+    );
+}
 
 /// A provider whose single stream emits one delta, signals that it has
 /// started, then blocks until released — so a run can be pinned in-flight
