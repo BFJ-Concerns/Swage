@@ -69,6 +69,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
+- Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
 - Work-surface sockets now retain a page update emitted while their WebSocket handshake is completing.
 - One-shot self-wakes now retry after their active turn instead of being consumed as an overlap skip.
 - Continued workflow workers now retain the skill selection made when they were created.

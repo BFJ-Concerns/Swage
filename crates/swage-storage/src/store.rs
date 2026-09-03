@@ -1243,7 +1243,14 @@ pub trait PageAnnotationStore: Send + Sync {
         body: &str,
         tags: &[String],
     ) -> Result<(), StorageError>;
-    async fn delete_page_annotation(&self, id: Uuid) -> Result<(), StorageError>;
+    /// Delete an annotation, advance its page timestamp, and append its
+    /// provenance event in one transaction. `false` means another writer
+    /// removed the annotation first, so no audit event was written.
+    async fn delete_page_annotation_with_audit(
+        &self,
+        annotation: PageAnnotation,
+        audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError>;
 }
 
 pub trait Storage:
@@ -2105,7 +2112,11 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
+        async fn delete_page_annotation_with_audit(
+            &self,
+            _: PageAnnotation,
+            _: NewAuditEvent,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }
