@@ -895,7 +895,7 @@ impl WorkflowEngine {
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "tools", "skills", "model", "effort", "timeoutMs",
+                                "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label",
                                 "session", "elements", "variables", "assembly",
                             ]);
@@ -926,6 +926,9 @@ impl WorkflowEngine {
                                     ? {}
                                     : { skills: merged.skills.map(String) }),
                                 model: merged.model ?? null,
+                                ...(merged.fallbackModel === undefined || merged.fallbackModel === null
+                                    ? {}
+                                    : { fallback_model: String(merged.fallbackModel) }),
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
                                     : { effort: String(merged.effort) }),
@@ -1220,6 +1223,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 working_directory: None,
+                served_model: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1267,6 +1271,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 working_directory: None,
+                served_model: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1371,6 +1376,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 working_directory,
+                served_model: None,
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
@@ -1778,7 +1784,7 @@ mod tests {
         WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 r#"await agent("inspect the unit", {
-                    agent: "worker", task: "review", model: "cheap", effort: "low",
+                    agent: "worker", task: "review", model: "cheap", fallbackModel: "sonnet", effort: "low",
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
                     schema: { type: "object" }, maxAttempts: 2, label: "inspect",
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
@@ -1799,6 +1805,7 @@ mod tests {
         assert_eq!(request.agent.as_deref(), Some("worker"));
         assert_eq!(request.task.as_deref(), Some("review"));
         assert_eq!(request.model.as_deref(), Some("cheap"));
+        assert_eq!(request.fallback_model.as_deref(), Some("sonnet"));
         assert_eq!(request.timeout_ms, Some(75));
         assert_eq!(request.max_attempts, 2);
         assert_eq!(request.label.as_deref(), Some("inspect"));
