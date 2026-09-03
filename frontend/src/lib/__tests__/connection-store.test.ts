@@ -135,15 +135,90 @@ describe("disconnect", () => {
 
     expect(store.status).toBe("disconnected");
   });
+
+  it("deselects only the selected client and retains an off-screen stream", () => {
+    const a = createMockWsClient();
+    const b = createMockWsClient();
+    const clients = [a, b];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+    });
+
+    store.connectTo("conv-a");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+    store.deselect?.();
+
+    expect(a.disconnect).not.toHaveBeenCalled();
+    expect(b.disconnect).toHaveBeenCalledOnce();
+  });
 });
 
 describe("sendMessage", () => {
+  it("keeps one client's stream connected while sending through another conversation", () => {
+    const first = createMockWsClient();
+    const second = createMockWsClient();
+    const clients = [first, second];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+    });
+
+    store.connectTo("conv-a");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+    store.sendMessage("conv-b", "Message for B");
+
+    expect(first.disconnect).not.toHaveBeenCalled();
+    expect(first.lastConnectedId()).toBe("conv-a");
+    expect(second.lastConnectedId()).toBe("conv-b");
+    expect(second.sentEvents().map((event) => JSON.parse(event))).toContainEqual({
+      type: "send_message",
+      content: "Message for B",
+    });
+    expect(first.sentEvents()).toEqual([]);
+  });
+
+  it("retains only selected or streaming clients", () => {
+    const a = createMockWsClient();
+    const b = createMockWsClient();
+    const c = createMockWsClient();
+    const d = createMockWsClient();
+    const e = createMockWsClient();
+    const clients = [a, b, c, d, e];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+    });
+
+    store.connectTo("conv-a");
+    store.connectTo("conv-b");
+    store.connectTo("conv-c");
+
+    expect(a.disconnect).toHaveBeenCalledOnce();
+    expect(b.disconnect).toHaveBeenCalledOnce();
+    expect(c.disconnect).not.toHaveBeenCalled();
+
+    store.connectTo("conv-a");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+
+    expect(d.lastConnectedId()).toBe("conv-a");
+    expect(d.disconnect).not.toHaveBeenCalled();
+    expect(c.disconnect).toHaveBeenCalledOnce();
+
+    store.setStreamActive?.("conv-a", false);
+    expect(d.disconnect).toHaveBeenCalledOnce();
+    expect(e.lastConnectedId()).toBe("conv-b");
+
+    store.disconnect();
+    expect(e.disconnect).toHaveBeenCalledOnce();
+  });
+
   it("sends a send_message ClientEvent via the WS client", () => {
     const mock = createMockWsClient();
     const store = createConnectionStore({ wsClientFactory: () => mock });
 
     store.connectTo("conv-abc");
-    store.sendMessage("Hello, world");
+    store.sendMessage("conv-abc", "Hello, world");
 
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({ type: "send_message", content: "Hello, world" });
@@ -154,10 +229,10 @@ describe("sendMessage", () => {
     const store = createConnectionStore({ wsClientFactory: () => mock });
 
     store.connectTo("conv-abc");
-    store.sendMessage("What is this?", null, [
+    store.sendMessage("conv-abc", "What is this?", null, [
       { kind: "image_url", url: "https://example.test/cat.png" },
     ]);
-    store.sendMessage("And this?", null, []);
+    store.sendMessage("conv-abc", "And this?", null, []);
 
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({
@@ -175,7 +250,7 @@ describe("cancelTurn", () => {
     const store = createConnectionStore({ wsClientFactory: () => mock });
 
     store.connectTo("conv-abc");
-    store.cancelTurn();
+    store.cancelTurn("conv-abc");
 
     const events = mock.sentEvents().map((s) => JSON.parse(s));
     expect(events).toContainEqual({ type: "cancel" });
@@ -266,6 +341,30 @@ describe("reconnect callback", () => {
     mock.triggerStatus("connected"); // reconnect succeeds
 
     expect(onReconnect).toHaveBeenCalledOnce();
+    expect(onReconnect).toHaveBeenCalledWith("conv-abc");
+  });
+
+  it("reconciles the reconnected off-screen conversation", () => {
+    const onReconnect = vi.fn();
+    const a = createMockWsClient();
+    const b = createMockWsClient();
+    const clients = [a, b];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+      onReconnect,
+    });
+
+    store.connectTo("conv-a");
+    a.triggerStatus("connected");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+    b.triggerStatus("connected");
+
+    a.triggerStatus("reconnecting");
+    a.triggerStatus("connected");
+
+    expect(onReconnect).toHaveBeenCalledWith("conv-a");
+    expect(store.status).toBe("connected");
   });
 
   it("does not invoke onReconnect on initial connection (not a reconnect)", () => {

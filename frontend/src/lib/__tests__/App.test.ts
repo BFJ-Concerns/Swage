@@ -100,6 +100,7 @@ vi.mock("../api/agent-definitions", () => ({
 vi.mock("../api/pages", () => ({
   setBaseUrl: vi.fn(),
   listPages: vi.fn(async () => ({ pages: [] })),
+  listPageTemplates: vi.fn(async () => ({ templates: [] })),
   getPage: vi.fn(),
   createPage: vi.fn(),
   writePageModule: vi.fn(),
@@ -165,15 +166,18 @@ describe("ambient channel control path", () => {
       .toContain("History of conv-1");
   });
 
-  it("drops the socket for the operator surface, which carries no channel", async () => {
+  it("keeps the selected conversation socket while the operator surface opens", async () => {
     component = await mountAppOnConversation();
+    wsClient.connect.mockClear();
+    wsClient.disconnect.mockClear();
 
     surfaceButton("Operator").click();
     await vi.waitFor(() => {
       expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("true");
     });
 
-    expect(wsClient.disconnect).toHaveBeenCalled();
+    expect(wsClient.disconnect).not.toHaveBeenCalled();
+    expect(wsClient.connect).not.toHaveBeenCalled();
   });
 
   it("cycles sessions in place, leaving the user on the work surface", async () => {
@@ -213,5 +217,19 @@ describe("ambient channel control path", () => {
       expect(document.body.textContent).not.toContain("History of conv-1");
     });
     expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("routes a workflow run URL into the run view and requests that run", async () => {
+    window.history.replaceState({}, "", "/workflow-runs/run-route");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ run: { id: "run-route", state: "running" }, journal: [] }), {
+        status: 200,
+      }),
+    );
+    component = mount(App, { target: document.body });
+
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-route");
+    });
   });
 });
