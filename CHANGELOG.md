@@ -11,6 +11,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
+- Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
 - Page template creation records its complete ordered module configuration in the local audit trail.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
