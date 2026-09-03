@@ -1784,7 +1784,6 @@ async fn run_ephemeral_agent_call(
             }
         }
     };
-    let mut served_model = request.model.clone();
     let final_events = match primary_error {
         None => primary.events,
         Some(error) => {
@@ -1830,7 +1829,6 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            served_model = Some(fallback_model);
             fallback.events
         }
     };
@@ -1884,19 +1882,22 @@ async fn run_ephemeral_agent_call(
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
         }
     };
-    let selected_model = match served_model {
-        Some(model) => model,
-        None => state
-            .storage
-            .get_session(session_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .and_then(|session| session.selected_model_id)
-            .unwrap_or_else(|| state.active_config().models.default),
-    };
-    let served_model =
-        crate::turn::resolve_model_catalogue_entry(&state.active_config().models, &selected_model)
-            .map(|(model_id, _)| model_id.to_string());
+    // The turn resolves its model after applying the agent, task, and space
+    // overlays. Its persisted effective-model snapshot is therefore the
+    // authoritative identity for this call; re-resolving from the gateway
+    // configuration here would misattribute an overlay-served turn.
+    let served_model = state
+        .storage
+        .get_snapshot(turn.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .and_then(|snapshot| serde_json::from_str::<Value>(&snapshot).ok())
+        .and_then(|snapshot| {
+            snapshot
+                .pointer("/provider_visible/effective_model/catalogue_entry")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
     Ok(AgentCallResult {
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
@@ -16429,6 +16430,106 @@ mod tests {
         .expect("start workflow");
         wait_for_terminal(state, started.id).await;
         started.id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_agent_calls_journal_the_effective_catalogue_model() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            scripted_text_output("pinned answer"),
+            scripted_text_output("default answer"),
+            scripted_text_output("task answer"),
+        ])
+        .await;
+        let mut config = fallback_test_config();
+        config.models.default = "default".into();
+        config.models.entries.insert(
+            "default".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "default-wire".into(),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "task-overlay".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "task-overlay-wire".into(),
+                ..Default::default()
+            },
+        );
+        state.replace_runtime(
+            config,
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+        storage
+            .upsert_task_definition(swage_storage::NewTaskDefinition {
+                id: "task-overlay".into(),
+                instructions: "Use the task's model.".into(),
+                model_id: Some("task-overlay".into()),
+                tool_permissions: None,
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store task overlay");
+
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const pinned = await agent("pinned", { agent: "default", model: "pinned" });
+                    const defaultModel = await agent("default", { agent: "default" });
+                    const task = await agent("task", { agent: "default", task: "task-overlay" });
+                    return { pinned, defaultModel, task };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let calls = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|entry| {
+                    entry
+                        .result
+                        .as_ref()
+                        .and_then(|result| result["served_model"].as_str())
+                })
+                .collect::<Vec<_>>(),
+            vec![Some("pinned"), Some("default"), Some("task-overlay")],
+            "each successful primary call must name the catalogue entry that actually served it"
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("pinned-wire"),
+                Some("default-wire"),
+                Some("task-overlay-wire")
+            ],
+            "each call must complete on its primary model without a fallback"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
