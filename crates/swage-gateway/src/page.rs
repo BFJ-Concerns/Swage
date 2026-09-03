@@ -10,14 +10,17 @@ use axum::extract::State;
 use serde_json::json;
 use uuid::Uuid;
 
-use swage_core::GatewayError;
+use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::page::{
-    CreatePageAnnotationRequest, CreatePageRequest, PageAnnotationView, PageListResponse,
-    PageModuleView, PageResponse, PageSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
+    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
+    DeletePageAnnotationResponse, PageAnnotationView, PageListResponse, PageModuleView,
+    PageResponse, PageSummary, PageTemplateListResponse, PageTemplateModuleView,
+    PageTemplateResponse, PageTemplateSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
-    NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, PageAnnotation, PageModule,
+    NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, NewPageTemplate,
+    NewPageTemplateModuleInput, PageAnnotation, PageModule,
 };
 
 use crate::error::{ApiError, Json, Path};
@@ -44,13 +47,41 @@ pub async fn create_page(
         .get(space_id)
         .await?
         .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-    let page = state
-        .storage
-        .create_page(NewPage {
-            space_id,
-            title: title.to_string(),
-        })
-        .await?;
+
+    // A template seeds the page; everything is validated before anything
+    // lands, so a rejected fork leaves no page behind.
+    let template = match request.template_id {
+        Some(template_id) => Some(resolve_template(state, space_id, template_id).await?),
+        None => None,
+    };
+
+    let page = match &template {
+        Some(template) => {
+            state
+                .storage
+                .create_page_from_template(
+                    NewPage {
+                        space_id,
+                        title: title.to_string(),
+                    },
+                    template.id,
+                )
+                .await?
+        }
+        None => {
+            state
+                .storage
+                .create_page(NewPage {
+                    space_id,
+                    title: title.to_string(),
+                })
+                .await?
+        }
+    };
+
+    let template_metadata = template
+        .as_ref()
+        .map(|template| json!({ "template_id": template.id, "template_name": template.name }));
     state
         .storage
         .create_audit_event(NewAuditEvent {
@@ -59,8 +90,17 @@ pub async fn create_page(
             entity_kind: "page".into(),
             entity_id: page.id.to_string(),
             event_kind: "page_created".into(),
-            summary: format!("page created: {title}"),
-            metadata: json!({ "space_id": page.space_id, "title": title }),
+            summary: match &template {
+                Some(template) => {
+                    format!("page created from template '{}': {title}", template.name)
+                }
+                None => format!("page created: {title}"),
+            },
+            metadata: json!({
+                "space_id": page.space_id,
+                "title": title,
+                "forked_from": template_metadata,
+            }),
         })
         .await?;
     // Creation is a page-level change: open surfaces refetch their list.
@@ -68,13 +108,145 @@ pub async fn create_page(
         page_id: page.id,
         module_id: None,
     });
+    let modules = state.storage.list_page_modules(page.id).await?;
     Ok(PageResponse {
         id: page.id,
         space_id: page.space_id,
         title: page.title,
         created_at: page.created_at,
         updated_at: page.updated_at,
-        modules: Vec::new(),
+        modules: modules
+            .into_iter()
+            .map(|module| module_view(module, Vec::new()))
+            .collect(),
+        forked_from_template_id: page.forked_from_template_id,
+        forked_at: page.forked_at,
+    })
+}
+
+/// A template usable from this space: it must exist and belong here.
+/// Templates are space-local — there is no sharing across spaces.
+async fn resolve_template(
+    state: &AppState,
+    space_id: Uuid,
+    template_id: Uuid,
+) -> Result<swage_storage::PageTemplate, GatewayError> {
+    state
+        .storage
+        .get_page_template(template_id)
+        .await?
+        .filter(|template| template.space_id == space_id)
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no template {template_id} in space {space_id}"))
+        })
+}
+
+/// Create a space's reusable page shape. A template is inert: it seeds
+/// pages at their creation and is never projected into pages already
+/// forked from it.
+pub async fn create_page_template(
+    state: &AppState,
+    space_id: Uuid,
+    request: CreatePageTemplateRequest,
+) -> Result<PageTemplateResponse, GatewayError> {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "a template needs a non-empty name".into(),
+        ));
+    }
+    state
+        .space_store
+        .get(space_id)
+        .await?
+        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+    // Validate every module kind before the first write: a template that
+    // seeds an unrenderable module is a page the user cannot see.
+    for module in &request.modules {
+        let kind = module.kind.as_deref().unwrap_or("document");
+        if !MODULE_KINDS.contains(&kind) {
+            return Err(GatewayError::ValidationError(format!(
+                "unknown module kind '{kind}' — known kinds: {}",
+                MODULE_KINDS.join(", ")
+            )));
+        }
+    }
+
+    let template = state
+        .storage
+        .create_page_template_with_modules(
+            NewPageTemplate {
+                space_id,
+                name: name.to_string(),
+            },
+            request
+                .modules
+                .iter()
+                .enumerate()
+                .map(|(position, module)| NewPageTemplateModuleInput {
+                    kind: module.kind.clone().unwrap_or_else(|| "document".into()),
+                    position: position as i32,
+                    source: module.source.clone(),
+                })
+                .collect(),
+        )
+        .await?;
+
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "page_template".into(),
+            entity_id: template.id.to_string(),
+            event_kind: "page_template_created".into(),
+            summary: format!("page template created: {name}"),
+            metadata: json!({
+                "space_id": template.space_id,
+                "name": name,
+                "module_count": request.modules.len(),
+                "modules": request.modules.iter().enumerate().map(|(position, module)| json!({
+                    "kind": module.kind.as_deref().unwrap_or("document"),
+                    "position": position,
+                    "source": module.source,
+                })).collect::<Vec<_>>(),
+            }),
+        })
+        .await?;
+
+    template_response(state, template.id).await
+}
+
+pub async fn template_response(
+    state: &AppState,
+    template_id: Uuid,
+) -> Result<PageTemplateResponse, GatewayError> {
+    let template = state
+        .storage
+        .get_page_template(template_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no template with id {template_id}"))
+        })?;
+    let modules = state
+        .storage
+        .list_page_template_modules(template.id)
+        .await?;
+    Ok(PageTemplateResponse {
+        id: template.id,
+        space_id: template.space_id,
+        name: template.name,
+        created_at: template.created_at,
+        updated_at: template.updated_at,
+        modules: modules
+            .into_iter()
+            .map(|module| PageTemplateModuleView {
+                id: module.id,
+                kind: module.kind,
+                position: module.position,
+                source: module.source,
+            })
+            .collect(),
     })
 }
 
@@ -336,22 +508,44 @@ pub async fn delete_page_annotation(
         .get_page_annotation(annotation_id)
         .await?
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "page annotation".into(),
+                id: annotation_id.to_string(),
+            })
         })?;
-    state.storage.delete_page_annotation(existing.id).await?;
+    delete_page_annotation_after_read(state, annotation_id, existing, author).await
+}
 
+/// Finish an annotation deletion after its caller has read the note. The
+/// storage operation remains the authority for a race with another deleter:
+/// its zero-row result is the typed not-found response, not a second audit.
+async fn delete_page_annotation_after_read(
+    state: &AppState,
+    annotation_id: Uuid,
+    existing: PageAnnotation,
+    author: &str,
+) -> Result<(), GatewayError> {
     let page = state.storage.get_page(existing.page_id).await?;
     let title = page.map(|page| page.title).unwrap_or_default();
-    record_annotation_change(
-        state,
+    let audit_event = annotation_change_event(
         &title,
         existing.page_id,
         &existing,
         "page_annotation_deleted",
         Some(&existing),
+        None,
         author,
-    )
-    .await?;
+    );
+    if !state
+        .storage
+        .delete_page_annotation_with_audit(existing.clone(), audit_event)
+        .await?
+    {
+        return Err(GatewayError::Storage(StorageError::NotFound {
+            entity: "page annotation".into(),
+            id: annotation_id.to_string(),
+        }));
+    }
 
     let _ = state.broadcast.send(ServerEvent::PageUpdated {
         page_id: existing.page_id,
@@ -377,26 +571,46 @@ async fn record_annotation_change(
 ) -> Result<(), GatewayError> {
     state
         .storage
-        .create_audit_event(NewAuditEvent {
-            id: Uuid::new_v4().to_string(),
-            session_id: None,
-            entity_kind: "page".into(),
-            entity_id: page_id.to_string(),
-            event_kind: event_kind.into(),
-            summary: format!("annotation change on page: {page_title}"),
-            metadata: json!({
-                "annotation_id": annotation.id,
-                "module_id": annotation.module_id,
-                "author": author,
-                "annotation_author": annotation.author,
-                "prior_body": prior.map(|prior| prior.body.clone()),
-                "prior_tags": prior.map(|prior| prior.tags.clone()),
-                "new_body": annotation.body,
-                "new_tags": annotation.tags,
-            }),
-        })
+        .create_audit_event(annotation_change_event(
+            page_title,
+            page_id,
+            annotation,
+            event_kind,
+            prior,
+            Some(annotation),
+            author,
+        ))
         .await?;
     Ok(())
+}
+
+fn annotation_change_event(
+    page_title: &str,
+    page_id: Uuid,
+    annotation: &PageAnnotation,
+    event_kind: &str,
+    prior: Option<&PageAnnotation>,
+    current: Option<&PageAnnotation>,
+    author: &str,
+) -> NewAuditEvent {
+    NewAuditEvent {
+        id: Uuid::new_v4().to_string(),
+        session_id: None,
+        entity_kind: "page".into(),
+        entity_id: page_id.to_string(),
+        event_kind: event_kind.into(),
+        summary: format!("annotation change on page: {page_title}"),
+        metadata: json!({
+            "annotation_id": annotation.id,
+            "module_id": annotation.module_id,
+            "author": author,
+            "annotation_author": annotation.author,
+            "prior_body": prior.map(|prior| prior.body.clone()),
+            "prior_tags": prior.map(|prior| prior.tags.clone()),
+            "new_body": current.map(|current| current.body.clone()),
+            "new_tags": current.map(|current| current.tags.clone()),
+        }),
+    }
 }
 
 pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageResponse, GatewayError> {
@@ -427,6 +641,8 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
                 module_view(module, hung_here)
             })
             .collect(),
+        forked_from_template_id: page.forked_from_template_id,
+        forked_at: page.forked_at,
     })
 }
 
@@ -526,9 +742,45 @@ pub async fn update_page_annotation_handler(
 pub async fn delete_page_annotation_handler(
     State(state): State<AppState>,
     Path(annotation_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeletePageAnnotationResponse>, ApiError> {
     delete_page_annotation(&state, annotation_id, "user").await?;
-    Ok(Json(json!({ "deleted": true })))
+    Ok(Json(DeletePageAnnotationResponse { deleted: true }))
+}
+
+pub async fn list_page_templates_handler(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+) -> Result<Json<PageTemplateListResponse>, ApiError> {
+    let templates = state
+        .storage
+        .list_page_templates_by_space(space_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(PageTemplateListResponse {
+        templates: templates
+            .into_iter()
+            .map(|template| PageTemplateSummary {
+                id: template.id,
+                name: template.name,
+                updated_at: template.updated_at,
+            })
+            .collect(),
+    }))
+}
+
+pub async fn create_page_template_handler(
+    State(state): State<AppState>,
+    Path(space_id): Path<Uuid>,
+    Json(request): Json<CreatePageTemplateRequest>,
+) -> Result<Json<PageTemplateResponse>, ApiError> {
+    Ok(Json(create_page_template(&state, space_id, request).await?))
+}
+
+pub async fn get_page_template_handler(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+) -> Result<Json<PageTemplateResponse>, ApiError> {
+    Ok(Json(template_response(&state, template_id).await?))
 }
 
 #[cfg(test)]
@@ -536,7 +788,7 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::{
-        AuditStore, NewSpace, PageAnnotationStore, SpaceStore, SqliteStorage, Storage,
+        AuditStore, NewSpace, PageAnnotationStore, PageStore, SpaceStore, SqliteStorage, Storage,
     };
 
     use super::*;
@@ -571,6 +823,7 @@ mod tests {
             space.id,
             CreatePageRequest {
                 title: "Planning".into(),
+                template_id: None,
             },
         )
         .await
@@ -592,6 +845,7 @@ mod tests {
             space.id,
             CreatePageRequest {
                 title: "Elsewhere".into(),
+                template_id: None,
             },
         )
         .await
@@ -768,6 +1022,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let before_delete = storage.get_page(page_id).await.unwrap().unwrap().updated_at;
 
         delete_page_annotation(&state, created.id, "user")
             .await
@@ -789,6 +1044,153 @@ mod tests {
         assert_eq!(
             recorded.metadata["prior_body"], "withdrawn on reflection",
             "recovery is re-writing the note, informed by the trail"
+        );
+        assert_eq!(recorded.metadata["prior_tags"], json!([]));
+        assert!(recorded.metadata["new_body"].is_null());
+        assert!(recorded.metadata["new_tags"].is_null());
+        assert!(
+            storage.get_page(page_id).await.unwrap().unwrap().updated_at > before_delete,
+            "deleting a note advances the page's freshness marker"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_annotation_deletes_leave_one_audit_event() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let created = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "only one removal is recorded"),
+            "user",
+        )
+        .await
+        .unwrap();
+
+        let (first, second) = tokio::join!(
+            delete_page_annotation(&state, created.id, "user"),
+            delete_page_annotation(&state, created.id, "user"),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let failure = first
+            .err()
+            .or(second.err())
+            .expect("one delete loses the race");
+        assert!(matches!(
+            failure,
+            GatewayError::Storage(StorageError::NotFound { .. })
+        ));
+        assert_eq!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_kind == "page_annotation_deleted")
+                .count(),
+            1,
+            "the losing delete must not append a second audit event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_that_loses_after_reading_the_note_returns_not_found_without_an_audit() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let created = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "both requests read this note first"),
+            "user",
+        )
+        .await
+        .unwrap();
+        let existing = storage
+            .get_page_annotation(created.id)
+            .await
+            .unwrap()
+            .expect("both concurrent requests read the note before either deletes it");
+
+        let (first, second) = tokio::join!(
+            delete_page_annotation_after_read(&state, created.id, existing.clone(), "user"),
+            delete_page_annotation_after_read(&state, created.id, existing, "user"),
+        );
+
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let failure = first
+            .err()
+            .or(second.err())
+            .expect("the second delete reaches the storage zero-row guard");
+        assert!(matches!(
+            failure,
+            GatewayError::Storage(StorageError::NotFound { .. })
+        ));
+        assert_eq!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_kind == "page_annotation_deleted")
+                .count(),
+            1,
+            "the zero-row loser must not append an audit event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_deletion_audit_rolls_back_the_annotation_removal() {
+        let (state, storage, page_id, module_id, _) = seeded().await;
+        let annotation = create_page_annotation(
+            &state,
+            page_id,
+            annotation(module_id, "the row must survive a failed audit"),
+            "user",
+        )
+        .await
+        .unwrap();
+        let duplicate_id = "deletion-audit-id";
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: duplicate_id.into(),
+                session_id: None,
+                entity_kind: "test".into(),
+                entity_id: annotation.id.to_string(),
+                event_kind: "seed".into(),
+                summary: "occupy the deletion audit id".into(),
+                metadata: json!({}),
+            })
+            .await
+            .unwrap();
+        let existing = storage
+            .get_page_annotation(annotation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let audit = annotation_change_event(
+            "Planning",
+            page_id,
+            &existing,
+            "page_annotation_deleted",
+            None,
+            None,
+            "user",
+        );
+        let audit = NewAuditEvent {
+            id: duplicate_id.into(),
+            ..audit
+        };
+
+        assert!(
+            storage
+                .delete_page_annotation_with_audit(existing, audit,)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .get_page_annotation(annotation.id)
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 
