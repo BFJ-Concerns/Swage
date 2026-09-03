@@ -123,7 +123,9 @@ return { reply };
     a definition never widens them.
 
   An unknown option key throws `UnknownAgentOptionError` before any
-  worker spawns; a non-string prompt throws a `TypeError`.
+  worker spawns; a non-string prompt throws `InvalidAgentPromptError`,
+  and a `tools` or `skills` value that is not an array of names throws
+  `InvalidAgentOptionError`.
 - **Return contract:** without `schema`, the worker's final text (a
   string). With `schema`, the validated JSON value, or `null` when
   `maxAttempts` is exhausted without one — treat `null` as an absent
