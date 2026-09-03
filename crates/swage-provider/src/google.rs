@@ -406,6 +406,11 @@ impl GoogleProvider {
             .collect()
     }
 
+    /// An image reference in Gemini's own terms: a base64 `data:` URL is
+    /// carried inline as bytes, and any other reference becomes a
+    /// `fileData.fileUri`, which addresses a resource already held by the
+    /// Google File API. Gemini fetches nothing, so the intake gate admits
+    /// only references of those two forms.
     fn image_part(url: &str) -> GeminiPart {
         if let Some((mime_type, data)) = url.strip_prefix("data:").and_then(|data_url| {
             let (metadata, data) = data_url.split_once(',')?;
@@ -949,7 +954,7 @@ mod tests {
                     url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
                 },
                 ContentPart::ImageUrl {
-                    url: "https://example.test/cat.png".into(),
+                    url: "https://generativelanguage.googleapis.com/v1beta/files/abc123".into(),
                 },
             ],
         );
@@ -960,7 +965,9 @@ mod tests {
             serde_json::json!([
                 {"text": "Describe these images"},
                 {"inlineData": {"mimeType": "image/png", "data": "cG5nLWJ5dGVz"}},
-                {"fileData": {"fileUri": "https://example.test/cat.png"}}
+                {"fileData": {
+                    "fileUri": "https://generativelanguage.googleapis.com/v1beta/files/abc123"
+                }}
             ])
         );
     }

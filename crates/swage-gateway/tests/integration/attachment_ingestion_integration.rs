@@ -19,7 +19,10 @@ use swage_core::{
     ToolCompletionResponse,
 };
 use swage_gateway::{
-    attachment, capabilities::WorkflowCapabilities, server::build_router, state::AppState,
+    attachment,
+    capabilities::{ImageReferences, WorkflowCapabilities},
+    server::build_router,
+    state::AppState,
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
@@ -132,7 +135,7 @@ async fn session_and_space_attachments_survive_restart_with_queryable_records() 
     let db_path = dir.path().join("attachments.db");
     let capabilities = WorkflowCapabilities {
         text: true,
-        vision: true,
+        images: Some(ImageReferences::AnyUrl),
         embeddings: false,
         image_generation: false,
     };
@@ -263,7 +266,7 @@ async fn background_jobs_cover_queued_running_completed_failed_and_retried_state
         &db_path,
         WorkflowCapabilities {
             text: true,
-            vision: true,
+            images: Some(ImageReferences::AnyUrl),
             embeddings: false,
             image_generation: false,
         },
@@ -380,7 +383,7 @@ async fn capabilities_hide_and_reject_unsupported_attachment_workflows() {
         &db_path,
         WorkflowCapabilities {
             text: true,
-            vision: false,
+            images: None,
             embeddings: false,
             image_generation: false,
         },
