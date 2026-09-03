@@ -90,6 +90,10 @@ return { reply };
 - **`agent(prompt, options)`** — dispatch one worker turn and await its
   reply. `prompt` must be a string. Options, all optional:
   - `model` — catalogue model id; this also selects the model family.
+  - `fallbackModel` — catalogue model id used only when the requested model
+    is unavailable or its provider refuses or fails it before output. It never runs
+    after schema exhaustion or a failure after output; a completed call's
+    record names the model that served as `served_model`.
   - `effort` — one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
     `max`; the platform resolves it against the model's declared
     capability (a level the model lacks clamps down to the nearest it
