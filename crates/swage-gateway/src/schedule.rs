@@ -1085,6 +1085,26 @@ async fn run_body(
             // continuation session. Overlap in fact if not in name: skip
             // deliberately instead of stumbling into a failure.
             Err(GatewayError::TurnInProgress { .. }) => {
+                // A one-shot continuation created by wake_me_later is the
+                // active turn asking to wake itself. The scheduler completed
+                // the one-shot before this run; re-arm this narrow case so
+                // the wake can fire after the active turn finishes.
+                if schedule.kind == ScheduleKind::OneShot
+                    && matches!(schedule.session_policy, SessionPolicy::Continuation { .. })
+                    && matches!(schedule.creator, ScheduleCreator::Agent { .. })
+                {
+                    state
+                        .storage
+                        .update_schedule(
+                            schedule.id,
+                            UpdateSchedule {
+                                status: Some(ScheduleStatus::Active),
+                                next_run_at: Some(Some(Utc::now() + Duration::seconds(1))),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                }
                 return Ok(RunOutcome::Skipped {
                     reason: SkipReason::Overlap,
                     gate: None,
