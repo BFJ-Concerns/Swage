@@ -2,10 +2,35 @@
 // manifest (crates/swage-protocol/src/client/routes.rs). Do not edit:
 // change the manifest and regenerate.
 
+import type { ConversationDetail } from "./ConversationDetail";
+import type { ConversationListResponse } from "./ConversationListResponse";
+import type { ConversationResponse } from "./ConversationResponse";
+import type { CreateConversationRequest } from "./CreateConversationRequest";
+import type { CreatePageAnnotationRequest } from "./CreatePageAnnotationRequest";
+import type { CreatePageRequest } from "./CreatePageRequest";
+import type { CreatePageTemplateRequest } from "./CreatePageTemplateRequest";
 import type { CreateSpaceRequest } from "./CreateSpaceRequest";
+import type { DeletePageAnnotationResponse } from "./DeletePageAnnotationResponse";
+import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
+import type { PageAnnotationView } from "./PageAnnotationView";
+import type { PageListResponse } from "./PageListResponse";
+import type { PageModuleView } from "./PageModuleView";
+import type { PageResponse } from "./PageResponse";
+import type { PageTemplateListResponse } from "./PageTemplateListResponse";
+import type { PageTemplateResponse } from "./PageTemplateResponse";
+import type { ProviderSignInState } from "./ProviderSignInState";
+import type { RestartStatusResponse } from "./RestartStatusResponse";
+import type { SaveProviderSettings } from "./SaveProviderSettings";
+import type { SaveSettingsRequest } from "./SaveSettingsRequest";
+import type { SettingsResponse } from "./SettingsResponse";
 import type { SpaceListResponse } from "./SpaceListResponse";
 import type { SpaceResponse } from "./SpaceResponse";
+import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
+import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
+import type { TurnContextResponse } from "./TurnContextResponse";
+import type { UpdatePageAnnotationRequest } from "./UpdatePageAnnotationRequest";
 import type { UpdateSpaceRequest } from "./UpdateSpaceRequest";
+import type { WritePageModuleRequest } from "./WritePageModuleRequest";
 import { ApiError } from "../api/error";
 
 let baseUrl = "";
@@ -47,15 +72,141 @@ export async function createSpace(body: CreateSpaceRequest): Promise<SpaceRespon
 
 /** Read one space. */
 export async function getSpace(id: string): Promise<SpaceResponse> {
-  return request<SpaceResponse>("GET", `/api/spaces/${id}`);
+  return request<SpaceResponse>("GET", `/api/spaces/${encodeURIComponent(id)}`);
 }
 
 /** Update a space's name or description. */
 export async function updateSpace(id: string, body: UpdateSpaceRequest): Promise<SpaceResponse> {
-  return request<SpaceResponse>("PUT", `/api/spaces/${id}`, body);
+  return request<SpaceResponse>("PUT", `/api/spaces/${encodeURIComponent(id)}`, body);
 }
 
 /** Delete a space. */
 export async function deleteSpace(id: string): Promise<void> {
-  return request<void>("DELETE", `/api/spaces/${id}`);
+  return request<void>("DELETE", `/api/spaces/${encodeURIComponent(id)}`);
+}
+
+/** List conversations in a space. */
+export async function listSpaceSessions(spaceId: string): Promise<ConversationListResponse> {
+  return request<ConversationListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/sessions`);
+}
+
+/** Create a conversation in a space. */
+export async function createSpaceSession(spaceId: string, body?: CreateConversationRequest): Promise<ConversationResponse> {
+  return request<ConversationResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/sessions`, body);
+}
+
+/** Read a conversation. */
+export async function getConversation(id: string): Promise<ConversationDetail> {
+  return request<ConversationDetail>("GET", `/api/conversations/${encodeURIComponent(id)}`);
+}
+
+/** Delete a conversation. */
+export async function deleteConversation(id: string): Promise<void> {
+  return request<void>("DELETE", `/api/conversations/${encodeURIComponent(id)}`);
+}
+
+/** Read a turn context report. */
+export async function getTurnContext(id: string): Promise<TurnContextResponse> {
+  return request<TurnContextResponse>("GET", `/api/turns/${encodeURIComponent(id)}/context`);
+}
+
+/** List pages in a space. */
+export async function listPages(spaceId: string): Promise<PageListResponse> {
+  return request<PageListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/pages`);
+}
+
+/** Create a page in a space. */
+export async function createPage(spaceId: string, body: CreatePageRequest): Promise<PageResponse> {
+  return request<PageResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/pages`, body);
+}
+
+/** List page templates in a space. */
+export async function listPageTemplates(spaceId: string): Promise<PageTemplateListResponse> {
+  return request<PageTemplateListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/page-templates`);
+}
+
+/** Create a page template in a space. */
+export async function createPageTemplate(spaceId: string, body: CreatePageTemplateRequest): Promise<PageTemplateResponse> {
+  return request<PageTemplateResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/page-templates`, body);
+}
+
+/** Read a page template. */
+export async function getPageTemplate(templateId: string): Promise<PageTemplateResponse> {
+  return request<PageTemplateResponse>("GET", `/api/page-templates/${encodeURIComponent(templateId)}`);
+}
+
+/** Read a page. */
+export async function getPage(pageId: string): Promise<PageResponse> {
+  return request<PageResponse>("GET", `/api/pages/${encodeURIComponent(pageId)}`);
+}
+
+/** Write a page module. */
+export async function writePageModule(pageId: string, body: WritePageModuleRequest): Promise<PageModuleView> {
+  return request<PageModuleView>("POST", `/api/pages/${encodeURIComponent(pageId)}/modules`, body);
+}
+
+/** Create a page annotation. */
+export async function createPageAnnotation(pageId: string, body: CreatePageAnnotationRequest): Promise<PageAnnotationView> {
+  return request<PageAnnotationView>("POST", `/api/pages/${encodeURIComponent(pageId)}/annotations`, body);
+}
+
+/** Update a page annotation. */
+export async function updatePageAnnotation(annotationId: string, body: UpdatePageAnnotationRequest): Promise<PageAnnotationView> {
+  return request<PageAnnotationView>("POST", `/api/page-annotations/${encodeURIComponent(annotationId)}`, body);
+}
+
+/** Delete a page annotation. */
+export async function deletePageAnnotation(annotationId: string): Promise<DeletePageAnnotationResponse> {
+  return request<DeletePageAnnotationResponse>("DELETE", `/api/page-annotations/${encodeURIComponent(annotationId)}`);
+}
+
+/** Read gateway settings. */
+export async function getSettings(): Promise<SettingsResponse> {
+  return request<SettingsResponse>("GET", `/api/settings`);
+}
+
+/** Save gateway settings. */
+export async function saveSettings(body: SaveSettingsRequest): Promise<SettingsResponse> {
+  return request<SettingsResponse>("PUT", `/api/settings`, body);
+}
+
+/** Discover models for a configured provider. */
+export async function discoverProviderModels(id: string, q?: string): Promise<ModelDiscoveryResponse> {
+  const query = new URLSearchParams();
+  if (q !== undefined) query.set("q", q);
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<ModelDiscoveryResponse>("GET", `/api/settings/providers/${encodeURIComponent(id)}/models${suffix}`);
+}
+
+/** Discover models for draft provider settings. */
+export async function discoverDraftProviderModels(id: string, body: SaveProviderSettings, q?: string): Promise<ModelDiscoveryResponse> {
+  const query = new URLSearchParams();
+  if (q !== undefined) query.set("q", q);
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<ModelDiscoveryResponse>("POST", `/api/settings/providers/${encodeURIComponent(id)}/models${suffix}`, body);
+}
+
+/** Read provider sign-in state. */
+export async function getProviderSignInState(id: string): Promise<ProviderSignInState> {
+  return request<ProviderSignInState>("GET", `/api/settings/providers/${encodeURIComponent(id)}/sign-in`);
+}
+
+/** Start provider sign-in. */
+export async function startProviderSignIn(id: string, body: StartProviderSignInRequest): Promise<StartProviderSignInResponse> {
+  return request<StartProviderSignInResponse>("POST", `/api/settings/providers/${encodeURIComponent(id)}/sign-in`, body);
+}
+
+/** Sign out a provider. */
+export async function signOutProvider(id: string): Promise<ProviderSignInState> {
+  return request<ProviderSignInState>("DELETE", `/api/settings/providers/${encodeURIComponent(id)}/sign-in`);
+}
+
+/** Read restart status. */
+export async function getRestartStatus(): Promise<RestartStatusResponse> {
+  return request<RestartStatusResponse>("GET", `/api/settings/restart-required`);
+}
+
+/** Restart the gateway. */
+export async function restartGateway(): Promise<RestartStatusResponse> {
+  return request<RestartStatusResponse>("POST", `/api/settings/restart`);
 }
