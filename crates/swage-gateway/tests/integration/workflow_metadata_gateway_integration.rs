@@ -68,7 +68,7 @@ async fn workflow_metadata_and_explicit_updates_persist_through_live_gateway_req
         updated["name"], "header-name",
         "source updates retain the saved name"
     );
-    assert_eq!(updated["description"], "ignored request description");
+    assert_eq!(updated["description"], "updated header description");
     assert_eq!(updated["head_version"], 2);
     let reloaded: Value = client
         .get(format!(
