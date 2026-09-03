@@ -303,6 +303,21 @@ impl GatewayDelegationHandler {
     }
 }
 
+fn delegate_message_payload(
+    composition: DispatchContextComposition,
+    task: &str,
+    task_definition: Option<&str>,
+) -> Result<serde_json::Value, AgentError> {
+    let mut payload = serde_json::to_value(composition).map_err(|error| {
+        AgentError::InvalidConfig(format!(
+            "failed to encode delegated context composition: {error}"
+        ))
+    })?;
+    payload["task"] = serde_json::json!(task);
+    payload["task_definition"] = serde_json::json!(task_definition);
+    Ok(payload)
+}
+
 #[async_trait::async_trait]
 impl DelegationHandler for GatewayDelegationHandler {
     async fn handle_delegation(
@@ -564,14 +579,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
 
-        let mut payload = serde_json::to_value(composition).map_err(|error| {
-            AgentError::InvalidConfig(format!(
-                "failed to encode delegated context composition: {error}"
-            ))
-        })?;
-        payload["task"] = serde_json::json!(task);
-        payload["task_definition"] = serde_json::json!(task_definition);
-        payload["skills"] = serde_json::json!(skills);
+        let mut payload = delegate_message_payload(composition, task, task_definition)?;
         payload["placement"] = serde_json::json!({
             "cwd": placement.as_ref().map(|placement| &placement.path),
             "requested_cwd": cwd,

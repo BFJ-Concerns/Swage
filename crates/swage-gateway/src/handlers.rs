@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{
@@ -872,12 +871,6 @@ pub async fn register_device(
         return Err(ApiError::validation(
             "device id must not be empty".to_string(),
         ));
-    }
-    if crate::device::DeviceKind::from_str(request.kind.trim()).is_err() {
-        return Err(ApiError::validation(format!(
-            "unknown device kind '{}'",
-            request.kind
-        )));
     }
     if request.base_url.trim().is_empty() {
         return Err(ApiError::validation(

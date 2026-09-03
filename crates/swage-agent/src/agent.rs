@@ -678,6 +678,7 @@ impl Agent {
                     self.fail_turn_and_idle(turn.id, thread_id).await;
                     let _ = event_tx.send(AgentEvent::Error {
                         message: error.to_string(),
+                        provider_failure: matches!(&error, AgentError::ProviderFailed(_)),
                     });
                     return Err(error);
                 }
@@ -1105,6 +1106,7 @@ impl Agent {
                 self.fail_turn_and_idle(turn.id, thread_id).await;
                 let _ = event_tx.send(AgentEvent::Error {
                     message: e.to_string(),
+                    provider_failure: matches!(&e, AgentError::ProviderFailed(_)),
                 });
                 return Err(e);
             }
@@ -1250,14 +1252,20 @@ impl Agent {
                         }
                         Some(StreamChunk::Error { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
-                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: message.clone(),
+                                provider_failure: true,
+                            });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
                             ));
                         }
                         Some(StreamChunk::ProviderAnomaly { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
-                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: message.clone(),
+                                provider_failure: true,
+                            });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::ProviderAnomaly(message),
                             ));
