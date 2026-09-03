@@ -9,27 +9,16 @@ import type {
 import type { ProviderSignInState } from "../protocol/ProviderSignInState";
 import type { SignInMethod } from "../protocol/SignInMethod";
 import type { StartProviderSignInResponse } from "../protocol/StartProviderSignInResponse";
-import { ApiError } from "./error";
-
-async function request(path: string, method = "GET", body?: unknown): Promise<Response> {
-  const init: RequestInit = { method };
-  if (body !== undefined) {
-    init.headers = { "Content-Type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
-  const response = await fetch(path, init);
-  if (!response.ok) {
-    throw await ApiError.fromResponse(response, method, path);
-  }
-  return response;
-}
+import type { SaveProviderSettings } from "../protocol/SaveProviderSettings";
+import type { SaveSettingsRequest } from "../protocol/SaveSettingsRequest";
+import * as generated from "../protocol/client";
 
 export async function fetchSettings(): Promise<SettingsResponse> {
-  return (await request("/api/settings")).json() as Promise<SettingsResponse>;
+  return generated.getSettings();
 }
 
 export async function saveSettings(payload: SettingsPayload): Promise<SettingsResponse> {
-  return (await request("/api/settings", "PUT", payload)).json() as Promise<SettingsResponse>;
+  return generated.saveSettings(payload as unknown as SaveSettingsRequest);
 }
 
 export async function discoverModels(
@@ -37,36 +26,36 @@ export async function discoverModels(
   q = "",
   provider?: ProviderDiscoveryDraft,
 ): Promise<ModelDiscoveryResponse> {
-  const query = q ? `?q=${encodeURIComponent(q)}` : "";
-  const method = provider ? "POST" : "GET";
-  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/models${query}`, method, provider))
-    .json() as Promise<ModelDiscoveryResponse>;
+  return provider
+    ? generated.discoverDraftProviderModels(
+      providerId,
+      provider as unknown as SaveProviderSettings,
+      q || undefined,
+    )
+    : generated.discoverProviderModels(providerId, q || undefined);
 }
 
 export async function fetchRestartStatus(): Promise<RestartStatusResponse> {
-  return (await request("/api/settings/restart-required")).json() as Promise<RestartStatusResponse>;
+  return generated.getRestartStatus();
 }
 
 export async function restartGateway(): Promise<RestartStatusResponse> {
-  return (await request("/api/settings/restart", "POST")).json() as Promise<RestartStatusResponse>;
+  return generated.restartGateway();
 }
 
 export async function fetchProviderSignIn(providerId: string): Promise<ProviderSignInState> {
-  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/sign-in`))
-    .json() as Promise<ProviderSignInState>;
+  return generated.getProviderSignInState(providerId);
 }
 
 export async function startProviderSignIn(
   providerId: string,
   method: SignInMethod = "browser",
 ): Promise<StartProviderSignInResponse> {
-  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/sign-in`, "POST", { method }))
-    .json() as Promise<StartProviderSignInResponse>;
+  return generated.startProviderSignIn(providerId, { method });
 }
 
 export async function signOutProvider(providerId: string): Promise<ProviderSignInState> {
-  return (await request(`/api/settings/providers/${encodeURIComponent(providerId)}/sign-in`, "DELETE"))
-    .json() as Promise<ProviderSignInState>;
+  return generated.signOutProvider(providerId);
 }
 
 export function emptyPreset(): GenerationPresetConfig {
