@@ -16494,7 +16494,10 @@ mod tests {
                 .is_some_and(|message| message.contains("injected wind-down completion failure"))
         );
         let account = terminal_account_of(&storage, started.id).await;
-        assert!(matches!(account.ending, WorkflowRunEnding::Threw { .. }));
+        // The run caught the refusal and returned, so its account names a
+        // return. The `wind_down` entry it left behind never completed, and a
+        // failed entry is not the host's record of a crossing.
+        assert!(matches!(account.ending, WorkflowRunEnding::Returned));
 
         storage
             .with_conn(|connection| {
@@ -16521,6 +16524,54 @@ mod tests {
             provider.requests.lock().expect("requests").len(),
             1,
             "replay does not duplicate completed provider work"
+        );
+    }
+
+    #[test]
+    fn only_a_completed_wind_down_entry_names_the_closing_boundary_as_the_ending() {
+        fn wind_down(status: &str) -> WorkflowJournalRecord {
+            WorkflowJournalRecord {
+                id: Uuid::new_v4(),
+                run_id: Uuid::new_v4(),
+                seq: 1,
+                completed_order: None,
+                kind: "wind_down".into(),
+                status: status.into(),
+                args_hash: String::new(),
+                request: Value::Null,
+                result: None,
+                error_message: None,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+            }
+        }
+        let threw = || WorkflowRunEnding::Threw {
+            error: "boom".into(),
+        };
+
+        assert!(
+            matches!(
+                refine_ending(threw(), &[wind_down("completed")]),
+                WorkflowRunEnding::WoundDown { .. }
+            ),
+            "a completed wind-down entry is the host's record of the crossing"
+        );
+        assert!(
+            matches!(
+                refine_ending(threw(), &[wind_down("failed")]),
+                WorkflowRunEnding::Threw { .. }
+            ),
+            "a wind-down intent that never completed did not close the run"
+        );
+        assert!(
+            matches!(
+                refine_ending(threw(), &[wind_down("started")]),
+                WorkflowRunEnding::Threw { .. }
+            ),
+            "a wind-down intent still in flight did not close the run"
         );
     }
 
@@ -18021,6 +18072,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: None,
                 source_hash: source_hash(""),
                 args: Value::Null,
@@ -18123,6 +18175,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: None,
                 source_hash: source_hash(""),
                 args: Value::Null,
