@@ -159,22 +159,23 @@ pub async fn update_workflow_script(
                 .replace("{name}", &record.name),
         ));
     }
-    if let Some(source) = &edit.source {
-        validate_source(source)?;
-    }
+    // Source headers are authoritative for both creation and updates.
+    let source_meta = edit.source.as_deref().map(validate_source).transpose()?;
+    let description = source_meta
+        .as_ref()
+        .and_then(|meta| meta.description.as_deref())
+        .or(edit.description.as_deref());
 
     let prior_version = head_version(state, id).await?;
     let prior = Some(snapshot(&record, prior_version));
 
-    if edit.description.is_some()
-        || edit.delivery_grant.is_some()
-        || edit.authoring_session_id.is_some()
+    if description.is_some() || edit.delivery_grant.is_some() || edit.authoring_session_id.is_some()
     {
         state
             .storage
             .update_workflow_script(
                 id,
-                edit.description.as_deref(),
+                description,
                 edit.delivery_grant,
                 edit.authoring_session_id,
             )
@@ -347,8 +348,7 @@ fn snapshot(record: &WorkflowScriptRecord, head_version: u32) -> serde_json::Val
         "name": record.name,
         "description": record.description,
         "head_version": head_version,
-        "has_delivery_grant": record.delivery_grant.is_some(),
-        "can_deliver": record.effective_delivery_grant().is_some(),
+        "delivery_grant": &record.delivery_grant,
         "authoring_session_id": record.authoring_session_id,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
@@ -545,6 +545,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_uses_the_source_header_description_over_the_request_field() {
+        let state = state();
+        let space = state.space_store.get_or_create_default().await.unwrap();
+        let change =
+            save_workflow_script(&state, draft(space.id, "described"), "operator_http", None)
+                .await
+                .unwrap();
+
+        update_workflow_script(
+            &state,
+            change.script_id,
+            WorkflowScriptEdit {
+                description: Some("From the request field.".into()),
+                source: Some(
+                    "export const meta = { description: \"From the source header.\" };\nreturn 2;"
+                        .into(),
+                ),
+                ..Default::default()
+            },
+            "operator_http",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let record = state
+            .storage
+            .get_workflow_script(change.script_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.description, "From the source header.");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_a_name_that_is_not_a_workflow_name() {
         let state = state();
         let space = state.space_store.get_or_create_default().await.unwrap();
@@ -561,7 +596,7 @@ mod tests {
         let space = state.space_store.get_or_create_default().await.unwrap();
         let session = session(&state, space.id).await;
         let mut draft = draft(space.id, "recorded");
-        draft.authoring_session_id = Some(session);
+        draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         let change = save_workflow_script(&state, draft, "workflow_save", Some(session))
             .await
             .unwrap();
@@ -581,7 +616,10 @@ mod tests {
         assert_eq!(event.metadata["prior_state"], serde_json::Value::Null);
         assert_eq!(event.metadata["new_state"]["name"], "recorded");
         assert_eq!(event.metadata["new_state"]["head_version"], 1);
-        assert_eq!(event.metadata["new_state"]["can_deliver"], false);
+        assert_eq!(
+            event.metadata["new_state"]["delivery_grant"],
+            serde_json::json!({"targets": ["webhook"]})
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
