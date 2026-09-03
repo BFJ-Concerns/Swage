@@ -231,6 +231,8 @@ pub struct WorkflowRun {
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
     pub carrying_skill: Option<String>,
+    /// Opaque identity declared by the workflow script for grouping its runs.
+    pub task: Option<String>,
     /// Source retained for runs whose workflow was not a saved script version.
     pub source: Option<String>,
     /// SHA-256 of the exact source executed by this run.
@@ -451,9 +453,10 @@ pub struct WorkflowAgentCallDetail {
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
     pub served_model: Option<String>,
+    /// What the call spent, or why that is not known. A call the provider
+    /// reported no usage for reads as unavailable with a reason, so budget
+    /// reconstruction never reads absence as zero spend.
     pub usage: WorkflowCallUsage,
     pub termination: WorkflowWorkerTermination,
     /// What the call was dispatched with. Absent only for calls journalled

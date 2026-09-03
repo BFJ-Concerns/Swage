@@ -2697,6 +2697,62 @@ mod tests {
         ) -> Result<Vec<WorkflowJournalRecord>, StorageError> {
             unimplemented!()
         }
+
+        async fn record_workflow_call_dispatch(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn record_workflow_call_attempt(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, StorageError> {
+            unimplemented!()
+        }
+        async fn cut_short_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+            _: &str,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ProviderRoundStore for StubStorage {
+        async fn open_provider_round(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: serde_json::Value,
+        ) -> Result<ProviderRoundRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn settle_provider_round(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_provider_rounds_by_turn(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ProviderRoundRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn interrupt_outstanding_provider_rounds(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
     }
 
     // --- MessageStore: thread-ownership API compile checks ---

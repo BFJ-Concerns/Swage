@@ -5116,22 +5116,6 @@
             ],
             "description": "What the call was dispatched with. Absent only for calls journalled\nbefore the dispatch record existed."
           },
-          "input_tokens": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "output_tokens": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
           "provider_rounds": {
             "description": "The provider rounds this call's turn ran, oldest first. `None` where\nthe projection does not carry them — the live entry event, which is\nsent as the entry settles — so an absent round record is never read\nas a call that made no provider request. The run detail always\ncarries them.",
             "items": {
@@ -5173,7 +5157,8 @@
             ]
           },
           "usage": {
-            "$ref": "#/components/schemas/WorkflowCallUsage"
+            "$ref": "#/components/schemas/WorkflowCallUsage",
+            "description": "What the call spent, or why that is not known. A call the provider\nreported no usage for reads as unavailable with a reason, so budget\nreconstruction never reads absence as zero spend."
           }
         },
         "required": [
@@ -5898,6 +5883,13 @@
           },
           "state": {
             "$ref": "#/components/schemas/WorkflowRunState"
+          },
+          "task": {
+            "description": "Opaque identity declared by the workflow script for grouping its runs.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
