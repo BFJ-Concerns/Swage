@@ -25,11 +25,11 @@ use swage_storage::{
         ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
         Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
-        NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial, NewMessage,
-        NewSchedule, NewScheduleRun, NewSession, NewSpace, NewThread, NewToolCall, NewTurn,
-        NewWorkspaceAttachment, Schedule, ScheduleRun, ScheduleRunState, ScheduleRunUpdate,
-        ScheduleStatus, Session, Space, SpaceSlug, Thread, ThreadState, ToolCallRecord, Turn,
-        TurnState, UpdateSchedule, WorkspaceAttachment,
+        NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial,
+        NewMessage, NewSchedule, NewScheduleRun, NewSession, NewSpace, NewThread, NewToolCall,
+        NewTurn, NewWorkspaceAttachment, PageAnnotation, Schedule, ScheduleRun, ScheduleRunState,
+        ScheduleRunUpdate, ScheduleStatus, Session, Space, SpaceSlug, Thread, ThreadState,
+        ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
@@ -3024,7 +3024,11 @@ impl swage_storage::PageAnnotationStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
-    async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
+    async fn delete_page_annotation_with_audit(
+        &self,
+        _: PageAnnotation,
+        _: NewAuditEvent,
+    ) -> Result<bool, StorageError> {
         unimplemented!()
     }
 }
