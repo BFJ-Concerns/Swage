@@ -20,9 +20,10 @@ use super::{
         CreateConversationRequest,
     },
     page::{
-        CreatePageAnnotationRequest, CreatePageRequest, DeletePageAnnotationResponse,
-        PageAnnotationView, PageListResponse, PageModuleView, PageResponse,
-        UpdatePageAnnotationRequest, WritePageModuleRequest,
+        CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
+        DeletePageAnnotationResponse, PageAnnotationView, PageListResponse, PageModuleView,
+        PageResponse, PageTemplateListResponse, PageTemplateResponse, UpdatePageAnnotationRequest,
+        WritePageModuleRequest,
     },
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
@@ -356,6 +357,57 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<PageResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_page_templates",
+            method: Method::Get,
+            path: "/api/spaces/{space_id}/page-templates",
+            path_parameters: vec![Parameter {
+                name: "space_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "List page templates in a space.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<PageTemplateListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "create_page_template",
+            method: Method::Post,
+            path: "/api/spaces/{space_id}/page-templates",
+            path_parameters: vec![Parameter {
+                name: "space_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Create a page template in a space.",
+            request_optional: false,
+            request: schema::<CreatePageTemplateRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PageTemplateResponse>(),
+            },
+        },
+        Route {
+            operation_id: "get_page_template",
+            method: Method::Get,
+            path: "/api/page-templates/{template_id}",
+            path_parameters: vec![Parameter {
+                name: "template_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Read a page template.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<PageTemplateResponse>(),
             },
         },
         Route {
