@@ -5,4 +5,4 @@ export type WorkflowAgentCallDetail = { agent_definition_id: string | null, sess
 /**
  * The resolved state of the isolated worktree after the worker settled.
  */
-worktree: WorkflowWorktreeCompletion | null, };
+worktree: WorkflowWorktreeCompletion | null, served_model: string | null, };

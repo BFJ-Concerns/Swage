@@ -435,10 +435,7 @@ mod tests {
         );
         let router = build_router(state);
         for route in routes() {
-            let mut path = route.path.to_string();
-            for parameter in route.path_parameters() {
-                path = path.replace(&format!("{{{parameter}}}"), &uuid::Uuid::nil().to_string());
-            }
+            let path = route.probe_path();
             let method = match route.method {
                 Method::Get => "GET",
                 Method::Post => "POST",
