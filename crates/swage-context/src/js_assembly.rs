@@ -160,8 +160,9 @@ pub fn assemble_named(
 /// reported as such rather than inherited.
 ///
 /// Between the run and the report sits the baseline floor: every element the
-/// default assembly would have carried and the script did not add is either a
-/// declared omission (honoured, recorded) or a breach (restored, warned).
+/// default assembly would have carried and the script did not add from its
+/// supplied element instance is either a declared omission (honoured,
+/// recorded) or a breach (restored, warned).
 fn compose(
     name: &str,
     outcome: ScriptOutcome,
@@ -181,6 +182,8 @@ fn compose(
 
     // Slice the flat output back into the blocks the script composed, so a
     // restored element can be placed among them by priority.
+    let added_element_indices: Vec<Option<usize>> =
+        added.iter().map(|block| block.element_index).collect();
     let mut blocks: Vec<ComposedBlock> = Vec::with_capacity(added.len());
     let mut offset = 0usize;
     for block in added {
@@ -199,7 +202,8 @@ fn compose(
     // so restoring in order keeps orientation ahead of the norms it precedes.
     let mut missing: Vec<ComposedBlock> = baseline_floor(elements, variables)
         .into_iter()
-        .filter(|element| !blocks.iter().any(|block| block.name == element.name))
+        .filter(|(index, _)| !added_element_indices.contains(&Some(*index)))
+        .map(|(_, element)| element)
         .collect();
     missing.sort_by_key(|element| Reverse(element.priority));
 
@@ -280,17 +284,23 @@ fn compose(
 fn baseline_floor(
     elements: &[Box<dyn ContextElement>],
     variables: &BTreeMap<String, String>,
-) -> Vec<ComposedBlock> {
+) -> Vec<(usize, ComposedBlock)> {
     elements
         .iter()
-        .filter(|element| default_assembly_carries(element.name()))
-        .filter_map(|element| {
+        .enumerate()
+        .filter(|(_, element)| default_assembly_carries(element.name()))
+        .filter_map(|(index, element)| {
             let messages = rendered_content(element.as_ref(), variables);
-            (!messages.is_empty()).then(|| ComposedBlock {
-                name: element.name().to_string(),
-                source: element.source(),
-                priority: element.priority(),
-                messages,
+            (!messages.is_empty()).then(|| {
+                (
+                    index,
+                    ComposedBlock {
+                        name: element.name().to_string(),
+                        source: element.source(),
+                        priority: element.priority(),
+                        messages,
+                    },
+                )
             })
         })
         .collect()
@@ -352,6 +362,8 @@ struct AddedBlock {
     name: String,
     source: String,
     priority: i32,
+    #[serde(rename = "elementIndex")]
+    element_index: Option<usize>,
     #[serde(rename = "messageCount")]
     message_count: usize,
 }
@@ -421,25 +433,6 @@ fn run_script(
             }
             globalThis.__output = [];
             globalThis.__added = [];
-            globalThis.add = (value) => {
-                const isElement = value && !Array.isArray(value) && Array.isArray(value.messages);
-                const messages = Array.isArray(value) ? value : isElement ? value.messages : null;
-                if (!Array.isArray(messages)) {
-                    throw new Error("add() takes an element from `elements` or an array of {role, text} messages");
-                }
-                for (const message of messages) {
-                    if (typeof message.role !== "string" || typeof message.text !== "string") {
-                        throw new Error("each message needs a string role and text");
-                    }
-                    globalThis.__output.push({ role: message.role, text: message.text });
-                }
-                globalThis.__added.push({
-                    name: isElement && typeof value.name === "string" ? value.name : "script",
-                    source: isElement && typeof value.source === "string" ? value.source : "composed by the assembly script",
-                    priority: isElement && typeof value.priority === "number" ? value.priority : 0,
-                    messageCount: messages.length,
-                });
-            };
             globalThis.__omitted = [];
             globalThis.omit = (name, reason) => {
                 if (typeof name !== "string" || name.length === 0) {
@@ -473,24 +466,54 @@ fn run_script(
                 : undefined;
             const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
             globalThis.ctx = Object.freeze({ variable: valueFor });
-            for (const element of globalThis.elements) {
-                if (element.rendersSessionValues) {
-                    Object.defineProperty(element, "render", {
-                        enumerable: false,
-                        value: () => ({
-                            ...element,
-                            messages: element.messages.map(message => ({
-                                ...message,
-                                text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
-                            })),
-                        }),
-                    });
+            (() => {
+                const suppliedElements = globalThis.elements;
+                const suppliedElementIndices = new WeakMap(
+                    suppliedElements.map((element, index) => [element, index]),
+                );
+                for (const element of suppliedElements) {
+                    if (element.rendersSessionValues) {
+                        Object.defineProperty(element, "render", {
+                            enumerable: false,
+                            value: () => {
+                                const rendered = {
+                                    ...element,
+                                    messages: element.messages.map(message => ({
+                                        ...message,
+                                        text: message.text.replace(slot, (_match, name) => renderedValueFor(name)),
+                                    })),
+                                };
+                                suppliedElementIndices.set(rendered, suppliedElementIndices.get(element));
+                                return rendered;
+                            },
+                        });
+                    }
+                    delete element.rendersSessionValues;
+                    Object.freeze(element.messages);
+                    Object.freeze(element);
                 }
-                delete element.rendersSessionValues;
-                Object.freeze(element.messages);
-                Object.freeze(element);
-            }
-            Object.freeze(globalThis.elements);
+                Object.freeze(suppliedElements);
+                globalThis.add = (value) => {
+                    const isElement = value && !Array.isArray(value) && Array.isArray(value.messages);
+                    const messages = Array.isArray(value) ? value : isElement ? value.messages : null;
+                    if (!Array.isArray(messages)) {
+                        throw new Error("add() takes an element from `elements` or an array of {role, text} messages");
+                    }
+                    for (const message of messages) {
+                        if (typeof message.role !== "string" || typeof message.text !== "string") {
+                            throw new Error("each message needs a string role and text");
+                        }
+                        globalThis.__output.push({ role: message.role, text: message.text });
+                    }
+                    globalThis.__added.push({
+                        name: isElement && typeof value.name === "string" ? value.name : "script",
+                        source: isElement && typeof value.source === "string" ? value.source : "composed by the assembly script",
+                        priority: isElement && typeof value.priority === "number" ? value.priority : 0,
+                        elementIndex: suppliedElementIndices.get(value) ?? null,
+                        messageCount: messages.length,
+                    });
+                };
+            })();
             delete globalThis.__variables;
         "#).map_err(|error| format!("variable capability setup failed: {error}"))?;
 
@@ -997,6 +1020,54 @@ mod tests {
         assert!(
             output.report.errors.is_empty(),
             "a restored baseline is not a script failure"
+        );
+    }
+
+    #[test]
+    fn forged_baseline_metadata_does_not_suppress_restoration() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add({ name: "orientation", messages: [] });
+            add({ ...byName.working_norms, messages: [] });
+            add(byName.prompts);
+            add(byName.history);
+            "#,
+            &elements,
+        );
+
+        let text = output
+            .messages
+            .iter()
+            .map(|message| message.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Atelier"),
+            "forged orientation metadata must not replace its content"
+        );
+        assert!(
+            text.contains("## Working norms"),
+            "an emptied copy of working norms must not replace its content"
+        );
+        assert!(
+            output
+                .report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("orientation") && warning.contains("restored")),
+            "the forged orientation must be reported as restored: {:?}",
+            output.report.warnings
+        );
+        assert!(
+            output
+                .report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("working_norms") && warning.contains("restored")),
+            "the forged working norms must be reported as restored: {:?}",
+            output.report.warnings
         );
     }
 
