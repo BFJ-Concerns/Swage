@@ -208,6 +208,13 @@ fn compose(
     missing.sort_by_key(|element| Reverse(element.priority));
 
     for declaration in declared {
+        if declaration.element.is_empty() || declaration.reason.trim().is_empty() {
+            report.warnings.push(format!(
+                "assembly '{name}' made an invalid omission declaration for '{}'; the runtime restored the baseline element if needed",
+                declaration.element
+            ));
+            continue;
+        }
         match missing
             .iter()
             .position(|element| element.name == declaration.element)
@@ -433,16 +440,6 @@ fn run_script(
             }
             globalThis.__output = [];
             globalThis.__added = [];
-            globalThis.__omitted = [];
-            globalThis.omit = (name, reason) => {
-                if (typeof name !== "string" || name.length === 0) {
-                    throw new Error("omit() takes the name of the element to leave out");
-                }
-                if (typeof reason !== "string" || reason.trim().length === 0) {
-                    throw new Error(`omit("${name}") needs a reason for leaving the element out`);
-                }
-                globalThis.__omitted.push({ element: name, reason });
-            };
             "#,
         )
         .map_err(|error| format!("cage setup failed: {error}"))?;
@@ -484,11 +481,19 @@ fn run_script(
                                     })),
                                 };
                                 suppliedElementIndices.set(rendered, suppliedElementIndices.get(element));
+                                for (const message of rendered.messages) {
+                                    Object.freeze(message);
+                                }
+                                Object.freeze(rendered.messages);
+                                Object.freeze(rendered);
                                 return rendered;
                             },
                         });
                     }
                     delete element.rendersSessionValues;
+                    for (const message of element.messages) {
+                        Object.freeze(message);
+                    }
                     Object.freeze(element.messages);
                     Object.freeze(element);
                 }
@@ -517,7 +522,29 @@ fn run_script(
             delete globalThis.__variables;
         "#).map_err(|error| format!("variable capability setup failed: {error}"))?;
 
-        ctx.eval::<(), _>(source.as_bytes())
+        let omitted_json: String = ctx
+            .eval(format!(
+                r#"
+                (() => {{
+                    const omitted = [];
+                    globalThis.omit = (name, reason) => {{
+                        if (typeof name !== "string" || name.length === 0) {{
+                            throw new Error("omit() takes the name of the element to leave out");
+                        }}
+                        if (typeof reason !== "string" || reason.trim().length === 0) {{
+                            throw new Error(`omit("${{name}}") needs a reason for leaving the element out`);
+                        }}
+                        omitted.push({{ element: name, reason }});
+                    }};
+                    try {{
+                        {source}
+                    }} finally {{
+                        delete globalThis.omit;
+                    }}
+                    return JSON.stringify(omitted);
+                }})()
+                "#
+            ))
             .map_err(|error| script_error(&ctx, error))?;
 
         let output_json: String = ctx
@@ -541,9 +568,6 @@ fn run_script(
         let added: Vec<AddedBlock> =
             serde_json::from_str(&added_json).map_err(|error| error.to_string())?;
 
-        let omitted_json: String = ctx
-            .eval("JSON.stringify(globalThis.__omitted)")
-            .map_err(|error| script_error(&ctx, error))?;
         let declared: Vec<DeclaredOmission> =
             serde_json::from_str(&omitted_json).map_err(|error| error.to_string())?;
 
@@ -1113,6 +1137,118 @@ mod tests {
             "a declared omission is a choice, not a breach: {:?}",
             output.report.warnings
         );
+    }
+
+    #[test]
+    fn script_cannot_forge_a_blank_omission_declaration() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.prompts);
+            add(byName.history);
+            globalThis.__omitted.push({ element: "working_norms", reason: "   " });
+            "#,
+            &elements,
+        );
+
+        assert!(
+            output.report.declared_omissions.is_empty(),
+            "host omission bookkeeping is not script-writable"
+        );
+        assert!(
+            output
+                .report
+                .elements
+                .iter()
+                .any(|element| element.name == "working_norms"),
+            "a forged declaration cannot suppress the baseline floor"
+        );
+    }
+
+    #[test]
+    fn mutating_an_original_element_message_does_not_suppress_the_floor() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            byName.working_norms.messages[0].text = "";
+            add(byName.working_norms);
+            add(byName.prompts);
+            add(byName.history);
+            "#,
+            &elements,
+        );
+
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("## Working norms")),
+            "mutated projected content must not replace the baseline element"
+        );
+    }
+
+    #[test]
+    fn mutating_a_rendered_element_message_does_not_suppress_the_floor() {
+        let elements: Vec<Box<dyn ContextElement>> =
+            vec![Box::new(BriefingElement::new(ResolvedNamedElement {
+                name: "current-work".into(),
+                level: HierarchyLevel::Global,
+                path: PathBuf::from("test"),
+                content: "Task: {{task}}".into(),
+            }))];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assemblies").join("focus.js");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+            const rendered = elements[0].render();
+            rendered.messages[0].text = "changed";
+            add(rendered);
+            "#,
+        )
+        .unwrap();
+        let output = assemble_named(
+            "focus",
+            Some(&path),
+            &elements,
+            &ContextConfig::default(),
+            &WordTokeniser,
+            &BTreeMap::from([("task".to_owned(), "audit storage".to_owned())]),
+        );
+
+        assert_eq!(output.messages[0].text_content(), "Task: audit storage");
+    }
+
+    #[test]
+    fn restored_template_baseline_uses_rendered_content_and_accounting() {
+        let elements: Vec<Box<dyn ContextElement>> =
+            vec![Box::new(BriefingElement::new(ResolvedNamedElement {
+                name: "current-work".into(),
+                level: HierarchyLevel::Global,
+                path: PathBuf::from("test"),
+                content: "Task: {{task}}".into(),
+            }))];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("assemblies").join("focus.js");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Include a raw message so the assembly has non-empty output after the
+        // undeclared omission, while the floor still has a template-backed item.
+        std::fs::write(&path, "add([{ role: 'system', text: 'other' }]);").unwrap();
+        let output = assemble_named(
+            "focus",
+            Some(&path),
+            &elements,
+            &ContextConfig::default(),
+            &WordTokeniser,
+            &BTreeMap::from([("task".to_owned(), "audit storage".to_owned())]),
+        );
+
+        assert_eq!(output.messages[0].text_content(), "Task: audit storage");
+        assert_eq!(output.report.elements[0].token_count, 3);
+        assert!(output.report.declared_omissions.is_empty());
     }
 
     #[test]
