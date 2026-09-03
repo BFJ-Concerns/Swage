@@ -44,14 +44,24 @@
   const spaceStore = createSpaceStore();
   const conversationStore = createConversationStore();
 
-  // onReconnect re-fetches the active conversation over HTTP after a dropped
-  // WebSocket successfully reconnects, reconciling any state drift during downtime.
+  // A reconnect reconciles the conversation that owns the socket, even while
+  // another conversation is selected.
   let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
-    onReconnect: async () => {
-      const recoveredTurnGeneration = streamingStore.activeTurnGeneration;
-      await conversationStore.refreshActiveConversation();
-      streamingStore.reconcileAfterReconnect(recoveredTurnGeneration);
+    onReconnect: async (conversationId) => {
+      const recoveredTurnGeneration = streamingStore.streamFor?.(conversationId)
+        .activeTurnGeneration ?? 0;
+      if (conversationStore.activeConversation?.id === conversationId) {
+        await conversationStore.refreshActiveConversation();
+        streamingStore.reconcileAfterReconnect(recoveredTurnGeneration);
+      } else {
+        const recoveredConversation = await getConversation(conversationId);
+        streamingStore.reconcileAfterReconnect(
+          recoveredTurnGeneration,
+          conversationId,
+          recoveredConversation.messages,
+        );
+      }
     },
   });
 
@@ -172,7 +182,8 @@
     clearActiveConversation: () => conversationStore.clearActiveConversation(),
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
-    appendAssistantMessage: (msg) => conversationStore.appendAssistantMessage(msg),
+    appendAssistantMessage: (msg, conversationId) =>
+      conversationStore.appendAssistantMessage(msg, conversationId),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
   };

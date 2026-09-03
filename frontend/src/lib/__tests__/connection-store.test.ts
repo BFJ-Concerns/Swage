@@ -324,6 +324,30 @@ describe("reconnect callback", () => {
     mock.triggerStatus("connected"); // reconnect succeeds
 
     expect(onReconnect).toHaveBeenCalledOnce();
+    expect(onReconnect).toHaveBeenCalledWith("conv-abc");
+  });
+
+  it("reconciles the reconnected off-screen conversation", () => {
+    const onReconnect = vi.fn();
+    const a = createMockWsClient();
+    const b = createMockWsClient();
+    const clients = [a, b];
+    const store = createConnectionStore({
+      wsClientFactory: () => clients.shift()!,
+      onReconnect,
+    });
+
+    store.connectTo("conv-a");
+    a.triggerStatus("connected");
+    store.setStreamActive?.("conv-a", true);
+    store.connectTo("conv-b");
+    b.triggerStatus("connected");
+
+    a.triggerStatus("reconnecting");
+    a.triggerStatus("connected");
+
+    expect(onReconnect).toHaveBeenCalledWith("conv-a");
+    expect(store.status).toBe("connected");
   });
 
   it("does not invoke onReconnect on initial connection (not a reconnect)", () => {
