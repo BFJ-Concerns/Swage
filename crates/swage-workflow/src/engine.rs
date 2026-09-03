@@ -67,6 +67,9 @@ pub struct ScriptCapabilities {
 pub struct ScriptMeta {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Opaque identity used to group records of runs of the same task.
+    /// Header metadata stays outside the caged runtime.
+    pub task: Option<String>,
     /// Optional JSON Schema governing the value passed as this workflow's
     /// arguments. Header metadata stays outside the caged runtime.
     pub argument_schema: Option<Value>,
@@ -80,6 +83,7 @@ pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
     Ok(ScriptMeta {
         name: meta_string_field(object, "name"),
         description: meta_string_field(object, "description"),
+        task: meta_string_field(object, "task"),
         argument_schema: meta_json_field(object, "argumentSchema")?,
     })
 }
@@ -1583,6 +1587,7 @@ mod tests {
             ScriptMeta {
                 name: Some("portable".into()),
                 description: Some("runs unchanged".into()),
+                task: None,
                 argument_schema: None,
             }
         );
@@ -1603,6 +1608,7 @@ mod tests {
             ScriptMeta {
                 name: Some("json".into()),
                 description: Some("quoted keys".into()),
+                task: None,
                 argument_schema: None,
             }
         );
@@ -1611,6 +1617,7 @@ mod tests {
             ScriptMeta {
                 name: Some("javascript".into()),
                 description: Some("bare keys".into()),
+                task: None,
                 argument_schema: None,
             }
         );
@@ -1641,6 +1648,15 @@ mod tests {
                 "properties": {"task": {"type": "string"}}
             }))
         );
+    }
+
+    #[test]
+    fn portable_meta_header_reads_an_opaque_task_identity() {
+        let meta =
+            script_meta(r#"export const meta = { task: "run-task-identity", name: "identity" };"#)
+                .expect("portable metadata");
+
+        assert_eq!(meta.task.as_deref(), Some("run-task-identity"));
     }
 
     #[test]
