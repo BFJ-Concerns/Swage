@@ -934,6 +934,19 @@ impl WorkflowEngine {
                                 error.name = "AgentRequiredError";
                                 throw error;
                             }
+                            // Name-list options are coerced per element below,
+                            // so a non-array would otherwise fail as a bare
+                            // TypeError — unrecognisable to fan-out as the
+                            // author error it is.
+                            for (const key of ["tools", "skills"]) {
+                                const value = merged[key];
+                                if (value === undefined || value === null) continue;
+                                if (!Array.isArray(value)) {
+                                    const error = new Error(`opts.${key} must be an array of names`);
+                                    error.name = "InvalidAgentOptionError";
+                                    throw error;
+                                }
+                            }
                             return {
                                 prompt: "",
                                 ...(merged.agent === undefined || merged.agent === null
@@ -1923,6 +1936,39 @@ mod tests {
                 error
                     .to_string()
                     .contains("unknown agent() option 'maxAttemps'"),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_name_list_options_propagate_through_fan_out() {
+        for (source, option) in [
+            (
+                r#"await parallel([() => agent("bad", { tools: "web_search" })]);"#,
+                "tools",
+            ),
+            (
+                r#"await pipeline(["one"], () => agent("bad", { skills: "testing" }));"#,
+                "skills",
+            ),
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("author error must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("opts.{option} must be an array of names")),
                 "unexpected propagated error: {error:?}"
             );
             assert!(host.agent_requests.lock().unwrap().is_empty());
