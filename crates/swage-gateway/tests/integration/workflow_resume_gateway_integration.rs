@@ -43,6 +43,7 @@ fn crashed_workflow_run(
         inline_workflow_name: None,
         inline_workflow_version: None,
         carrying_skill: None,
+        task: None,
         source: source.map(str::to_owned),
         source_hash: source_hash.into(),
         args: Value::Null,

@@ -6,6 +6,7 @@ import type {
 import type { VoiceCapabilitiesResponse } from "../protocol/VoiceCapabilitiesResponse";
 import type { CreateScheduleRequest } from "../protocol/CreateScheduleRequest";
 import type { Schedule } from "../protocol/Schedule";
+import { ApiError } from "./error";
 
 let baseUrl = "";
 
@@ -27,7 +28,7 @@ async function request(
 
   const response = await fetch(`${baseUrl}${path}`, init);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${method} ${path}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
   return response;
 }

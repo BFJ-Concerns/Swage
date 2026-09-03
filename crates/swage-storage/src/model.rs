@@ -2098,6 +2098,8 @@ pub struct WorkflowRunRecord {
     pub script_version: Option<u32>,
     /// Canonical name of the skill whose bundled workflow source this run used.
     pub carrying_skill: Option<String>,
+    /// Opaque identity declared by the workflow script for grouping its runs.
+    pub task: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
     pub args: serde_json::Value,
@@ -2142,6 +2144,8 @@ pub struct NewWorkflowRun {
     pub inline_workflow_name: Option<String>,
     pub inline_workflow_version: Option<u32>,
     pub carrying_skill: Option<String>,
+    /// See `WorkflowRunRecord::task`.
+    pub task: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
     pub args: serde_json::Value,

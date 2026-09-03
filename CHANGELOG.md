@@ -4,9 +4,14 @@ All notable changes to Swage are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
+
 ### Added
 
 - Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
+- Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
 - Page template creation records its complete ordered module configuration in the local audit trail.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
