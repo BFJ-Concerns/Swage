@@ -12,10 +12,10 @@ use uuid::Uuid;
 
 use swage_core::GatewayError;
 use swage_protocol::client::page::{
-    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest, PageAnnotationView,
-    PageListResponse, PageModuleView, PageResponse, PageSummary, PageTemplateListResponse,
-    PageTemplateModuleView, PageTemplateResponse, PageTemplateSummary, UpdatePageAnnotationRequest,
-    WritePageModuleRequest,
+    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
+    DeletePageAnnotationResponse, PageAnnotationView, PageListResponse, PageModuleView,
+    PageResponse, PageSummary, PageTemplateListResponse, PageTemplateModuleView,
+    PageTemplateResponse, PageTemplateSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
@@ -700,9 +700,9 @@ pub async fn update_page_annotation_handler(
 pub async fn delete_page_annotation_handler(
     State(state): State<AppState>,
     Path(annotation_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<DeletePageAnnotationResponse>, ApiError> {
     delete_page_annotation(&state, annotation_id, "user").await?;
-    Ok(Json(json!({ "deleted": true })))
+    Ok(Json(DeletePageAnnotationResponse { deleted: true }))
 }
 
 pub async fn list_page_templates_handler(
