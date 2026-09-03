@@ -56,6 +56,9 @@
         streamingStore.reconcileAfterReconnect(recoveredTurnGeneration);
       } else {
         const recoveredConversation = await getConversation(conversationId);
+        // The owner may have become active while its off-screen recovery was
+        // pending. Install the same authoritative snapshot in that case.
+        conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
         streamingStore.reconcileAfterReconnect(
           recoveredTurnGeneration,
           conversationId,
@@ -153,7 +156,7 @@
 
   function startNewConversation(): void {
     keepSurfaceForConversation();
-    connectionStore.disconnect();
+    connectionStore.deselect?.();
     conversationStore.clearActiveConversation();
     router.navigate("/");
   }
@@ -218,7 +221,7 @@
         await getConversation(id);
       },
       clearActiveConversation: () => {
-        connectionStore.disconnect();
+        connectionStore.deselect?.();
         conversationStore.clearActiveConversation();
       },
       selectConversation: selectAndNavigateOrThrow,
