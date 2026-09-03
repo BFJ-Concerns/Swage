@@ -3,6 +3,7 @@ import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryRespons
 import type { ScheduleListResponse } from "../protocol/ScheduleListResponse";
 import type { ScheduleRunListResponse } from "../protocol/ScheduleRunListResponse";
 import type { TriggerScheduleResponse } from "../protocol/TriggerScheduleResponse";
+import { ApiError } from "./error";
 
 let baseUrl = "";
 
@@ -25,7 +26,7 @@ async function request(
   const response = await fetch(`${baseUrl}${path}`, init);
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${method} ${path}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
 
   return response;

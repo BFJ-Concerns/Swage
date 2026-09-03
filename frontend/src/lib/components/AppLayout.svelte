@@ -103,6 +103,13 @@
     onNavigate?.(activeConversation?.id ? `/conversations/${activeConversation.id}` : "/");
   }
 
+  function selectSurface(next: Surface): void {
+    if (workflowRunId) {
+      onNavigate?.("/");
+    }
+    onSelectSurface(next);
+  }
+
   function openCurrentSpaceWorkspaces(): void {
     if (!currentSpace) return;
     onNavigate?.(`/settings/space/${encodeURIComponent(currentSpace.slug)}/workspaces`);
@@ -113,9 +120,9 @@
   <header class="topbar">
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
-      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversations</button>
-      <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => onSelectSurface("pages")}>Pages</button>
-      <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
+      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => selectSurface("conversation")}>Conversations</button>
+      <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => selectSurface("pages")}>Pages</button>
+      <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => selectSurface("operator")}>Operator</button>
       <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
     {#if desktopRuntime}<span>{desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}</span>{/if}

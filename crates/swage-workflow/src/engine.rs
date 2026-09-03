@@ -67,6 +67,9 @@ pub struct ScriptCapabilities {
 pub struct ScriptMeta {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Opaque identity used to group records of runs of the same task.
+    /// Header metadata stays outside the caged runtime.
+    pub task: Option<String>,
     /// Optional JSON Schema governing the value passed as this workflow's
     /// arguments. Header metadata stays outside the caged runtime.
     pub argument_schema: Option<Value>,
@@ -80,6 +83,7 @@ pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
     Ok(ScriptMeta {
         name: meta_string_field(object, "name"),
         description: meta_string_field(object, "description"),
+        task: meta_string_field(object, "task"),
         argument_schema: meta_json_field(object, "argumentSchema")?,
     })
 }
@@ -891,7 +895,7 @@ impl WorkflowEngine {
                         const buildAgentRequest = (options) => {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
-                                "agent", "task", "tools", "skills", "model", "effort", "timeoutMs",
+                                "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label",
                                 "session", "elements", "variables", "assembly",
                             ]);
@@ -922,6 +926,9 @@ impl WorkflowEngine {
                                     ? {}
                                     : { skills: merged.skills.map(String) }),
                                 model: merged.model ?? null,
+                                ...(merged.fallbackModel === undefined || merged.fallbackModel === null
+                                    ? {}
+                                    : { fallback_model: String(merged.fallbackModel) }),
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {}
                                     : { effort: String(merged.effort) }),
@@ -1219,6 +1226,7 @@ mod tests {
                     output_tokens: 0,
                 },
                 working_directory: None,
+                served_model: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1268,6 +1276,7 @@ mod tests {
                     output_tokens: 1,
                 },
                 working_directory: None,
+                served_model: None,
                 session_id: None,
                 thread_id: None,
                 turn_id: None,
@@ -1374,6 +1383,7 @@ mod tests {
                     output_tokens: 1,
                 },
                 working_directory,
+                served_model: None,
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
@@ -1590,6 +1600,7 @@ mod tests {
             ScriptMeta {
                 name: Some("portable".into()),
                 description: Some("runs unchanged".into()),
+                task: None,
                 argument_schema: None,
             }
         );
@@ -1610,6 +1621,7 @@ mod tests {
             ScriptMeta {
                 name: Some("json".into()),
                 description: Some("quoted keys".into()),
+                task: None,
                 argument_schema: None,
             }
         );
@@ -1618,6 +1630,7 @@ mod tests {
             ScriptMeta {
                 name: Some("javascript".into()),
                 description: Some("bare keys".into()),
+                task: None,
                 argument_schema: None,
             }
         );
@@ -1648,6 +1661,15 @@ mod tests {
                 "properties": {"task": {"type": "string"}}
             }))
         );
+    }
+
+    #[test]
+    fn portable_meta_header_reads_an_opaque_task_identity() {
+        let meta =
+            script_meta(r#"export const meta = { task: "run-task-identity", name: "identity" };"#)
+                .expect("portable metadata");
+
+        assert_eq!(meta.task.as_deref(), Some("run-task-identity"));
     }
 
     #[test]
@@ -1769,7 +1791,7 @@ mod tests {
         WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 r#"await agent("inspect the unit", {
-                    agent: "worker", task: "review", model: "cheap", effort: "low",
+                    agent: "worker", task: "review", model: "cheap", fallbackModel: "sonnet", effort: "low",
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
                     schema: { type: "object" }, maxAttempts: 2, label: "inspect",
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
@@ -1790,6 +1812,7 @@ mod tests {
         assert_eq!(request.agent.as_deref(), Some("worker"));
         assert_eq!(request.task.as_deref(), Some("review"));
         assert_eq!(request.model.as_deref(), Some("cheap"));
+        assert_eq!(request.fallback_model.as_deref(), Some("sonnet"));
         assert_eq!(request.timeout_ms, Some(75));
         assert_eq!(request.max_attempts, 2);
         assert_eq!(request.label.as_deref(), Some("inspect"));
