@@ -166,15 +166,18 @@ describe("ambient channel control path", () => {
       .toContain("History of conv-1");
   });
 
-  it("drops the socket for the operator surface, which carries no channel", async () => {
+  it("keeps the selected conversation socket while the operator surface opens", async () => {
     component = await mountAppOnConversation();
+    wsClient.connect.mockClear();
+    wsClient.disconnect.mockClear();
 
     surfaceButton("Operator").click();
     await vi.waitFor(() => {
       expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("true");
     });
 
-    expect(wsClient.disconnect).toHaveBeenCalled();
+    expect(wsClient.disconnect).not.toHaveBeenCalled();
+    expect(wsClient.connect).not.toHaveBeenCalled();
   });
 
   it("cycles sessions in place, leaving the user on the work surface", async () => {

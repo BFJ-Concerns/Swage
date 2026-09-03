@@ -71,6 +71,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Live replies now remain with their conversation while the user changes conversations or opens Operator.
 - Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
 - Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
 - Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
