@@ -5511,6 +5511,59 @@
         ],
         "type": "string"
       },
+      "WorkflowPartialResult": {
+        "description": "A completed worker's output recovered from a run that never returned.",
+        "properties": {
+          "journal_entry_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output": true,
+          "placement": {
+            "description": "Where the work was done, still on disk.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "journal_entry_id",
+          "seq",
+          "output"
+        ],
+        "type": "object"
+      },
+      "WorkflowPartialResults": {
+        "description": "The completed work a run that never returned left behind. The type is the\npartial marking: these outputs are the run's recoverable work, never its\nresult, and `reason` says what stopped the run from producing one.",
+        "properties": {
+          "reason": {
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowPartialResult"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "reason",
+          "results"
+        ],
+        "type": "object"
+      },
       "WorkflowRun": {
         "properties": {
           "args": true,
@@ -5600,6 +5653,17 @@
               "string",
               "null"
             ]
+          },
+          "terminal_account": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRunTerminalAccount"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going."
           }
         },
         "required": [
@@ -5646,6 +5710,88 @@
           "wake_metrics"
         ],
         "type": "object"
+      },
+      "WorkflowRunEnding": {
+        "description": "How a run ended. Every ending path names itself here, so no reader has to\ninfer a run's end from silence or from the absence of a result.",
+        "oneOf": [
+          {
+            "description": "The script returned its result.",
+            "properties": {
+              "ending": {
+                "const": "returned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The script threw, or the engine failed the run.",
+            "properties": {
+              "ending": {
+                "const": "threw",
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ending",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An operator or a parent run cancelled it.",
+            "properties": {
+              "ending": {
+                "const": "cancelled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "ending"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The working token allowance ran out and the run ended under\nwind-down rather than on its own terms.",
+            "properties": {
+              "ending": {
+                "const": "wound_down",
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ending",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The gateway died with the run in flight and the run could not be\nresumed. The reason is why the resume was refused.",
+            "properties": {
+              "ending": {
+                "const": "interrupted_without_resume",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ending",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WorkflowRunEvent": {
         "properties": {
@@ -5848,6 +5994,38 @@
           }
         ]
       },
+      "WorkflowRunTerminalAccount": {
+        "description": "The one terminal record of a run: what ended it, where every worker stood,\nand — when the script never returned — the completed work still recoverable\nfrom it.",
+        "properties": {
+          "ending": {
+            "$ref": "#/components/schemas/WorkflowRunEnding"
+          },
+          "partial_results": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowPartialResults"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present exactly when the run ended without its script returning."
+          },
+          "settled_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "workers": {
+            "$ref": "#/components/schemas/WorkflowWorkerPartition"
+          }
+        },
+        "required": [
+          "ending",
+          "workers",
+          "settled_at"
+        ],
+        "type": "object"
+      },
       "WorkflowScript": {
         "properties": {
           "argument_contract": {
@@ -5955,6 +6133,145 @@
           "events_pending"
         ],
         "type": "object"
+      },
+      "WorkflowWorkerAccount": {
+        "description": "One worker's standing in the run's terminal account.",
+        "properties": {
+          "agent_definition_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "journal_entry_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "placement": {
+            "description": "The directory the worker ran in — the worktree kept rather than torn\ndown when the run did not return, so its work is still on disk.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "termination": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerTermination"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absent for a worker that settled on its own account."
+          }
+        },
+        "required": [
+          "journal_entry_id",
+          "seq"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerPartition": {
+        "description": "Every worker the run dispatched, sorted by how it stood when the run\nended. A worker appears in exactly one list.",
+        "properties": {
+          "cut_short": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowWorkerAccount"
+            },
+            "type": "array"
+          },
+          "done": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowWorkerAccount"
+            },
+            "type": "array"
+          },
+          "failed": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowWorkerAccount"
+            },
+            "type": "array"
+          },
+          "unsettled": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowWorkerAccount"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "done",
+          "failed",
+          "cut_short",
+          "unsettled"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerTermination": {
+        "description": "Why a worker stopped when it did not settle on its own account.\n\nShared contract: the run's terminal account partitions workers by it, and\na worker call's own record names the same cause, so \"the run ended me\" and\n\"I failed\" are never the same fact wearing one name.",
+        "oneOf": [
+          {
+            "description": "The worker's own failure, in the words its journal entry recorded.",
+            "properties": {
+              "cause": {
+                "const": "failed",
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The run's ending reached this worker before it settled. `detail`\ncarries the settling error the run wrote over it.",
+            "properties": {
+              "cause": {
+                "const": "cut_short",
+                "type": "string"
+              },
+              "detail": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Nothing ever recorded an outcome for this worker — the run's end left\nno process alive to settle it.",
+            "properties": {
+              "cause": {
+                "const": "unsettled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WorkspaceAttachmentListResponse": {
         "properties": {

@@ -747,7 +747,6 @@ impl WorkflowStore for SqliteStorage {
         })
         .await
     }
-
 }
 
 #[cfg(test)]

@@ -164,6 +164,7 @@ mod tests {
                 inline_workflow_name: Some("fan-out".into()),
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null;".into()),
                 source_hash: "hash".into(),
                 args: Value::Null,
