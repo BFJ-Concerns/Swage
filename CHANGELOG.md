@@ -4,10 +4,17 @@ All notable changes to Swage are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
+
 ### Added
 
 - Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
 - Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
+- Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
+- Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
+- Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
 - Page template creation records its complete ordered module configuration in the local audit trail.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
 - Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
@@ -66,6 +73,17 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Live replies now remain with their conversation while the user changes conversations or opens Operator.
+- Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
+- Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
+- Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
+- Work-surface sockets now retain a page update emitted while their WebSocket handshake is completing.
+- One-shot self-wakes now retry after their active turn instead of being consumed as an overlap skip.
+- Continued workflow workers now retain the skill selection made when they were created.
+- Workflow terminal-budget audit entries now settle to failed after bounded completion-write retries, rather than remaining started.
+- Carried workflows excluded for invalid metadata are now recorded in the local audit trail.
+- Remote-device registration now refuses a Local target consistently, including pairing and recovery imports that have no local producer.
+- Workflow-script updates now retain source-header descriptions, expose their whole delivery grant in configuration history, and return 404 for an absent script.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.

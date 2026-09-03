@@ -230,6 +230,8 @@ pub struct WorkflowRun {
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
     pub carrying_skill: Option<String>,
+    /// Opaque identity declared by the workflow script for grouping its runs.
+    pub task: Option<String>,
     /// Source retained for runs whose workflow was not a saved script version.
     pub source: Option<String>,
     /// SHA-256 of the exact source executed by this run.
@@ -300,6 +302,7 @@ pub struct WorkflowAgentCallDetail {
     pub output_tokens: Option<u64>,
     /// The resolved state of the isolated worktree after the worker settled.
     pub worktree: Option<WorkflowWorktreeCompletion>,
+    pub served_model: Option<String>,
 }
 
 /// The final Git state of an isolated worker worktree.
