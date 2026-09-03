@@ -940,8 +940,17 @@ mod tests {
         assert_eq!(second.value, "refreshed-token");
 
         let audits = storage.list_audit_events().await.unwrap();
+        let access_events: Vec<_> = audits
+            .iter()
+            .filter(|event| event.event_kind == "accessed")
+            .collect();
+        assert_eq!(
+            access_events.len(),
+            2,
+            "each file-backed resolution must be recorded: {audits:?}"
+        );
         assert!(
-            audits.iter().all(|event| {
+            access_events.iter().all(|event| {
                 let rendered = event.metadata.to_string();
                 !rendered.contains("first-token") && !rendered.contains("refreshed-token")
             }),
