@@ -44,7 +44,7 @@ describe("fetchTurnContext", () => {
 
     const loaded = await fetchTurnContext("t-1");
 
-    expect(fetch).toHaveBeenCalledWith("/api/turns/t-1/context");
+    expect(fetch).toHaveBeenCalledWith("/api/turns/t-1/context", { method: "GET" });
     expect(loaded?.assembly_name).toBe("default");
     expect(loaded?.elements[0].name).toBe("orientation");
   });

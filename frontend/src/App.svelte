@@ -44,14 +44,27 @@
   const spaceStore = createSpaceStore();
   const conversationStore = createConversationStore();
 
-  // onReconnect re-fetches the active conversation over HTTP after a dropped
-  // WebSocket successfully reconnects, reconciling any state drift during downtime.
+  // A reconnect reconciles the conversation that owns the socket, even while
+  // another conversation is selected.
   let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
-    onReconnect: async () => {
-      const recoveredTurnGeneration = streamingStore.activeTurnGeneration;
-      await conversationStore.refreshActiveConversation();
-      streamingStore.reconcileAfterReconnect(recoveredTurnGeneration);
+    onReconnect: async (conversationId) => {
+      const recoveredTurnGeneration = streamingStore.streamFor?.(conversationId)
+        .activeTurnGeneration ?? 0;
+      if (conversationStore.activeConversation?.id === conversationId) {
+        await conversationStore.refreshActiveConversation();
+        streamingStore.reconcileAfterReconnect(recoveredTurnGeneration);
+      } else {
+        const recoveredConversation = await getConversation(conversationId);
+        // The owner may have become active while its off-screen recovery was
+        // pending. Install the same authoritative snapshot in that case.
+        conversationStore.replaceActiveConversationIfCurrent?.(recoveredConversation);
+        streamingStore.reconcileAfterReconnect(
+          recoveredTurnGeneration,
+          conversationId,
+          recoveredConversation.messages,
+        );
+      }
     },
   });
 
@@ -64,8 +77,8 @@
 
   // Route all server events from the WebSocket through the streaming store.
   // The connection store is a pure relay — interpretation belongs to streaming.
-  connectionStore.onServerEvent((event) =>
-    streamingStore.handleServerEvent(event),
+  connectionStore.onServerEvent((event, conversationId) =>
+    streamingStore.handleServerEvent(event, conversationId),
   );
 
   // The pages store opens its own work-surface channel: page signals are not
@@ -143,7 +156,7 @@
 
   function startNewConversation(): void {
     keepSurfaceForConversation();
-    connectionStore.disconnect();
+    connectionStore.deselect?.();
     conversationStore.clearActiveConversation();
     router.navigate("/");
   }
@@ -172,7 +185,8 @@
     clearActiveConversation: () => conversationStore.clearActiveConversation(),
     appendOptimisticUserMessage: (msg) =>
       conversationStore.appendOptimisticUserMessage(msg),
-    appendAssistantMessage: (msg) => conversationStore.appendAssistantMessage(msg),
+    appendAssistantMessage: (msg, conversationId) =>
+      conversationStore.appendAssistantMessage(msg, conversationId),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
   };
@@ -207,7 +221,7 @@
         await getConversation(id);
       },
       clearActiveConversation: () => {
-        connectionStore.disconnect();
+        connectionStore.deselect?.();
         conversationStore.clearActiveConversation();
       },
       selectConversation: selectAndNavigateOrThrow,
@@ -337,10 +351,7 @@
     // the control channel beside the work surface rather than a place to
     // navigate away to. Page liveness does not depend on it — the pages
     // store listens on its own channel.
-    if (next === "operator") {
-      connectionStore.disconnect();
-      return;
-    }
+    if (next === "operator") return;
 
     // Conversations and Pages share the same ambient channel. Moving between
     // them must retain its socket and in-memory history; only returning from
