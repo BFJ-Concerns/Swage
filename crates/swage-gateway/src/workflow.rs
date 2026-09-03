@@ -5,7 +5,8 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
@@ -100,6 +101,7 @@ struct EffectiveWorkflow {
     immutable: bool,
     carrying_skill: Option<String>,
     argument_schema: Option<Value>,
+    task: Option<String>,
 }
 
 #[derive(Clone)]
@@ -127,14 +129,12 @@ impl EffectiveWorkflow {
         source: String,
     ) -> Result<Self, String> {
         let identity = format!("{}/{}", skill.name, name);
-        let argument_schema = swage_workflow::script_meta(&source)
-            .map_err(|error| {
-                format!(
-                    "workflow {name} carried by skill {} has invalid metadata: {error}",
-                    skill.name
-                )
-            })?
-            .argument_schema;
+        let meta = swage_workflow::script_meta(&source).map_err(|error| {
+            format!(
+                "workflow {name} carried by skill {} has invalid metadata: {error}",
+                skill.name
+            )
+        })?;
         Ok(Self {
             id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
             space_id,
@@ -148,12 +148,14 @@ impl EffectiveWorkflow {
             updated_at: chrono::DateTime::UNIX_EPOCH,
             immutable: true,
             carrying_skill: Some(skill.name.clone()),
-            argument_schema,
+            argument_schema: meta.argument_schema,
+            task: meta.task,
         })
     }
 }
 
-fn carried_workflows(
+async fn carried_workflows(
+    state: &AppState,
     space_id: Uuid,
     skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
@@ -174,7 +176,14 @@ fn carried_workflows(
                 ) {
                     Ok(workflow) => workflows.push(workflow),
                     Err(error) => {
-                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                        record_carried_workflow_exclusion(
+                            state,
+                            space_id,
+                            &skill.name,
+                            name,
+                            &error,
+                        )
+                        .await;
                     }
                 }
             }
@@ -225,12 +234,43 @@ fn carried_workflows(
             match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
                 Ok(workflow) => workflows.push(workflow),
                 Err(error) => {
-                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    record_carried_workflow_exclusion(state, space_id, &skill.name, name, &error)
+                        .await;
                 }
             }
         }
     }
     Ok(workflows)
+}
+
+async fn record_carried_workflow_exclusion(
+    state: &AppState,
+    space_id: Uuid,
+    skill_name: &str,
+    workflow_name: &str,
+    error: &str,
+) {
+    tracing::warn!(%error, skill = skill_name, workflow = workflow_name, "excluding carried workflow with invalid metadata");
+    if let Err(audit_error) = state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "workflow_script".into(),
+            entity_id: format!("{skill_name}/{workflow_name}"),
+            event_kind: "excluded".into(),
+            summary: "Excluded carried workflow with invalid metadata".into(),
+            metadata: serde_json::json!({
+                "space_id": space_id,
+                "skill": skill_name,
+                "workflow": workflow_name,
+                "error": error,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(%audit_error, skill = skill_name, workflow = workflow_name, "could not audit carried workflow exclusion");
+    }
 }
 
 async fn discover_skills_for_space(
@@ -255,7 +295,7 @@ async fn authored_workflow(
     // use, never the stored column: a model-authored script resolves none.
     // See service::workflow_script.
     let delivery_grant = record.effective_delivery_grant();
-    let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
+    let meta = swage_workflow::script_meta(&head.source)?;
     Ok(EffectiveWorkflow {
         id: record.id,
         space_id: record.space_id,
@@ -269,7 +309,8 @@ async fn authored_workflow(
         updated_at: record.updated_at,
         immutable: false,
         carrying_skill: None,
-        argument_schema,
+        argument_schema: meta.argument_schema,
+        task: meta.task,
     })
 }
 
@@ -289,7 +330,8 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    Ok(carried_workflows(space_id, skills)?
+    Ok(carried_workflows(state, space_id, skills)
+        .await?
         .into_iter()
         .find(|workflow| workflow.name == name))
 }
@@ -354,7 +396,7 @@ async fn list_effective_workflows(
     // Carried workflows arrive in skill precedence order (the discovery
     // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
-    for workflow in carried_workflows(space_id, skills)? {
+    for workflow in carried_workflows(state, space_id, skills).await? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
@@ -553,9 +595,35 @@ fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudge
 }
 
 const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
+const TERMINAL_BUDGET_WRITE_ATTEMPTS: usize = 3;
 
 fn is_positional_journal_entry(entry: &WorkflowJournalRecord) -> bool {
     entry.kind != "terminal_budget"
+}
+
+async fn complete_terminal_budget_entry(
+    state: &AppState,
+    entry_id: Uuid,
+    reading: Value,
+) -> Result<(), String> {
+    let mut last_error = None;
+    for _ in 0..TERMINAL_BUDGET_WRITE_ATTEMPTS {
+        match state
+            .complete_workflow_journal_entry(entry_id, reading.clone())
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    let error = last_error.expect("the bounded retry loop always attempts a write");
+    state
+        .fail_workflow_journal_entry(entry_id, &error)
+        .await
+        .map_err(|failure| {
+            format!("{error}; could not mark terminal budget entry failed: {failure}")
+        })?;
+    Err(error)
 }
 
 async fn record_terminal_budget(
@@ -587,11 +655,7 @@ async fn record_terminal_budget(
                 .unwrap_or_else(|| "recorded terminal budget failure".into())),
             "started" => {
                 let reading = terminal_budget_reading(&*accounting.lock().await, budget);
-                state
-                    .complete_workflow_journal_entry(entry.id, reading.clone())
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                complete_terminal_budget_entry(state, entry.id, reading).await
             }
             other => Err(format!("unknown terminal budget entry status: {other}")),
         };
@@ -616,11 +680,7 @@ async fn record_terminal_budget(
         })
         .await
         .map_err(|error| error.to_string())?;
-    state
-        .complete_workflow_journal_entry(intent.id, reading)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    complete_terminal_budget_entry(state, intent.id, reading).await
 }
 
 fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
@@ -804,6 +864,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             script.delivery_grant,
             script.carrying_skill,
             script.argument_schema,
+            script.task,
             args,
             budget,
             wait,
@@ -826,6 +887,9 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("session {session_id} was not found"))?;
+        let task = swage_workflow::script_meta(source)
+            .map_err(|error| format!("inline workflow has invalid metadata: {error}"))?
+            .task;
         self.start_for_session(
             session,
             None,
@@ -834,6 +898,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             None,
             None,
             None,
+            task,
             args,
             budget,
             wait,
@@ -852,6 +917,7 @@ impl GatewayWorkflowLauncher {
         delivery_grant: Option<Value>,
         carrying_skill: Option<String>,
         argument_schema: Option<Value>,
+        task: Option<String>,
         args: Value,
         budget: Option<WorkflowBudget>,
         wait: bool,
@@ -885,6 +951,7 @@ impl GatewayWorkflowLauncher {
             inline_identity,
             source,
             argument_schema,
+            task,
             args,
             budget.unwrap_or_default(),
             delivery_grant,
@@ -1282,7 +1349,7 @@ async fn run_ephemeral_agent_call(
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
-    let (session_id, thread_id) = match request.session.as_ref() {
+    let (session_id, thread_id, persisted_skills) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
         // workers — an id from anywhere else (another run, an interactive
@@ -1328,6 +1395,41 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            let persisted_skills = session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills"))
+                .map(|skills| serde_json::from_value::<Vec<String>>(skills.clone()))
+                .transpose()
+                .map_err(|error| {
+                    format!(
+                        "AgentCallError: continued session has invalid requested skills: {error}"
+                    )
+                })?
+                .unwrap_or_default();
+            if let Some(requested_skills) = request.skills.as_ref()
+                && requested_skills != &persisted_skills
+            {
+                return Err(
+                    "AgentCallError: skills cannot be changed on a continued session; select them when creating the worker"
+                        .into(),
+                );
+            }
+            if !persisted_skills.is_empty() {
+                let space = state
+                    .space_store
+                    .get(space_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                crate::turn::resolve_requested_skills_for_agent(
+                    &space.slug,
+                    &session.agent_id,
+                    Some(crate::turn::resolve_swage_root(state)),
+                    &persisted_skills,
+                )
+                .map_err(|error| format!("AgentCallError: {error}"))?;
+            }
             if request.tools.is_some() {
                 let persisted_tools = session
                     .metadata
@@ -1366,7 +1468,7 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
             }
-            (session.id, thread.id)
+            (session.id, thread.id, Some(persisted_skills))
         }
         None => {
             let agent_id = request
@@ -1448,7 +1550,7 @@ async fn run_ephemeral_agent_call(
             )
             .await
             .map_err(|error| error.to_string())?;
-            (session.id, thread.id)
+            (session.id, thread.id, None)
         }
     };
     let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -1462,7 +1564,7 @@ async fn run_ephemeral_agent_call(
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
-        skills: request.skills.clone(),
+        skills: persisted_skills.or_else(|| request.skills.clone()),
     };
     // Boxed: the turn future carries the whole composed input and would
     // otherwise push this call's future past the large-future lint.
@@ -4144,6 +4246,7 @@ async fn complete_workflow_call_entry(
                         .map(|identity| identity.name.clone()),
                     inline_workflow_version: inline_identity.map(|identity| identity.version),
                     carrying_skill: script.carrying_skill.clone(),
+                    task: script.task.clone(),
                     source: script
                         .script_version_id
                         .is_none()
@@ -4370,6 +4473,7 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_name: record.script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
+        task: record.task,
         source: record.source,
         source_hash: record.source_hash,
         state: run_state(&record.state)?,
@@ -4478,11 +4582,11 @@ pub async fn update_script(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    if resolve_workflow_by_id(&state, id, None)
+    let workflow = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
-        .is_some_and(|workflow| workflow.immutable)
-    {
+        .ok_or_else(|| ApiError::not_found("workflow script", id))?;
+    if workflow.immutable {
         return Err(ApiError::conflict(
             "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
@@ -4521,6 +4625,7 @@ async fn start_run(
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
     argument_schema: Option<Value>,
+    task: Option<String>,
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
@@ -4552,6 +4657,7 @@ async fn start_run(
                 .map(|identity| identity.name.clone()),
             inline_workflow_version: inline_identity.map(|identity| identity.version),
             carrying_skill,
+            task,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
             args,
@@ -5057,6 +5163,11 @@ pub async fn start_inline_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
+    let task = swage_workflow::script_meta(&request.source)
+        .map_err(|error| {
+            ApiError::validation(format!("inline workflow has invalid metadata: {error}"))
+        })?
+        .task;
     Ok(Json(
         start_run(
             state,
@@ -5065,6 +5176,7 @@ pub async fn start_inline_run(
             None,
             request.source,
             None,
+            task,
             request.args,
             request.budget.unwrap_or_default(),
             None,
@@ -5097,6 +5209,7 @@ pub async fn start_saved_run(
             script.inline_identity(),
             script.source,
             script.argument_schema,
+            script.task,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
@@ -5171,9 +5284,15 @@ pub async fn get_run(
     }))
 }
 
+#[derive(Default, Deserialize)]
+pub struct WorkflowRunListQuery {
+    task: Option<String>,
+}
+
 pub async fn list_runs(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
+    Query(query): Query<WorkflowRunListQuery>,
 ) -> Result<Json<WorkflowRunListResponse>, ApiError> {
     let runs = state
         .storage
@@ -5181,6 +5300,12 @@ pub async fn list_runs(
         .await
         .map_err(internal)?
         .into_iter()
+        .filter(|run| {
+            query
+                .task
+                .as_ref()
+                .is_none_or(|task| run.task.as_ref() == Some(task))
+        })
         .map(run_wire)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(WorkflowRunListResponse { runs }))
@@ -5753,6 +5878,16 @@ mod tests {
             !list.scripts.iter().any(|script| script.name == "invalid"),
             "the malformed carried workflow must be excluded: {list:?}"
         );
+        let audit = storage
+            .list_audit_events()
+            .await
+            .expect("carried-workflow audit records");
+        assert!(audit.iter().any(|event| {
+            event.entity_kind == "workflow_script"
+                && event.event_kind == "excluded"
+                && event.metadata["skill"] == "invalid-meta"
+                && event.metadata["workflow"] == "invalid"
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5855,6 +5990,29 @@ mod tests {
         assert_eq!(run.carrying_skill.as_deref(), Some("research"));
         assert_eq!(run.source.as_deref(), Some(embedded));
         assert_eq!(run.source_hash, source_hash(embedded));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn updating_an_absent_workflow_script_returns_not_found() {
+        let (state, _) = workflow_test_state();
+        let missing = Uuid::new_v4();
+
+        let error = update_script(
+            State(state),
+            Path(missing),
+            Json(UpdateWorkflowScriptRequest {
+                description: Some("still absent".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("an absent workflow script must remain absent");
+
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::NotFound
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6184,6 +6342,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: Some("operator-proof".into()),
+                task: None,
                 source: Some(recorded_source.into()),
                 source_hash: source_hash(recorded_source),
                 args: Value::Null,
@@ -6244,6 +6403,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -6803,6 +6963,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7153,6 +7314,7 @@ mod tests {
                     inline_workflow_name: None,
                     inline_workflow_version: None,
                     carrying_skill: None,
+                    task: None,
                     source: Some("return null".into()),
                     source_hash: source_hash("return null"),
                     args: Value::Null,
@@ -7702,6 +7864,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8187,6 +8350,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8320,6 +8484,15 @@ mod tests {
         let worker_directory = tempfile::tempdir().expect("worker directory");
         grant_workspace(&storage, space.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
+        let skill_dir = swage_home
+            .path()
+            .join("spaces/default/skills/workflow-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Workflow specialist\n---\nUse the persisted workflow specialist skill.\n",
+        )
+        .expect("write workflow skill");
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
@@ -8339,6 +8512,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8353,6 +8527,16 @@ mod tests {
             .expect("run");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "continued-history-tool".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
                 vec![
                     swage_core::StreamChunk::Delta {
                         content: "restated: gather the sources".into(),
@@ -8417,7 +8601,7 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
-                skills: None,
+                skills: Some(vec!["workflow-specialist".into()]),
                 model: None,
                 schema: None,
                 max_attempts: 1,
@@ -8459,6 +8643,13 @@ mod tests {
                 .and_then(|metadata| metadata.get(crate::turn::DISPATCH_BOUND_METADATA_KEY))
                 .and_then(Value::as_array),
             Some(&vec![Value::String("lead".into())]),
+        );
+        assert_eq!(
+            worker_session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills")),
+            Some(&serde_json::json!(["workflow-specialist"])),
         );
 
         // Revoke shell after the first worker turn. The continuation must
@@ -8599,7 +8790,7 @@ mod tests {
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(
             requests[0]
                 .tool_definitions
@@ -8608,20 +8799,73 @@ mod tests {
             "shell is available while the lead still grants it"
         );
         assert!(
-            requests[1]
+            requests[2]
                 .tool_definitions
                 .iter()
                 .all(|definition| definition["name"] != "shell"),
             "the continued turn must observe the lead's revoked shell grant"
         );
-        let second_request = requests[1]
+        let second_request = &requests[2];
+        let anthropic =
+            swage_provider::anthropic::AnthropicProvider::new("test-key", "claude-test");
+        let outbound = swage_provider::LlmProvider::provider_request_snapshot(
+            &anthropic,
+            second_request,
+            true,
+        );
+        if let Some(path) = std::env::var_os("SWAGE_PROVIDER_REQUEST_CAPTURE") {
+            std::fs::write(
+                path,
+                serde_json::to_vec_pretty(&outbound["body"])
+                    .expect("serialise outbound provider request"),
+            )
+            .expect("write outbound provider request capture");
+        }
+        let second_request_text = second_request
             .messages
             .iter()
             .map(swage_core::ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(second_request.contains("restate the brief"));
-        assert!(second_request.contains("restated: gather the sources"));
+        assert!(second_request_text.contains("restate the brief"));
+        assert!(second_request_text.contains("restated: gather the sources"));
+        assert!(
+            second_request_text.contains("Use the persisted workflow specialist skill."),
+            "the continued turn must compose the persisted skill selection: {second_request_text}"
+        );
+        let replayed_tool_names = second_request
+            .messages
+            .iter()
+            .filter_map(swage_core::ChatMessage::tool_replay)
+            .flat_map(|replay| replay.iter())
+            .filter_map(|part| match part {
+                swage_core::ToolReplayPart::ToolCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replayed_tool_names, vec!["shell"]);
+        assert!(
+            replayed_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every replayed tool_use entry in the continued provider request must carry its name"
+        );
+        let outbound_tool_names = outbound["body"]["messages"]
+            .as_array()
+            .expect("Anthropic request messages")
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(outbound_tool_names, vec!["shell"]);
+        assert!(
+            outbound_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every tool_use in the Anthropic outbound body must carry its persisted name"
+        );
 
         drop(tx);
         task.await.expect("host loop");
@@ -8655,6 +8899,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -9495,6 +9740,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10170,6 +10416,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10292,6 +10539,7 @@ mod tests {
                 .expect("budget"),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10387,6 +10635,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.clone()),
                 source_hash: source_hash(&source),
                 args: Value::Null,
@@ -10493,6 +10742,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -10760,6 +11010,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -10851,6 +11102,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12149,6 +12401,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some(source.into()),
             source_hash: source_hash(source),
             args: Value::Null,
@@ -12241,6 +12494,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -12496,6 +12750,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12867,6 +13122,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13005,6 +13261,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13216,6 +13473,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13461,6 +13719,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13693,6 +13952,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -13834,6 +14094,83 @@ mod tests {
         assert_eq!(
             completed.final_output,
             Some(serde_json::json!({ "value": 42 }))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_run_task_identity_is_persisted_and_filters_the_listing() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"export const meta = { task: "run-task-identity" }; return null;"#;
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "task identity".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("script");
+
+        let Json(saved) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start saved run");
+        let Json(inline) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        let Json(without_task) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return null;".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start unlabelled run");
+
+        let stored = storage
+            .get_workflow_run(saved.id)
+            .await
+            .expect("read saved run")
+            .expect("saved run exists");
+        assert_eq!(stored.task.as_deref(), Some("run-task-identity"));
+        assert_eq!(without_task.task, None);
+
+        let Json(list) = list_runs(
+            State(state),
+            Path(space.id),
+            Query(WorkflowRunListQuery {
+                task: Some("run-task-identity".into()),
+            }),
+        )
+        .await
+        .expect("list task runs");
+        assert_eq!(list.runs.len(), 2);
+        assert!(list.runs.iter().any(|run| run.id == saved.id));
+        assert!(list.runs.iter().any(|run| run.id == inline.id));
+        assert!(
+            list.runs
+                .iter()
+                .all(|run| run.task.as_deref() == Some("run-task-identity"))
         );
     }
 
@@ -14431,6 +14768,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14540,6 +14878,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14645,6 +14984,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14918,6 +15258,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        let mut events = state.broadcast.subscribe();
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
@@ -14948,7 +15289,16 @@ mod tests {
             .into_iter()
             .find(|entry| entry.kind == "terminal_budget")
             .expect("terminal budget intent");
-        assert_eq!(terminal.status, "started");
+        assert_eq!(terminal.status, "failed");
+        let event = loop {
+            if let ServerEvent::WorkflowEntryCompleted { event } =
+                events.recv().await.expect("terminal journal broadcast")
+                && event.entry.id == terminal.id
+            {
+                break event;
+            }
+        };
+        assert_eq!(event.entry.status, WorkflowJournalEntryStatus::Failed);
     }
 
     #[tokio::test(flavor = "multi_thread")]
