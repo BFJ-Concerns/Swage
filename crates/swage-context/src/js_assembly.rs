@@ -375,6 +375,12 @@ struct AddedBlock {
     message_count: usize,
 }
 
+#[derive(serde::Deserialize)]
+struct ScriptBookkeeping {
+    added: Vec<AddedBlock>,
+    omitted: Vec<DeclaredOmission>,
+}
+
 /// Execute the script against a read-only projection of the elements,
 /// returning the composed message list and per-add attribution.
 fn run_script(
@@ -439,7 +445,6 @@ fn run_script(
                 };
             }
             globalThis.__output = [];
-            globalThis.__added = [];
             "#,
         )
         .map_err(|error| format!("cage setup failed: {error}"))?;
@@ -455,7 +460,8 @@ fn run_script(
         globals
             .set("__variables", ctx.json_parse(variables_json.as_bytes()).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-        ctx.eval::<(), _>(r#"
+        let bookkeeping_json: String = ctx.eval(r#"
+            (() => {
             const slot = /\{\{([a-z0-9-]+)\}\}/g;
             const variables = globalThis.__variables;
             const valueFor = name => Object.prototype.hasOwnProperty.call(variables, name)
@@ -463,7 +469,6 @@ fn run_script(
                 : undefined;
             const renderedValueFor = name => valueFor(name) ?? `⟦unset:${name}⟧`;
             globalThis.ctx = Object.freeze({ variable: valueFor });
-            (() => {
                 const suppliedElements = globalThis.elements;
                 const suppliedElementIndices = new WeakMap(
                     suppliedElements.map((element, index) => [element, index]),
@@ -498,6 +503,7 @@ fn run_script(
                     Object.freeze(element);
                 }
                 Object.freeze(suppliedElements);
+                const added = [];
                 globalThis.add = (value) => {
                     const isElement = value && !Array.isArray(value) && Array.isArray(value.messages);
                     const messages = Array.isArray(value) ? value : isElement ? value.messages : null;
@@ -510,7 +516,7 @@ fn run_script(
                         }
                         globalThis.__output.push({ role: message.role, text: message.text });
                     }
-                    globalThis.__added.push({
+                    added.push({
                         name: isElement && typeof value.name === "string" ? value.name : "script",
                         source: isElement && typeof value.source === "string" ? value.source : "composed by the assembly script",
                         priority: isElement && typeof value.priority === "number" ? value.priority : 0,
@@ -518,33 +524,26 @@ fn run_script(
                         messageCount: messages.length,
                     });
                 };
-            })();
-            delete globalThis.__variables;
-        "#).map_err(|error| format!("variable capability setup failed: {error}"))?;
-
-        let omitted_json: String = ctx
-            .eval(format!(
-                r#"
-                (() => {{
-                    const omitted = [];
-                    globalThis.omit = (name, reason) => {{
-                        if (typeof name !== "string" || name.length === 0) {{
-                            throw new Error("omit() takes the name of the element to leave out");
-                        }}
-                        if (typeof reason !== "string" || reason.trim().length === 0) {{
-                            throw new Error(`omit("${{name}}") needs a reason for leaving the element out`);
-                        }}
-                        omitted.push({{ element: name, reason }});
-                    }};
-                    try {{
-                        {source}
-                    }} finally {{
-                        delete globalThis.omit;
-                    }}
-                    return JSON.stringify(omitted);
-                }})()
-                "#
-            ))
+                const omitted = [];
+                globalThis.omit = (name, reason) => {
+                    if (typeof name !== "string" || name.length === 0) {
+                        throw new Error("omit() takes the name of the element to leave out");
+                    }
+                    if (typeof reason !== "string" || reason.trim().length === 0) {
+                        throw new Error(`omit("${name}") needs a reason for leaving the element out`);
+                    }
+                    omitted.push({ element: name, reason });
+                };
+                try {
+                    {source}
+                } finally {
+                    delete globalThis.add;
+                    delete globalThis.omit;
+                    delete globalThis.__variables;
+                }
+                return JSON.stringify({ added, omitted });
+            })()
+        "#.replace("{source}", source))
             .map_err(|error| script_error(&ctx, error))?;
 
         let output_json: String = ctx
@@ -562,14 +561,8 @@ fn run_script(
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        let added_json: String = ctx
-            .eval("JSON.stringify(globalThis.__added)")
-            .map_err(|error| script_error(&ctx, error))?;
-        let added: Vec<AddedBlock> =
-            serde_json::from_str(&added_json).map_err(|error| error.to_string())?;
-
-        let declared: Vec<DeclaredOmission> =
-            serde_json::from_str(&omitted_json).map_err(|error| error.to_string())?;
+        let ScriptBookkeeping { added, omitted: declared } =
+            serde_json::from_str(&bookkeeping_json).map_err(|error| error.to_string())?;
 
         Ok(ScriptOutcome {
             messages,
@@ -1091,6 +1084,44 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("working_norms") && warning.contains("restored")),
             "the forged working norms must be reported as restored: {:?}",
+            output.report.warnings
+        );
+    }
+
+    #[test]
+    fn forged_added_bookkeeping_does_not_suppress_restoration() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.prompts);
+            add(byName.history);
+            globalThis.__added = [];
+            globalThis.__added.push({
+                name: "orientation",
+                source: "forged",
+                priority: 0,
+                elementIndex: 0,
+                messageCount: 0,
+            });
+            "#,
+            &elements,
+        );
+
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Atelier")),
+            "forged added bookkeeping must not replace orientation"
+        );
+        assert!(
+            output
+                .report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("orientation") && warning.contains("restored")),
+            "the forged entry must be reported as restored: {:?}",
             output.report.warnings
         );
     }
