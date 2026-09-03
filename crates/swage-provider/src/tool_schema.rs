@@ -417,6 +417,33 @@ mod tests {
     }
 
     #[test]
+    fn provider_tool_schema_preserves_anyof_and_allof_guidance_without_sending_hostile_keywords() {
+        let schema = json!({
+            "type": "object",
+            "anyOf": [
+                {"required": ["url"]},
+                {"required": ["query"]}
+            ],
+            "allOf": [
+                {"required": ["source"]},
+                {"properties": {"source": {"type": "string"}}}
+            ]
+        });
+
+        let projected = provider_tool_schema(&schema);
+
+        assert!(projected.get("anyOf").is_none());
+        assert!(projected.get("allOf").is_none());
+        let description = projected["description"].as_str().unwrap();
+        assert!(
+            description.contains("anyOf (at least one of: requires `url`; or requires `query`)")
+        );
+        assert!(description.contains(
+            "allOf (all of: requires `source`; and an additional locally validated alternative)"
+        ));
+    }
+
+    #[test]
     fn provider_tool_schema_explains_all_of_requirements_conjunctively() {
         let schema = json!({
             "allOf": [
