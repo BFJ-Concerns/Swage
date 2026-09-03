@@ -804,13 +804,20 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<bool, StorageError> {
         let now = Utc::now();
         self.with_conn(move |conn| {
-            // Only an open hold settles: a second answerer arriving behind
-            // the first changes nothing and is told it lost.
+            // Only an open hold on a run that can still resume settles.
+            // A second answerer arriving behind the first changes nothing
+            // and is told it lost; so does an answer that arrives after the
+            // run went terminal, so cancellation and answer have one winner
+            // rather than a verdict attributed to a run that cannot take it.
             let changed = conn.execute(
                 "UPDATE workflow_run_holds \
                  SET state = 'answered', verdict = ?2, answer_surface = ?3, answer_agent_id = ?4, \
                      answer_session_id = ?5, answer_turn_id = ?6, answered_at = ?7 \
-                 WHERE id = ?1 AND state = 'open'",
+                 WHERE id = ?1 AND state = 'open' AND EXISTS (\
+                     SELECT 1 FROM workflow_runs \
+                     WHERE workflow_runs.id = workflow_run_holds.run_id \
+                       AND workflow_runs.state NOT IN ('completed', 'failed', 'cancelled')\
+                 )",
                 params![
                     id.to_string(),
                     answer.verdict,
@@ -1174,6 +1181,98 @@ mod tests {
                 .is_empty(),
             "an answered hold leaves the decider's list"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_arriving_after_the_run_went_terminal_loses() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "hold-cancel".into(),
+                slug: "hold-cancel".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: Uuid::new_v4().to_string(),
+                args: serde_json::Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+                task: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "hold".into(),
+                args_hash: "hash".into(),
+                request: serde_json::json!({"action": "raise"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("raise intent");
+        let hold = storage
+            .create_workflow_run_hold(NewWorkflowRunHold {
+                run_id: run.id,
+                journal_entry_id: entry.id,
+                content: "Ship the release?".into(),
+                verdicts: vec!["ship".into(), "hold".into()],
+            })
+            .await
+            .expect("open the hold");
+
+        // The cancellation lands between an answerer's read of the run and
+        // its write of the verdict.
+        storage
+            .update_workflow_run_state(run.id, "cancelled", None, None, None)
+            .await
+            .expect("cancel the waiting run");
+
+        assert!(
+            !storage
+                .answer_workflow_run_hold(
+                    hold.id,
+                    WorkflowRunHoldAnswer {
+                        verdict: "ship".into(),
+                        surface: "agent".into(),
+                        agent_id: Some("latecomer".into()),
+                        session_id: Some(Uuid::new_v4()),
+                        turn_id: Some(Uuid::new_v4()),
+                    },
+                )
+                .await
+                .expect("late answer"),
+            "cancellation and answer have one winner, and cancellation got there first"
+        );
+        let unanswered = storage
+            .get_workflow_run_hold(hold.id)
+            .await
+            .expect("read")
+            .expect("hold");
+        assert_eq!(
+            unanswered.state, "open",
+            "a run that cannot resume is never given a verdict"
+        );
+        assert!(unanswered.verdict.is_none());
+        assert!(unanswered.answer_agent_id.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
