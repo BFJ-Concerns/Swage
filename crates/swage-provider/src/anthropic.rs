@@ -430,6 +430,17 @@ async fn forward_anthropic_stream(
             if matches!(chunk, StreamChunk::ToolUse { .. }) {
                 witness.record_tool_output();
             }
+            if matches!(
+                &chunk,
+                StreamChunk::Error { message }
+                    if message == "Anthropic tool_use block is missing a name"
+            ) {
+                if tx.send(witness.witness_chunk()).is_err() {
+                    return;
+                }
+                let _ = tx.send(chunk);
+                return;
+            }
             if tx.send(chunk).is_err() {
                 return;
             }
@@ -504,7 +515,15 @@ impl ToolUseAccumulator {
                 };
                 if payload.content_block.block_type == "tool_use" {
                     let call_id = payload.content_block.id.unwrap_or_default();
-                    let name = payload.content_block.name.unwrap_or_default();
+                    let Some(name) = payload
+                        .content_block
+                        .name
+                        .filter(|name| !name.trim().is_empty())
+                    else {
+                        return Some(StreamChunk::Error {
+                            message: "Anthropic tool_use block is missing a name".into(),
+                        });
+                    };
                     self.pending = Some((call_id, name, String::new()));
                 }
                 None
@@ -1514,6 +1533,59 @@ mod tests {
             2,
             "forwarding must terminate at the error frame"
         );
+    }
+
+    #[tokio::test]
+    async fn nameless_tool_use_forwards_an_error_without_a_tool_call() {
+        let chunks = fixture_chunks(vec![
+            event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_missing_name"}}"#,
+            ),
+            event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"must not escape"}}"#,
+            ),
+        ])
+        .await;
+
+        assert!(matches!(chunks[0], StreamChunk::ProviderResponseWitness(_)));
+        assert!(matches!(
+            &chunks[1],
+            StreamChunk::Error { message } if message.contains("tool_use block is missing a name")
+        ));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !matches!(chunk, StreamChunk::ToolUse { .. })),
+            "a malformed provider block must not enter the tool replay path"
+        );
+        assert_eq!(
+            chunks.len(),
+            2,
+            "forwarding must stop at the malformed tool block"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_use_frame_forwards_its_error_and_keeps_streaming() {
+        let chunks = fixture_chunks(vec![
+            event("content_block_start", "{not-json"),
+            event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"still forwarded"}}"#,
+            ),
+        ])
+        .await;
+
+        assert!(matches!(
+            &chunks[0],
+            StreamChunk::Error { message } if message.contains("failed to parse Anthropic tool-use frame")
+        ));
+        assert!(matches!(
+            &chunks[1],
+            StreamChunk::Delta { content } if content == "still forwarded"
+        ));
     }
 
     #[test]
