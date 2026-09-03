@@ -18,11 +18,13 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
+use uuid::Uuid;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
 use swage_gateway::tool::Tool;
 use swage_gateway::tool_executor::GatewayToolContext;
+use swage_gateway::websocket::ServerEvent;
 use swage_storage::NewSession;
 use swage_storage::SqliteStorage;
 use swage_storage::store::{SessionStore, SpaceStore, Storage};
@@ -78,6 +80,49 @@ async fn next_page_signal(
             }
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::new(StubProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let page_id = Uuid::new_v4();
+    let broadcast = state.broadcast.clone();
+    let router = build_router(state).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let broadcast = broadcast.clone();
+            async move {
+                let response = next.run(request).await;
+                // The handler has built the upgrade response, but Hyper cannot
+                // complete the handshake until this middleware returns it.
+                let _ = broadcast.send(ServerEvent::PageUpdated {
+                    page_id,
+                    module_id: None,
+                });
+                response
+            }
+        },
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/work-surface/ws"))
+            .await
+            .expect("work-surface handshake");
+    let signal = next_page_signal(&mut socket).await;
+    assert_eq!(signal["page_id"], page_id.to_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]
