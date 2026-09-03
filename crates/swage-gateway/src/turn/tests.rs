@@ -15282,7 +15282,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    assert!(state.workflow_capabilities.vision);
+    assert!(state.workflow_capabilities.vision());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -15344,7 +15344,7 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
         make_state_with_config_and_storage(vec![], text_only_config(), Arc::clone(&storage)).await;
-    assert!(!state.workflow_capabilities.vision);
+    assert!(!state.workflow_capabilities.vision());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let error = process_turn(
@@ -15377,6 +15377,88 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
         db.turns.is_empty(),
         "no turn record is created for a refused turn"
     );
+}
+
+fn google_vision_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "google".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Google,
+            ..Default::default()
+        },
+    );
+    config.models.default = "gemini".into();
+    config.models.entries.insert(
+        "gemini".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "google".into(),
+            model_id: "gemini-2.5-flash".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+/// Gemini fetches nothing: `fileData.fileUri` addresses a resource already
+/// held by the Google File API, so an ordinary web image URL is a reference
+/// the model never resolves. The gate refuses it before anything is written
+/// rather than sending an unusable reference and failing the turn at the
+/// provider. An inline data URL, which the adapter carries as bytes, still
+/// travels.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_url_the_provider_cannot_resolve_is_refused_before_persistence() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], google_vision_config(), Arc::clone(&storage))
+            .await;
+    assert!(
+        state.workflow_capabilities.vision(),
+        "the Google adapter maps image parts"
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("a reference the provider cannot resolve must fail the turn");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("resolve")),
+        "{error}"
+    );
+
+    {
+        let db = storage.db.lock().await;
+        assert!(
+            db.messages.is_empty(),
+            "nothing is persisted for a refused turn"
+        );
+        assert!(
+            db.turns.is_empty(),
+            "no turn record is created for a refused turn"
+        );
+    }
+
+    // The reference the adapter can inline is admitted by the same gate.
+    crate::turn::check_attachment_support(
+        &state.workflow_capabilities,
+        &[MessageAttachment::ImageUrl {
+            url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+        }],
+    )
+    .expect("an inline data URL travels to Gemini as bytes");
 }
 
 /// A stored attachment outside the wire contract is corruption, refused

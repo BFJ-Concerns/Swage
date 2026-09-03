@@ -165,9 +165,16 @@ pub(crate) fn check_attachment_support(
                         "an image attachment needs a non-empty url".into(),
                     ));
                 }
-                if !capabilities.vision {
+                if !capabilities.vision() {
                     return Err(GatewayError::ValidationError(
                         "the configured provider does not accept image attachments".into(),
+                    ));
+                }
+                if !capabilities.accepts_image_reference(url) {
+                    return Err(GatewayError::ValidationError(
+                        "the configured provider cannot resolve this image reference: attach the \
+                         image inline as a base64 data URL"
+                            .into(),
                     ));
                 }
             }

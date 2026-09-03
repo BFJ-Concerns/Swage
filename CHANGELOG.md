@@ -10,7 +10,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Images now reach every provider protocol that advertises vision.
+- Images now reach every provider protocol that advertises vision, and an image reference a provider cannot resolve is refused when it is submitted rather than failing the turn at the provider.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
 - Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
