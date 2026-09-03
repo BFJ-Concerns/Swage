@@ -230,6 +230,8 @@ pub struct WorkflowRun {
     pub script_name: Option<String>,
     pub script_version: Option<u32>,
     pub carrying_skill: Option<String>,
+    /// Opaque identity declared by the workflow script for grouping its runs.
+    pub task: Option<String>,
     /// Source retained for runs whose workflow was not a saved script version.
     pub source: Option<String>,
     /// SHA-256 of the exact source executed by this run.
@@ -299,6 +301,7 @@ pub struct WorkflowAgentCallDetail {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub liveness: Option<WorkflowWorkerLiveness>,
+    pub served_model: Option<String>,
 }
 
 /// Earliest liveness evidence for one workflow worker.

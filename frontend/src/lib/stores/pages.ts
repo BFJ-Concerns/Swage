@@ -87,6 +87,12 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
 
   const channel = (options?.channelFactory ?? createWorkSurfaceChannel)();
   channel.onSignal(handleSignal);
+  channel.onReconnect(() => {
+    const active = activePageState.current;
+    if (active) {
+      void refreshActive(active.id).catch(() => {});
+    }
+  });
 
   return {
     get pages() {

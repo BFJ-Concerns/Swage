@@ -36,7 +36,9 @@ export interface ConversationStore {
     >;
     turn_id?: string;
     tool_calls?: MessageView["tool_calls"];
-  }): void;
+  }, conversationId?: string | null): void;
+  /** Install a fetched snapshot only when its owner is still selected. */
+  replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
 }
 
@@ -88,6 +90,12 @@ export function createConversationStore(): ConversationStore {
     );
   }
 
+  function replaceActiveConversationIfCurrent(conversation: ConversationDetail): void {
+    if (get(activeConversationStore)?.id === conversation.id) {
+      activeConversationStore.set(conversation);
+    }
+  }
+
   function appendMessage(
     message: {
       role: MessageView["role"];
@@ -97,27 +105,36 @@ export function createConversationStore(): ConversationStore {
       turn_id?: string;
       tool_calls?: MessageView["tool_calls"];
     },
+    conversationId?: string | null,
   ): void {
     const activeConversation = get(activeConversationStore);
-    if (!activeConversation) return;
+    const ownerId = conversationId ?? activeConversation?.id;
+    if (!ownerId) return;
+
+    const appendedMessage: MessageView = {
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp,
+      turn_state: message.turn_state,
+      ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
+      ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
+    };
+
+    if (activeConversation?.id !== ownerId) {
+      updateConversationSummary(ownerId, message);
+      return;
+    }
 
     activeConversationStore.set({
       ...activeConversation,
       last_activity: message.timestamp,
       messages: [
         ...activeConversation.messages,
-        {
-          role: message.role,
-          content: message.content,
-          timestamp: message.timestamp,
-          turn_state: message.turn_state,
-          ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
-          ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
-        },
+        appendedMessage,
       ],
     });
 
-    updateConversationSummary(activeConversation.id, message);
+    updateConversationSummary(ownerId, message);
   }
 
   return {
@@ -155,6 +172,9 @@ export function createConversationStore(): ConversationStore {
     async selectConversation(id) {
       isLoadingStore.set(true);
       try {
+        // The server is authoritative for an off-screen conversation. Terminal
+        // stream events update its summary only; retaining synthetic messages
+        // here duplicates partial errors that have no stable turn identity.
         activeConversationStore.set(await api.getConversation(id));
       } finally {
         isLoadingStore.set(false);
@@ -224,7 +244,7 @@ export function createConversationStore(): ConversationStore {
       });
     },
 
-    appendAssistantMessage(message) {
+    appendAssistantMessage(message, conversationId) {
       appendMessage({
         role: "assistant",
         content: message.content,
@@ -232,7 +252,11 @@ export function createConversationStore(): ConversationStore {
         turn_state: message.turn_state,
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
-      });
+      }, conversationId);
+    },
+
+    replaceActiveConversationIfCurrent(conversation) {
+      replaceActiveConversationIfCurrent(conversation);
     },
 
     async refreshActiveConversation() {
@@ -240,7 +264,7 @@ export function createConversationStore(): ConversationStore {
       // that happened while the connection was down.
       const activeConversation = get(activeConversationStore);
       if (!activeConversation) return;
-      activeConversationStore.set(await api.getConversation(activeConversation.id));
+      replaceActiveConversationIfCurrent(await api.getConversation(activeConversation.id));
     },
   };
 }
