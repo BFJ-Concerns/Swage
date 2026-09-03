@@ -5989,6 +5989,11 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
 
 #[tokio::test]
 async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
+    swage_agent::AgentConfig::new("agent")
+        .with_workspace("relative", vec![])
+        .validate()
+        .expect("generic agent validation must leave execution-root policy to the turn owner");
+
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage_and_root(
         vec![],
@@ -9705,6 +9710,121 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             "the broad sender and target definitions must not restore shell"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_skill_selection_is_carried_by_the_composition_once() {
+    let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    for skill in ["validated-skill", "composition-skill"] {
+        let skill_dir = swage_home.path().join("spaces/default/skills").join(skill);
+        std::fs::create_dir_all(&skill_dir).expect("create delegated skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: {skill}\n---\nUse {skill}.\n"),
+        )
+        .expect("write delegated skill");
+    }
+    let _guard = SwageHomeGuard::set_to(swage_home.path());
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("parent session");
+    let thread = ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .expect("parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate with a selected skill".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("parent turn");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "agent-b".into(),
+            space_id: Some(space.id),
+            display_name: "Agent B".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("target agent definition");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(MockProvider::new(vec![
+            StreamChunk::Delta {
+                content: "delegated".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "agent-b",
+            "carry the composition",
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["validated-skill".into()]),
+            DispatchContextComposition {
+                skills: Some(vec!["composition-skill".into()]),
+                ..Default::default()
+            },
+            "composition-skill-owner",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Detach,
+        )
+        .await
+        .expect("detached delegation should start");
+    let detached = match outcome {
+        DelegationOutcome::Detached(detached) => detached,
+        DelegationOutcome::Completed(_) => panic!("expected detached delegation"),
+    };
+    let message = storage
+        .get_agent_message(detached.delegate_message_id)
+        .await
+        .expect("delegate message query")
+        .expect("durable delegate message");
+    assert_eq!(
+        message.payload["skills"],
+        serde_json::json!(["composition-skill"]),
+        "the composition must remain the sole delegate-payload carrier"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

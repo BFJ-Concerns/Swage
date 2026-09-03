@@ -10,28 +10,10 @@ import type { WritePageModuleRequest } from "../protocol/WritePageModuleRequest"
 import type { PageAnnotationView } from "../protocol/PageAnnotationView";
 import type { CreatePageAnnotationRequest } from "../protocol/CreatePageAnnotationRequest";
 import type { UpdatePageAnnotationRequest } from "../protocol/UpdatePageAnnotationRequest";
+import * as generated from "../protocol/client";
 import type { PageTemplateListResponse } from "../protocol/PageTemplateListResponse";
 import type { PageTemplateResponse } from "../protocol/PageTemplateResponse";
 import type { CreatePageTemplateRequest } from "../protocol/CreatePageTemplateRequest";
-import * as generated from "../protocol/client";
-
-async function templateRequest(
-  path: string,
-  method: string,
-  body?: unknown,
-): Promise<Response> {
-  const init: RequestInit = { method };
-  if (body !== undefined) {
-    init.headers = { "Content-Type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
-  const response = await fetch(path, init);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`${method} ${path} failed (${response.status}): ${text}`);
-  }
-  return response;
-}
 
 export function setBaseUrl(url: string): void {
   generated.setClientBaseUrl(url);
@@ -58,23 +40,14 @@ export async function createPage(
 export async function listPageTemplates(
   spaceId: string,
 ): Promise<PageTemplateListResponse> {
-  const response = await templateRequest(
-    `/api/spaces/${spaceId}/page-templates`,
-    "GET",
-  );
-  return (await response.json()) as PageTemplateListResponse;
+  return generated.listPageTemplates(spaceId);
 }
 
 export async function createPageTemplate(
   spaceId: string,
   body: CreatePageTemplateRequest,
 ): Promise<PageTemplateResponse> {
-  const response = await templateRequest(
-    `/api/spaces/${spaceId}/page-templates`,
-    "POST",
-    body,
-  );
-  return (await response.json()) as PageTemplateResponse;
+  return generated.createPageTemplate(spaceId, body);
 }
 
 export async function writePageModule(
