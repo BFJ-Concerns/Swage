@@ -12419,6 +12419,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn startup_recovery_keeps_turn_non_terminal_when_worker_thread_release_fails() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "worker".into(),
+                metadata: Some(serde_json::json!({})),
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("worker session");
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "worker".into(),
+            },
+        )
+        .await
+        .expect("worker thread");
+        storage
+            .update_state(thread.id, ThreadState::Processing)
+            .await
+            .expect("persist processing worker thread");
+        let orphan = storage
+            .create_turn(swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: "worker".into(),
+                state: TurnState::Processing,
+                user_input: Some("continue".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("orphaned worker turn");
+
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_orphaned_worker_thread_release
+                     BEFORE UPDATE OF state ON threads
+                     WHEN NEW.id = OLD.id AND NEW.state = 'idle'
+                     BEGIN SELECT RAISE(FAIL, 'injected worker thread release failure'); END;",
+                )
+            })
+            .await
+            .expect("install thread release failure trigger");
+
+        let error = crate::shutdown::recover_orphaned_turns(storage.as_ref(), storage.as_ref())
+            .await
+            .expect_err("thread release failure aborts recovery");
+        assert!(
+            error
+                .to_string()
+                .contains("injected worker thread release failure")
+        );
+        assert_eq!(
+            storage.get_turn(orphan.id).await.unwrap().unwrap().state,
+            TurnState::Processing,
+            "a failed worker release must leave the turn recoverable on the next startup"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_settlement_releases_estimate_and_retains_actual_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");

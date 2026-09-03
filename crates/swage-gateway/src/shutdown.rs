@@ -126,13 +126,12 @@ pub async fn recover_orphaned_turns(
                         thread_id = %turn.thread_id,
                         "Recovered orphaned turn from a previous shutdown"
                     );
-                    storage
-                        .update_turn_state(turn.id, TurnState::Interrupted)
-                        .await?;
 
                     // Recovery runs before new work can begin. Read the persisted
                     // thread state at the recovery point: an orphaned worker can
-                    // only be replayed after its Processing → Idle transition.
+                    // only be replayed after its Processing → Idle transition. Do
+                    // this before terminalising the turn so a failed reset leaves
+                    // the turn recoverable on the next startup.
                     if storage
                         .get(thread.id)
                         .await?
@@ -140,6 +139,10 @@ pub async fn recover_orphaned_turns(
                     {
                         storage.update_state(thread.id, ThreadState::Idle).await?;
                     }
+
+                    storage
+                        .update_turn_state(turn.id, TurnState::Interrupted)
+                        .await?;
                 }
             }
         }
