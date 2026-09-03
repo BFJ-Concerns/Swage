@@ -23,6 +23,22 @@ pub type WsStream = futures::stream::SplitStream<
 
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Create a disposable test root off the nearly-full system volume.
+pub fn scratch_tempdir() -> tempfile::TempDir {
+    match tempfile::Builder::new()
+        .prefix("swage-gateway-test-")
+        .tempdir_in("/tmp/scratch")
+    {
+        Ok(tempdir) => tempdir,
+        Err(error) => {
+            eprintln!(
+                "could not create gateway test root in /tmp/scratch ({error}); falling back to the system temporary directory"
+            );
+            tempfile::tempdir().expect("create gateway test root")
+        }
+    }
+}
+
 /// A streaming provider that records every request and serves scripted rounds.
 pub struct CapturingProvider {
     model_id: &'static str,
