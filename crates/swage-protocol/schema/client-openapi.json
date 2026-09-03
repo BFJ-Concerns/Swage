@@ -5587,6 +5587,13 @@
           },
           "state": {
             "$ref": "#/components/schemas/WorkflowRunState"
+          },
+          "task": {
+            "description": "Opaque identity declared by the workflow script for grouping its runs.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [

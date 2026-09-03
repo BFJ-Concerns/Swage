@@ -5,7 +5,8 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
@@ -100,6 +101,7 @@ struct EffectiveWorkflow {
     immutable: bool,
     carrying_skill: Option<String>,
     argument_schema: Option<Value>,
+    task: Option<String>,
 }
 
 #[derive(Clone)]
@@ -127,14 +129,12 @@ impl EffectiveWorkflow {
         source: String,
     ) -> Result<Self, String> {
         let identity = format!("{}/{}", skill.name, name);
-        let argument_schema = swage_workflow::script_meta(&source)
-            .map_err(|error| {
-                format!(
-                    "workflow {name} carried by skill {} has invalid metadata: {error}",
-                    skill.name
-                )
-            })?
-            .argument_schema;
+        let meta = swage_workflow::script_meta(&source).map_err(|error| {
+            format!(
+                "workflow {name} carried by skill {} has invalid metadata: {error}",
+                skill.name
+            )
+        })?;
         Ok(Self {
             id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
             space_id,
@@ -148,7 +148,8 @@ impl EffectiveWorkflow {
             updated_at: chrono::DateTime::UNIX_EPOCH,
             immutable: true,
             carrying_skill: Some(skill.name.clone()),
-            argument_schema,
+            argument_schema: meta.argument_schema,
+            task: meta.task,
         })
     }
 }
@@ -294,7 +295,7 @@ async fn authored_workflow(
     // use, never the stored column: a model-authored script resolves none.
     // See service::workflow_script.
     let delivery_grant = record.effective_delivery_grant();
-    let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
+    let meta = swage_workflow::script_meta(&head.source)?;
     Ok(EffectiveWorkflow {
         id: record.id,
         space_id: record.space_id,
@@ -308,7 +309,8 @@ async fn authored_workflow(
         updated_at: record.updated_at,
         immutable: false,
         carrying_skill: None,
-        argument_schema,
+        argument_schema: meta.argument_schema,
+        task: meta.task,
     })
 }
 
@@ -862,6 +864,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             script.delivery_grant,
             script.carrying_skill,
             script.argument_schema,
+            script.task,
             args,
             budget,
             wait,
@@ -884,6 +887,9 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("session {session_id} was not found"))?;
+        let task = swage_workflow::script_meta(source)
+            .map_err(|error| format!("inline workflow has invalid metadata: {error}"))?
+            .task;
         self.start_for_session(
             session,
             None,
@@ -892,6 +898,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             None,
             None,
             None,
+            task,
             args,
             budget,
             wait,
@@ -910,6 +917,7 @@ impl GatewayWorkflowLauncher {
         delivery_grant: Option<Value>,
         carrying_skill: Option<String>,
         argument_schema: Option<Value>,
+        task: Option<String>,
         args: Value,
         budget: Option<WorkflowBudget>,
         wait: bool,
@@ -943,6 +951,7 @@ impl GatewayWorkflowLauncher {
             inline_identity,
             source,
             argument_schema,
+            task,
             args,
             budget.unwrap_or_default(),
             delivery_grant,
@@ -4237,6 +4246,7 @@ async fn complete_workflow_call_entry(
                         .map(|identity| identity.name.clone()),
                     inline_workflow_version: inline_identity.map(|identity| identity.version),
                     carrying_skill: script.carrying_skill.clone(),
+                    task: script.task.clone(),
                     source: script
                         .script_version_id
                         .is_none()
@@ -4463,6 +4473,7 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_name: record.script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
+        task: record.task,
         source: record.source,
         source_hash: record.source_hash,
         state: run_state(&record.state)?,
@@ -4614,6 +4625,7 @@ async fn start_run(
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
     argument_schema: Option<Value>,
+    task: Option<String>,
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
@@ -4645,6 +4657,7 @@ async fn start_run(
                 .map(|identity| identity.name.clone()),
             inline_workflow_version: inline_identity.map(|identity| identity.version),
             carrying_skill,
+            task,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
             args,
@@ -5150,6 +5163,11 @@ pub async fn start_inline_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
+    let task = swage_workflow::script_meta(&request.source)
+        .map_err(|error| {
+            ApiError::validation(format!("inline workflow has invalid metadata: {error}"))
+        })?
+        .task;
     Ok(Json(
         start_run(
             state,
@@ -5158,6 +5176,7 @@ pub async fn start_inline_run(
             None,
             request.source,
             None,
+            task,
             request.args,
             request.budget.unwrap_or_default(),
             None,
@@ -5190,6 +5209,7 @@ pub async fn start_saved_run(
             script.inline_identity(),
             script.source,
             script.argument_schema,
+            script.task,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
@@ -5264,9 +5284,15 @@ pub async fn get_run(
     }))
 }
 
+#[derive(Default, Deserialize)]
+pub struct WorkflowRunListQuery {
+    task: Option<String>,
+}
+
 pub async fn list_runs(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
+    Query(query): Query<WorkflowRunListQuery>,
 ) -> Result<Json<WorkflowRunListResponse>, ApiError> {
     let runs = state
         .storage
@@ -5274,6 +5300,12 @@ pub async fn list_runs(
         .await
         .map_err(internal)?
         .into_iter()
+        .filter(|run| {
+            query
+                .task
+                .as_ref()
+                .is_none_or(|task| run.task.as_ref() == Some(task))
+        })
         .map(run_wire)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(WorkflowRunListResponse { runs }))
@@ -6310,6 +6342,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: Some("operator-proof".into()),
+                task: None,
                 source: Some(recorded_source.into()),
                 source_hash: source_hash(recorded_source),
                 args: Value::Null,
@@ -6370,6 +6403,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -6929,6 +6963,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -7279,6 +7314,7 @@ mod tests {
                     inline_workflow_name: None,
                     inline_workflow_version: None,
                     carrying_skill: None,
+                    task: None,
                     source: Some("return null".into()),
                     source_hash: source_hash("return null"),
                     args: Value::Null,
@@ -7828,6 +7864,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8313,6 +8350,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8474,6 +8512,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8488,6 +8527,16 @@ mod tests {
             .expect("run");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "continued-history-tool".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
                 vec![
                     swage_core::StreamChunk::Delta {
                         content: "restated: gather the sources".into(),
@@ -8741,7 +8790,7 @@ mod tests {
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(
             requests[0]
                 .tool_definitions
@@ -8750,23 +8799,72 @@ mod tests {
             "shell is available while the lead still grants it"
         );
         assert!(
-            requests[1]
+            requests[2]
                 .tool_definitions
                 .iter()
                 .all(|definition| definition["name"] != "shell"),
             "the continued turn must observe the lead's revoked shell grant"
         );
-        let second_request = requests[1]
+        let second_request = &requests[2];
+        let anthropic =
+            swage_provider::anthropic::AnthropicProvider::new("test-key", "claude-test");
+        let outbound = swage_provider::LlmProvider::provider_request_snapshot(
+            &anthropic,
+            second_request,
+            true,
+        );
+        if let Some(path) = std::env::var_os("SWAGE_PROVIDER_REQUEST_CAPTURE") {
+            std::fs::write(
+                path,
+                serde_json::to_vec_pretty(&outbound["body"])
+                    .expect("serialise outbound provider request"),
+            )
+            .expect("write outbound provider request capture");
+        }
+        let second_request_text = second_request
             .messages
             .iter()
             .map(swage_core::ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(second_request.contains("restate the brief"));
-        assert!(second_request.contains("restated: gather the sources"));
+        assert!(second_request_text.contains("restate the brief"));
+        assert!(second_request_text.contains("restated: gather the sources"));
         assert!(
-            second_request.contains("Use the persisted workflow specialist skill."),
-            "the continued turn must compose the persisted skill selection: {second_request}"
+            second_request_text.contains("Use the persisted workflow specialist skill."),
+            "the continued turn must compose the persisted skill selection: {second_request_text}"
+        );
+        let replayed_tool_names = second_request
+            .messages
+            .iter()
+            .filter_map(swage_core::ChatMessage::tool_replay)
+            .flat_map(|replay| replay.iter())
+            .filter_map(|part| match part {
+                swage_core::ToolReplayPart::ToolCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replayed_tool_names, vec!["shell"]);
+        assert!(
+            replayed_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every replayed tool_use entry in the continued provider request must carry its name"
+        );
+        let outbound_tool_names = outbound["body"]["messages"]
+            .as_array()
+            .expect("Anthropic request messages")
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(outbound_tool_names, vec!["shell"]);
+        assert!(
+            outbound_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every tool_use in the Anthropic outbound body must carry its persisted name"
         );
 
         drop(tx);
@@ -8801,6 +8899,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -9641,6 +9740,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10316,6 +10416,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10438,6 +10539,7 @@ mod tests {
                 .expect("budget"),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10533,6 +10635,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.clone()),
                 source_hash: source_hash(&source),
                 args: Value::Null,
@@ -10639,6 +10742,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -10906,6 +11010,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -10997,6 +11102,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12295,6 +12401,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some(source.into()),
             source_hash: source_hash(source),
             args: Value::Null,
@@ -12387,6 +12494,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -12562,6 +12670,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12933,6 +13042,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13071,6 +13181,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13282,6 +13393,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13527,6 +13639,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13759,6 +13872,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -13900,6 +14014,83 @@ mod tests {
         assert_eq!(
             completed.final_output,
             Some(serde_json::json!({ "value": 42 }))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_run_task_identity_is_persisted_and_filters_the_listing() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"export const meta = { task: "run-task-identity" }; return null;"#;
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "task identity".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("script");
+
+        let Json(saved) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start saved run");
+        let Json(inline) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        let Json(without_task) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return null;".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start unlabelled run");
+
+        let stored = storage
+            .get_workflow_run(saved.id)
+            .await
+            .expect("read saved run")
+            .expect("saved run exists");
+        assert_eq!(stored.task.as_deref(), Some("run-task-identity"));
+        assert_eq!(without_task.task, None);
+
+        let Json(list) = list_runs(
+            State(state),
+            Path(space.id),
+            Query(WorkflowRunListQuery {
+                task: Some("run-task-identity".into()),
+            }),
+        )
+        .await
+        .expect("list task runs");
+        assert_eq!(list.runs.len(), 2);
+        assert!(list.runs.iter().any(|run| run.id == saved.id));
+        assert!(list.runs.iter().any(|run| run.id == inline.id));
+        assert!(
+            list.runs
+                .iter()
+                .all(|run| run.task.as_deref() == Some("run-task-identity"))
         );
     }
 
@@ -14497,6 +14688,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14606,6 +14798,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14711,6 +14904,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
