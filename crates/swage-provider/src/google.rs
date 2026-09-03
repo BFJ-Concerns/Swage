@@ -10,8 +10,9 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ProviderError,
-    Role, StreamChunk, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, EffortCapability,
+    EffortControl, FinishReason, ProviderError, Role, StreamChunk, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
@@ -31,6 +32,47 @@ struct GenerateContentRequest {
     generation_config: Option<GenerationConfig>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<GeminiTool>,
+}
+
+/// Gemini 2.5 Flash models accept a numeric thinking-token budget. A zero
+/// budget is their documented true disable; other resolved budgets pass through.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GeminiThinkingConfig {
+    thinking_budget: u32,
+}
+
+/// The documented Gemini 2.5 Flash control is a numeric thinking budget from
+/// zero through 24,576 tokens. The adapter vouches only for that family;
+/// catalogue declarations govern every other Google model.
+fn google_effort_capability(model: &str) -> Option<EffortCapability> {
+    let model = model.trim().to_ascii_lowercase();
+    if model.starts_with("gemini-2.5-flash-lite") {
+        Some(EffortCapability::Budget {
+            min_tokens: 512,
+            max_tokens: 24_576,
+            can_disable: true,
+        })
+    } else if model.starts_with("gemini-2.5-flash") {
+        Some(EffortCapability::Budget {
+            min_tokens: 1,
+            max_tokens: 24_576,
+            can_disable: true,
+        })
+    } else {
+        None
+    }
+}
+
+/// The request builder expresses an already-resolved control only.
+fn google_thinking_config(control: EffortControl) -> Option<GeminiThinkingConfig> {
+    match control {
+        EffortControl::Budget { tokens } => Some(GeminiThinkingConfig {
+            thinking_budget: tokens,
+        }),
+        EffortControl::Disabled => Some(GeminiThinkingConfig { thinking_budget: 0 }),
+        EffortControl::Level { .. } | EffortControl::Omitted => None,
+    }
 }
 
 /// A content block in the Gemini format.
@@ -97,6 +139,8 @@ struct GenerationConfig {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<GeminiThinkingConfig>,
 }
 
 /// Tool definition for function calling.
@@ -396,14 +440,20 @@ impl GoogleProvider {
         let (system_instruction, remaining) = Self::extract_system(&request.messages);
         let contents = Self::convert_messages(&remaining);
 
+        let thinking_config = request
+            .effort
+            .as_ref()
+            .and_then(|effort| google_thinking_config(effort.control));
         let generation_config = if request.max_tokens.is_some()
             || request.temperature.is_some()
             || request.stop_sequences.is_some()
+            || thinking_config.is_some()
         {
             Some(GenerationConfig {
                 max_output_tokens: request.max_tokens,
                 temperature: request.temperature,
                 stop_sequences: request.stop_sequences.clone(),
+                thinking_config,
             })
         } else {
             None
@@ -461,6 +511,7 @@ impl GoogleProvider {
                 max_output_tokens: request.max_tokens,
                 temperature: request.temperature,
                 stop_sequences: request.stop_sequences.clone(),
+                thinking_config: None,
             })
         } else {
             None
@@ -619,6 +670,10 @@ impl GoogleProvider {
 impl LlmProvider for GoogleProvider {
     fn model_id(&self) -> &str {
         &self.config.model
+    }
+
+    fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
+        google_effort_capability(model)
     }
 
     fn provider_request_snapshot(
@@ -1051,6 +1106,146 @@ mod tests {
             snapshot["body"]["tools"][0]["functionDeclarations"][0]["name"],
             "ping"
         );
+    }
+
+    #[test]
+    fn every_resolved_google_budget_reaches_the_wire() {
+        use swage_core::Effort;
+
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-2.5-flash",
+            "https://generativelanguage.googleapis.com",
+        ));
+        let capability = google_effort_capability("gemini-2.5-flash").expect("known family");
+        let mut previous = None;
+
+        for level in Effort::ALL {
+            let resolved = swage_core::resolve_effort(level, &capability);
+            let body = serde_json::to_value(provider.build_request(&CompletionRequest {
+                effort: Some(resolved),
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            }))
+            .unwrap();
+            let expected_google_body = serde_json::json!({
+                "contents": [],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": 1}}
+            });
+            assert!(
+                body["generationConfig"].get("thinkingConfig").is_some(),
+                "the documented positive-control body nests thinkingConfig in generationConfig"
+            );
+            let budget = body["generationConfig"]["thinkingConfig"]["thinkingBudget"]
+                .as_u64()
+                .expect("resolved Google control is a numeric budget");
+            if level == Effort::Minimal {
+                assert_eq!(
+                    body["generationConfig"], expected_google_body["generationConfig"],
+                    "the documented positive-control fixture is the generated request shape"
+                );
+            }
+            assert!(previous.is_none_or(|previous| budget > previous));
+            previous = Some(budget);
+        }
+    }
+
+    #[test]
+    fn lowest_non_off_google_effort_resolves_to_each_flash_family_floor() {
+        use swage_core::Effort;
+
+        for (model, expected_budget) in [("gemini-2.5-flash-lite", 512), ("gemini-2.5-flash", 1)] {
+            let provider = GoogleProvider::from_config(ProviderConfig::new(
+                "key",
+                model,
+                "https://generativelanguage.googleapis.com",
+            ));
+            let capability = google_effort_capability(model).expect("known Flash family");
+            let resolved = swage_core::resolve_effort(Effort::Minimal, &capability);
+            let body = serde_json::to_value(provider.build_request(&CompletionRequest {
+                effort: Some(resolved),
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            }))
+            .expect("Google request serialises");
+
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingBudget"], expected_budget,
+                "{model} sends its documented lowest non-off thinking budget"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_google_disable_and_omission_reach_the_wire_as_resolved() {
+        use swage_core::Effort;
+
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-2.5-flash",
+            "https://generativelanguage.googleapis.com",
+        ));
+        let capability = google_effort_capability("gemini-2.5-flash").expect("known family");
+        let disabled = swage_core::resolve_effort(Effort::Off, &capability);
+        let body = serde_json::to_value(provider.build_request(&CompletionRequest {
+            effort: Some(disabled),
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        }))
+        .unwrap();
+        let expected_google_body = serde_json::json!({
+            "contents": [],
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}
+        });
+        assert_eq!(
+            body["generationConfig"], expected_google_body["generationConfig"],
+            "the documented positive-control fixture is the generated disable shape"
+        );
+
+        let omitted = serde_json::to_value(provider.build_request(&CompletionRequest {
+            effort: None,
+            messages: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        }))
+        .unwrap();
+        assert!(omitted.get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn effort_capability_is_declared_only_for_documented_google_models() {
+        let provider = GoogleProvider::from_config(ProviderConfig::new(
+            "key",
+            "gemini-2.5-flash",
+            "https://generativelanguage.googleapis.com",
+        ));
+        assert!(provider.effort_capability("gemini-2.5-flash").is_some());
+        assert!(
+            provider
+                .effort_capability("gemini-2.5-flash-lite")
+                .is_some()
+        );
+        assert!(provider.effort_capability("gemini-2.5-pro").is_none());
+        assert!(provider.effort_capability("gemini-3-pro").is_none());
     }
 
     #[test]
