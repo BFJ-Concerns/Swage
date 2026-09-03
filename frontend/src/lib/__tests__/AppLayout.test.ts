@@ -98,6 +98,8 @@ function mockPagesStore(): PagesStore {
   return {
     get pages() { return [{ id: page.id, title: page.title, updated_at: page.updated_at }]; },
     get activePage() { return page; },
+    get templates() { return []; },
+    templateName: () => null,
     loadPages: async () => {},
     openPage: async () => {},
     closePage: () => {},

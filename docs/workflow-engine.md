@@ -331,3 +331,37 @@ Four mechanisms bound concurrent work:
   counter is above zero.
 - **Agent-call counter**: a lifetime count checked against the budget's
   `max_agent_calls` cap.
+
+## Carried workflows
+
+A workflow script can be carried by a skill instead of being authored as a
+standalone row in a space. In the workflow listing, a carried workflow's
+`carrying_skill` field names the skill that provides it. Carried workflows are
+immutable in place; an operator can shadow one by authoring a same-named
+workflow in the space.
+
+Each shipped skill carries its own workflows. When a skill is active on a
+session, its carried workflows become available, and any available workflow
+starts by name through `workflow_run`. The research skill carries
+`research-sweep`.
+
+### Running a research sweep
+
+To run a research sweep, activate the research skill on the session, then
+dispatch the carried workflow:
+
+```json
+{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+```
+
+- **`topic`** — what to research, as the user phrased it.
+- **`purpose`** — what the findings must serve; the synthesis is judged
+  against this, so it should carry the user's actual need.
+- **`maxSources`** — optional ceiling on sources gathered (default 8).
+
+The sweep runs unattended: sources are gathered as immutable observations,
+an organising pass signposts what landed using `knowledge_curate_orientation`
+(which can author, supersede, and retire orientation cards), and a synthesis
+pass delivers cited findings. The sweep's internal roles — scout, gatherers,
+organiser, synthesist — are bare dispatches inside the script, not standalone
+agent definitions.
