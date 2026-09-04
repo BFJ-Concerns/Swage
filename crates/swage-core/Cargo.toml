@@ -11,6 +11,7 @@ workspace = true
 swage-protocol = { path = "../swage-protocol" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+jsonschema = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

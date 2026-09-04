@@ -8,9 +8,11 @@ use uuid::Uuid;
 use crate::{
     tool::Tool,
     tool::workflow_list::{workflow_catalogue_error_summary, workflows_for_session},
-    tool_executor::GatewayToolContext,
     workflow::{GatewayWorkflowLauncher, WorkflowLauncher},
 };
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 
 pub struct WorkflowRunTool;
 
@@ -85,13 +87,11 @@ impl Tool for WorkflowRunTool {
                 name: self.name().into(),
                 message: error.to_string(),
             })?;
-        let gateway = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().into(),
-                message: "workflow_run requires gateway execution".into(),
-            })?;
+        let gateway = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "workflow_run requires gateway execution",
+        )?;
         let state = gateway
             .app_state()
             .ok_or_else(|| ToolError::ExecutionFailed {

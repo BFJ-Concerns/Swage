@@ -98,7 +98,7 @@ pub struct CompactionRecord {
     pub budget: Option<usize>,
     pub failure_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub focus: Option<String>,
 }
 
