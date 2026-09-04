@@ -17264,10 +17264,10 @@ mod tests {
         let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
             "max_agent_calls": 5,
             "max_concurrent_agent_calls": 2,
-            "max_total_tokens": 2,
+            "max_total_tokens": 4,
             "per_route": {
                 "alpha-route": {"max_total_tokens": 2, "reserved_closing_tokens": 1},
-                "beta-route": {"max_total_tokens": 1}
+                "beta-route": {"max_total_tokens": 3}
             }
         }))
         .expect("route budget contract");
@@ -17307,15 +17307,31 @@ mod tests {
         assert_eq!(output["beta"], "beta", "another route remains admissible");
         assert_eq!(output["exhausted"], "BudgetWindDownError");
         assert_eq!(output["fallbackSpent"], 1);
-        assert_eq!(output["fallbackRemaining"], 1);
+        assert_eq!(output["fallbackRemaining"], 3);
         assert_eq!(output["spentAfterRoutes"], 1);
-        assert_eq!(output["remainingAfterRoutes"], 1);
+        assert_eq!(output["remainingAfterRoutes"], 3);
         assert_eq!(
             output["unknown"], "AgentCallError",
             "unknown model is not a budget refusal"
         );
         assert_eq!(output["snapshot"]["per_route"]["alpha-route"]["spent"], 1);
+        assert_eq!(
+            output["snapshot"]["per_route"]["alpha-route"]["remaining"],
+            1
+        );
+        assert_eq!(
+            output["snapshot"]["per_route"]["alpha-route"]["closing_remaining"],
+            1
+        );
         assert_eq!(output["snapshot"]["per_route"]["beta-route"]["spent"], 0);
+        assert_eq!(
+            output["snapshot"]["per_route"]["beta-route"]["remaining"],
+            3
+        );
+        assert_eq!(
+            output["snapshot"]["per_route"]["beta-route"]["closing_remaining"],
+            Value::Null
+        );
         let wind_down = detail
             .journal
             .iter()
@@ -17334,8 +17350,24 @@ mod tests {
             1
         );
         assert_eq!(
+            terminal.result.as_ref().unwrap()["per_route"]["alpha-route"]["remaining"],
+            1
+        );
+        assert_eq!(
+            terminal.result.as_ref().unwrap()["per_route"]["alpha-route"]["closing_remaining"],
+            1
+        );
+        assert_eq!(
             terminal.result.as_ref().unwrap()["per_route"]["beta-route"]["spent"],
             1
+        );
+        assert_eq!(
+            terminal.result.as_ref().unwrap()["per_route"]["beta-route"]["remaining"],
+            2
+        );
+        assert_eq!(
+            terminal.result.as_ref().unwrap()["per_route"]["beta-route"]["closing_remaining"],
+            Value::Null
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
     }
