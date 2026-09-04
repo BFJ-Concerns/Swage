@@ -940,7 +940,11 @@ mod tests {
             )
             .await
             .expect_err("an unrecorded delegated task must not execute");
-        assert!(error.to_string().contains("injected delegated task write failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("injected delegated task write failure")
+        );
         let session = storage
             .list_sessions_by_agent_id("agent-b")
             .await

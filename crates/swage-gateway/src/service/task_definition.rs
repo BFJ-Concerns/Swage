@@ -34,7 +34,7 @@ pub fn validate_task_definition(definition: &NewTaskDefinition) -> Result<(), Ga
             })?;
     }
     if let Some(schema) = &definition.output_schema {
-        jsonschema::validator_for(schema).map_err(|e| {
+        swage_core::json_schema_validator(schema).map_err(|e| {
             GatewayError::ValidationError(format!(
                 "the output contract is not a valid JSON Schema: {e}"
             ))

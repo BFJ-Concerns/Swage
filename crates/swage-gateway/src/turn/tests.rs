@@ -10661,11 +10661,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         "the waiting delegated turn must use its enforced grant without parking"
     );
     assert_eq!(
-        state
-            .worktree_host
-            .list_owner(wait_owner_id)
-            .await
-            .len(),
+        state.worktree_host.list_owner(wait_owner_id).await.len(),
         1,
         "a named wait-mode child keeps its worktree owner for continuation"
     );
