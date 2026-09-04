@@ -4101,7 +4101,7 @@ async fn run_host_commands_inner(
                         .clone()
                         .unwrap_or_else(|| "recorded worker failure".to_string())),
                     existing => {
-                        let reading = held_worker_staleness_reading(&state.config, worker);
+                        let reading = held_worker_staleness_reading(&state.active_config(), worker);
                         match existing {
                             Some(entry) => state
                                 .complete_workflow_journal_entry(entry.id, reading.clone())
@@ -10357,6 +10357,77 @@ mod tests {
             "idle time is the gap since the last turn settled, not the time \
              that turn spent working ({idle_ms}ms after a {}ms turn)",
             turn_duration.as_millis()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_staleness_uses_the_hot_applied_route_threshold() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        let worker_dir = swage_home.path().join("spaces/default/agents/worker");
+        std::fs::create_dir_all(&worker_dir).expect("create worker config directory");
+        std::fs::write(worker_dir.join("config.toml"), "").expect("write worker config");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            held_worker_route_config(None),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const worker = await session({agent: "worker"});
+                    await wait({timerMs: 1_000});
+                    const reading = await staleness(worker);
+                    await close(worker);
+                    return reading;
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if storage
+                    .list_workflow_journal(started.id)
+                    .await
+                    .expect("journal")
+                    .iter()
+                    .any(|entry| {
+                        entry.kind == "worker"
+                            && entry.request.get("action").and_then(Value::as_str) == Some("open")
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker opens");
+        state.replace_runtime(
+            held_worker_route_config(Some(600_000)),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        assert_eq!(
+            run.final_output.as_ref().expect("staleness reading")["thresholdMs"],
+            600_000,
         );
     }
 
