@@ -100,28 +100,25 @@ pub async fn compact_with_model(
     model: Option<&str>,
     threshold_known_exceeded: bool,
 ) -> Result<(Vec<ChatMessage>, Option<CompactionRecord>), AgentError> {
-    if !threshold_known_exceeded
-        && !exceeds_threshold_with_model(messages.as_slice(), threshold, provider, model, false)
-            .await
-            .exceeds
-    {
-        return Ok((messages, None));
+    let mut native_breach = threshold_known_exceeded;
+    if !native_breach {
+        let evaluation =
+            exceeds_threshold_with_model(messages.as_slice(), threshold, provider, model, false)
+                .await;
+        native_breach |= evaluation.native_breach;
+        if !evaluation.exceeds {
+            return Ok((messages, None));
+        }
     }
     let tokens_before = estimated_tokens(&messages);
 
     // Tier 1 — Summarise: condense older half via an LLM call. Falls back
     // gracefully if the provider call fails.
     let (messages, mut messages_removed) = try_summarise(messages, provider, focus).await;
-    if !exceeds_threshold_with_model(
-        &messages,
-        threshold,
-        provider,
-        model,
-        threshold_known_exceeded,
-    )
-    .await
-    .exceeds
-    {
+    let evaluation =
+        exceeds_threshold_with_model(&messages, threshold, provider, model, native_breach).await;
+    native_breach |= evaluation.native_breach;
+    if !evaluation.exceeds {
         let tokens_after = estimated_tokens(&messages);
         return Ok((
             messages,
@@ -139,16 +136,10 @@ pub async fn compact_with_model(
     let messages_before_tier = messages.len();
     let messages = truncate(messages, threshold);
     messages_removed += messages_before_tier.saturating_sub(messages.len());
-    if !exceeds_threshold_with_model(
-        &messages,
-        threshold,
-        provider,
-        model,
-        threshold_known_exceeded,
-    )
-    .await
-    .exceeds
-    {
+    let evaluation =
+        exceeds_threshold_with_model(&messages, threshold, provider, model, native_breach).await;
+    native_breach |= evaluation.native_breach;
+    if !evaluation.exceeds {
         let tokens_after = estimated_tokens(&messages);
         return Ok((
             messages,
@@ -167,16 +158,9 @@ pub async fn compact_with_model(
     let messages_before_tier = messages.len();
     let messages = aggressive_truncate(messages);
     messages_removed += messages_before_tier.saturating_sub(messages.len());
-    if !exceeds_threshold_with_model(
-        &messages,
-        threshold,
-        provider,
-        model,
-        threshold_known_exceeded,
-    )
-    .await
-    .exceeds
-    {
+    let evaluation =
+        exceeds_threshold_with_model(&messages, threshold, provider, model, native_breach).await;
+    if !evaluation.exceeds {
         let tokens_after = estimated_tokens(&messages);
         return Ok((
             messages,
@@ -567,6 +551,63 @@ mod tests {
                 Err(ProviderError::InvalidResponse(
                     "native count unavailable".into(),
                 ))
+            }
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Err(ProviderError::InvalidResponse(
+                "summarisation unavailable".into(),
+            ))
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            unreachable!("compaction does not request tools")
+        }
+
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+            unreachable!("compaction does not stream")
+        }
+    }
+
+    /// Provider whose first post-compaction native recount establishes a
+    /// breach, then becomes unavailable while an image-only prompt remains.
+    struct RecountBreachProvider {
+        count_calls: AtomicUsize,
+    }
+
+    impl RecountBreachProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                count_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecountBreachProvider {
+        fn model_id(&self) -> &str {
+            "recount-breach"
+        }
+
+        async fn count_tokens(
+            &self,
+            _request: &CompletionRequest,
+        ) -> Result<Option<u64>, ProviderError> {
+            match self.count_calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(None),
+                1 => Ok(Some(100)),
+                _ => Err(ProviderError::InvalidResponse(
+                    "native recount unavailable".into(),
+                )),
             }
         }
 
@@ -1124,6 +1165,32 @@ mod tests {
         )
         .await
         .expect_err("a failed native recount cannot clear the known breach");
+
+        assert!(matches!(error, AgentError::CompactionFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn post_compaction_native_breach_survives_a_later_failed_recount() {
+        let messages = vec![
+            text_msg(Role::User, &"a".repeat(100)),
+            image_msg(Role::Assistant, "https://example.test/a"),
+            image_msg(Role::User, "https://example.test/b"),
+        ];
+        let storage = stub_storage();
+        let provider = RecountBreachProvider::new();
+
+        let error = compact_with_model(
+            messages,
+            &CompactionThreshold::TokenCount(20),
+            provider.as_ref(),
+            storage.as_ref(),
+            Uuid::new_v4(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect_err("a native breach established during compaction must remain latched");
 
         assert!(matches!(error, AgentError::CompactionFailed(_)));
     }
