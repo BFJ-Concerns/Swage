@@ -6953,6 +6953,7 @@ mod tests {
                     thread_id: None,
                     turn_id: None,
                     served_model: None,
+                    worktree: None,
                 })
                 .expect("recorded result"),
             )
