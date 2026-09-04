@@ -499,8 +499,8 @@ pub enum WorkflowJournalResult {
     AgentCall {
         #[ts(type = "unknown")]
         output: Value,
-        input_tokens: u64,
-        output_tokens: u64,
+        /// What the call spent, or why that is not known.
+        usage: WorkflowCallUsage,
         working_directory: Option<String>,
         served_model: Option<String>,
         session_id: Option<Uuid>,

@@ -5724,21 +5724,11 @@
         "oneOf": [
           {
             "properties": {
-              "input_tokens": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
               "kind": {
                 "const": "agent_call",
                 "type": "string"
               },
               "output": true,
-              "output_tokens": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
               "served_model": {
                 "type": [
                   "string",
@@ -5766,6 +5756,10 @@
                   "null"
                 ]
               },
+              "usage": {
+                "$ref": "#/components/schemas/WorkflowCallUsage",
+                "description": "What the call spent, or why that is not known."
+              },
               "working_directory": {
                 "type": [
                   "string",
@@ -5787,8 +5781,7 @@
             "required": [
               "kind",
               "output",
-              "input_tokens",
-              "output_tokens"
+              "usage"
             ],
             "type": "object"
           },
