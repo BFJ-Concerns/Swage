@@ -168,10 +168,11 @@ pub struct ChannelLinkCodeRecord {
 }
 
 impl AppState {
-    /// Owner directories that must survive startup recovery because the
-    /// workflow wake loop can replay them from durable placement journals.
-    pub(crate) async fn replayable_worktree_owner_ids(&self) -> Result<HashSet<Uuid>, String> {
-        let mut owners = self
+    /// Worktrees that must survive startup recovery for replay or integration.
+    pub(crate) async fn worktree_recovery_claims(
+        &self,
+    ) -> Result<crate::worktree::WorktreeRecoveryClaims, String> {
+        let mut replayable_owner_ids = self
             .storage
             .list_interrupted_workflow_runs()
             .await
@@ -188,7 +189,7 @@ impl AppState {
             .into_iter()
             .map(|space| space.id)
             .collect::<HashSet<_>>();
-        owners.extend(
+        replayable_owner_ids.extend(
             self.storage
                 .list_parked_workflow_runs()
                 .await
@@ -197,7 +198,52 @@ impl AppState {
                 .filter(|run| space_ids.contains(&run.space_id))
                 .map(|run| run.id),
         );
-        Ok(owners)
+
+        let mut retained_paths = HashSet::new();
+        for space_id in space_ids {
+            let runs = self
+                .storage
+                .list_workflow_runs(space_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            for run in runs {
+                for entry in self
+                    .storage
+                    .list_workflow_journal(run.id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    if entry.kind != "agent_call" || entry.status != "completed" {
+                        continue;
+                    }
+                    let Some(result) = entry.result else {
+                        continue;
+                    };
+                    let Some(worktree) = result.get("worktree") else {
+                        continue;
+                    };
+                    if worktree.get("changed").and_then(serde_json::Value::as_bool) == Some(true)
+                        && worktree.get("removed").and_then(serde_json::Value::as_bool)
+                            == Some(false)
+                    {
+                        let path = result
+                            .get("working_directory")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                format!(
+                                    "completed changed worktree record {} has no working directory",
+                                    entry.id
+                                )
+                            })?;
+                        retained_paths.insert(PathBuf::from(path));
+                    }
+                }
+            }
+        }
+        Ok(crate::worktree::WorktreeRecoveryClaims {
+            replayable_owner_ids,
+            retained_paths,
+        })
     }
 
     pub fn new(
