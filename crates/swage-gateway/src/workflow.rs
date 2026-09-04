@@ -17789,6 +17789,114 @@ protocol = "openai"
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn replay_completes_a_started_route_wind_down_once() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = empty_journal_run(&storage, space.id).await;
+        let working = route_test_request("working", Some("alpha"));
+        journal_routed_agent_call(&storage, run_id, 0, &working, "alpha-route", Some(4)).await;
+        let transition = route_test_request("wind down", Some("alpha"));
+        let mut transition_json =
+            serde_json::to_value(&transition).expect("transition request serialises");
+        transition_json["provider_route"] = Value::String("alpha-route".into());
+        storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: 1,
+                kind: "wind_down".into(),
+                args_hash: journal_args_hash(
+                    &serde_json::to_value(&transition).expect("transition request"),
+                ),
+                request: transition_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("started route wind-down");
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "max_concurrent_agent_calls": 1,
+            "per_route": {
+                "alpha-route": {"max_total_tokens": 8, "reserved_closing_tokens": 4}
+            }
+        }))
+        .expect("route budget");
+        let replay = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("replay journal");
+        let accounting = terminal_budget_accounting_from_journal(&replay, &budget);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(FixedUsageProvider),
+            route_test_config("alpha", "alpha-route"),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands_with_budget(
+            state,
+            run_id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            budget,
+            replay,
+            Arc::new(AtomicU32::new(1)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(accounting)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        for replayed in [working, transition] {
+            let (reply, receive) = oneshot::channel();
+            tx.send(HostCommand::Agent {
+                request: replayed,
+                resolved_working_directory: None,
+                cancellation: CancellationToken::new(),
+                reply,
+            })
+            .expect("replay command");
+            let _ = receive.await.expect("replay reply");
+        }
+        let (closing_reply, closing_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: route_test_request("closing report", Some("alpha")),
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply: closing_reply,
+        })
+        .expect("closing command");
+        closing_receive
+            .await
+            .expect("closing reply")
+            .expect("one closing reserve remains");
+        drop(tx);
+        task.await.expect("host task");
+
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal after replay");
+        let transitions = journal
+            .iter()
+            .filter(|entry| entry.kind == "wind_down")
+            .collect::<Vec<_>>();
+        assert_eq!(transitions.len(), 1, "the intent completes in place");
+        assert_eq!(transitions[0].status, "completed");
+        assert_eq!(transitions[0].result.as_ref().unwrap()["closing_limit"], 8);
+        assert_eq!(
+            transitions[0].result.as_ref().unwrap()["closing_remaining"],
+            4
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn resumed_unconfigured_route_spend_uses_the_fallback_ledger() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
