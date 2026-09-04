@@ -15,6 +15,7 @@ pub enum SignInMethod {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 pub struct StartProviderSignInRequest {
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub method: SignInMethod,
 }
 

@@ -68,12 +68,16 @@ pub enum DeliveryTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct DeliveryRoutingRequest {
     #[serde(default = "default_true")]
+    #[ts(optional, as = "Option<_>")]
     pub deliver_to_origin: bool,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub home_target: Option<DeliveryTarget>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub explicit_targets: Vec<DeliveryTarget>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub store_local_output: bool,
 }
 
