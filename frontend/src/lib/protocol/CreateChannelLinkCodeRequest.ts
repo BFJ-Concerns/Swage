@@ -5,4 +5,4 @@ import type { ExternalChannelIntegration } from "./ExternalChannelIntegration";
 /**
  * Request a short-lived code that links a channel conversation to a space.
  */
-export type CreateChannelLinkCodeRequest = { integration: ExternalChannelIntegration, space_id: string | null, agent_id: string | null, home_target: DeliveryTarget | null, };
+export type CreateChannelLinkCodeRequest = { integration: ExternalChannelIntegration, space_id?: string | null, agent_id?: string | null, home_target?: DeliveryTarget | null, };

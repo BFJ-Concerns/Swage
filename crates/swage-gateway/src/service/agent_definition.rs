@@ -273,7 +273,7 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
         ));
     }
     if let Some(schema) = &definition.output_schema {
-        jsonschema::validator_for(schema).map_err(|error| {
+        swage_core::json_schema_validator(schema).map_err(|error| {
             GatewayError::ValidationError(format!(
                 "the output contract is not a valid JSON Schema: {error}"
             ))

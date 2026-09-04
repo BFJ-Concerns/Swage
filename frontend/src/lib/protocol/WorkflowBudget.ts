@@ -7,7 +7,7 @@ export type WorkflowBudget = { max_agent_calls: number | null,
  * entry named by its catalogue configuration, and calls on one entry
  * never consume another entry's allowance.
  */
-per_route: { [key in string]: WorkflowRouteBudget },
+per_route?: { [key in string]: WorkflowRouteBudget },
 /**
  * Fallback ceiling for a resolved provider route without a `per_route`
  * entry.
