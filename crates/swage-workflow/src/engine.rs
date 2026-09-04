@@ -892,6 +892,13 @@ impl WorkflowEngine {
                             }
                             return response.value;
                         };
+                        const identifiedAgentEnvelopes = new WeakSet();
+                        const markIdentifiedAgentEnvelope = (value) => {
+                            if (value !== null && typeof value === "object") {
+                                identifiedAgentEnvelopes.add(value);
+                            }
+                            return value;
+                        };
                         // Agent responses carry a continuation token beside the
                         // value; only agentStart handles surface it.
                         const unwrapAgentResponse = (json, request) => {
@@ -915,7 +922,9 @@ impl WorkflowEngine {
                                 throw error;
                             }
                             return {
-                                value: response.value,
+                                value: request.identity === true
+                                    ? markIdentifiedAgentEnvelope(response.value)
+                                    : response.value,
                                 session: response.session ?? null,
                                 workingDirectory: response.working_directory ?? null,
                             };
@@ -1134,12 +1143,7 @@ impl WorkflowEngine {
                             "AgentRequiredError",
                             "InvalidAgentOptionError",
                         ]).has(error.name);
-                        const isIdentifiedFailure = (value) => value !== null
-                            && typeof value === "object"
-                            && Object.prototype.hasOwnProperty.call(value, "label")
-                            && Object.prototype.hasOwnProperty.call(value, "phase")
-                            && Object.prototype.hasOwnProperty.call(value, "output")
-                            && Object.prototype.hasOwnProperty.call(value, "failure")
+                        const isIdentifiedFailure = (value) => identifiedAgentEnvelopes.has(value)
                             && value.failure !== null;
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
@@ -1149,12 +1153,12 @@ impl WorkflowEngine {
                                     __log(`parallel thunk ${index} failed: ${error.name}: ${error.message}`);
                                     const identity = error.__swageAgentCallIdentity;
                                     if (identity !== undefined) {
-                                        return {
+                                        return markIdentifiedAgentEnvelope({
                                             label: identity.label,
                                             phase: identity.phase,
                                             output: null,
                                             failure: { message: error.message },
-                                        };
+                                        });
                                     }
                                     return null;
                                 }
@@ -1176,12 +1180,12 @@ impl WorkflowEngine {
                                         __log(`pipeline item ${index} stage ${stageIndex} failed: ${error.name}: ${error.message}`);
                                         const identity = error.__swageAgentCallIdentity;
                                         if (identity !== undefined) {
-                                            return {
+                                            return markIdentifiedAgentEnvelope({
                                                 label: identity.label,
                                                 phase: identity.phase,
                                                 output: null,
                                                 failure: { message: error.message },
-                                            };
+                                            });
                                         }
                                         return null;
                                     }
@@ -2585,6 +2589,47 @@ mod tests {
                     "failure": {"message": "agent returned empty output"},
                 }],
                 "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_continues_after_unmarked_output_matching_identified_failure_shape() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(json!({
+            "label": "domain label",
+            "phase": "domain phase",
+            "output": "domain output",
+            "failure": {"message": "domain failure"},
+        })));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather"),
+                    (previous) => {
+                        laterStageRan = true;
+                        return { continuedWith: previous.output };
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline result");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{"continuedWith": "domain output"}],
+                "laterStageRan": true,
             })
         );
         assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
