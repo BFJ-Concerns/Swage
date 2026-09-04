@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import App from "../../App.svelte";
-import { getConversation } from "../api/conversations";
+import { createConversation, getConversation } from "../api/conversations";
 import type { WebSocketClient } from "../api/websocket";
 
 const space = {
@@ -202,11 +202,19 @@ describe("ambient channel control path", () => {
     expect(wsClient.connect).toHaveBeenLastCalledWith("conv-2");
   });
 
-  it("starts a conversation in place, leaving the user on the work surface", async () => {
+  it("creates a conversation in place, leaving the user on the work surface", async () => {
     component = await mountAppOnConversation();
     surfaceButton("Pages").click();
     await vi.waitFor(() => {
       expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    vi.mocked(createConversation).mockResolvedValueOnce({
+      id: "conv-new",
+      space_id: space.id,
+      selected_model_id: null,
+      created_at: "2026-08-29T10:10:00Z",
+      last_activity: "2026-08-29T10:10:00Z",
     });
 
     (document.querySelector(
@@ -214,8 +222,13 @@ describe("ambient channel control path", () => {
     ) as HTMLButtonElement).click();
 
     await vi.waitFor(() => {
-      expect(document.body.textContent).not.toContain("History of conv-1");
+      expect(window.location.pathname).toBe("/conversations/conv-new");
     });
+    expect(createConversation).toHaveBeenCalledWith(space.id, undefined, undefined, undefined);
+    expect((document.querySelector(
+      'main.pages-surface select[aria-label="Active conversation"]',
+    ) as HTMLSelectElement).value).toBe("conv-new");
+    expect(document.body.textContent).not.toContain("History of conv-1");
     expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
   });
 });
