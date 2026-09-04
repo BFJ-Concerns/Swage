@@ -1012,6 +1012,13 @@ impl WorkflowEngine {
                             }
                             return JSON.stringify(request);
                         };
+                        const validateAgentOptions = (options, caller) => {
+                            if (options === null || typeof options !== "object" || Array.isArray(options)) {
+                                const error = new TypeError(`${caller}() options must be an object`);
+                                error.name = "InvalidAgentOptionError";
+                                throw error;
+                            }
+                        };
                         const validateAgentPrompt = (prompt, caller) => {
                             if (typeof prompt !== "string") {
                                 const error = new TypeError(`${caller} prompt must be a string`);
@@ -1021,6 +1028,7 @@ impl WorkflowEngine {
                         };
                         globalThis.agent = async (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agent");
+                            validateAgentOptions(options, "agent");
                             const request = buildAgentRequest(options);
                             const response = unwrapAgentResponse(await __agent(prompt, agentRequestJson(request, "agent")));
                             return response.value;
@@ -1044,6 +1052,7 @@ impl WorkflowEngine {
                         // one session.
                         globalThis.agentStart = (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agentStart");
+                            validateAgentOptions(options, "agentStart");
                             const request = buildAgentRequest(options);
                             const requestJson = agentRequestJson(request, "agentStart");
                             const handle = {
@@ -2042,6 +2051,33 @@ mod tests {
                 error
                     .to_string()
                     .contains(&format!("opts.{option} must be an array of names")),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_object_agent_options_propagate_through_fan_out() {
+        for source in [
+            r#"await parallel([() => agent("bad", null)]);"#,
+            r#"await pipeline(["one"], () => agent("bad", null));"#,
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("non-object options must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent() options must be an object"),
                 "unexpected propagated error: {error:?}"
             );
             assert!(host.agent_requests.lock().unwrap().is_empty());
