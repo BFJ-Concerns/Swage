@@ -216,7 +216,7 @@ fn assert_restart_recovers_without_swage_home(probe: GatewayProbe) {
 
     let port = probe.port.to_string();
     let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
-    probe.assert_success(output);
+    probe.assert_ready_after_start(output);
 
     let second_pid = probe.pid();
     assert_ne!(first_pid, second_pid);

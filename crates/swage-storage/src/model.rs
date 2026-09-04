@@ -1094,6 +1094,12 @@ pub struct Page {
     /// Advanced on every module mutation, so "has this page moved?" is one
     /// column read.
     pub updated_at: DateTime<Utc>,
+    /// The template this page was forked from, if any. Recorded origin, not
+    /// a live link: the page's modules are its own from birth, and neither
+    /// side's later edits reach the other.
+    pub forked_from_template_id: Option<Uuid>,
+    /// When the fork happened, alongside `forked_from_template_id`.
+    pub forked_at: Option<DateTime<Utc>>,
 }
 
 /// A module instance on a page: work product seeded from a canonical module
@@ -1151,6 +1157,18 @@ pub struct PageAnnotation {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A reusable page shape a space keeps: a named set of module rows that
+/// seeds new pages. Space-local — templates are neither shared nor
+/// distributed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageTemplate {
+    pub id: Uuid,
+    pub space_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Input for leaving an annotation. `id` and timestamps are storage-assigned.
 #[derive(Debug, Clone)]
 pub struct NewPageAnnotation {
@@ -1159,6 +1177,43 @@ pub struct NewPageAnnotation {
     pub body: String,
     pub tags: Vec<String>,
     pub author: String,
+}
+
+/// A module row on a template: the same shape a page module has, copied
+/// into the forked page's own rows at creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageTemplateModule {
+    pub id: Uuid,
+    pub template_id: Uuid,
+    pub kind: String,
+    pub position: i32,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Input for creating a page template.
+#[derive(Debug, Clone)]
+pub struct NewPageTemplate {
+    pub space_id: Uuid,
+    pub name: String,
+}
+
+/// Input for a module seeded into a template at its creation.
+#[derive(Debug, Clone)]
+pub struct NewPageTemplateModuleInput {
+    pub kind: String,
+    pub position: i32,
+    pub source: String,
+}
+
+/// Input for adding a module row to a template.
+#[derive(Debug, Clone)]
+pub struct NewPageTemplateModule {
+    pub template_id: Uuid,
+    pub kind: String,
+    pub position: i32,
+    pub source: String,
 }
 
 /// A message within a thread.
@@ -1177,6 +1232,11 @@ pub struct Message {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts submitted beside the text, one generic JSON value per
+    /// part exactly as the client wire carried it. Storage keeps them
+    /// opaque; the gateway parses them against the wire contract when it
+    /// projects the message and rejects a value outside it.
+    pub attachments: Vec<serde_json::Value>,
     /// Monotonically increasing position within the thread.
     pub position: i32,
     /// The agent that produced or received this message.
@@ -1925,6 +1985,8 @@ pub struct NewMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts beside the text; empty for a text-only message.
+    pub attachments: Vec<serde_json::Value>,
     /// Monotonically increasing position within the thread.
     pub position: i32,
     /// The agent that produced or received this message.
@@ -1941,6 +2003,8 @@ pub struct AppendMessage {
     pub turn_id: Option<Uuid>,
     pub role: Role,
     pub content: String,
+    /// Content parts beside the text; empty for a text-only message.
+    pub attachments: Vec<serde_json::Value>,
     /// The agent that produced or received this message.
     pub agent_id: String,
 }
@@ -2034,6 +2098,8 @@ pub struct WorkflowRunRecord {
     pub script_version: Option<u32>,
     /// Canonical name of the skill whose bundled workflow source this run used.
     pub carrying_skill: Option<String>,
+    /// Opaque identity declared by the workflow script for grouping its runs.
+    pub task: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
     pub args: serde_json::Value,
@@ -2078,6 +2144,8 @@ pub struct NewWorkflowRun {
     pub inline_workflow_name: Option<String>,
     pub inline_workflow_version: Option<u32>,
     pub carrying_skill: Option<String>,
+    /// See `WorkflowRunRecord::task`.
+    pub task: Option<String>,
     pub source: Option<String>,
     pub source_hash: String,
     pub args: serde_json::Value,
@@ -2608,6 +2676,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             content: "hello".to_string(),
@@ -2639,6 +2708,7 @@ mod tests {
         let msg = Message {
             id,
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::Assistant,
             content: "sure".to_string(),
@@ -2661,6 +2731,7 @@ mod tests {
         let thread_id = Uuid::new_v4();
         let nm = NewMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
             content: "test".to_string(),
@@ -2675,6 +2746,7 @@ mod tests {
     fn new_message_is_debug_clone() {
         let original = NewMessage {
             thread_id: Uuid::new_v4(),
+            attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
             content: "hi".to_string(),

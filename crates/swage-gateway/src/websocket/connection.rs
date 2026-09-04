@@ -3,14 +3,15 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
     extract::{Path, State, WebSocketUpgrade},
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use uuid::Uuid;
 
-use crate::{state::AppState, subscription::SubscriptionState};
+use swage_protocol::client::error::ErrorCode;
+
+use crate::{error::ApiError, state::AppState, subscription::SubscriptionState};
 
 use super::{ServerEvent, dispatch_client_message};
 
@@ -31,43 +32,22 @@ pub(crate) async fn check_upgrade_preconditions(
     match state.storage.get_session(session_id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return Some(
-                (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(serde_json::json!({
-                        "code": "not_found",
-                        "message": format!("conversation {session_id} not found")
-                    })),
-                )
-                    .into_response(),
-            );
+            return Some(ApiError::not_found("conversation", session_id).into_response());
         }
         Err(e) => {
             tracing::error!(%session_id, error = %e, "storage error checking conversation");
-            return Some(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({
-                        "code": "internal_error",
-                        "message": "failed to check conversation"
-                    })),
-                )
-                    .into_response(),
-            );
+            return Some(ApiError::internal("failed to check conversation".into()).into_response());
         }
     }
 
     // Reject duplicate connections to the same conversation.
     if state.active_connections.lock().await.contains(&session_id) {
         return Some(
-            (
-                StatusCode::CONFLICT,
-                axum::Json(serde_json::json!({
-                    "code": "already_connected",
-                    "message": format!("conversation {session_id} already has an active connection")
-                })),
+            ApiError::new(
+                ErrorCode::AlreadyConnected,
+                format!("conversation {session_id} already has an active connection"),
             )
-                .into_response(),
+            .into_response(),
         );
     }
 

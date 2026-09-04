@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
 
 use crate::error::ApiError;
 use crate::secret::{CreateSecretRequest, RotateSecretRequest};
@@ -37,36 +36,22 @@ fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, Ap
 }
 
 async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(), ApiError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ApiError::validation("config path has no parent directory".to_string()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ApiError::validation("config path has no valid file name".to_string()))?;
-    let temporary_path = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-
-    let write_result = async {
-        let mut temporary = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .await?;
-        temporary.write_all(body.as_bytes()).await?;
-        temporary.flush().await?;
-        temporary.sync_all().await?;
-        drop(temporary);
-        tokio::fs::rename(&temporary_path, path).await
+    if path.parent().is_none() {
+        return Err(ApiError::validation(
+            "config path has no parent directory".to_string(),
+        ));
     }
-    .await;
-
-    if let Err(error) = write_result {
-        let _ = tokio::fs::remove_file(&temporary_path).await;
-        return Err(ApiError::validation(format!(
-            "failed to write config: {error}"
-        )));
+    if path.file_name().and_then(|name| name.to_str()).is_none() {
+        return Err(ApiError::validation(
+            "config path has no valid file name".to_string(),
+        ));
     }
-    Ok(())
+    let path = path.to_path_buf();
+    let body = body.as_bytes().to_vec();
+    tokio::task::spawn_blocking(move || swage_client::runtime::write_atomically(&path, &body))
+        .await
+        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?
+        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))
 }
 
 fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Value, ApiError> {
@@ -1399,6 +1384,7 @@ mod tests {
                 default_effort: Some(swage_protocol::client::settings::Effort::Low),
                 capabilities: swage_config::ModelCapabilitiesConfig {
                     reasoning_replay: true,
+                    effort: None,
                 },
             },
         );
@@ -1440,6 +1426,7 @@ mod tests {
                     default_effort: Some(swage_protocol::client::settings::Effort::High),
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
+                        effort: None,
                     },
                 },
             )]
@@ -1813,7 +1800,7 @@ mod tests {
         };
 
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
-        assert!(error.0.to_string().contains("tool deny rules"));
+        assert!(error.message().contains("tool deny rules"));
 
         request.tool_permissions = Some(wire_from_config(
             swage_config::ToolPermissionConfig::default(),
@@ -1823,7 +1810,7 @@ mod tests {
             timeout_policy: swage_protocol::client::settings::ApprovalTimeoutPolicy::Reject,
         });
         let error = validate_settings_request(&request).expect_err("zero HITL timeout is invalid");
-        assert!(error.0.to_string().contains("hitl timeout"));
+        assert!(error.message().contains("hitl timeout"));
 
         request.hitl = Some(wire_from_config(swage_config::HitlConfig::default()));
         request.context = Some(swage_protocol::client::settings::ContextConfig {
@@ -1834,7 +1821,7 @@ mod tests {
         });
         let error = validate_settings_request(&request)
             .expect_err("context timeout above range is invalid");
-        assert!(error.0.to_string().contains("context timeout"));
+        assert!(error.message().contains("context timeout"));
 
         request.context = Some(wire_from_config(swage_config::ContextConfig::default()));
         request.tool_runtime = Some(ToolRuntimeSettings {
@@ -1845,7 +1832,7 @@ mod tests {
             search: None,
         });
         let error = validate_settings_request(&request).expect_err("zero shell timeout is invalid");
-        assert!(error.0.to_string().contains("shell timeout"));
+        assert!(error.message().contains("shell timeout"));
 
         let mut python_execute: swage_protocol::client::settings::PythonExecuteToolConfig =
             wire_from_config(swage_config::PythonExecuteToolConfig::default());
@@ -1859,7 +1846,7 @@ mod tests {
         });
         let error =
             validate_settings_request(&request).expect_err("missing python runtime is invalid");
-        assert!(error.0.to_string().contains("runtime path does not exist"));
+        assert!(error.message().contains("runtime path does not exist"));
 
         request.tool_runtime = Some(ToolRuntimeSettings {
             shell_timeout_secs: 30,

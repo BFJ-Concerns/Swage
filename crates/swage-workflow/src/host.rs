@@ -72,6 +72,11 @@ pub struct AgentCallRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skills: Option<Vec<String>>,
     pub model: Option<String>,
+    /// Optional model to use only when the selected model cannot begin this
+    /// call. It remains in the journalled request so replay retains the
+    /// caller's declared degradation policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +104,8 @@ pub struct ResolvedWorkerPlacement {
     pub can_write: bool,
     pub authority_path: String,
     pub authority_context_id: Uuid,
+    pub worktree_seq: Option<u64>,
+    pub worktree_base_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,12 +117,25 @@ pub struct AgentCallResult {
     /// separately from the caller's journalled `cwd` request.
     #[serde(default)]
     pub working_directory: Option<String>,
+    /// The catalogue model that supplied this call's output.
+    #[serde(default)]
+    pub served_model: Option<String>,
     #[serde(default)]
     pub session_id: Option<Uuid>,
     #[serde(default)]
     pub thread_id: Option<Uuid>,
     #[serde(default)]
     pub turn_id: Option<Uuid>,
+    #[serde(default)]
+    pub worktree: Option<WorktreeCompletion>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorktreeCompletion {
+    pub base_commit: String,
+    pub tip_commit: String,
+    pub changed: bool,
+    pub removed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,6 +239,8 @@ pub trait WorkflowHost: Send + Sync {
             path,
             can_write: true,
             authority_context_id: Uuid::nil(),
+            worktree_seq: None,
+            worktree_base_commit: None,
         }))
     }
 
@@ -343,6 +365,7 @@ mod task_request_tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             effort: None,
             timeout_ms: None,
             cwd: None,
@@ -378,6 +401,12 @@ mod task_request_tests {
                 .expect("request object")
                 .contains_key("skills")
         );
+        assert!(
+            !value
+                .as_object()
+                .expect("request object")
+                .contains_key("fallback_model")
+        );
     }
 
     #[test]
@@ -412,6 +441,14 @@ mod task_request_tests {
     }
 
     #[test]
+    fn fallback_model_is_serialised_verbatim() {
+        let mut request = request(None);
+        request.fallback_model = Some("sonnet".into());
+        let value = serde_json::to_value(request).expect("serialise request");
+        assert_eq!(value["fallback_model"], "sonnet");
+    }
+
+    #[test]
     fn unknown_effort_is_rejected_at_the_dispatch_boundary() {
         let error = serde_json::from_value::<AgentCallRequest>(serde_json::json!({
             "prompt": "work",
@@ -440,6 +477,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             effort: None,
             timeout_ms: None,
             cwd: None,

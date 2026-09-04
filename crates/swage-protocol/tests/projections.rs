@@ -31,6 +31,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export channel link code request");
     client::channel::ChannelLinkCodeResponse::export_all(&cfg)
         .expect("export channel link code response");
+    client::error::ApiErrorBody::export_all(&cfg).expect("export api error body");
     client::websocket::ClientEvent::export_all(&cfg).expect("export client events");
     client::websocket::ServerEvent::export_all(&cfg).expect("export server events");
     client::space::CreateSpaceRequest::export_all(&cfg).expect("export create space");
@@ -44,6 +45,11 @@ fn typescript_bindings_are_regenerated() {
         .expect("export create page annotation");
     client::page::UpdatePageAnnotationRequest::export_all(&cfg)
         .expect("export update page annotation");
+    client::page::DeletePageAnnotationResponse::export_all(&cfg)
+        .expect("export delete page annotation");
+    client::page::CreatePageTemplateRequest::export_all(&cfg).expect("export create page template");
+    client::page::PageTemplateResponse::export_all(&cfg).expect("export page template");
+    client::page::PageTemplateListResponse::export_all(&cfg).expect("export page templates");
     client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
@@ -62,6 +68,7 @@ fn typescript_bindings_are_regenerated() {
     client::turn::SendMessageRequest::export_all(&cfg).expect("export send message");
     client::turn::MessageResponse::export_all(&cfg).expect("export message response");
     client::settings::SettingsResponse::export_all(&cfg).expect("export settings");
+    client::settings::EffortCapability::export_all(&cfg).expect("export effort capability");
     client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
     client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
     client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
@@ -157,6 +164,171 @@ fn typescript_bindings_are_regenerated() {
     // Normalise generated files so the committed projection also satisfies
     // the repository whitespace gate.
     trim_generated_typescript(&repo_root().join("frontend/src/lib/protocol"));
+
+    let create_space = std::fs::read_to_string(
+        repo_root().join("frontend/src/lib/protocol/CreateSpaceRequest.ts"),
+    )
+    .expect("read generated create-space binding");
+    assert!(create_space.contains("description?: string"));
+
+    assert_defaulted_fields_reach_typescript_as_optional();
+}
+
+/// A field the wire contract fills in for itself when the sender omits it.
+struct DefaultedField {
+    type_name: String,
+    wire_name: String,
+    location: String,
+}
+
+/// Every `#[serde(default)]` field must reach TypeScript as an optional
+/// property: a sender that legitimately leaves one out is accepted on the
+/// wire, so a projection that demands it turns a valid request into a
+/// type error.
+fn assert_defaulted_fields_reach_typescript_as_optional() {
+    let directory = repo_root().join("frontend/src/lib/protocol");
+    let fields = defaulted_fields();
+
+    // Guards the reader below against silently matching nothing: the
+    // sweep only means something while it still finds a field known to
+    // be defaulted.
+    assert!(
+        fields.iter().any(
+            |field| field.type_name == "CreateSpaceRequest" && field.wire_name == "description"
+        ),
+        "the source sweep stopped finding defaulted fields",
+    );
+
+    let mut required = Vec::new();
+    for field in fields {
+        // A type with no binding on disk has no TypeScript projection —
+        // the regeneration above never touched it.
+        let Ok(binding) =
+            std::fs::read_to_string(directory.join(format!("{}.ts", field.type_name)))
+        else {
+            continue;
+        };
+        if !binding.contains(&format!("{}?:", field.wire_name)) {
+            required.push(format!(
+                "{} — {}.{}",
+                field.location, field.type_name, field.wire_name
+            ));
+        }
+    }
+
+    assert!(
+        required.is_empty(),
+        "defaulted fields projected as required TypeScript properties:\n{}",
+        required.join("\n"),
+    );
+}
+
+/// Reads the defaulted fields out of the crate's own source, so a field
+/// gains coverage the day it is declared rather than when someone
+/// remembers to extend a list here.
+fn defaulted_fields() -> Vec<DefaultedField> {
+    let mut sources = Vec::new();
+    collect_rust_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    sources.sort();
+
+    let mut fields = Vec::new();
+    let mut declared = 0usize;
+
+    for path in &sources {
+        let source = std::fs::read_to_string(path).expect("read protocol source");
+        declared += source.matches("#[serde(default").count();
+
+        let mut owner: Option<String> = None;
+        let mut attributes: Vec<&str> = Vec::new();
+        for (index, line) in source.lines().enumerate() {
+            let line = line.trim();
+            if let Some(name) = declared_type(line) {
+                owner = Some(name.to_owned());
+                attributes.clear();
+            } else if line.starts_with("#[") {
+                attributes.push(line);
+            } else if let Some(name) = declared_field(line) {
+                if attributes
+                    .iter()
+                    .any(|attribute| attribute.starts_with("#[serde(default"))
+                {
+                    fields.push(DefaultedField {
+                        type_name: owner.clone().expect("field declared inside a type"),
+                        wire_name: wire_name(name, &attributes),
+                        location: format!("{}:{}", path.display(), index + 1),
+                    });
+                }
+                attributes.clear();
+            } else if !line.is_empty() && !line.starts_with("//") {
+                attributes.clear();
+            }
+        }
+    }
+
+    // Every `#[serde(default)]` in the crate must have landed on a field
+    // the reader recognised; a shortfall means the sweep skipped one.
+    assert_eq!(
+        fields.len(),
+        declared,
+        "the source sweep missed a #[serde(default)] attribute",
+    );
+    fields
+}
+
+fn collect_rust_sources(directory: &Path, into: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(directory).expect("read protocol source directory") {
+        let path = entry.expect("read protocol source entry").path();
+        if path.is_dir() {
+            collect_rust_sources(&path, into);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            into.push(path);
+        }
+    }
+}
+
+/// The struct or enum a `struct Foo {` / `enum Foo {` line opens.
+fn declared_type(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("pub ").unwrap_or(line);
+    let rest = rest
+        .strip_prefix("struct ")
+        .or_else(|| rest.strip_prefix("enum "))?;
+    let name = rest
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// The field a `name: Type,` line declares, in a struct body or an
+/// enum variant's.
+fn declared_field(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("pub ").unwrap_or(line);
+    let (name, tail) = rest.split_once(':')?;
+    if tail.starts_with(':') {
+        return None;
+    }
+    let name = name.trim();
+    let plain = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    (!name.is_empty() && plain).then_some(name)
+}
+
+/// The name the field carries on the wire — its own, unless serde renames it.
+fn wire_name(field: &str, attributes: &[&str]) -> String {
+    for attribute in attributes {
+        if !attribute.starts_with("#[serde(") {
+            continue;
+        }
+        if let Some((_, rest)) = attribute.split_once("rename = \"")
+            && let Some((renamed, _)) = rest.split_once('"')
+        {
+            return renamed.to_owned();
+        }
+    }
+    field.to_owned()
 }
 
 fn trim_generated_typescript(directory: &Path) {
@@ -174,6 +346,22 @@ fn trim_generated_typescript(directory: &Path) {
             + "\n";
         std::fs::write(path, normalised).expect("normalise generated TypeScript file");
     }
+}
+
+/// The OpenAPI document and the TypeScript client are projections of the
+/// route manifest; like the schema, they are rewritten in place so drift
+/// shows as a dirty tree at the gate.
+#[test]
+fn client_route_projections_are_regenerated() {
+    let document = serde_json::to_string_pretty(&client::openapi::document())
+        .expect("openapi document serialises")
+        + "\n";
+    let document_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client-openapi.json");
+    std::fs::write(&document_path, document).expect("write openapi document");
+
+    let client_path = repo_root().join("frontend/src/lib/protocol/client.ts");
+    std::fs::write(&client_path, client::typescript_client::render())
+        .expect("write generated client");
 }
 
 #[test]

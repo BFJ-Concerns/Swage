@@ -26,7 +26,13 @@ pub(super) async fn rebuild_thread_history_messages(
                     rebuilt.push(ChatMessage::tool_result(call_id, message.content));
                 }
             }
-            role => rebuilt.push(ChatMessage::new(role, message.content)),
+            role => {
+                let attachments = super::message_attachments(&message.attachments)?;
+                rebuilt.push(ChatMessage::new_parts(
+                    role,
+                    super::content_parts(message.content, &attachments),
+                ));
+            }
         }
     }
 

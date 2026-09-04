@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use axum::{
-    Json,
-    extract::{ConnectInfo, Extension, Path, Query, State},
+    extract::{ConnectInfo, Extension, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -42,7 +40,7 @@ use crate::{
         DevDmInboundRequest, DevThreadInboundRequest,
     },
     device::{DeviceListResponse, DeviceResponse, RegisterDeviceRequest},
-    error::ApiError,
+    error::{ApiError, Json, Path},
     material::{
         CreateMaterialRequest, MaterialListResponse, MaterialResponse, PromoteMaterialRequest,
     },
@@ -147,7 +145,7 @@ fn ensure_codex_provider(state: &AppState, provider_id: &str) -> Result<(), ApiE
         .get(provider_id)
         .ok_or_else(|| ApiError::not_found_str("provider", provider_id))?;
     if provider.protocol != swage_config::Protocol::Codex {
-        return Err(ApiError(GatewayError::SignInUnsupported(
+        return Err(ApiError::from(GatewayError::SignInUnsupported(
             provider_id.to_string(),
         )));
     }
@@ -160,7 +158,7 @@ pub async fn provider_sign_in_state(
 ) -> Result<Json<swage_protocol::client::provider_signin::ProviderSignInState>, ApiError> {
     ensure_codex_provider(&state, &provider_id)?;
     Ok(Json(crate::codex::sign_in_state(&state).await.map_err(
-        |error| ApiError(GatewayError::ProviderRuntimeUnavailable(error)),
+        |error| ApiError::from(GatewayError::ProviderRuntimeUnavailable(error)),
     )?))
 }
 
@@ -173,7 +171,7 @@ pub async fn start_provider_sign_in(
     Ok(Json(
         crate::codex::start_sign_in(&state, request)
             .await
-            .map_err(|error| ApiError(GatewayError::SignInFailed(error)))?,
+            .map_err(|error| ApiError::from(GatewayError::SignInFailed(error)))?,
     ))
 }
 
@@ -183,7 +181,7 @@ pub async fn provider_sign_out(
 ) -> Result<Json<swage_protocol::client::provider_signin::ProviderSignInState>, ApiError> {
     ensure_codex_provider(&state, &provider_id)?;
     Ok(Json(crate::codex::sign_out(&state).await.map_err(
-        |error| ApiError(GatewayError::SignInFailed(error)),
+        |error| ApiError::from(GatewayError::SignInFailed(error)),
     )?))
 }
 
@@ -874,12 +872,6 @@ pub async fn register_device(
             "device id must not be empty".to_string(),
         ));
     }
-    if crate::device::DeviceKind::from_str(request.kind.trim()).is_err() {
-        return Err(ApiError::validation(format!(
-            "unknown device kind '{}'",
-            request.kind
-        )));
-    }
     if request.base_url.trim().is_empty() {
         return Err(ApiError::validation(
             "device base_url must not be empty".to_string(),
@@ -1185,9 +1177,9 @@ pub async fn list_skills(
         .space_store
         .get(params.space_id)
         .await
-        .map_err(|e| ApiError(GatewayError::Storage(e)))?
+        .map_err(|e| ApiError::from(GatewayError::Storage(e)))?
         .ok_or({
-            ApiError(GatewayError::SpaceNotFound {
+            ApiError::from(GatewayError::SpaceNotFound {
                 id: params.space_id,
             })
         })?;
@@ -1245,21 +1237,14 @@ pub async fn get_turn_context(
         .storage
         .get_snapshot(turn_id)
         .await
-        .map_err(|e| ApiError(GatewayError::Storage(e)))?;
+        .map_err(|e| ApiError::from(GatewayError::Storage(e)))?;
 
     match snapshot {
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "code": "not_found",
-                "message": format!("no context snapshot found for turn {turn_id}"),
-            })),
-        )
-            .into_response()),
+        None => Err(ApiError::not_found("context snapshot for turn", turn_id)),
         Some(report_json) => {
             let report: swage_protocol::client::context::AssemblyReport =
                 serde_json::from_str(&report_json)
-                    .map_err(|e| ApiError(GatewayError::ConfigError(e.to_string())))?;
+                    .map_err(|e| ApiError::from(GatewayError::ConfigError(e.to_string())))?;
             Ok(
                 Json(swage_protocol::client::context::TurnContextResponse { turn_id, report })
                     .into_response(),
@@ -1296,14 +1281,7 @@ pub async fn shutdown(
     if let Some(Extension(ConnectInfo(addr))) = connect_info
         && !addr.ip().is_loopback()
     {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({
-                "code": "forbidden",
-                "message": "shutdown is only accessible from localhost",
-            })),
-        )
-            .into_response();
+        return ApiError::forbidden("shutdown is only accessible from localhost").into_response();
     }
 
     let reason = "admin shutdown request".to_string();
@@ -1368,6 +1346,8 @@ pub async fn submit_turn(
         crate::turn::resolve_requested_turn_model(&state.active_config(), model)
             .map_err(ApiError::from)?;
     }
+    crate::turn::check_attachment_support(&state.workflow_capabilities, &req.attachments)
+        .map_err(ApiError::from)?;
 
     if state
         .active_turns
@@ -1431,7 +1411,7 @@ pub async fn submit_turn(
 
     // Spawn background turn processing — the REST client polls for result.
     let bg_state = state.clone();
-    let message = req.message;
+    let input = crate::turn::TurnInput::with_attachments(req.message, req.attachments);
     let output_schema = req.output_schema;
     let compaction_focus = req.compaction_focus;
     let model = req.model;
@@ -1453,7 +1433,7 @@ pub async fn submit_turn(
             &bg_state,
             session_id,
             Some(thread_id),
-            message,
+            input,
             ws_tx,
             subscription,
             output_schema,
@@ -1576,8 +1556,7 @@ pub async fn send_agent_message(
             {
                 tracing::warn!(error = ?error, "external delegate execution failed");
                 let router = MessageRouter::new(state_for_task.storage.clone(), None);
-                if let Err(fail_error) = router.fail_message(message_id, &error.0.to_string()).await
-                {
+                if let Err(fail_error) = router.fail_message(message_id, error.message()).await {
                     tracing::warn!(
                         message_id = %message_id,
                         error = ?fail_error,
@@ -2614,6 +2593,7 @@ mod tests {
             storage
                 .append_message(AppendMessage {
                     thread_id: thread.id,
+                    attachments: Vec::new(),
                     turn_id: None,
                     role: if index % 2 == 0 {
                         Role::User
@@ -2768,7 +2748,10 @@ mod tests {
         ))
         .await
         .expect_err("malformed composition must be rejected");
-        assert!(matches!(error.0, GatewayError::ValidationError(_)));
+        assert!(matches!(
+            error.cause(),
+            Some(GatewayError::ValidationError(_))
+        ));
 
         let valid = router
             .send_message(swage_storage::NewAgentMessage {
@@ -2787,8 +2770,7 @@ mod tests {
         .expect_err("unconsumed dispatcher failure proves malformed input provisioned nothing");
         assert!(
             error
-                .0
-                .to_string()
+                .message()
                 .contains("injected dispatcher build failure")
         );
     }
@@ -3341,7 +3323,7 @@ mod tests {
         .await
         .expect_err("result delivery failure should surface");
         assert!(
-            err.0.to_string().contains("result delivery failed"),
+            err.message().contains("result delivery failed"),
             "error should explain the result delivery failure: {:?}",
             err
         );
@@ -3406,12 +3388,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
+        // An extractor rejection answers in the wire error contract's shape,
+        // exactly as a handler's own refusal would.
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "validation_error");
         assert!(
-            body.contains("space_id"),
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("space_id")),
             "rejection should name the unknown field: {body}"
         );
     }
@@ -3619,6 +3603,82 @@ mod tests {
                 .expect("list turns")
                 .is_empty(),
             "an invalid requested model must not create a pending turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_turns_refuses_an_image_attachment_the_provider_cannot_consume() {
+        let storage = Arc::new(MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "codex".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::Codex,
+                ..Default::default()
+            },
+        );
+        config.models.default = "codex".into();
+        config.models.entries.insert(
+            "codex".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "codex".into(),
+                model_id: "fake-codex".into(),
+                ..Default::default()
+            },
+        );
+        let (router, storage) = make_router_with_provider_and_config(
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            storage,
+            config,
+        );
+
+        let create = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("create conversation response");
+        let conversation_id = body_json(create).await["id"]
+            .as_str()
+            .expect("conversation id")
+            .to_string();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "message": "what is this?",
+                            "attachments": [{"kind": "image_url", "url": "https://example.test/cat.png"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("refused response");
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "validation_error");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("image")),
+            "{body}"
+        );
+        assert!(
+            storage.db.lock().await.turns.is_empty(),
+            "a refused attachment must not create a pending turn"
         );
     }
 
@@ -4249,12 +4309,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
+        // An extractor rejection answers in the wire error contract's shape,
+        // exactly as a handler's own refusal would.
+        let body = body_json(resp).await;
+        assert_eq!(body["code"], "validation_error");
         assert!(
-            body.contains("space_id"),
+            body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("space_id")),
             "rejection should name the unknown field: {body}"
         );
     }
@@ -4339,6 +4401,7 @@ mod tests {
         let first = storage
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::User,
                 content: "hello".into(),
@@ -4350,6 +4413,7 @@ mod tests {
         storage
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::Assistant,
                 content: "draft".into(),
@@ -4389,6 +4453,7 @@ mod tests {
         storage
             .create_message(swage_storage::model::NewMessage {
                 thread_id: parent_thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::User,
                 content: "parent continues".into(),

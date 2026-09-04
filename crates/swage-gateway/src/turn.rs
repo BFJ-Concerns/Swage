@@ -5,9 +5,9 @@
 // with a test explaining why defaulting is safe.
 // ---
 
+use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::{env, mem};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -16,10 +16,11 @@ use uuid::Uuid;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use swage_core::{
-    ApprovalTimeoutPolicy, ChatMessage, GatewayError, Role, ToolCall, ToolResult,
+    ApprovalTimeoutPolicy, ChatMessage, ContentPart, GatewayError, Role, ToolCall, ToolResult,
     build_tool_round_messages,
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
+use swage_protocol::client::turn::MessageAttachment;
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -70,6 +71,110 @@ pub(crate) use operator_guidance::*;
 pub(crate) use workspace::*;
 
 pub(crate) use swage_core::DispatchContextComposition;
+
+/// Internal workflow-only witness that an agent reported a provider failure.
+pub(crate) type ProviderFailureObserver = Arc<StdMutex<Option<String>>>;
+
+/// What a caller submits for one turn: the message text plus the content
+/// parts sent beside it. Every turn entry point takes this; a `String`
+/// converts, so a text-only caller passes its text unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnInput {
+    pub text: String,
+    pub attachments: Vec<MessageAttachment>,
+}
+
+impl TurnInput {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    pub fn with_attachments(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
+        Self {
+            text: text.into(),
+            attachments,
+        }
+    }
+}
+
+impl From<String> for TurnInput {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<&str> for TurnInput {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+/// The content parts a stored message carries, parsed against the wire
+/// contract. Storage keeps attachments as opaque JSON; a value outside the
+/// contract is a corrupt record and is refused loudly here, never dropped.
+pub(crate) fn message_attachments(
+    stored: &[serde_json::Value],
+) -> Result<Vec<MessageAttachment>, GatewayError> {
+    stored
+        .iter()
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                GatewayError::Storage(swage_core::StorageError::Corruption {
+                    message: format!("message attachment outside the wire contract: {error}"),
+                })
+            })
+        })
+        .collect()
+}
+
+/// The attachment values as storage records them: the wire representation
+/// verbatim, so the stored row and the client contract never disagree.
+pub(crate) fn attachment_records(attachments: &[MessageAttachment]) -> Vec<serde_json::Value> {
+    attachments
+        .iter()
+        .map(|attachment| serde_json::to_value(attachment).expect("attachments serialise"))
+        .collect()
+}
+
+/// The model-facing content parts for a submitted message: the text first,
+/// then one part per attachment in submission order.
+pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> Vec<ContentPart> {
+    let mut parts = Vec::with_capacity(1 + attachments.len());
+    parts.push(ContentPart::Text { text });
+    parts.extend(attachments.iter().map(|attachment| match attachment {
+        MessageAttachment::ImageUrl { url } => ContentPart::ImageUrl { url: url.clone() },
+    }));
+    parts
+}
+
+/// Refuse a submission whose attachments the configured provider cannot
+/// consume. The check runs before anything is persisted: a part the model
+/// would never see must fail the turn, not ride along silently.
+pub(crate) fn check_attachment_support(
+    capabilities: &crate::capabilities::WorkflowCapabilities,
+    attachments: &[MessageAttachment],
+) -> Result<(), GatewayError> {
+    for attachment in attachments {
+        match attachment {
+            MessageAttachment::ImageUrl { url } => {
+                if url.trim().is_empty() {
+                    return Err(GatewayError::ValidationError(
+                        "an image attachment needs a non-empty url".into(),
+                    ));
+                }
+                if !capabilities.vision {
+                    return Err(GatewayError::ValidationError(
+                        "the configured provider does not accept image attachments".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
@@ -187,37 +292,16 @@ pub(crate) async fn apply_provider_snapshot_event(
 }
 
 async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
-    let records = state.storage.list_secrets().await?;
-
-    let mut values = Vec::new();
-    for record in records
-        .into_iter()
-        .filter(|record| record.status == "active")
-    {
-        let value = match record.backend_kind.as_str() {
-            "managed" => Some(
-                state
-                    .storage
-                    .get_managed_secret_value(record.id)
-                    .await?
-                    .ok_or_else(|| swage_core::StorageError::Corruption {
-                        message: format!(
-                            "active managed secret '{}' has no stored value",
-                            record.id
-                        ),
-                    })?,
-            ),
-            "env" => record
-                .external_reference
-                .as_deref()
-                .and_then(|variable| env::var(variable).ok()),
-            _ => None,
-        };
-        if let Some(value) = value.filter(|value| !value.is_empty()) {
-            values.push(value);
-        }
-    }
-    Ok(values)
+    state
+        .secret_manager
+        .known_values()
+        .await
+        .map_err(|error| match error {
+            GatewayError::Storage(storage) => storage,
+            other => swage_core::StorageError::Corruption {
+                message: format!("secret redaction set could not be read: {other}"),
+            },
+        })
 }
 
 fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
@@ -291,6 +375,37 @@ fn provider_visible_array<'a>(
     values
         .as_array_mut()
         .expect("provider-visible value was normalised to an array")
+}
+
+/// The effort control the effective model accepts: the catalogue's own
+/// declaration when the entry carries one, otherwise the provider adapter's
+/// account of the documented control, otherwise no control at all.
+pub(crate) fn effort_capability_for_model(
+    config: &swage_config::ResolvedConfig,
+    catalogue_entry: &str,
+    provider: &dyn swage_provider::LlmProvider,
+) -> swage_core::EffortCapability {
+    let model = config.models.entries.get(catalogue_entry);
+    model
+        .and_then(|model| model.capabilities.effort.clone())
+        .or_else(|| {
+            provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
+        })
+        .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// Record the resolved effort beside the effective model in the turn's
+/// provider-visible snapshot: what was asked, what is sent, and any clamp.
+fn record_effort_snapshot(
+    report_json: &mut serde_json::Value,
+    resolved: &swage_core::ResolvedEffort,
+) {
+    normalise_report_object(report_json);
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["effort"] =
+        serde_json::to_value(resolved).expect("resolved effort serialises");
 }
 
 fn record_effective_model_snapshot(
@@ -639,7 +754,7 @@ pub async fn process_turn(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -648,7 +763,7 @@ pub async fn process_turn(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -666,7 +781,7 @@ pub(crate) async fn process_turn_with_existing_turn(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -680,7 +795,7 @@ pub(crate) async fn process_turn_with_existing_turn(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -699,7 +814,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -714,7 +829,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -734,7 +849,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -750,7 +865,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -763,16 +878,19 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         None,
         compaction_focus,
         requested_model,
+        None,
+        false,
     )
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_turn_with_composition(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: impl Into<TurnInput>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -788,7 +906,7 @@ pub(crate) async fn process_turn_with_composition(
         state,
         session_id,
         target_thread_id,
-        content,
+        input.into(),
         ws_tx,
         subscription,
         output_schema_override,
@@ -801,13 +919,61 @@ pub(crate) async fn process_turn_with_composition(
         agent_call_scope,
         None,
         None,
+        None,
+        false,
+    )
+    .await
+}
+
+/// Process a composed turn with a call-scoped model selection. Workflow calls
+/// use this to make their journalled model choice explicit without changing
+/// the session's durable selection for an ordinary one-off turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_turn_with_composition_and_model(
+    state: &AppState,
+    session_id: Uuid,
+    target_thread_id: Option<Uuid>,
+    input: impl Into<TurnInput>,
+    ws_tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+    output_schema_override: Option<serde_json::Value>,
+    max_output_retries_override: Option<u32>,
+    effort_override: Option<swage_core::Effort>,
+    cancellation_override: Option<CancellationToken>,
+    existing_turn_id: Option<Uuid>,
+    attendance: TurnAttendance,
+    composition: DispatchContextComposition,
+    agent_call_scope: Option<Uuid>,
+    requested_model: Option<String>,
+    provider_failure_observer: Option<ProviderFailureObserver>,
+    reuse_persisted_input: bool,
+) -> Result<(), GatewayError> {
+    process_turn_with_composition_and_focus(
+        state,
+        session_id,
+        target_thread_id,
+        input.into(),
+        ws_tx,
+        subscription,
+        output_schema_override,
+        max_output_retries_override,
+        effort_override,
+        cancellation_override,
+        existing_turn_id,
+        attendance,
+        composition,
+        agent_call_scope,
+        None,
+        requested_model,
+        provider_failure_observer,
+        reuse_persisted_input,
     )
     .await
 }
 
 #[tracing::instrument(
     name = "turn",
-    skip(state, content, ws_tx, subscription, composition, compaction_focus),
+    skip(state, input, ws_tx, subscription, composition, compaction_focus),
     fields(turn_id = tracing::field::Empty),
 )]
 #[allow(clippy::too_many_arguments)]
@@ -815,7 +981,7 @@ async fn process_turn_with_composition_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
-    content: String,
+    input: TurnInput,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
@@ -828,7 +994,17 @@ async fn process_turn_with_composition_and_focus(
     agent_call_scope: Option<Uuid>,
     compaction_focus: Option<String>,
     requested_model: Option<String>,
+    provider_failure_observer: Option<ProviderFailureObserver>,
+    reuse_persisted_input: bool,
 ) -> Result<(), GatewayError> {
+    let TurnInput {
+        text: content,
+        attachments,
+    } = input;
+    // An attachment the provider cannot consume fails the turn before any
+    // record is written — a part the model never sees must not ride along.
+    check_attachment_support(&state.workflow_capabilities, &attachments)?;
+
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
         .storage
@@ -1092,23 +1268,26 @@ async fn process_turn_with_composition_and_focus(
         .await?;
     }
 
-    record_failed_turn_and_release_on_error(
-        state,
-        session_id,
-        prepared_turn_id,
-        state
-            .storage
-            .append_message(AppendMessage {
-                thread_id,
-                turn_id: Some(prepared_turn_id),
-                role: Role::User,
-                content: before_inbound.canonical_content.clone(),
-                agent_id: session.agent_id.clone(),
-            })
-            .await
-            .map_err(GatewayError::from),
-    )
-    .await?;
+    if !reuse_persisted_input {
+        record_failed_turn_and_release_on_error(
+            state,
+            session_id,
+            prepared_turn_id,
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id,
+                    attachments: attachment_records(&attachments),
+                    turn_id: Some(prepared_turn_id),
+                    role: Role::User,
+                    content: before_inbound.canonical_content.clone(),
+                    agent_id: session.agent_id.clone(),
+                })
+                .await
+                .map_err(GatewayError::from),
+        )
+        .await?;
+    }
 
     // Step 7: Deliver completed detached delegations. A detached child's
     // Result waits in this agent's mailbox until its parent next turns;
@@ -1135,6 +1314,7 @@ async fn process_turn_with_composition_and_focus(
                 .storage
                 .append_message(AppendMessage {
                     thread_id,
+                    attachments: Vec::new(),
                     turn_id: Some(prepared_turn_id),
                     role: Role::User,
                     content: render_delegation_result(result),
@@ -1533,8 +1713,45 @@ async fn process_turn_with_composition_and_focus(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
+    let requested_effort = match effort_override {
+        Some(effort) => Some(effort),
+        None => session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("effort"))
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                GatewayError::ConfigError(format!("session effort is invalid: {error}"))
+            })?
+            .or_else(
+                || match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+                    Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
+                        .and_then(|(_, model)| model.default_effort),
+                    None => config
+                        .models
+                        .entries
+                        .get(&config.models.default)
+                        .and_then(|model| model.default_effort),
+                },
+            ),
+    };
     let model_name = config.default_model_id().to_string();
     let agent_handle = if is_codex_turn {
+        let effort = requested_effort.map(|requested| {
+            let capability = config
+                .models
+                .entries
+                .get(&config.models.default)
+                .and_then(|model| model.capabilities.effort.clone())
+                .or_else(|| crate::codex::effort_capability(&model_name))
+                .unwrap_or(swage_core::EffortCapability::None);
+            swage_core::resolve_effort(requested, &capability)
+        });
+        if let Some(resolved) = effort.as_ref() {
+            record_effort_snapshot(&mut report_json, resolved);
+        }
         let session_approval_grants = state
             .session_approval_grants
             .lock()
@@ -1553,6 +1770,7 @@ async fn process_turn_with_composition_and_focus(
             turn_id: prepared_turn_id,
             agent_id: session.agent_id.clone(),
             model: model_name.clone(),
+            effort,
             user_message: before_inbound.canonical_content.clone(),
             assembled_context: assembled_messages,
             agent_config,
@@ -1605,30 +1823,21 @@ async fn process_turn_with_composition_and_focus(
                 )));
             }
         };
-        let effort = match effort_override {
-            Some(effort) => Some(effort),
-            None => session
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("effort"))
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| {
-                    GatewayError::ConfigError(format!("session effort is invalid: {error}"))
-                })?
-                .or_else(|| {
-                    match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
-                        Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
-                            .and_then(|(_, model)| model.default_effort),
-                        None => config
-                            .models
-                            .entries
-                            .get(&config.models.default)
-                            .and_then(|model| model.default_effort),
-                    }
-                }),
-        };
+        // The intent is resolved once, here, against the effective model's
+        // declared capability; adapters express the resolved control. The
+        // outcome is written into the turn's audit snapshot so a clamp or an
+        // unsupported `off` is reconstructable from the record.
+        let effort = requested_effort.map(|requested| {
+            let capability = effort_capability_for_model(
+                &config,
+                &config.models.default,
+                state.active_provider().as_ref(),
+            );
+            swage_core::resolve_effort(requested, &capability)
+        });
+        if let Some(resolved) = effort.as_ref() {
+            record_effort_snapshot(&mut report_json, resolved);
+        }
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -2014,7 +2223,14 @@ async fn process_turn_with_composition_and_focus(
                     structured_output: structured_output.clone(),
                 });
             }
-            AgentEvent::Error { message } => {
+            AgentEvent::Error {
+                message,
+                provider_failure,
+            } => {
+                if provider_failure && let Some(observer) = provider_failure_observer.as_ref() {
+                    *observer.lock().unwrap_or_else(|error| error.into_inner()) =
+                        Some(message.clone());
+                }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_error".to_string(),
                     message,

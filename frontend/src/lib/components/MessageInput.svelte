@@ -34,6 +34,9 @@
   }: Props = $props();
 
   const hasNoConfiguredModels = $derived(modelCatalogueReady && modelOptions.length === 0);
+  const isStreamingHere = $derived(
+    store?.streamFor?.(sessionId).isStreaming ?? store?.isStreaming ?? false,
+  );
 
   // Local draft content — cleared after every successful send.
   let content = $state("");
@@ -75,7 +78,7 @@
   function send() {
     const trimmed = content.trim();
     // Guard: no-op when there is nothing to send or a turn is in progress.
-    if (!store || !trimmed || store.isStreaming || hasNoConfiguredModels) return;
+    if (!store || !trimmed || isStreamingHere || hasNoConfiguredModels) return;
 
     store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
 
@@ -115,12 +118,15 @@
     {#if modelOptions.length > 0 || canSelectAgent}
       <div class="field-toolbar">
         {#if canSelectAgent}
-          <AgentPicker definitions={agentDefinitions} bind:selectedAgentId disabled={!store || store?.isStreaming} />
-          <select bind:value={selectedEffort} aria-label="Effort" disabled={!store || store?.isStreaming}>
+          <AgentPicker definitions={agentDefinitions} bind:selectedAgentId disabled={!store || isStreamingHere} />
+          <select bind:value={selectedEffort} aria-label="Effort" disabled={!store || isStreamingHere}>
             <option value="">Model default</option>
+            <option value="off">Reasoning off</option>
+            <option value="minimal">Minimal effort</option>
             <option value="low">Low effort</option>
             <option value="medium">Medium effort</option>
             <option value="high">High effort</option>
+            <option value="xhigh">Extra-high effort</option>
             <option value="max">Maximum effort</option>
           </select>
         {/if}
@@ -129,7 +135,7 @@
             class="model-select"
             bind:value={selectedModel}
             aria-label="Model"
-            disabled={!store || store?.isStreaming}
+            disabled={!store || isStreamingHere}
           >
             {#each modelOptions as modelId (modelId)}
               <option value={modelId}>{modelId}</option>
@@ -146,7 +152,7 @@
     {/if}
   </div>
 
-  {#if store?.isStreaming}
+  {#if isStreamingHere}
     <button class="action stop" onclick={() => store!.cancelTurn()}>
       Stop
     </button>

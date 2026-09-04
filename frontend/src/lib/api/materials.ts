@@ -2,6 +2,7 @@ import type {
   CreateMaterialRequest,
   MaterialRecord,
 } from "../types";
+import { ApiError } from "./error";
 
 let baseUrl = "";
 
@@ -23,7 +24,7 @@ async function request(
 
   const response = await fetch(`${baseUrl}${path}`, init);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${method} ${path}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
   return response;
 }

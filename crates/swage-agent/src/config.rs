@@ -123,15 +123,10 @@ impl AgentConfig {
                 "working_directory must be resolved with AgentConfig::with_workspace".into(),
             ));
         }
-        if !self.working_directory.is_absolute() {
-            return Err(crate::AgentError::InvalidConfig(
-                "working_directory must be absolute".into(),
-            ));
-        }
         // Compile the output schema eagerly to catch malformed schemas at
         // construction time rather than at the first validation attempt.
         if let Some(schema) = &self.output_schema {
-            jsonschema::validator_for(schema).map_err(|e| {
+            swage_core::json_schema_validator(schema).map_err(|e| {
                 crate::AgentError::InvalidConfig(format!("output schema compilation failed: {e}"))
             })?;
         }
@@ -179,11 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_relative_workspace() {
+    fn validate_leaves_relative_workspace_policy_to_the_turn_owner() {
         let config = AgentConfig::new("agent").with_workspace("relative", vec![]);
-        let err = config.validate().unwrap_err();
-        assert!(matches!(err, crate::AgentError::InvalidConfig(_)));
-        assert!(err.to_string().contains("absolute"));
+        config
+            .validate()
+            .expect("the turn owner decides whether its execution root is deliberate");
     }
 
     #[test]

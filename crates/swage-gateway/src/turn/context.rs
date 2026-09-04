@@ -2,13 +2,15 @@ use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
     MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement, Uuid,
 };
-use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
+
+#[cfg(test)]
+use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -269,21 +271,7 @@ pub(crate) fn configuration_hierarchy(
     space_slug: &str,
     agent_id: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
-    let space = root.join("spaces").join(space_slug);
-    let mut hierarchy = vec![
-        (HierarchyLevel::Global, root.to_path_buf()),
-        (HierarchyLevel::Space, space),
-    ];
-    if let Some(agent_id) = agent_id.filter(|id| *id != RESERVED_WORKFLOW_AGENT_ID) {
-        hierarchy.push((
-            HierarchyLevel::Agent,
-            root.join("spaces")
-                .join(space_slug)
-                .join("agents")
-                .join(agent_id),
-        ));
-    }
-    hierarchy
+    swage_config::configuration_hierarchy(root, space_slug, agent_id)
 }
 
 /// Load space memory content by reading all `.md` files from the space's
@@ -470,7 +458,7 @@ mod shipped_skill_tests {
     fn fresh_orientation_catalogue_contains_all_shipped_skills() {
         let root = tempfile::tempdir().expect("temporary root");
         let available = available_skills_for_agent("default", "gateway", Some(root.path()));
-        assert_eq!(available.len(), 5);
+        assert_eq!(available.len(), 6);
         assert_eq!(
             available
                 .iter()
@@ -481,6 +469,7 @@ mod shipped_skill_tests {
                 "commission",
                 "maestro",
                 "project-docs",
+                "research",
                 "workflow-authoring"
             ]
         );

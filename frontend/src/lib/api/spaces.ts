@@ -13,6 +13,8 @@ import type {
   ConversationSummary,
   ConversationResponse,
 } from "../types";
+import * as generated from "../protocol/client";
+import { ApiError } from "./error";
 
 // Base URL prepended to every request. Defaults to "" so requests resolve to
 // the same origin — the Vite dev proxy then forwards /api/* to the gateway.
@@ -21,6 +23,7 @@ let baseUrl = "";
 
 export function setSpacesBaseUrl(url: string): void {
   baseUrl = url;
+  generated.setClientBaseUrl(url);
 }
 
 // ---------------------------------------------------------------------------
@@ -48,21 +51,21 @@ async function request(
   const response = await fetch(`${baseUrl}${path}`, init);
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status} from ${method} ${path}`);
+    throw await ApiError.fromResponse(response, method, path);
   }
 
   return response;
 }
 
 // ---------------------------------------------------------------------------
-// Space CRUD
+// Space CRUD — served by the generated client (frontend/src/lib/protocol/client.ts),
+// rendered from the protocol route manifest; these wrappers only adapt the
+// view type and the list unwrapping.
 // ---------------------------------------------------------------------------
 
 /** Fetch all spaces. */
 export async function listSpaces(): Promise<Space[]> {
-  const response = await request("/api/spaces", "GET");
-  // Gateway wraps the array in { spaces: [...] }.
-  const body = (await response.json()) as { spaces: Space[] };
+  const body = await generated.listSpaces();
   return body.spaces;
 }
 
@@ -70,14 +73,12 @@ export async function listSpaces(): Promise<Space[]> {
 export async function createSpace(
   req: CreateSpaceRequest,
 ): Promise<Space> {
-  const response = await request("/api/spaces", "POST", req);
-  return response.json() as Promise<Space>;
+  return generated.createSpace({ description: "", ...req });
 }
 
 /** Fetch a single space by ID. */
 export async function getSpace(id: string): Promise<Space> {
-  const response = await request(`/api/spaces/${id}`, "GET");
-  return response.json() as Promise<Space>;
+  return generated.getSpace(id);
 }
 
 /** Update a space's metadata and return the updated record. */
@@ -85,8 +86,7 @@ export async function updateSpace(
   id: string,
   req: UpdateSpaceRequest,
 ): Promise<Space> {
-  const response = await request(`/api/spaces/${id}`, "PUT", req);
-  return response.json() as Promise<Space>;
+  return generated.updateSpace(id, req);
 }
 
 /**
@@ -96,7 +96,7 @@ export async function updateSpace(
  * to parse.
  */
 export async function deleteSpace(id: string): Promise<void> {
-  await request(`/api/spaces/${id}`, "DELETE");
+  await generated.deleteSpace(id);
 }
 
 export async function listSpaceWorkspaces(

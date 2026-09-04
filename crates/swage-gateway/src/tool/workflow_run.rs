@@ -8,9 +8,11 @@ use uuid::Uuid;
 use crate::{
     tool::Tool,
     tool::workflow_list::{workflow_catalogue_error_summary, workflows_for_session},
-    tool_executor::GatewayToolContext,
     workflow::{GatewayWorkflowLauncher, WorkflowLauncher},
 };
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 
 pub struct WorkflowRunTool;
 
@@ -85,13 +87,11 @@ impl Tool for WorkflowRunTool {
                 name: self.name().into(),
                 message: error.to_string(),
             })?;
-        let gateway = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().into(),
-                message: "workflow_run requires gateway execution".into(),
-            })?;
+        let gateway = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "workflow_run requires gateway execution",
+        )?;
         let state = gateway
             .app_state()
             .ok_or_else(|| ToolError::ExecutionFailed {
@@ -291,19 +291,22 @@ mod tests {
         assert_eq!(record.source_hash, expected_hash);
         assert_eq!(result["source_hash"], expected_hash);
 
-        let axum::Json(detail) = crate::workflow::get_run(
+        let crate::error::Json(detail) = crate::workflow::get_run(
             axum::extract::State(state.clone()),
-            axum::extract::Path(run_id),
+            crate::error::Path(run_id),
         )
         .await
         .expect("run detail");
         assert_eq!(detail.run.source.as_deref(), Some(source));
         assert_eq!(detail.run.source_hash, expected_hash);
 
-        let axum::Json(list) =
-            crate::workflow::list_runs(axum::extract::State(state), axum::extract::Path(space.id))
-                .await
-                .expect("list runs");
+        let crate::error::Json(list) = crate::workflow::list_runs(
+            axum::extract::State(state),
+            crate::error::Path(space.id),
+            axum::extract::Query(crate::workflow::WorkflowRunListQuery::default()),
+        )
+        .await
+        .expect("list runs");
         let listed = list
             .runs
             .iter()

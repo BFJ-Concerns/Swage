@@ -95,13 +95,14 @@ pub async fn register_remote_device(
     state: &AppState,
     request: RegisterDeviceRequest,
 ) -> Result<RegisteredDevice, swage_core::GatewayError> {
+    let kind = remote_registration_kind(&request.kind)?;
     let workspace_root = PathBuf::from(&request.workspace_root);
     let workspace_roots =
         normalise_workspace_roots(workspace_root.clone(), request.workspace_roots);
     let device = RegisteredDevice {
         device_id: request.device_id,
         label: request.label.clone(),
-        kind: DeviceKind::from_str(&request.kind).unwrap_or(DeviceKind::AttachedDevice),
+        kind,
         base_url: Some(request.base_url),
         shared_token_secret_ref: Some(request.shared_token_secret_ref),
         workspace_root,
@@ -146,6 +147,22 @@ pub async fn register_remote_device(
     .await;
 
     Ok(device)
+}
+
+/// Parse the kind at the shared remote-registration boundary.
+///
+/// Local execution has no remote producer, so pairing and recovery imports
+/// must receive the same refusal as HTTP registration.
+fn remote_registration_kind(value: &str) -> Result<DeviceKind, swage_core::GatewayError> {
+    let kind = DeviceKind::from_str(value.trim()).map_err(|_| {
+        swage_core::GatewayError::ValidationError(format!("unknown device kind '{value}'"))
+    })?;
+    if kind == DeviceKind::Local {
+        return Err(swage_core::GatewayError::ValidationError(
+            "a local device has no remote producer to register".into(),
+        ));
+    }
+    Ok(kind)
 }
 
 pub async fn restore_registered_devices(state: &AppState) -> Result<(), swage_core::StorageError> {
@@ -513,6 +530,7 @@ mod tests {
     use std::sync::Arc;
     use swage_core::ToolError;
     use swage_storage::SqliteStorage;
+    use swage_storage::store::DeviceStore;
     use swage_tool::context::{MockToolContext, UserInfo};
     use swage_tool::tool::Tool;
     use uuid::Uuid;
@@ -536,6 +554,43 @@ mod tests {
             capabilities: vec!["device_identity".to_string()],
             registered_at: Utc::now(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_registration_rejects_a_local_kind_without_a_producer() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let error = register_remote_device(
+            &state,
+            RegisterDeviceRequest {
+                device_id: "unbacked-local".into(),
+                label: None,
+                kind: "local".into(),
+                base_url: "http://127.0.0.1:1".into(),
+                shared_token_secret_ref: "secret://managed/test".into(),
+                workspace_root: "/workspace".into(),
+                workspace_roots: vec![],
+                capabilities: vec![],
+            },
+        )
+        .await
+        .expect_err("remote registration must not create an unbacked local device");
+        assert!(
+            error
+                .to_string()
+                .contains("a local device has no remote producer to register")
+        );
+        assert!(
+            storage.list_devices().await.unwrap().is_empty(),
+            "the shared registration owner must refuse before persistence"
+        );
     }
 
     struct ObservingTool;

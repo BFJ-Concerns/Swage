@@ -70,6 +70,7 @@ pub struct GateConfig {
     /// What "work needed" means for this schedule. When absent the gate
     /// judges from the schedule message and previous outcome alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
     pub criteria: Option<String>,
 }
 
@@ -219,8 +220,10 @@ pub struct CreateScheduleRequest {
     pub session: SessionPolicy,
     /// Defaults to local-record-only routing when omitted.
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub routing: Option<DeliveryRoutingRequest>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub gate: Option<GateConfig>,
 }
 
@@ -231,13 +234,17 @@ pub struct CreateScheduleRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 pub struct UpdateScheduleRequest {
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub message: Option<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub spec: Option<ScheduleSpec>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub routing: Option<DeliveryRoutingRequest>,
     /// Set or clear the gate. Absent leaves the existing gate untouched.
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub gate: Option<ScheduleGateUpdate>,
 }
 

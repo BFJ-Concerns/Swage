@@ -224,6 +224,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/spaces/{space_id}/pages",
             get(page::list_pages_handler).post(page::create_page_handler),
         )
+        .route(
+            "/api/spaces/{space_id}/page-templates",
+            get(page::list_page_templates_handler).post(page::create_page_template_handler),
+        )
+        .route(
+            "/api/page-templates/{template_id}",
+            get(page::get_page_template_handler),
+        )
         .route("/api/pages/{page_id}", get(page::get_page_handler))
         .route(
             "/api/pages/{page_id}/modules",
@@ -389,4 +397,84 @@ pub fn build_router(state: AppState) -> Router {
             activity_recording_middleware,
         ))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    use swage_protocol::client::routes::{Method, routes};
+    use swage_storage::store::{SpaceStore, Storage};
+
+    use super::build_router;
+    use crate::{
+        state::AppState,
+        turn::tests::{MockProvider, MockStorage},
+    };
+
+    /// Every route the protocol manifest names is registered on the router
+    /// with the same method and path template. The probe substitutes a nil
+    /// UUID for each path parameter and asks only whether the router
+    /// matched: a 404 or 405 means the manifest and the router disagree.
+    #[tokio::test]
+    async fn every_manifest_route_is_registered_on_the_router() {
+        let storage = Arc::new(MockStorage::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = build_router(state);
+        for route in routes() {
+            let path = route.probe_path();
+            let method = match route.method {
+                Method::Get => "GET",
+                Method::Post => "POST",
+                Method::Put => "PUT",
+                Method::Delete => "DELETE",
+            };
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            assert_ne!(
+                status,
+                axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {} is in the manifest but the router has no such method",
+                route.path
+            );
+            // A registered handler answering 404 for the nil entity carries
+            // the wire error contract's body; an unregistered /api path falls
+            // to the SPA fallback, whose 404 is bodiless. The body is the
+            // discriminator, not the status.
+            if status == axum::http::StatusCode::NOT_FOUND {
+                let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let parsed: Result<swage_protocol::client::error::ApiErrorBody, _> =
+                    serde_json::from_slice(&bytes);
+                assert!(
+                    parsed.is_ok(),
+                    "{method} {} is in the manifest but the router fell through to the fallback",
+                    route.path
+                );
+            }
+        }
+    }
 }

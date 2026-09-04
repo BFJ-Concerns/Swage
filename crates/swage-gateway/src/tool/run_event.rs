@@ -7,8 +7,10 @@ use swage_protocol::client::workflow::PostWorkflowRunEventRequest;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 use crate::workflow::{RunEventSource, post_external_run_event};
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 
 pub struct RunEventPostTool;
 
@@ -68,14 +70,11 @@ impl Tool for RunEventPostTool {
             .get("payload")
             .cloned()
             .ok_or_else(|| invalid("'payload' is required"))?;
-        let gateway = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .and_then(GatewayToolContext::app_state)
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: TOOL.into(),
-                message: "this tool runs only inside a gateway host turn".into(),
-            })?;
+        let gateway = super::require_gateway_state(
+            ctx,
+            TOOL,
+            "this tool runs only inside a gateway host turn",
+        )?;
         let session_id =
             Uuid::parse_str(ctx.session_id()).map_err(|_| ToolError::ExecutionFailed {
                 name: TOOL.into(),
@@ -95,7 +94,7 @@ impl Tool for RunEventPostTool {
         .await
         .map_err(|error| ToolError::ExecutionFailed {
             name: TOOL.into(),
-            message: error.0.to_string(),
+            message: error.message().to_owned(),
         })?;
         serde_json::to_value(response).map_err(|error| ToolError::ExecutionFailed {
             name: TOOL.into(),
@@ -124,6 +123,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: "test".into(),
                 args: Value::Null,

@@ -7,13 +7,119 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+/// Reasoning effort as the user means it: one provider-neutral intent,
+/// ordered lowest to highest, resolved per model against that model's
+/// declared [`EffortCapability`] before anything reaches a provider.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema, TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
+    /// No reasoning at all — a true disable where the model has one.
+    Off,
+    Minimal,
     Low,
     Medium,
     High,
+    Xhigh,
     Max,
+}
+
+impl Effort {
+    /// Every level, lowest first.
+    pub const ALL: [Effort; 7] = [
+        Effort::Off,
+        Effort::Minimal,
+        Effort::Low,
+        Effort::Medium,
+        Effort::High,
+        Effort::Xhigh,
+        Effort::Max,
+    ];
+
+    /// The wire spelling, which is also the vocabulary users see.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Effort::Off => "off",
+            Effort::Minimal => "minimal",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+            Effort::Max => "max",
+        }
+    }
+}
+
+impl std::fmt::Display for Effort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What a model's provider actually accepts as an effort control, declared
+/// per model in the catalogue or supplied by the provider adapter for the
+/// models it serves. The declaration is bound to the provider's documented
+/// control: it must admit every level the control accepts and must not
+/// collapse levels the control distinguishes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(tag = "control", rename_all = "snake_case")]
+pub enum EffortCapability {
+    /// The control takes a named level from a fixed set. `can_disable`
+    /// says whether the model can switch reasoning off entirely.
+    Levels {
+        /// The levels the control accepts, in any order; never `off`,
+        /// which is expressed through `can_disable`.
+        levels: Vec<Effort>,
+        can_disable: bool,
+    },
+    /// The control takes only a numeric thinking budget, in tokens.
+    Budget {
+        min_tokens: u32,
+        max_tokens: u32,
+        can_disable: bool,
+    },
+    /// The model has no effort control; every intent is omitted.
+    None,
+}
+
+impl EffortCapability {
+    /// A declaration that could not be honoured as written, named so the
+    /// catalogue can refuse it at load rather than resolve nonsense.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            EffortCapability::Levels { levels, .. } => {
+                if levels.is_empty() {
+                    return Err("an effort capability with named levels needs at least one".into());
+                }
+                if levels.contains(&Effort::Off) {
+                    return Err(
+                        "`off` is not a level; declare it through can_disable instead".into(),
+                    );
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for level in levels {
+                    if !seen.insert(*level) {
+                        return Err(format!("effort level `{level}` is declared twice"));
+                    }
+                }
+                Ok(())
+            }
+            EffortCapability::Budget {
+                min_tokens,
+                max_tokens,
+                ..
+            } => {
+                if min_tokens > max_tokens {
+                    return Err(format!(
+                        "effort budget range is inverted: min {min_tokens} exceeds max {max_tokens}"
+                    ));
+                }
+                Ok(())
+            }
+            EffortCapability::None => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -48,13 +154,13 @@ pub struct SaveProviderSettings {
     pub api_key_secret_ref: Option<String>,
     pub api_key_env: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub api_key: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub command: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub state_dir: Option<PathBuf>,
 }
 
@@ -62,11 +168,17 @@ pub struct SaveProviderSettings {
 #[serde(deny_unknown_fields)]
 pub struct ModelCapabilitiesConfig {
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub reasoning_replay: bool,
+    /// The model's effort control, when the catalogue declares one; absent,
+    /// the provider adapter's declaration for the models it serves applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub effort: Option<EffortCapability>,
 }
 impl ModelCapabilitiesConfig {
     pub fn is_empty(&self) -> bool {
-        !self.reasoning_replay
+        !self.reasoning_replay && self.effort.is_none()
     }
 }
 
@@ -78,9 +190,10 @@ pub struct ModelSettings {
     pub context_window: Option<u32>,
     pub generation_preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub default_effort: Option<Effort>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub capabilities: ModelCapabilitiesConfig,
 }
 
@@ -92,6 +205,7 @@ pub struct GenerationPresetConfig {
     #[ts(optional)]
     pub temperature: Option<f64>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub stop_sequences: Vec<String>,
     #[ts(optional, type = "unknown")]
     pub metadata: Option<serde_json::Value>,
@@ -216,6 +330,7 @@ pub struct ContextConfig {
     /// Named context assemblies registered as hidden alternatives to the
     /// configured default. Selection records the chosen name locally.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
     pub alternatives: Vec<String>,
     #[ts(type = "number")]
     pub timeout: u64,
@@ -324,22 +439,31 @@ pub struct SaveSettingsRequest {
     pub default_model: String,
     pub models: HashMap<String, ModelSettings>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub generation_presets: HashMap<String, GenerationPresetConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub tool_runtime: Option<ToolRuntimeSettings>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub tool_permissions: Option<ToolPermissionConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub hitl: Option<HitlConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub sandbox: Option<SandboxConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub context: Option<ContextConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub pricing: Option<PricingConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub observability: Option<ObservabilityConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub communication: Option<CommunicationConfig>,
 }
 
@@ -359,4 +483,67 @@ pub struct RestartStatusResponse {
     pub restart_required: bool,
     pub can_restart: bool,
     pub guidance: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effort_levels_are_ordered_lowest_first_and_spelled_on_the_wire() {
+        assert!(Effort::Off < Effort::Minimal && Effort::Xhigh < Effort::Max);
+        let spelled: Vec<&str> = Effort::ALL.iter().map(|level| level.as_str()).collect();
+        assert_eq!(
+            spelled,
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        for level in Effort::ALL {
+            let wire = serde_json::to_value(level).unwrap();
+            assert_eq!(wire, serde_json::json!(level.as_str()));
+        }
+    }
+
+    #[test]
+    fn a_capability_declaration_is_tagged_by_its_control() {
+        let levels = EffortCapability::Levels {
+            levels: vec![Effort::Low, Effort::High],
+            can_disable: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&levels).unwrap(),
+            serde_json::json!({"control": "levels", "levels": ["low", "high"], "can_disable": true})
+        );
+        let budget: EffortCapability = serde_json::from_value(serde_json::json!({
+            "control": "budget", "min_tokens": 1024, "max_tokens": 32000, "can_disable": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            budget,
+            EffortCapability::Budget {
+                min_tokens: 1024,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_declaration_that_cannot_be_honoured_is_refused() {
+        let off_as_level = EffortCapability::Levels {
+            levels: vec![Effort::Off],
+            can_disable: false,
+        };
+        assert!(off_as_level.validate().unwrap_err().contains("can_disable"));
+        let empty = EffortCapability::Levels {
+            levels: vec![],
+            can_disable: true,
+        };
+        assert!(empty.validate().is_err());
+        let inverted = EffortCapability::Budget {
+            min_tokens: 10,
+            max_tokens: 5,
+            can_disable: false,
+        };
+        assert!(inverted.validate().unwrap_err().contains("inverted"));
+        assert!(EffortCapability::None.validate().is_ok());
+    }
 }
