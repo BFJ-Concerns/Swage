@@ -336,7 +336,16 @@ impl DelegationExecutor {
             })
             .await
         {
-            tracing::warn!(%turn_id, %error, "failed to record the delegated task message");
+            if let Err(update_error) = self
+                .storage
+                .update_turn_state(turn_id, TurnState::Failed)
+                .await
+            {
+                return Err(AgentError::InvalidConfig(format!(
+                    "failed to record delegated task ({error}) and mark turn {turn_id} failed ({update_error})"
+                )));
+            }
+            return Err(error.into());
         }
         let assembled = match self
             .context_assembler
@@ -873,5 +882,86 @@ mod tests {
             .expect("list child turns");
         assert_eq!(turns.len(), 1, "expected one child turn");
         assert_eq!(turns[0].state, TurnState::Failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegated_task_record_failure_stops_before_provider_execution() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let storage_trait: Arc<dyn Storage> = storage.clone();
+        let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
+        let delegate_message = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "Remember this delegated task"}),
+            })
+            .await
+            .expect("create delegate message");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER reject_delegated_task_message \
+                     BEFORE INSERT ON messages BEGIN \
+                     SELECT RAISE(FAIL, 'injected delegated task write failure'); END;",
+                )
+            })
+            .await
+            .expect("install write failure");
+        let executor = DelegationExecutor {
+            storage: storage_trait,
+            provider: Arc::new(NeverCalledProvider),
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: None,
+            delegation_handler: None,
+            router,
+            active_delegations: ActiveDelegations::new(),
+            context_assembler: Arc::new(PassthroughAssembler),
+            snapshot_recorder: None,
+        };
+        let error = executor
+            .execute_delegation(
+                &delegate_message,
+                None,
+                space.id,
+                AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]),
+                swage_config::ContextTransferConfig::default(),
+                None,
+                serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
+            )
+            .await
+            .expect_err("an unrecorded delegated task must not execute");
+        assert!(error.to_string().contains("injected delegated task write failure"));
+        let session = storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("sessions")
+            .into_iter()
+            .next()
+            .expect("child session");
+        let thread = storage
+            .list_by_session(session.id)
+            .await
+            .expect("threads")
+            .into_iter()
+            .next()
+            .expect("child thread");
+        let turn = storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .expect("turns")
+            .into_iter()
+            .next()
+            .expect("pre-created child turn");
+        assert_eq!(turn.state, TurnState::Failed);
     }
 }
