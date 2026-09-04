@@ -18529,6 +18529,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_spends_only_its_provider_route() {
+        let (state, storage, _provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "primary refused".into(),
+            }],
+            scripted_text_output_with_usage("fallback answer", 2, 0),
+        ])
+        .await;
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "per_route": {
+                "primary-route": {"max_total_tokens": 7},
+                "fallback-route": {"max_total_tokens": 3}
+            }
+        }))
+        .expect("route budget");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"return await agent("answer", { agent: "default", model: "pinned", fallbackModel: "fallback" });"#.into(),
+                args: Value::Null,
+                budget: Some(budget),
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let terminal = journal
+            .iter()
+            .find(|entry| entry.kind == "terminal_budget")
+            .and_then(|entry| entry.result.as_ref())
+            .expect("terminal budget result");
+        assert_eq!(terminal["per_route"]["primary-route"]["spent"], 0);
+        assert_eq!(terminal["per_route"]["fallback-route"]["spent"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_does_not_retry_agent_construction_errors() {
         let (state, storage, provider, space_id) =
             fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
