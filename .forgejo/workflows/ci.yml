@@ -62,7 +62,7 @@ jobs:
             "$api/statuses/$sha?limit=50" \
             | jq -r '[.[] | select(.context == "CI / test (pull_request)" and (.status == "success" or .status == "failure") and (.description | startswith("Has been") | not))][0].status // empty')
           case "$verdict" in
-            success) echo "Commit $sha already passed this gate; reusing that verdict."; echo "reused=success" >> "$FORGEJO_OUTPUT" ;;
+            success) echo "Commit $sha already passed this gate; reusing that verdict."; echo "reused=success" >> "$GITHUB_OUTPUT" ;;
             failure) echo "Commit $sha already failed this gate; push a new commit to re-run it."; exit 1 ;;
             *) echo "No verdict yet for $sha; running the gate." ;;
           esac
