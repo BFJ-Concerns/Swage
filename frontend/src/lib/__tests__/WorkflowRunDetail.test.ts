@@ -151,6 +151,23 @@ describe("WorkflowRunDetail", () => {
     expect(usage).not.toContain("0");
   });
 
+  it("distinguishes a cancelled call's unsettled usage from provider non-reporting", async () => {
+    await render(
+      runWith({
+        ...baseCall,
+        usage: {
+          availability: "unavailable",
+          reason: "call_did_not_settle",
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+
+    const usage = document.querySelector(".usage")!.textContent!;
+    expect(usage).toContain("Not recorded");
+    expect(usage).toContain("the call never settled");
+    expect(usage).not.toContain("the provider reported no usage");
+  });
+
   it("names a cut-short worker as the run's end, not the worker's failure", async () => {
     await render(
       runWith({
