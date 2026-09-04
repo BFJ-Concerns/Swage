@@ -118,6 +118,9 @@ pub struct AgentCallResult {
     /// The catalogue model that supplied this call's output.
     #[serde(default)]
     pub served_model: Option<String>,
+    /// The provider route that supplied this call's output.
+    #[serde(default)]
+    pub provider_route: Option<String>,
     #[serde(default)]
     pub session_id: Option<Uuid>,
     #[serde(default)]

@@ -761,11 +761,16 @@ fn journal_entry_uses_fallback_budget(
     entry: &WorkflowJournalRecord,
     budget: &WorkflowBudget,
 ) -> bool {
+    journal_entry_provider_route(entry).is_none_or(|route| !budget.per_route.contains_key(route))
+}
+
+fn journal_entry_provider_route(entry: &WorkflowJournalRecord) -> Option<&str> {
     entry
-        .request
-        .get("provider_route")
+        .result
+        .as_ref()
+        .and_then(|result| result.get("provider_route"))
         .and_then(Value::as_str)
-        .is_none_or(|route| !budget.per_route.contains_key(route))
+        .or_else(|| entry.request.get("provider_route").and_then(Value::as_str))
 }
 
 fn completed_fallback_agent_tokens_before(
@@ -809,11 +814,7 @@ fn terminal_budget_accounting_from_journal(
         .iter()
         .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
     {
-        let route = entry
-            .request
-            .get("provider_route")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
+        let route = journal_entry_provider_route(entry).unwrap_or("default");
         let spent = entry
             .result
             .as_ref()
@@ -2076,24 +2077,29 @@ async fn run_ephemeral_agent_call(
     // overlays. Its persisted effective-model snapshot is therefore the
     // authoritative identity for this call; re-resolving from the gateway
     // configuration here would misattribute an overlay-served turn.
-    let served_model = state
+    let effective_model = state
         .storage
         .get_snapshot(turn.id)
         .await
         .map_err(|error| error.to_string())?
-        .and_then(|snapshot| serde_json::from_str::<Value>(&snapshot).ok())
-        .and_then(|snapshot| {
-            snapshot
-                .pointer("/provider_visible/effective_model/catalogue_entry")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
+        .and_then(|snapshot| serde_json::from_str::<Value>(&snapshot).ok());
+    let served_model = effective_model
+        .as_ref()
+        .and_then(|snapshot| snapshot.pointer("/provider_visible/effective_model/catalogue_entry"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let provider_route = effective_model
+        .as_ref()
+        .and_then(|snapshot| snapshot.pointer("/provider_visible/effective_model/provider_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     Ok(AgentCallResult {
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
         working_directory: resolved_working_directory.map(|placement| placement.path),
         served_model,
+        provider_route,
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
@@ -3191,6 +3197,7 @@ async fn run_host_commands_inner(
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
                 let route_token_ledger = route_limit.as_ref().and_then(|_| budget_route.clone());
+                let configured_route_budgets = budget.per_route.clone();
                 let call_uses_closing_partition = winding_down;
                 let semaphore = Arc::clone(&semaphore);
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
@@ -3334,7 +3341,26 @@ async fn run_host_commands_inner(
                         0
                     };
                     let mut accounting = token_budget.lock().await;
-                    if let Some(route) = route_token_ledger {
+                    if call_reservation > 0 {
+                        if call_uses_closing_partition {
+                            accounting.closing_reserved =
+                                accounting.closing_reserved.saturating_sub(call_reservation);
+                        } else {
+                            accounting.working_reserved =
+                                accounting.working_reserved.saturating_sub(call_reservation);
+                        }
+                    }
+                    let settled_route = if started_replay {
+                        route_token_ledger
+                    } else {
+                        result
+                            .as_ref()
+                            .ok()
+                            .and_then(|result| result.provider_route.as_ref())
+                            .filter(|route| configured_route_budgets.contains_key(*route))
+                            .cloned()
+                    };
+                    if let Some(route) = settled_route {
                         let ledger = accounting.ledger_mut(&route);
                         ledger.spent = ledger.spent.saturating_add(actual);
                         // A call admitted while this route was still working
@@ -3351,13 +3377,6 @@ async fn run_host_commands_inner(
                     } else {
                         accounting.spent = accounting.spent.saturating_add(actual);
                         spent.store(accounting.spent, Ordering::SeqCst);
-                        if call_uses_closing_partition {
-                            accounting.closing_reserved =
-                                accounting.closing_reserved.saturating_sub(call_reservation);
-                        } else {
-                            accounting.working_reserved =
-                                accounting.working_reserved.saturating_sub(call_reservation);
-                        }
                         if !call_uses_closing_partition && actual > 0 {
                             if let Some(limit) = accounting.closing_limit.as_mut() {
                                 *limit = limit.saturating_add(actual);
@@ -13243,6 +13262,7 @@ mod tests {
                     output_tokens: 1,
                     working_directory: None,
                     served_model: None,
+                    provider_route: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
@@ -14205,6 +14225,7 @@ mod tests {
                     output_tokens: 1,
                     working_directory: None,
                     served_model: None,
+                    provider_route: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -14454,6 +14475,7 @@ mod tests {
                     output_tokens: 1,
                     working_directory: None,
                     served_model: None,
+                    provider_route: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -17299,6 +17321,7 @@ mod tests {
                     thread_id: None,
                     turn_id: None,
                     served_model: None,
+                    provider_route: None,
                 })
                 .expect("working result"),
             )
@@ -17362,6 +17385,7 @@ mod tests {
                     thread_id: None,
                     turn_id: None,
                     served_model: None,
+                    provider_route: None,
                 })
                 .expect("closing result"),
             )
@@ -17547,6 +17571,7 @@ mod tests {
                     thread_id: None,
                     turn_id: None,
                     served_model: None,
+                    provider_route: None,
                 })
                 .expect("result"),
             )
@@ -17757,6 +17782,7 @@ mod tests {
                         thread_id: None,
                         turn_id: None,
                         served_model: None,
+                        provider_route: None,
                     })
                     .expect("result"),
                 )
@@ -18197,7 +18223,7 @@ mod tests {
         config.models.entries.insert(
             "pinned".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "scripted".into(),
+                provider_id: "primary-route".into(),
                 model_id: "pinned-wire".into(),
                 ..Default::default()
             },
@@ -18205,7 +18231,7 @@ mod tests {
         config.models.entries.insert(
             "fallback".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "scripted".into(),
+                provider_id: "fallback-route".into(),
                 model_id: "fallback-wire".into(),
                 ..Default::default()
             },
@@ -18398,6 +18424,13 @@ mod tests {
                 .as_ref()
                 .and_then(|result| result["served_model"].as_str()),
             Some("fallback")
+        );
+        assert_eq!(
+            call.result
+                .as_ref()
+                .and_then(|result| result["provider_route"].as_str()),
+            Some("fallback-route"),
+            "the journal must retain the provider route that actually served"
         );
         let Json(detail) = get_run(State(state.clone()), Path(run_id))
             .await
