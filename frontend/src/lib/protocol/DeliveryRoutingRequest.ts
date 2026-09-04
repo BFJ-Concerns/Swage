@@ -8,4 +8,4 @@ import type { DeliveryTarget } from "./DeliveryTarget";
  * an origin always exists. Callers without an origin (schedules, manual
  * API calls) must set it false or target resolution errors.
  */
-export type DeliveryRoutingRequest = { deliver_to_origin: boolean, home_target: DeliveryTarget | null, explicit_targets: Array<DeliveryTarget>, store_local_output: boolean, };
+export type DeliveryRoutingRequest = { deliver_to_origin?: boolean, home_target?: DeliveryTarget | null, explicit_targets?: Array<DeliveryTarget>, store_local_output?: boolean, };
