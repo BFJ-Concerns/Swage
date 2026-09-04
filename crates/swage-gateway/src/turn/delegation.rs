@@ -148,6 +148,56 @@ async fn record_named_child(
     Ok(())
 }
 
+pub(super) async fn reauthorise_named_child_placement(
+    state: &AppState,
+    space_id: Uuid,
+    sender_turn_id: Uuid,
+    sender_session_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
+    sender_placement: Option<&ResolvedWorkerDirectory>,
+    metadata: &serde_json::Value,
+) -> Result<Option<ResolvedWorkerDirectory>, AgentError> {
+    let Some(path) = metadata
+        .get(WORKER_PLACEMENT_CWD_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+    else {
+        return Ok(None);
+    };
+    let authority_path = metadata
+        .get(WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            AgentError::InvalidConfig("named child placement is missing its authority path".into())
+        })?;
+    let authority_context_id = metadata
+        .get(WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            AgentError::InvalidConfig(
+                "named child placement is missing its authority context".into(),
+            )
+        })?;
+    let authority = resolve_authorised_worker_directory(
+        state,
+        space_id,
+        sender_turn_id,
+        Some(sender_session_id),
+        active_workspace_attachment_id,
+        sender_placement,
+        authority_path,
+    )
+    .await
+    .map_err(AgentError::InvalidConfig)?;
+    Ok(Some(ResolvedWorkerDirectory {
+        path,
+        can_write: authority.can_write,
+        authority_path: authority.path,
+        authority_context_id,
+    }))
+}
+
 pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &str) -> Uuid {
     let mut digest = Sha256::new();
     digest.update(sender_turn_id.as_bytes());
@@ -677,47 +727,16 @@ impl DelegationHandler for GatewayDelegationHandler {
         .await;
         let mut worktree_owner_id = None;
         let placement = if existing_child.is_some() {
-            let path = session_metadata
-                .get(WORKER_PLACEMENT_CWD_METADATA_KEY)
-                .and_then(serde_json::Value::as_str)
-                .map(std::path::PathBuf::from);
-            match path {
-                Some(path) => {
-                    let can_write = session_metadata
-                        .get(WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY)
-                        .and_then(serde_json::Value::as_bool)
-                        .ok_or_else(|| {
-                            AgentError::InvalidConfig(
-                                "named child placement is missing its write authority".into(),
-                            )
-                        })?;
-                    let authority_path = session_metadata
-                        .get(WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
-                        .and_then(serde_json::Value::as_str)
-                        .map(std::path::PathBuf::from)
-                        .ok_or_else(|| {
-                            AgentError::InvalidConfig(
-                                "named child placement is missing its authority path".into(),
-                            )
-                        })?;
-                    let authority_context_id = session_metadata
-                        .get(WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|value| Uuid::parse_str(value).ok())
-                        .ok_or_else(|| {
-                            AgentError::InvalidConfig(
-                                "named child placement is missing its authority context".into(),
-                            )
-                        })?;
-                    Some(ResolvedWorkerDirectory {
-                        path,
-                        can_write,
-                        authority_path,
-                        authority_context_id,
-                    })
-                }
-                None => None,
-            }
+            reauthorise_named_child_placement(
+                &self.state,
+                space_id,
+                sender_turn_id,
+                sender_session_id,
+                active_workspace_attachment_id,
+                sender_filesystem_authority.placement.as_ref(),
+                &session_metadata,
+            )
+            .await?
         } else {
             match isolation {
                 None => match cwd.as_deref() {
