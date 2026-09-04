@@ -4,9 +4,9 @@
  * Write a module's source: replace an existing instance's content, or
  * append a new instance to the page when `module_id` is absent.
  */
-export type WritePageModuleRequest = { module_id?: string,
+export type WritePageModuleRequest = { module_id?: string | null,
 /**
  * Module kind for a new instance ("document" first); ignored when
  * `module_id` names an existing instance.
  */
-kind?: string, source: string, };
+kind?: string | null, source: string, };
