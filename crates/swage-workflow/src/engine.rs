@@ -1208,6 +1208,10 @@ impl WorkflowEngine {
                                 session: worker.session,
                                 worker: worker.workerId,
                             });
+                            if (worker.session !== null) {
+                                delete request.cwd;
+                                delete request.isolation;
+                            }
                             worker.busy = true;
                             try {
                                 const response = unwrapAgentResponse(
@@ -1820,7 +1824,13 @@ mod tests {
         let output = WorkflowEngine::new(EngineLimits::default())
             .execute_hosted(
                 r#"
-                const worker = await session({agent: "reviewer", model: "strong", effort: "high"});
+                const worker = await session({
+                    agent: "reviewer",
+                    model: "strong",
+                    effort: "high",
+                    cwd: "/repo",
+                    isolation: "worktree",
+                });
                 const first = await send(worker, "read the diff");
                 const second = await send(worker, "now judge it", {schema: {type: "string"}});
                 await close(worker);
@@ -1859,10 +1869,23 @@ mod tests {
             requests[0].session.is_none(),
             "the first turn opens the session"
         );
+        assert_eq!(requests[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(
+            requests[0].isolation,
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+        );
         assert_eq!(
             requests[1].session.as_ref().map(|s| s.session_id),
             Some(uuid::Uuid::from_u128(0xA)),
             "the second turn continues the first turn's session"
+        );
+        assert_eq!(
+            requests[1].cwd, None,
+            "a continuation inherits the worker's resolved directory"
+        );
+        assert_eq!(
+            requests[1].isolation, None,
+            "a continuation does not request a fresh isolated placement"
         );
         assert!(
             requests[1].schema.is_some(),

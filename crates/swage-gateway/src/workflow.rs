@@ -1428,16 +1428,6 @@ fn check_held_worker_turn(
             serde_json::json!(request.effort),
             serde_json::json!(worker.open.effort),
         ),
-        (
-            "cwd",
-            serde_json::json!(request.cwd),
-            serde_json::json!(worker.open.cwd),
-        ),
-        (
-            "isolation",
-            serde_json::json!(request.isolation),
-            serde_json::json!(worker.open.isolation),
-        ),
     ];
     if let Some((field, requested, opened)) = fixed
         .into_iter()
@@ -1445,6 +1435,13 @@ fn check_held_worker_turn(
     {
         return Err(format!(
             "HeldWorkerError: worker {worker_id} fixes {field} at creation ({opened}); received {requested}"
+        ));
+    }
+    if request.session.is_none()
+        && (request.cwd != worker.open.cwd || request.isolation != worker.open.isolation)
+    {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} must start in its creation placement"
         ));
     }
     if request.fallback_model.is_some()
