@@ -971,7 +971,7 @@ impl Agent {
         // retry streams tokens independently. Without a schema, this block is skipped.
         let structured_output = if let Some(ref schema_value) = self.config.output_schema {
             // Compile once — AgentConfig::validate() already proved this succeeds.
-            let validator = jsonschema::validator_for(schema_value)
+            let validator = swage_core::json_schema_validator(schema_value)
                 .expect("schema was validated at config time");
 
             let max_retries = self.config.max_output_retries;

@@ -6,4 +6,4 @@
  * module grain in both directions: the page as a whole is not an anchor, and
  * there is no way to name a position inside a module's content.
  */
-export type CreatePageAnnotationRequest = { module_id: string, body: string, tags: Array<string>, };
+export type CreatePageAnnotationRequest = { module_id: string, body: string, tags?: Array<string>, };
