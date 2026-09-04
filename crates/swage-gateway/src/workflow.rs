@@ -971,10 +971,12 @@ fn closing_partition_remaining(
 
 fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudget) -> Value {
     let spent = accounting.spent;
+    let usage_complete = accounting.usage_unavailable_calls == 0;
     serde_json::json!({
         "spent": spent,
-        "remaining": budget.max_total_tokens.map(|limit| limit.saturating_sub(spent)),
-        "closing_remaining": closing_partition_remaining(budget, accounting.closing_limit, spent),
+        "remaining": usage_complete.then(|| budget.max_total_tokens.map(|limit| limit.saturating_sub(spent))).flatten(),
+        "closing_remaining": usage_complete.then(|| closing_partition_remaining(budget, accounting.closing_limit, spent)).flatten(),
+        "usage_unavailable_calls": accounting.usage_unavailable_calls,
     })
 }
 
@@ -3170,6 +3172,25 @@ async fn run_host_commands_inner(
                     .expect("a token limit has a reservation estimate");
                     let mut accounting = token_budget.lock().await;
                     if existing_call.is_none() {
+                        if accounting.usage_unavailable_calls > 0 {
+                            let unavailable = accounting.usage_unavailable_calls;
+                            drop(accounting);
+                            let error = format!(
+                                "BudgetUsageUnavailableError: token usage unavailable for {unavailable} completed call(s)"
+                            );
+                            seq.fetch_add(1, Ordering::SeqCst);
+                            let result = record_agent_budget_refusal(
+                                &state,
+                                run_id,
+                                current_seq,
+                                &request,
+                                &error,
+                            )
+                            .await
+                            .map_or_else(Err, |_| Err(error));
+                            let _ = reply.send(result.map_err(WorkflowHostError::Message));
+                            continue;
+                        }
                         if !winding_down
                             && let Some(reserve) = budget
                                 .reserved_closing_tokens
@@ -3998,6 +4019,7 @@ async fn run_host_commands_inner(
                             .saturating_add(accounting.working_reserved)
                             .saturating_add(accounting.closing_reserved);
                         let snapshot_starts_wind_down = !winding_down
+                            && accounting.usage_unavailable_calls == 0
                             && budget
                                 .reserved_closing_tokens
                                 .filter(|reserve| *reserve > 0)
@@ -4010,15 +4032,22 @@ async fn run_host_commands_inner(
                                         < working_token_reservation.unwrap_or(0)
                                 });
                         let reading_winding_down = winding_down || snapshot_starts_wind_down;
-                        let working_remaining = budget.max_total_tokens.map(|limit| {
-                            limit
-                                .saturating_sub(budget.reserved_closing_tokens.unwrap_or(0))
-                                .saturating_sub(spent)
-                        });
+                        let usage_complete = accounting.usage_unavailable_calls == 0;
+                        let working_remaining = usage_complete
+                            .then(|| {
+                                budget.max_total_tokens.map(|limit| {
+                                    limit
+                                        .saturating_sub(budget.reserved_closing_tokens.unwrap_or(0))
+                                        .saturating_sub(spent)
+                                })
+                            })
+                            .flatten();
                         let proposed_closing_limit = snapshot_starts_wind_down.then(|| {
                             spent.saturating_add(budget.reserved_closing_tokens.unwrap_or(0))
                         });
-                        let remaining = if reading_winding_down {
+                        let remaining = if !usage_complete {
+                            None
+                        } else if reading_winding_down {
                             if snapshot_starts_wind_down {
                                 working_remaining
                             } else {
@@ -4029,25 +4058,33 @@ async fn run_host_commands_inner(
                                 .max_total_tokens
                                 .map(|limit| limit.saturating_sub(spent))
                         };
-                        let closing_remaining = closing_partition_remaining(
-                            &budget,
-                            reading_winding_down
-                                .then(|| proposed_closing_limit.or(accounting.closing_limit))
-                                .flatten(),
-                            spent,
-                        );
+                        let closing_remaining = usage_complete
+                            .then(|| {
+                                closing_partition_remaining(
+                                    &budget,
+                                    reading_winding_down
+                                        .then(|| {
+                                            proposed_closing_limit.or(accounting.closing_limit)
+                                        })
+                                        .flatten(),
+                                    spent,
+                                )
+                            })
+                            .flatten();
+                        let working_remaining = if !usage_complete {
+                            None
+                        } else if reading_winding_down {
+                            budget.max_total_tokens.map(|_| 0)
+                        } else {
+                            working_remaining
+                        };
                         let reading = serde_json::json!({
                             "spent": spent,
                             "remaining": remaining,
-                            "working_remaining": budget.max_total_tokens.map(|_| {
-                                if reading_winding_down {
-                                    0
-                                } else {
-                                    working_remaining.unwrap_or(0)
-                                }
-                            }),
+                            "working_remaining": working_remaining,
                             "closing_remaining": closing_remaining,
                             "winding_down": reading_winding_down,
+                            "usage_unavailable_calls": accounting.usage_unavailable_calls,
                         });
                         let entry_id = match existing {
                             Some(entry) => Ok(entry.id),
@@ -5594,15 +5631,15 @@ async fn launch_existing_run(
         .into_iter()
         .filter(is_positional_journal_entry)
         .collect::<Vec<_>>();
-    // These prefixes are produced by both budget-refusal paths in the host-command loop.
+    // These prefixes are produced by the budget-refusal paths in the host-command loop.
     let initial_agent_calls = replay
         .iter()
         .filter(|entry| {
             entry.kind == "agent_call"
-                && !entry
-                    .error_message
-                    .as_deref()
-                    .is_some_and(|error| error.starts_with("BudgetExceededError:"))
+                && !entry.error_message.as_deref().is_some_and(|error| {
+                    error.starts_with("BudgetExceededError:")
+                        || error.starts_with("BudgetUsageUnavailableError:")
+                })
         })
         .count() as u32;
     let (initial_spent_tokens, initial_usage_unavailable_calls) =
@@ -18554,6 +18591,107 @@ mod tests {
             },
             "a call the provider reported no usage for is unavailable, never zero spend"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_usage_closes_the_token_gate_and_marks_budget_readings_incomplete() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                vec![
+                    swage_core::StreamChunk::Delta {
+                        content: "first answer".into(),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                scripted_text_output("illegally admitted second answer"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            const first = await agent("provider omits usage", {agent: "default"});
+            let refusal = null;
+            try {
+                await agent("must not bypass the token gate", {agent: "default"});
+            } catch (error) {
+                refusal = String(error);
+            }
+            return {first, refusal, snapshot: await budgetSnapshot()};
+        "#;
+
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: Some(3),
+                    max_total_tokens: Some(12),
+                    reserved_closing_tokens: None,
+                    max_concurrent_agent_calls: Some(1),
+                }),
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let output = run.final_output.expect("workflow output");
+        assert_eq!(output["first"], "first answer");
+        assert!(
+            output["refusal"]
+                .as_str()
+                .is_some_and(|error| error.contains("BudgetUsageUnavailableError")),
+            "the next call is refused because the prior spend is unknown: {output}"
+        );
+        assert_eq!(output["snapshot"]["spent"], 0);
+        assert_eq!(output["snapshot"]["remaining"], Value::Null);
+        assert_eq!(output["snapshot"]["working_remaining"], Value::Null);
+        assert_eq!(output["snapshot"]["closing_remaining"], Value::Null);
+        assert_eq!(output["snapshot"]["usage_unavailable_calls"], 1);
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "unknown spend must not admit another provider call"
+        );
+
+        let detail = get_run(State(state), Path(started.id))
+            .await
+            .expect("detail")
+            .0;
+        let terminal = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
+            .and_then(|entry| entry.result.as_ref())
+            .expect("terminal budget reading");
+        assert!(matches!(
+            terminal,
+            WorkflowJournalResult::TerminalBudget {
+                spent: 0,
+                remaining: None,
+                closing_remaining: None,
+                usage_unavailable_calls: 1,
+            }
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]

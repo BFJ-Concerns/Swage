@@ -6027,6 +6027,11 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "usage_unavailable_calls": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
               "winding_down": {
                 "type": "boolean"
               },
@@ -6042,7 +6047,8 @@
             "required": [
               "kind",
               "spent",
-              "winding_down"
+              "winding_down",
+              "usage_unavailable_calls"
             ],
             "type": "object"
           },
@@ -6072,11 +6078,17 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "usage_unavailable_calls": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
               }
             },
             "required": [
               "kind",
-              "spent"
+              "spent",
+              "usage_unavailable_calls"
             ],
             "type": "object"
           },
