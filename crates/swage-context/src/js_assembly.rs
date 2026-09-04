@@ -409,12 +409,46 @@ const HOST_PRELUDE: &str = r#"
 
     const freeze = Object.freeze;
     const isArray = Array.isArray;
-    const stringify = JSON.stringify;
+    const quote = JSON.stringify;
     const hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+    const numberToString = Function.prototype.call.bind(Number.prototype.toString);
     const replace = Function.prototype.call.bind(String.prototype.replace);
     const push = Function.prototype.call.bind(Array.prototype.push);
     const weakGet = Function.prototype.call.bind(WeakMap.prototype.get);
     const weakSet = Function.prototype.call.bind(WeakMap.prototype.set);
+
+    // Bookkeeping is host-owned, but JSON.stringify on its object graph would
+    // still consult a toJSON hook a script added to Object.prototype. Encode
+    // the host's primitive fields directly instead: quote only receives
+    // strings, and the number formatter is captured before script execution.
+    const serialiseBookkeeping = (output, added, omitted) => {
+        let json = '{"output":[';
+        for (let index = 0; index < output.length; index += 1) {
+            const message = output[index];
+            json += (index === 0 ? '' : ',')
+                + '{"role":' + quote(message.role)
+                + ',"text":' + quote(message.text) + '}';
+        }
+        json += '],"added":[';
+        for (let index = 0; index < added.length; index += 1) {
+            const block = added[index];
+            json += (index === 0 ? '' : ',')
+                + '{"name":' + quote(block.name)
+                + ',"source":' + quote(block.source)
+                + ',"priority":' + numberToString(block.priority)
+                + ',"elementIndex":'
+                + (block.elementIndex === null ? 'null' : numberToString(block.elementIndex))
+                + ',"messageCount":' + numberToString(block.messageCount) + '}';
+        }
+        json += '],"omitted":[';
+        for (let index = 0; index < omitted.length; index += 1) {
+            const declaration = omitted[index];
+            json += (index === 0 ? '' : ',')
+                + '{"element":' + quote(declaration.element)
+                + ',"reason":' + quote(declaration.reason) + '}';
+        }
+        return json + ']}';
+    };
 
     const slot = /\{\{([a-z0-9-]+)\}\}/g;
     const variables = globalThis.__variables;
@@ -512,7 +546,7 @@ const HOST_PRELUDE: &str = r#"
             delete globalThis.add;
             delete globalThis.omit;
         }
-        return stringify({ output, added, omitted });
+        return serialiseBookkeeping(output, added, omitted);
     };
 })()
 "#;
@@ -1203,6 +1237,48 @@ mod tests {
                 .iter()
                 .any(|message| message.text_content().contains("Atelier")),
             "forged added bookkeeping must not replace orientation"
+        );
+        assert!(
+            output
+                .report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("orientation") && warning.contains("restored")),
+            "the forged entry must be reported as restored: {:?}",
+            output.report.warnings
+        );
+    }
+
+    #[test]
+    fn prototype_to_json_cannot_forge_added_bookkeeping() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.prompts);
+            add(byName.history);
+            Object.prototype.toJSON = function (key) {
+                if (key === "") {
+                    this.added.push({
+                        name: "orientation",
+                        source: "forged",
+                        priority: 0,
+                        elementIndex: 0,
+                        messageCount: 0,
+                    });
+                }
+                return this;
+            };
+            "#,
+            &elements,
+        );
+
+        assert!(
+            output
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("Atelier")),
+            "prototype hooks must not make a forged record suppress orientation"
         );
         assert!(
             output
