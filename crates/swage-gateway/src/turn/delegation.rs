@@ -762,12 +762,12 @@ impl DelegationHandler for GatewayDelegationHandler {
                             .worktree_host
                             .provision(owner_id, 0, &repo.path)
                             .await
-                            .map_err(AgentError::InvalidConfig)?,
-                        can_write: repo.can_write,
-                        authority_path: repo.authority_path,
-                        authority_context_id: repo.authority_context_id,
-                    })
-                }
+                            .map_err(AgentError::InvalidConfig)?
+                            .path,
+                    can_write: repo.can_write,
+                    authority_path: repo.authority_path,
+                    authority_context_id: repo.authority_context_id,
+                })
             }
         };
         if let Some(placement) = placement.as_ref() {
