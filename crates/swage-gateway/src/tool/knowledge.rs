@@ -38,7 +38,6 @@ use swage_tool::context::ToolContext;
 use crate::knowledge;
 use crate::state::AppState;
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 
 const SEARCH_TOOL: &str = "knowledge_search";
 const RECORD_TOOL: &str = "knowledge_record";
@@ -58,13 +57,11 @@ fn gateway_state<'ctx>(
     tool: &str,
     ctx: &'ctx dyn ToolContext,
 ) -> Result<&'ctx AppState, ToolError> {
-    ctx.as_any()
-        .downcast_ref::<GatewayToolContext>()
-        .and_then(GatewayToolContext::app_state)
-        .ok_or_else(|| ToolError::ExecutionFailed {
-            name: tool.to_owned(),
-            message: "the knowledge tools run only inside a gateway host turn".to_owned(),
-        })
+    super::require_gateway_state(
+        ctx,
+        tool,
+        "the knowledge tools run only inside a gateway host turn",
+    )
 }
 
 fn invalid(tool: &str, message: impl Into<String>) -> ToolError {

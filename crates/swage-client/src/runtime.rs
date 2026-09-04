@@ -24,6 +24,36 @@ pub struct RuntimeMetadata {
     pub started_at: DateTime<Utc>,
 }
 
+/// Replace a file through a newly-created sibling, so readers observe either
+/// the previous complete file or the new complete file.
+pub fn write_atomically(path: &Path, body: &[u8]) -> io::Result<()> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "metadata path has no file name",
+        )
+    })?;
+    let temporary = path.with_file_name(format!(
+        ".{}-{}-{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        METADATA_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    ));
+    let write_result = (|| -> io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
+}
+
 impl RuntimeMetadata {
     /// Constructs a new metadata record with the current timestamp.
     pub fn new(pid: u32, address: String) -> Self {
@@ -109,31 +139,7 @@ impl RuntimeMetadata {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let file_name = path.file_name().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "metadata path has no file name",
-            )
-        })?;
-        let temporary = path.with_file_name(format!(
-            ".{}-{}-{}.tmp",
-            file_name.to_string_lossy(),
-            std::process::id(),
-            METADATA_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
-        ));
-        let write_result = (|| -> io::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            file.write_all(json.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, path)
-        })();
-        if write_result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        write_result
+        write_atomically(path, json.as_bytes())
     }
 
     pub fn load_from(path: &Path) -> io::Result<Self> {
