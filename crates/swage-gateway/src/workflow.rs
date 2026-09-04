@@ -10011,7 +10011,7 @@ mod tests {
             const reading = await staleness(worker);
             const second = await send(worker, "now do the work");
             await close(worker);
-            return {second, stale: reading.stale, thresholdMs: reading.thresholdMs};
+            return {second, reading};
         "#;
         let (storage, run, provider, _home) = run_held_worker_script(
             source,
@@ -10022,15 +10022,10 @@ mod tests {
         )
         .await;
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
-        assert_eq!(
-            run.final_output,
-            Some(serde_json::json!({
-                "second": "the work is done",
-                "stale": Value::Null,
-                "thresholdMs": Value::Null,
-            })),
-            "a route declaring no threshold reports an unknown verdict, not a guessed one"
-        );
+        let output = run.final_output.as_ref().expect("held-worker output");
+        assert_eq!(output["second"], "the work is done");
+        assert_eq!(output["reading"]["stale"], Value::Null);
+        assert_eq!(output["reading"]["thresholdMs"], Value::Null);
 
         let requests = provider.requests.lock().expect("requests");
         assert_eq!(requests.len(), 2, "two turns reached the provider");
@@ -10093,6 +10088,78 @@ mod tests {
                 .filter(|entry| entry.kind == "agent_call")
                 .all(|entry| entry.request["worker"] == worker_id),
             "every turn names the worker it belongs to"
+        );
+
+        let original_output = run.final_output.clone();
+        let original_worker_id = opened.id;
+        let original_session_id = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result["session_id"].as_str())
+            .map(str::to_owned)
+            .expect("recorded worker session");
+        let original_staleness = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("staleness")
+            })
+            .and_then(|entry| entry.result.clone())
+            .expect("recorded staleness");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate process interruption");
+        let replay_state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(NamedTool::new("knowledge_search")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        let _resumed = resume_run(State(replay_state.clone()), Path(run.id))
+        .await
+        .expect("resume held-worker run");
+        wait_for_terminal(&replay_state, run.id).await;
+        let replayed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run")
+            .expect("replayed run");
+        assert_eq!(replayed.state, "completed", "replay error: {:?}", replayed.error_message);
+        assert_eq!(replayed.final_output, original_output);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+        let replay_journal = storage.list_workflow_journal(run.id).await.expect("journal");
+        let replay_open = replay_journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
+            .expect("replayed open");
+        assert_eq!(replay_open.id, original_worker_id);
+        assert_eq!(
+            replay_journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call")
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result["session_id"].as_str()),
+            Some(original_session_id.as_str()),
+        );
+        assert_eq!(
+            replay_journal
+                .iter()
+                .find(|entry| {
+                    entry.kind == "worker"
+                        && entry.request.get("action").and_then(Value::as_str)
+                            == Some("staleness")
+                })
+                .and_then(|entry| entry.result.as_ref()),
+            Some(&original_staleness),
         );
     }
 
