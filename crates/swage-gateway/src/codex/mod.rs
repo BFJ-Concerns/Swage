@@ -206,10 +206,12 @@ pub async fn run_turn(
         {
             tracing::warn!(%thread_id, error = %storage_error, "failed to return Codex thread to idle");
         }
-        let _ = event_tx.send(AgentEvent::Error {
-            message: error.to_string(),
-            provider_failure: matches!(error, AgentError::ProviderFailed(_)),
-        });
+        if !matches!(error, AgentError::OutputSchemaFailed { .. }) {
+            let _ = event_tx.send(AgentEvent::Error {
+                message: error.to_string(),
+                provider_failure: matches!(error, AgentError::ProviderFailed(_)),
+            });
+        }
     }
     result
 }
@@ -487,8 +489,40 @@ async fn run_turn_inner(
             break;
         }
         if attempt == request.agent_config.max_output_retries {
-            structured_output = Some(Value::Null);
-            break;
+            let errors = vec![SchemaValidationError {
+                path: String::new(),
+                message: "Codex output did not match the required JSON schema".into(),
+            }];
+            state
+                .storage
+                .update_response(request.turn_id, &response_text)
+                .await?;
+            state
+                .storage
+                .update_tokens(
+                    request.turn_id,
+                    i64::from(input_tokens),
+                    i64::from(output_tokens),
+                )
+                .await?;
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id: request.thread_id,
+                    attachments: Vec::new(),
+                    turn_id: Some(request.turn_id),
+                    role: Role::Assistant,
+                    content: response_text.clone(),
+                    agent_id: request.agent_id.clone(),
+                })
+                .await?;
+            let attempts = attempt + 1;
+            let _ = request.event_tx.send(AgentEvent::OutputSchemaFailed {
+                turn_id: request.turn_id,
+                attempts,
+                errors,
+            });
+            return Err(AgentError::OutputSchemaFailed { attempts });
         }
         let _ = request.event_tx.send(AgentEvent::OutputSchemaRetry {
             turn_id: request.turn_id,
@@ -1212,7 +1246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scripted_schema_exhaustion_retries_to_the_configured_bound_and_returns_null() {
+    async fn scripted_schema_exhaustion_retries_to_the_configured_bound_and_fails_the_turn() {
         let invalid_turn = |turn_id: &str| {
             vec![
                 json!({"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":turn_id}}}),
@@ -1221,7 +1255,7 @@ mod tests {
                 json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":turn_id,"status":"completed"}}}),
             ]
         };
-        let scenario = json!({"keepOpen":true,"steps":[
+        let scenario = json!({"steps":[
             {
                 "receive":{"method":"thread/start"},
                 "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
@@ -1234,7 +1268,7 @@ mod tests {
             .with_output_schema(json!({"type":"object","required":["result"]}), 1);
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _, events) = run_scripted_turn_with_config(
+        let (result, _, storage, events) = run_scripted_turn_with_config(
             scenario,
             dispatcher,
             permissions(&[], &[]),
@@ -1243,8 +1277,10 @@ mod tests {
         )
         .await;
 
-        let output = result.expect("schema exhaustion must settle as a completed null result");
-        assert_eq!(output.structured_output, Some(Value::Null));
+        assert!(matches!(
+            result,
+            Err(AgentError::OutputSchemaFailed { attempts: 2 })
+        ));
         assert_eq!(
             events
                 .iter()
@@ -1265,6 +1301,19 @@ mod tests {
                 ..
             }
         )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::OutputSchemaFailed {
+                attempts: 2,
+                errors,
+                ..
+            } if errors.len() == 1
+        )));
+        let turns = storage.db.lock().await.turns.clone();
+        let turn = turns.values().next().expect("schema-exhausted turn is retained");
+        assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(turn.assistant_response.as_deref(), Some("not json"));
+        assert_eq!(turn.structured_output, None);
         assert_eq!(
             events
                 .iter()
