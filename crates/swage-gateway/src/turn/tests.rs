@@ -14720,16 +14720,12 @@ async fn structured_output_is_persisted_before_turn_complete() {
         .await
     });
 
-    loop {
-        tokio::select! {
-            () = storage.wait_for_structured_output_write() => break,
-            event = rx.recv() => {
-                assert!(
-                    !matches!(event, Some(ServerEvent::TurnComplete { .. })),
-                    "TurnComplete became observable before structured-output persistence began"
-                );
-            }
-        }
+    storage.wait_for_structured_output_write().await;
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, ServerEvent::TurnComplete { .. }),
+            "TurnComplete became observable before structured-output persistence completed"
+        );
     }
     storage.release_structured_output_write();
 
