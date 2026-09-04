@@ -528,7 +528,8 @@ impl DelegationHandler for GatewayDelegationHandler {
                         .worktree_host
                         .provision(owner_id, 0, &repo.path)
                         .await
-                        .map_err(AgentError::InvalidConfig)?,
+                        .map_err(AgentError::InvalidConfig)?
+                        .path,
                     can_write: repo.can_write,
                     authority_path: repo.authority_path,
                     authority_context_id: repo.authority_context_id,
