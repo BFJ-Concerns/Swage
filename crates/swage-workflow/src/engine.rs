@@ -1973,6 +1973,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_refuses_a_concurrent_turn_through_an_alias_handle() {
+        let host = Arc::new(SurfaceHost {
+            agent_delay_ms: 50,
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer"});
+                const alias = {...worker};
+                const first = send(worker, "first");
+                await Promise.resolve();
+                let concurrent = null;
+                try { await send(alias, "overlap"); }
+                catch (error) { concurrent = error.name; }
+                await first;
+                await close(worker);
+                return concurrent;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("concurrent refusal is catchable");
+
+        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), "HeldWorkerError");
+        assert_eq!(
+            host.agent_requests.lock().unwrap().len(),
+            1,
+            "the overlapping turn never reaches the host"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn held_worker_staleness_reports_the_recorded_route_reading() {
         let host = Arc::new(SurfaceHost {
             staleness_reading: json!({
