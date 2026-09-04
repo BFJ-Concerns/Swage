@@ -26,14 +26,15 @@ pub struct SubmitTurnRequest {
     /// Content parts submitted beside the text, in order. Absent means
     /// text only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
     pub attachments: Vec<MessageAttachment>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub compaction_focus: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub model: Option<String>,
 }
 

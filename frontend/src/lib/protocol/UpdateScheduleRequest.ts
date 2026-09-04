@@ -9,8 +9,8 @@ import type { ScheduleSpec } from "./ScheduleSpec";
  * The session policy is fixed at creation — delete and recreate to change
  * where runs execute.
  */
-export type UpdateScheduleRequest = { message: string | null, spec: ScheduleSpec | null, routing: DeliveryRoutingRequest | null,
+export type UpdateScheduleRequest = { message?: string | null, spec?: ScheduleSpec | null, routing?: DeliveryRoutingRequest | null,
 /**
  * Set or clear the gate. Absent leaves the existing gate untouched.
  */
-gate: ScheduleGateUpdate | null, };
+gate?: ScheduleGateUpdate | null, };

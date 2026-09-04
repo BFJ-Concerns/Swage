@@ -12,6 +12,7 @@ import type { KnownServerEventType, ServerEvent } from "../types";
 
 export interface WorkSurfaceChannel {
   onSignal(handler: (event: ServerEvent) => void): void;
+  onReconnect(handler: () => void): void;
   close(): void;
 }
 
@@ -34,11 +35,13 @@ export function createWorkSurfaceChannel(
   options?: WorkSurfaceChannelOptions,
 ): WorkSurfaceChannel {
   const handlers: ((event: ServerEvent) => void)[] = [];
+  const reconnectHandlers: (() => void)[] = [];
 
   let ws: WebSocket | null = null;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectDelay = BACKOFF_BASE_MS;
+  let hasConnected = false;
 
   function resolveWsBase(): string {
     if (options?.wsBaseUrl !== undefined) return options.wsBaseUrl;
@@ -66,6 +69,10 @@ export function createWorkSurfaceChannel(
 
     ws.onopen = () => {
       reconnectDelay = BACKOFF_BASE_MS;
+      if (hasConnected) {
+        for (const handler of reconnectHandlers) handler();
+      }
+      hasConnected = true;
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -104,6 +111,10 @@ export function createWorkSurfaceChannel(
   return {
     onSignal(handler: (event: ServerEvent) => void): void {
       handlers.push(handler);
+    },
+
+    onReconnect(handler: () => void): void {
+      reconnectHandlers.push(handler);
     },
 
     close(): void {

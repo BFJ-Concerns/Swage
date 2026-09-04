@@ -3,5 +3,6 @@ import type { WorkflowAgentCallDetail } from "./WorkflowAgentCallDetail";
 import type { WorkflowEffectDetail } from "./WorkflowEffectDetail";
 import type { WorkflowJournalEntryKind } from "./WorkflowJournalEntryKind";
 import type { WorkflowJournalEntryStatus } from "./WorkflowJournalEntryStatus";
+import type { WorkflowJournalResult } from "./WorkflowJournalResult";
 
-export type WorkflowJournalEntry = { id: string, seq: bigint, completed_order: bigint | null, kind: WorkflowJournalEntryKind, status: WorkflowJournalEntryStatus, label: string | null, request: unknown, result: unknown, error_message: string | null, agent_call: WorkflowAgentCallDetail | null, effect: WorkflowEffectDetail | null, started_at: string, completed_at: string | null, };
+export type WorkflowJournalEntry = { id: string, seq: bigint, completed_order: bigint | null, kind: WorkflowJournalEntryKind, status: WorkflowJournalEntryStatus, label: string | null, request: unknown, result: WorkflowJournalResult | null, error_message: string | null, agent_call: WorkflowAgentCallDetail | null, effect: WorkflowEffectDetail | null, started_at: string, completed_at: string | null, };
