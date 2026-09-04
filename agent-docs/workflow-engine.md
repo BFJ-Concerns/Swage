@@ -79,7 +79,7 @@ override, but `undefined` at the call site falls back to the default.
 |---|---|---|
 | `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. |
-| `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `effort`, `cwd`, `isolation`, `label`. |
+| `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
 | `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
 | `staleness(worker)` | `Promise<StalenessReading>` | Returns `{stale, idleMs, thresholdMs, route}` from a journalled reading. |
 | `close(worker)` | `Promise<void>` | Closes a held worker. Repeated calls with the same JS worker object are no-ops. |
@@ -99,13 +99,15 @@ override, but `undefined` at the call site falls back to the default.
 
 ### Agent model fallback
 
-`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. The
-host uses it only when the requested model is unavailable or the provider
-refuses or fails it before any output; schema exhaustion and failures after output do
-not fall back. A completed `agent_call` result records `served_model`, the
-catalogue model that actually served the call. Continuation calls ignore
-`fallbackModel` and never make a fallback attempt; they use the worker's
-persisted model selection, including a fallback selected at creation.
+`agent()`, `agentStart()`, and `session()` accept `fallbackModel`, a catalogue
+model id. For a held worker it is a creation-only option, fixed with the rest of
+the worker's execution envelope. The host uses it only when the requested model
+is unavailable or the provider refuses or fails it before any output; schema
+exhaustion and failures after output do not fall back. A completed `agent_call`
+result records `served_model`, the catalogue model that actually served the
+call. Continuation calls ignore `fallbackModel` and never make a fallback
+attempt; they use the worker's persisted model selection, including a fallback
+selected at creation.
 
 ### Held workers
 
