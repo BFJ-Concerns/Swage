@@ -385,8 +385,18 @@ async fn run_turn_inner(
                         let tool_client = client.clone();
                         let tool_request = request.clone();
                         let position = tool_count;
+                        let provider_round =
+                            i32::try_from(attempt.saturating_add(1)).unwrap_or(i32::MAX);
                         tool_tasks.spawn(async move {
-                            handle_tool_call(&tool_state, &tool_client, &tool_request, incoming, position).await;
+                            handle_tool_call(
+                                &tool_state,
+                                &tool_client,
+                                &tool_request,
+                                incoming,
+                                position,
+                                provider_round,
+                            )
+                            .await;
                         });
                     } else {
                         handle_approval(&state, &client, &request, incoming, &active_items).await;
@@ -606,6 +616,7 @@ async fn handle_tool_call(
     request: &CodexTurnRequest,
     incoming: swage_codex::ServerRequest,
     position: u32,
+    provider_round: i32,
 ) {
     let tool = incoming
         .params
@@ -685,7 +696,7 @@ async fn handle_tool_call(
             duration_ms: Some(duration_ms),
             truncated: false,
             total_bytes: None,
-            provider_round: 0,
+            provider_round,
             position: i32::try_from(position.saturating_sub(1)).unwrap_or(i32::MAX),
             parent_call_id: None,
             display_summary,
@@ -1428,6 +1439,73 @@ mod tests {
         let output = result.expect("scripted tool turn succeeds");
         assert_eq!(output.response, "done");
         assert_eq!(output.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn scripted_schema_retry_records_tool_calls_in_their_provider_round() {
+        let dispatcher =
+            ToolDispatcher::allow_all([Arc::new(NamedTool::echoing("file_read")) as Arc<dyn Tool>]);
+        let tool_request = |id: &str, call_id: &str| json!({"jsonrpc":"2.0","id":id,"method":"item/tool/call","params":{"tool":"file_read","callId":call_id,"arguments":{"path":"probe.txt"}}});
+        let tool_response = |id: &str| json!({"jsonrpc":"2.0","id":id,"result":{"success":true,"contentItems":[{"type":"inputText","text":"{\"path\":\"probe.txt\"}"}]}});
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"scripted turn"}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"first"}}},
+                    tool_request("tool-first", "call-first")
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":tool_response("tool-first"),
+                "send":[
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"first","status":"completed"}}}
+                ]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema."}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"second"}}},
+                    tool_request("tool-second", "call-second")
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":tool_response("tool-second"),
+                "send":[
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"{\\\"result\\\":true}"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"second","status":"completed"}}}
+                ]
+            }
+        ]});
+        let config = AgentConfig::new("gateway")
+            .with_workspace("/work", vec!["/work".into()])
+            .with_output_schema(json!({"type":"object","required":["result"]}), 1);
+
+        let (result, _, storage, _) = run_scripted_turn_with_config(
+            scenario,
+            dispatcher,
+            permissions(&["file_read"], &[]),
+            false,
+            config,
+        )
+        .await;
+
+        result.expect("a valid retry completes the turn");
+        let calls = storage.db.lock().await.tool_calls.clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.call_id.as_str(), call.provider_round))
+                .collect::<Vec<_>>(),
+            vec![("call-first", 1), ("call-second", 2)]
+        );
     }
 
     #[tokio::test]
