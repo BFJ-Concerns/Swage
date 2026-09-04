@@ -1117,11 +1117,16 @@ impl WorkflowEngine {
                             error.name = "HeldWorkerError";
                             return error;
                         };
+                        const heldWorkerStates = new Map();
                         const requireWorker = (worker, caller) => {
                             if (!worker || typeof worker.workerId !== "string") {
                                 throw heldWorkerError(`${caller} requires a worker from session()`);
                             }
-                            return worker;
+                            const state = heldWorkerStates.get(worker.workerId);
+                            if (!state) {
+                                throw heldWorkerError(`${caller} requires a worker from session()`);
+                            }
+                            return state;
                         };
                         globalThis.session = async (options = {}) => {
                             // Script-wide defaults may also contain per-turn
@@ -1167,22 +1172,33 @@ impl WorkflowEngine {
                             };
                             const opened = unwrapHostResponse(await __workerOpen(JSON.stringify(open)));
                             const creation = opened.creation ?? open;
-                            return {
-                                workerId: opened.worker_id,
-                                label: creation.label ?? null,
+                            const state = {
                                 creation,
                                 session: null,
                                 turns: 0,
                                 closed: false,
                                 busy: false,
                             };
+                            heldWorkerStates.set(opened.worker_id, state);
+                            const worker = {
+                                workerId: opened.worker_id,
+                                label: creation.label ?? null,
+                            };
+                            Object.defineProperties(worker, {
+                                creation: {enumerable: true, get: () => state.creation},
+                                session: {enumerable: true, get: () => state.session},
+                                turns: {enumerable: true, get: () => state.turns},
+                                closed: {enumerable: true, get: () => state.closed},
+                                busy: {enumerable: true, get: () => state.busy},
+                            });
+                            return worker;
                         };
                         // One turn on a held worker. Turns are sequential: a
                         // second send while one is in flight is refused rather
                         // than quietly queued, so the script's own ordering is
                         // the ordering the journal records.
                         globalThis.send = async (worker, prompt, options = {}) => {
-                            requireWorker(worker, "send()");
+                            const state = requireWorker(worker, "send()");
                             validateAgentPrompt(prompt, "send");
                             for (const key of Object.keys(options)) {
                                 if (options[key] === undefined) continue;
@@ -1195,46 +1211,49 @@ impl WorkflowEngine {
                                     throw heldWorkerError(`unknown send() option '${key}'`);
                                 }
                             }
-                            if (worker.closed) {
+                            if (state.closed) {
                                 throw heldWorkerError("this worker is closed; open a new one to keep working");
                             }
-                            if (worker.busy) {
+                            if (state.busy) {
                                 throw heldWorkerError("this worker is already taking a turn; a worker's turns are sequential");
                             }
-                            const { fallback_model: fallbackModel, ...creation } = worker.creation;
+                            const { fallback_model: fallbackModel, ...creation } = state.creation;
                             const request = buildAgentRequest({
                                 ...creation,
                                 fallbackModel,
                                 schema: options.schema,
                                 maxAttempts: options.maxAttempts,
                                 timeoutMs: options.timeoutMs,
-                                label: options.label ?? worker.creation.label,
-                                session: worker.session,
+                                label: options.label ?? state.creation.label,
+                                session: state.session,
                                 worker: worker.workerId,
                             });
-                            if (worker.session !== null) {
+                            if (state.session !== null) {
                                 delete request.model;
                                 delete request.cwd;
                                 delete request.isolation;
                                 delete request.fallback_model;
                             }
-                            worker.busy = true;
+                            state.busy = true;
                             try {
                                 const response = unwrapAgentResponse(
                                     await __agent(prompt, JSON.stringify(request))
                                 );
-                                worker.session = response.session ?? worker.session;
-                                worker.turns += 1;
+                                state.session = response.session ?? state.session;
+                                state.turns += 1;
                                 return response.value;
                             } finally {
-                                worker.busy = false;
+                                state.busy = false;
                             }
                         };
                         globalThis.close = async (worker) => {
-                            requireWorker(worker, "close()");
-                            if (worker.closed) return;
+                            const state = requireWorker(worker, "close()");
+                            if (state.closed) return;
+                            if (state.busy) {
+                                throw heldWorkerError("this worker is already taking a turn; close it after the turn settles");
+                            }
                             unwrapHostResponse(await __workerClose(worker.workerId));
-                            worker.closed = true;
+                            state.closed = true;
                         };
                         // What the worker's idle gap actually is, against the
                         // threshold of the route its model draws on — recorded
@@ -1989,8 +2008,13 @@ mod tests {
                 try { await send(alias, "overlap"); }
                 catch (error) { concurrent = error.name; }
                 await first;
+                await send(alias, "follow-up");
+                await close(alias);
+                let afterClose = null;
+                try { await send(worker, "after close"); }
+                catch (error) { afterClose = error.name; }
                 await close(worker);
-                return concurrent;
+                return {concurrent, afterClose};
                 "#,
                 "null",
                 CancellationToken::new(),
@@ -2000,11 +2024,21 @@ mod tests {
             .await
             .expect("concurrent refusal is catchable");
 
-        assert_eq!(serde_json::from_str::<Value>(&output).unwrap(), "HeldWorkerError");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "concurrent": "HeldWorkerError",
+                "afterClose": "HeldWorkerError",
+            })
+        );
         assert_eq!(
             host.agent_requests.lock().unwrap().len(),
-            1,
-            "the overlapping turn never reaches the host"
+            2,
+            "only the first and sequential follow-up turns reach the host"
+        );
+        assert!(
+            host.agent_requests.lock().unwrap()[1].session.is_some(),
+            "the alias continues the centrally held session"
         );
     }
 
