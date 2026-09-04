@@ -45,4 +45,7 @@ pub use discovery::{DiscoveredSpace, discover, effective_root_path, resolve_root
 pub use merge::PartialConfig;
 
 // Resolution pipeline — primary public API
-pub use resolve::{apply_overlay, load_resolved_config, load_resolved_config_from, validate_files};
+pub use resolve::{
+    apply_overlay, configuration_hierarchy, load_resolved_config, load_resolved_config_from,
+    validate_files,
+};

@@ -7,7 +7,6 @@ use swage_tool::context::ToolContext;
 
 use crate::state::AppState;
 use crate::tool::Tool;
-use crate::tool_executor::GatewayToolContext;
 
 const TOOL: &str = "session_values";
 
@@ -20,13 +19,11 @@ fn invalid(message: impl Into<String>) -> ToolError {
     }
 }
 fn state(ctx: &dyn ToolContext) -> Result<&AppState, ToolError> {
-    ctx.as_any()
-        .downcast_ref::<GatewayToolContext>()
-        .and_then(GatewayToolContext::app_state)
-        .ok_or_else(|| ToolError::ExecutionFailed {
-            name: TOOL.into(),
-            message: "session values can be changed only inside a gateway host turn".into(),
-        })
+    super::require_gateway_state(
+        ctx,
+        TOOL,
+        "session values can be changed only inside a gateway host turn",
+    )
 }
 fn service_error(error: GatewayError) -> ToolError {
     match error {
