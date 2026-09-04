@@ -5463,6 +5463,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "served_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "session_id": {
           "type": [
             "string",

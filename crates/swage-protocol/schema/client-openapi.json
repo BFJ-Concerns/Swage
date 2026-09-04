@@ -5147,6 +5147,12 @@
               "null"
             ]
           },
+          "served_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "session_id": {
             "format": "uuid",
             "type": [

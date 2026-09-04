@@ -199,7 +199,10 @@ pub enum AgentEvent {
     },
 
     /// A non-recoverable error occurred during turn processing.
-    Error { message: String },
+    Error {
+        message: String,
+        provider_failure: bool,
+    },
 }
 
 #[cfg(test)]
@@ -328,9 +331,15 @@ mod tests {
     fn test_error_constructible() {
         let event = AgentEvent::Error {
             message: "something went wrong".to_string(),
+            provider_failure: false,
         };
-        if let AgentEvent::Error { message } = event {
+        if let AgentEvent::Error {
+            message,
+            provider_failure,
+        } = event
+        {
             assert_eq!(message, "something went wrong");
+            assert!(!provider_failure);
         } else {
             panic!("unexpected variant");
         }
@@ -407,6 +416,7 @@ mod tests {
         .unwrap();
         tx.send(AgentEvent::Error {
             message: "err".to_string(),
+            provider_failure: false,
         })
         .unwrap();
 
