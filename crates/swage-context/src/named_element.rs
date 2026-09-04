@@ -14,10 +14,7 @@ use swage_config::HierarchyLevel;
 const RESERVED_ELEMENT_NAMES: &[&str] = &["history", "memory", "orientation", "prompts", "skills"];
 
 pub(crate) fn has_valid_element_name_shape(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    swage_core::is_lowercase_identifier(name)
 }
 
 /// A resolved Markdown context file, including its precise provenance.

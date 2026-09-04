@@ -19,6 +19,20 @@ pub mod runtime;
 pub mod secret;
 pub mod tool;
 
+/// Whether a value is a non-empty lowercase ASCII slug.
+pub fn is_lowercase_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Compile a JSON Schema for the validation surfaces that share Swage's
+/// contract grammar. Callers retain ownership of their user-facing errors.
+pub fn json_schema_validator(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+    jsonschema::validator_for(schema).map_err(|error| error.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Convenience re-exports
 // ---------------------------------------------------------------------------
