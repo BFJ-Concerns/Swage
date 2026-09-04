@@ -1705,7 +1705,17 @@ async fn resolve_held_worker_open(
     Ok(open)
 }
 
-fn held_worker_replay_matches(requested: &HeldWorkerOpen, recorded: &HeldWorkerOpen) -> bool {
+fn held_worker_replay_matches(
+    config: &swage_config::ResolvedConfig,
+    requested: &HeldWorkerOpen,
+    recorded: &HeldWorkerOpen,
+) -> bool {
+    let requested_model = requested.model.as_deref().and_then(|model| {
+        crate::turn::resolve_requested_turn_model(config, model).ok()
+    });
+    let requested_fallback = requested.fallback_model.as_deref().and_then(|model| {
+        crate::turn::resolve_requested_turn_model(config, model).ok()
+    });
     requested.agent == recorded.agent
         && requested.task == recorded.task
         && requested.tools == recorded.tools
@@ -1713,11 +1723,12 @@ fn held_worker_replay_matches(requested: &HeldWorkerOpen, recorded: &HeldWorkerO
         && requested.cwd == recorded.cwd
         && requested.isolation == recorded.isolation
         && requested.label == recorded.label
-        && requested.fallback_model == recorded.fallback_model
+        && requested.fallback_model.is_none() == recorded.fallback_model.is_none()
+        && requested_fallback == recorded.fallback_model
         && requested
             .model
             .as_ref()
-            .is_none_or(|model| recorded.model.as_ref() == Some(model))
+            .is_none_or(|_| requested_model == recorded.model)
         && requested
             .effort
             .as_ref()
@@ -4122,7 +4133,13 @@ async fn run_host_commands_inner(
                                     .map_err(|error| error.to_string())
                             });
                         match recorded {
-                            Ok(recorded) if held_worker_replay_matches(&open, &recorded) => {
+                            Ok(recorded)
+                                if held_worker_replay_matches(
+                                    &state.active_config(),
+                                    &open,
+                                    &recorded,
+                                ) =>
+                            {
                                 recorded
                             }
                             Ok(_) => {
@@ -10207,6 +10224,37 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn held_worker_replay_accepts_the_same_model_aliases_as_opening() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.entries.insert(
+            "steady".into(),
+            swage_config::ModelEndpointConfig {
+                aliases: vec!["steady-alias".into()],
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "backup".into(),
+            swage_config::ModelEndpointConfig {
+                aliases: vec!["backup-alias".into()],
+                ..Default::default()
+            },
+        );
+        let requested = HeldWorkerOpen {
+            model: Some("steady-alias".into()),
+            fallback_model: Some("backup-alias".into()),
+            ..HeldWorkerOpen::default()
+        };
+        let recorded = HeldWorkerOpen {
+            model: Some("steady".into()),
+            fallback_model: Some("backup".into()),
+            ..HeldWorkerOpen::default()
+        };
+
+        assert!(held_worker_replay_matches(&config, &requested, &recorded));
     }
 
     #[tokio::test(flavor = "multi_thread")]
