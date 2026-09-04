@@ -10,4 +10,4 @@ import type { Effort } from "./Effort";
  * `agent_id` must be `"gateway"` or an agent definition visible to the
  * target space; the gateway rejects anything else with a validation error.
  */
-export type CreateConversationRequest = { selected_model_id?: string, agent_id?: string, effort?: Effort, };
+export type CreateConversationRequest = { selected_model_id?: string | null, agent_id?: string | null, effort?: Effort | null, };
