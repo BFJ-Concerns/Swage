@@ -1130,6 +1130,13 @@ impl WorkflowEngine {
                             "AgentRequiredError",
                             "InvalidAgentOptionError",
                         ]).has(error.name);
+                        const isIdentifiedFailure = (value) => value !== null
+                            && typeof value === "object"
+                            && Object.prototype.hasOwnProperty.call(value, "label")
+                            && Object.prototype.hasOwnProperty.call(value, "phase")
+                            && Object.prototype.hasOwnProperty.call(value, "output")
+                            && Object.prototype.hasOwnProperty.call(value, "failure")
+                            && value.failure !== null;
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
                                 try { return await thunk(); }
@@ -1159,6 +1166,7 @@ impl WorkflowEngine {
                                 for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
                                     try {
                                         previous = await stages[stageIndex](previous, item, index);
+                                        if (isIdentifiedFailure(previous)) return previous;
                                     } catch (error) {
                                         if (isPreSpawnAuthorError(error)) throw error;
                                         __log(`pipeline item ${index} stage ${stageIndex} failed: ${error.name}: ${error.message}`);
