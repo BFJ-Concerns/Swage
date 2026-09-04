@@ -7657,7 +7657,7 @@ mod tests {
                 )),
                 inline_workflow_name: Some("research-sweep".into()),
                 inline_workflow_version: Some(1),
-                carrying_skill: Some("skill".into()),
+                carrying_skill: Some("research".into()),
                 task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
@@ -7675,7 +7675,7 @@ mod tests {
             !captured_sources_grant_for_run(&state, &carried)
                 .await
                 .expect("resolve carried grant"),
-            "a carried workflow named like the built-in must retain its advertised denial"
+            "a counterfeit research carrier must retain its advertised denial"
         );
         launch_existing_run(state.clone(), carried.clone(), source.into(), None)
             .await
