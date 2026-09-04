@@ -9658,7 +9658,13 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             "agent-b",
             "scout the eastern approach",
             None,
-            None,
+            Some(
+                serde_json::to_value(vec![ChatMessage::new(
+                    Role::User,
+                    "the bridge is unsafe after dusk",
+                )])
+                .expect("serialise transferred context"),
+            ),
             None,
             None,
             None,
@@ -9779,7 +9785,8 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .join("\n");
     assert!(
         second.contains("scout the eastern approach")
-            && second.contains("the eastern approach is clear"),
+            && second.contains("the eastern approach is clear")
+            && second.contains("the bridge is unsafe after dusk"),
         "the returned-to child still sees what it was told and what it answered: {second}"
     );
     drop(requests);
