@@ -15,9 +15,10 @@ use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
-    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind,
+    WorkflowJournalResult, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunListResponse, WorkflowRunState,
+    WorkflowScript, WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -506,33 +507,50 @@ fn journal_wire(
             target_kind: entry.target_kind.unwrap_or_default(),
             idempotency_key,
         });
+    let result = entry.result.as_ref().and_then(|stored| {
+        journal_result_from_storage(kind, stored)
+            .map_err(|error| {
+                tracing::warn!(
+                    entry_id = %entry.id,
+                    entry_kind = %entry.kind,
+                    %error,
+                    "excluding invalid workflow journal result from client projection"
+                );
+            })
+            .ok()
+    });
     let agent_call = (entry.kind == "agent_call").then(|| {
-        let result = entry.result.as_ref();
+        let result = result.as_ref();
         WorkflowAgentCallDetail {
             agent_definition_id: entry
                 .request
                 .get("agent")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            session_id: result
-                .and_then(|v| v.get("session_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            thread_id: result
-                .and_then(|v| v.get("thread_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            turn_id: result
-                .and_then(|v| v.get("turn_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            input_tokens: result
-                .and_then(|v| v.get("input_tokens"))
-                .and_then(Value::as_u64),
-            output_tokens: result
-                .and_then(|v| v.get("output_tokens"))
-                .and_then(Value::as_u64),
-            served_model: result
-                .and_then(|v| v.get("served_model"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            session_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { session_id, .. } => *session_id,
+                _ => None,
+            }),
+            thread_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { thread_id, .. } => *thread_id,
+                _ => None,
+            }),
+            turn_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { turn_id, .. } => *turn_id,
+                _ => None,
+            }),
+            input_tokens: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { input_tokens, .. } => Some(*input_tokens),
+                _ => None,
+            }),
+            output_tokens: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { output_tokens, .. } => Some(*output_tokens),
+                _ => None,
+            }),
+            served_model: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { served_model, .. } => served_model.clone(),
+                _ => None,
+            }),
         }
     });
     let label = entry
@@ -548,13 +566,149 @@ fn journal_wire(
         status,
         label,
         request: entry.request,
-        result: entry.result,
+        result,
         error_message: entry.error_message,
         agent_call,
         effect,
         started_at: entry.started_at,
         completed_at: entry.completed_at,
     })
+}
+
+fn journal_result_from_storage(
+    kind: WorkflowJournalEntryKind,
+    stored: &Value,
+) -> Result<WorkflowJournalResult, String> {
+    let stored_tag = stored.get("kind").and_then(Value::as_str);
+    if kind != WorkflowJournalEntryKind::WorkflowCall
+        && let Some(tag) = stored_tag
+        && is_journal_result_tag(tag)
+        && !journal_result_tag_matches_kind(kind, tag)
+    {
+        return Err(format!(
+            "stored workflow journal result tag {tag:?} does not match entry kind {kind:?}"
+        ));
+    }
+
+    let tagged_object = |tag: &str| {
+        let mut object = stored
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "workflow journal result is not an object".to_string())?;
+        object.insert("kind".into(), Value::String(tag.into()));
+        Ok::<_, String>(Value::Object(object))
+    };
+    let event_object = |tag: &str| {
+        let mut object = stored
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "workflow journal result is not an object".to_string())?;
+        let event_kind = object
+            .remove("kind")
+            .ok_or_else(|| "workflow journal event result has no kind".to_string())?;
+        object.insert("event_kind".into(), event_kind);
+        object.insert("kind".into(), Value::String(tag.into()));
+        Ok::<_, String>(Value::Object(object))
+    };
+
+    let tagged = match kind {
+        WorkflowJournalEntryKind::AgentCall => tagged_object("agent_call")?,
+        WorkflowJournalEntryKind::WorkerPlacement if stored.get("paths").is_some() => {
+            tagged_object("worker_placement_list")?
+        }
+        WorkflowJournalEntryKind::WorkerPlacement => tagged_object("worker_placement")?,
+        WorkflowJournalEntryKind::Effect => tagged_object("effect")?,
+        WorkflowJournalEntryKind::Log => serde_json::json!({"kind": "log"}),
+        WorkflowJournalEntryKind::Phase => serde_json::json!({"kind": "phase"}),
+        WorkflowJournalEntryKind::WorkflowCall => {
+            serde_json::json!({"kind": "workflow_call", "output": stored})
+        }
+        WorkflowJournalEntryKind::Timer => tagged_object("timer")?,
+        WorkflowJournalEntryKind::Event if stored.get("delivered").is_some() => {
+            tagged_object("event_delivery")?
+        }
+        WorkflowJournalEntryKind::Event => event_object("event")?,
+        WorkflowJournalEntryKind::AwaitEvent => event_object("await_event")?,
+        WorkflowJournalEntryKind::Gate => tagged_object("gate")?,
+        WorkflowJournalEntryKind::Budget => tagged_object("budget")?,
+        WorkflowJournalEntryKind::TerminalBudget => tagged_object("terminal_budget")?,
+        WorkflowJournalEntryKind::WindDown => tagged_object("wind_down")?,
+    };
+
+    serde_json::from_value(tagged)
+        .map_err(|error| format!("invalid workflow journal result: {error}"))
+}
+
+fn is_journal_result_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "agent_call"
+            | "worker_placement"
+            | "worker_placement_list"
+            | "effect"
+            | "log"
+            | "phase"
+            | "workflow_call"
+            | "timer"
+            | "event"
+            | "event_delivery"
+            | "await_event"
+            | "gate"
+            | "budget"
+            | "terminal_budget"
+            | "wind_down"
+    )
+}
+
+fn journal_result_tag_matches_kind(kind: WorkflowJournalEntryKind, tag: &str) -> bool {
+    matches!(
+        (kind, tag),
+        (WorkflowJournalEntryKind::AgentCall, "agent_call")
+            | (
+                WorkflowJournalEntryKind::WorkerPlacement,
+                "worker_placement" | "worker_placement_list"
+            )
+            | (WorkflowJournalEntryKind::Effect, "effect")
+            | (WorkflowJournalEntryKind::Log, "log")
+            | (WorkflowJournalEntryKind::Phase, "phase")
+            | (WorkflowJournalEntryKind::WorkflowCall, "workflow_call")
+            | (WorkflowJournalEntryKind::Timer, "timer")
+            | (WorkflowJournalEntryKind::Event, "event" | "event_delivery")
+            | (WorkflowJournalEntryKind::AwaitEvent, "await_event")
+            | (WorkflowJournalEntryKind::Gate, "gate")
+            | (WorkflowJournalEntryKind::Budget, "budget")
+            | (WorkflowJournalEntryKind::TerminalBudget, "terminal_budget")
+            | (WorkflowJournalEntryKind::WindDown, "wind_down")
+    )
+}
+
+#[cfg(test)]
+mod journal_result_contract_tests {
+    use super::*;
+
+    #[test]
+    fn journal_result_kind_mismatch_is_rejected_at_the_storage_to_wire_seam() {
+        let entry = WorkflowJournalRecord {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            seq: 0,
+            completed_order: Some(0),
+            kind: "timer".into(),
+            status: "completed".into(),
+            args_hash: String::new(),
+            request: Value::Null,
+            result: Some(serde_json::json!({"kind": "log", "fired": true})),
+            error_message: None,
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+
+        let projected = journal_wire(entry).expect("journal entry projects");
+        assert_eq!(projected.result, None);
+    }
 }
 
 #[derive(Default)]
@@ -4692,7 +4846,7 @@ fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(
     let Some(schema) = schema else {
         return Ok(());
     };
-    let validator = jsonschema::validator_for(schema).map_err(|error| {
+    let validator = swage_core::json_schema_validator(schema).map_err(|error| {
         ApiError::validation(format!("workflow argument schema is invalid: {error}"))
     })?;
     validator.validate(args).map_err(|error| {
@@ -15608,6 +15762,90 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn run_detail_survives_malformed_results_and_preserves_workflow_output() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { completed: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let malformed_await = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: started.id,
+                seq: 100,
+                kind: "await_event".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("malformed await intent");
+        storage
+            .complete_workflow_journal_entry(
+                malformed_await.id,
+                serde_json::json!({"delivered": 3}),
+            )
+            .await
+            .expect("malformed await result");
+
+        let workflow_call = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: started.id,
+                seq: 101,
+                kind: "workflow_call".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("workflow call intent");
+        let workflow_output = serde_json::json!({"kind": "gate", "answer": 7});
+        storage
+            .complete_workflow_journal_entry(workflow_call.id, workflow_output.clone())
+            .await
+            .expect("workflow call result");
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail remains available");
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == malformed_await.id)
+                .expect("malformed await entry remains visible")
+                .result,
+            None
+        );
+        assert!(matches!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == workflow_call.id)
+                .expect("workflow call entry")
+                .result
+                .as_ref(),
+            Some(WorkflowJournalResult::WorkflowCall { output }) if output == &workflow_output
+        ));
+        assert!(detail.journal.iter().any(|entry| {
+            entry.kind == WorkflowJournalEntryKind::TerminalBudget && entry.result.is_some()
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -15669,7 +15907,7 @@ mod tests {
         storage
             .with_conn(move |connection| {
                 connection.execute_batch(&format!(
-                    "UPDATE workflow_journal SET result_json = '{{\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
+                    "UPDATE workflow_journal SET result_json = '{{\"spent\":6,\"remaining\":0,\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
                 ))?;
                 Ok(())
             })
@@ -15684,15 +15922,45 @@ mod tests {
             .expect("resume");
         wait_for_terminal(&state, started.id).await;
 
+        let bad_entry_id = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal after replay")
+            .into_iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("agent call beside terminal reading")
+            .id;
+        storage
+            .with_conn(move |connection| {
+                connection.execute_batch(&format!(
+                    "UPDATE workflow_journal SET result_json = '{{\"input_tokens\":\"invalid\"}}' WHERE id = '{bad_entry_id}';"
+                ))?;
+                Ok(())
+            })
+            .await
+            .expect("replace one stored result with an invalid shape");
+
         let Json(detail) = get_run(State(state), Path(started.id))
             .await
             .expect("get run");
+        let invalid = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == bad_entry_id)
+            .expect("invalid entry remains in run detail");
+        assert_eq!(invalid.result, None);
         let replayed = detail
             .journal
             .iter()
             .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
             .expect("projected terminal budget entry");
-        assert_eq!(replayed.result.as_ref().unwrap()["closing_remaining"], 99);
+        assert!(matches!(
+            replayed.result,
+            Some(WorkflowJournalResult::TerminalBudget {
+                closing_remaining: Some(99),
+                ..
+            })
+        ));
         assert_eq!(
             detail
                 .journal
@@ -16091,7 +16359,13 @@ mod tests {
             .find(|entry| entry.kind == WorkflowJournalEntryKind::WindDown)
             .expect("wind-down journal entry");
         assert_eq!(wind_down.status, WorkflowJournalEntryStatus::Completed);
-        assert_eq!(wind_down.result.as_ref().unwrap()["winding_down"], true);
+        assert!(matches!(
+            wind_down.result,
+            Some(WorkflowJournalResult::WindDown {
+                winding_down: true,
+                ..
+            })
+        ));
         assert_eq!(provider.requests.lock().unwrap().len(), 6);
 
         storage

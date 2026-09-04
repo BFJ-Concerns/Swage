@@ -155,10 +155,7 @@
   }
 
   function startNewConversation(): void {
-    keepSurfaceForConversation();
-    connectionStore.deselect?.();
-    conversationStore.clearActiveConversation();
-    router.navigate("/");
+    void createAndNavigate();
   }
 
   // Proxy that implements ConversationStore but overrides the two navigation-
