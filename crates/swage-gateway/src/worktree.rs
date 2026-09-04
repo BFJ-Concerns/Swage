@@ -95,7 +95,10 @@ impl WorktreeHost {
         let owner_root = self.config.root.join(owner_id.to_string());
         let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
         let claimed = read_retained_placements(&marker).await;
-        self.retained.lock().await.retain(|path| !claimed.contains(path));
+        self.retained
+            .lock()
+            .await
+            .retain(|path| !claimed.contains(path));
         match tokio::fs::remove_file(&marker).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -597,7 +600,10 @@ mod tests {
         restarted.restore(owner, 0, &repo, &path).await.unwrap();
         restarted.release(owner).await;
         restarted.cleanup_owner(owner).await;
-        assert!(!path.exists(), "a returned owner no longer retains its placement");
+        assert!(
+            !path.exists(),
+            "a returned owner no longer retains its placement"
+        );
         assert!(
             !config
                 .root
