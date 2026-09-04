@@ -936,6 +936,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 .await;
 
                 if result_msg.payload.get("error").is_none()
+                    && child.is_none()
                     && let Some(owner_id) = worktree_owner_id
                 {
                     self.state.worktree_host.cleanup_owner(owner_id).await;
@@ -985,6 +986,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let worktree_host = Arc::clone(&self.state.worktree_host);
                 let state = self.state.clone();
                 let placement = placement.clone();
+                let retain_worktree = child.is_some();
 
                 tokio::spawn(async move {
                     let result = executor
@@ -1030,6 +1032,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                                 // failed delegation result.
                             }
                             if result_msg.payload.get("error").is_none()
+                                && !retain_worktree
                                 && let Some(owner_id) = worktree_owner_id
                             {
                                 worktree_host.cleanup_owner(owner_id).await;
