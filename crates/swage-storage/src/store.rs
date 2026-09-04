@@ -17,10 +17,10 @@ use crate::model::{
     NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
     NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page,
     PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin, Schedule,
-    ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceObservation,
-    Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
-    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord,
-    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceCapture,
+    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -285,12 +285,12 @@ pub trait ObservationStore: Send + Sync {
         space_id: Uuid,
     ) -> Result<Vec<SourceObservation>, StorageError>;
 
-    /// Read observations belonging to the supplied workflow worker scopes.
-    async fn list_observations_by_capture_scopes(
+    /// Read capture acts belonging to the supplied workflow worker scopes.
+    async fn list_source_captures_by_scopes(
         &self,
         space_id: Uuid,
         capture_scopes: Vec<String>,
-    ) -> Result<Vec<SourceObservation>, StorageError>;
+    ) -> Result<Vec<SourceCapture>, StorageError>;
 
     /// Add the next extraction version for an observation. The store assigns
     /// the version; existing derivations are never touched.
@@ -1700,11 +1700,11 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_observations_by_capture_scopes(
+        async fn list_source_captures_by_scopes(
             &self,
             _: Uuid,
             _: Vec<String>,
-        ) -> Result<Vec<SourceObservation>, StorageError> {
+        ) -> Result<Vec<SourceCapture>, StorageError> {
             unimplemented!()
         }
 

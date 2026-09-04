@@ -762,8 +762,8 @@ pub struct SourceObservation {
     pub body_sha256: String,
     pub body_bytes: u64,
     pub media_type: String,
-    /// Retry-safe capture identity: when set, a later capture of the same
-    /// origin under the same scope is this observation, not a new row.
+    /// Scope that created this observation, when it was first recorded.
+    /// Every scoped capture is represented separately by `SourceCapture`.
     pub capture_scope: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -782,11 +782,20 @@ pub struct NewSourceObservation {
     /// Re-recording the same origin under the same scope deduplicates to
     /// the first capture, so retried work cannot fork the evidence. Body
     /// identity still wins: a capture whose bytes match existing evidence
-    /// returns that observation whatever its scope, so a scope binds only
-    /// rows it created — a retry whose first attempt landed on
-    /// body-identical foreign evidence records its changed bytes as a
-    /// distinct observation.
+    /// returns that observation and records the current scope and origin as
+    /// a separate capture act.
     pub capture_scope: Option<String>,
+}
+
+/// One scoped act of capturing source material, even when its body resolves
+/// to an observation that already exists in the knowledge base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCapture {
+    pub observation_id: Uuid,
+    pub space_id: Uuid,
+    pub origin: ObservationOrigin,
+    pub capture_scope: String,
+    pub captured_at: DateTime<Utc>,
 }
 
 /// One versioned text extraction of an observation's raw body.
