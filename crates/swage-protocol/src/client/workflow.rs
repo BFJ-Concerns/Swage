@@ -104,7 +104,7 @@ pub struct WorkflowRunEvent {
 }
 
 /// Attribution is derived by the gateway, never accepted from a poster.
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRunEventSource {
     pub surface: String,
     pub agent_id: Option<String>,
@@ -310,6 +310,91 @@ pub struct WorkflowEffectDetail {
     pub idempotency_key: Uuid,
 }
 
+/// A completed workflow journal entry's client-visible result. Durable
+/// storage keeps this as JSON, but clients receive only one of these
+/// kind-specific shapes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowJournalResult {
+    AgentCall {
+        #[ts(type = "unknown")]
+        output: Value,
+        input_tokens: u64,
+        output_tokens: u64,
+        working_directory: Option<String>,
+        served_model: Option<String>,
+        session_id: Option<Uuid>,
+        thread_id: Option<Uuid>,
+        turn_id: Option<Uuid>,
+    },
+    WorkerPlacement {
+        path: String,
+        can_write: bool,
+        authority_path: String,
+        authority_context_id: Uuid,
+    },
+    WorkerPlacementList {
+        paths: Vec<String>,
+    },
+    Effect {
+        delivered: bool,
+        target: String,
+        effect_seq: u64,
+    },
+    Log,
+    Phase,
+    WorkflowCall {
+        #[ts(type = "unknown")]
+        output: Value,
+    },
+    Timer {
+        fired: bool,
+    },
+    Event {
+        seq: u64,
+        event_kind: String,
+        #[ts(type = "unknown")]
+        payload: Value,
+        source: WorkflowRunEventSource,
+    },
+    EventDelivery {
+        delivered: u64,
+    },
+    AwaitEvent {
+        seq: u64,
+        event_kind: String,
+        #[ts(type = "unknown")]
+        payload: Value,
+        source: WorkflowRunEventSource,
+    },
+    Gate {
+        wake: bool,
+        reasoning: String,
+        #[ts(type = "unknown")]
+        events: Value,
+        read_up_to_seq: u64,
+    },
+    Budget {
+        spent: u64,
+        remaining: Option<u64>,
+        working_remaining: Option<u64>,
+        closing_remaining: Option<u64>,
+        winding_down: bool,
+    },
+    TerminalBudget {
+        spent: u64,
+        remaining: Option<u64>,
+        closing_remaining: Option<u64>,
+    },
+    WindDown {
+        spent: u64,
+        remaining: u64,
+        working_remaining: u64,
+        closing_remaining: u64,
+        winding_down: bool,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowJournalEntry {
     pub id: Uuid,
@@ -320,8 +405,7 @@ pub struct WorkflowJournalEntry {
     pub label: Option<String>,
     #[ts(type = "unknown")]
     pub request: Value,
-    #[ts(type = "unknown")]
-    pub result: Option<Value>,
+    pub result: Option<WorkflowJournalResult>,
     pub error_message: Option<String>,
     pub agent_call: Option<WorkflowAgentCallDetail>,
     pub effect: Option<WorkflowEffectDetail>,
@@ -369,4 +453,18 @@ pub struct WorkflowEntryEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRunCompletedEvent {
     pub run: WorkflowRun,
+}
+
+#[cfg(test)]
+mod journal_result_tests {
+    use super::*;
+
+    #[test]
+    fn journal_result_serialises_as_a_kind_tagged_client_contract() {
+        let result = WorkflowJournalResult::Timer { fired: true };
+        assert_eq!(
+            serde_json::to_value(result).expect("serialise journal result"),
+            serde_json::json!({"kind": "timer", "fired": true})
+        );
+    }
 }
