@@ -410,9 +410,7 @@ async fn run_turn_inner(
                 settle_provider_round(
                     &request,
                     1,
-                    swage_agent::ProviderRoundOutcome::Failed {
-                        message: "Codex turn cancelled".to_string(),
-                    },
+                    swage_agent::ProviderRoundOutcome::Interrupted,
                 );
                 return Err(AgentError::Cancelled);
             }

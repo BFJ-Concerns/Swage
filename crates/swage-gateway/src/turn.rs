@@ -2209,6 +2209,9 @@ async fn process_turn_with_composition_and_focus(
                     swage_agent::ProviderRoundOutcome::Failed { message } => {
                         WorkflowProviderRoundOutcome::Failed { message }
                     }
+                    swage_agent::ProviderRoundOutcome::Interrupted => {
+                        WorkflowProviderRoundOutcome::Interrupted
+                    }
                 };
                 settle_provider_round_record(
                     state,
