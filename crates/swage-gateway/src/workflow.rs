@@ -7297,6 +7297,21 @@ mod tests {
         let _swage_home = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let deduplicated = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/landed".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: source_hash(RESEARCH_SWEEP_QUOTE),
+                body_bytes: RESEARCH_SWEEP_QUOTE.len() as u64,
+                media_type: "text/plain".into(),
+                capture_scope: None,
+            })
+            .await
+            .expect("seed deduplicated source");
         let provider = Arc::new(ResearchSweepRecordingProvider {
             requests: std::sync::Mutex::new(Vec::new()),
             observation_id: std::sync::Mutex::new(None),
@@ -7376,6 +7391,7 @@ mod tests {
             .await
             .expect("persisted observations");
         assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].id, deduplicated.id);
         assert_eq!(
             observations[0].origin.url.as_deref(),
             Some("https://example.test/landed")
