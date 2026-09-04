@@ -17917,6 +17917,7 @@ protocol = "openai"
                     turn_id: None,
                     served_model: None,
                     provider_route: None,
+                    worktree: None,
                 })
                 .expect("working result"),
             )
@@ -17981,6 +17982,7 @@ protocol = "openai"
                     turn_id: None,
                     served_model: None,
                     provider_route: None,
+                    worktree: None,
                 })
                 .expect("closing result"),
             )
@@ -18167,6 +18169,7 @@ protocol = "openai"
                     working_directory: None,
                     served_model: Some("alpha".into()),
                     provider_route: Some("alpha-route".into()),
+                    worktree: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
@@ -18377,6 +18380,7 @@ protocol = "openai"
                     turn_id: None,
                     served_model: None,
                     provider_route: None,
+                    worktree: None,
                 })
                 .expect("result"),
             )
@@ -18588,6 +18592,7 @@ protocol = "openai"
                         turn_id: None,
                         served_model: None,
                         provider_route: None,
+                        worktree: None,
                     })
                     .expect("result"),
                 )
