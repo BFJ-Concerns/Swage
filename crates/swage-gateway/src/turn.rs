@@ -1854,22 +1854,49 @@ async fn process_turn_with_composition_and_focus(
                 thread_id: Some(thread_id),
                 turn_id: Some(prepared_turn_id),
             };
-            let resolution = serde_json::to_value(&resolution).map_err(|error| {
-                GatewayError::WebSocketError(format!(
-                    "agent call attempt could not be serialised: {error}"
-                ))
-            })?;
-            crate::workflow::record_agent_call_attempt(
+            let resolution = match serde_json::to_value(&resolution) {
+                Ok(resolution) => resolution,
+                Err(error) => {
+                    shutdown_sandbox_guard(
+                        &sandbox_guard,
+                        "failed to shut down sandbox after agent call attempt serialisation failure",
+                    )
+                    .await;
+                    record_terminal_state_and_release(
+                        state,
+                        session_id,
+                        prepared_turn_id,
+                        TurnState::Failed,
+                    )
+                    .await?;
+                    return Err(GatewayError::WebSocketError(format!(
+                        "agent call attempt could not be serialised: {error}"
+                    )));
+                }
+            };
+            if let Err(error) = crate::workflow::record_agent_call_attempt(
                 state.storage.as_ref(),
                 agent_call_scope,
                 resolution,
             )
             .await
-            .map_err(|error| {
-                GatewayError::WebSocketError(format!(
+            {
+                shutdown_sandbox_guard(
+                    &sandbox_guard,
+                    "failed to shut down sandbox after agent call attempt recording failure",
+                )
+                .await;
+                record_terminal_state_and_release(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    TurnState::Failed,
+                )
+                .await?;
+                return Err(GatewayError::WebSocketError(format!(
                     "failed to record agent call attempt: {error}"
-                ))
-            })?;
+                )));
+            }
         }
         let session_approval_grants = state
             .session_approval_grants
