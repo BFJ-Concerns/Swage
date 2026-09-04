@@ -13,10 +13,13 @@ use super::delivery::{DeliveryTarget, ExternalChannelIntegration};
 pub struct CreateChannelLinkCodeRequest {
     pub integration: ExternalChannelIntegration,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub space_id: Option<Uuid>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub agent_id: Option<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub home_target: Option<DeliveryTarget>,
 }
 

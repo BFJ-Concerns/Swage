@@ -154,13 +154,13 @@ pub struct SaveProviderSettings {
     pub api_key_secret_ref: Option<String>,
     pub api_key_env: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub api_key: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub command: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub state_dir: Option<PathBuf>,
 }
 
@@ -168,11 +168,12 @@ pub struct SaveProviderSettings {
 #[serde(deny_unknown_fields)]
 pub struct ModelCapabilitiesConfig {
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub reasoning_replay: bool,
     /// The model's effort control, when the catalogue declares one; absent,
     /// the provider adapter's declaration for the models it serves applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub effort: Option<EffortCapability>,
 }
 impl ModelCapabilitiesConfig {
@@ -189,9 +190,10 @@ pub struct ModelSettings {
     pub context_window: Option<u32>,
     pub generation_preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub default_effort: Option<Effort>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub capabilities: ModelCapabilitiesConfig,
 }
 
@@ -203,6 +205,7 @@ pub struct GenerationPresetConfig {
     #[ts(optional)]
     pub temperature: Option<f64>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub stop_sequences: Vec<String>,
     #[ts(optional, type = "unknown")]
     pub metadata: Option<serde_json::Value>,
@@ -327,6 +330,7 @@ pub struct ContextConfig {
     /// Named context assemblies registered as hidden alternatives to the
     /// configured default. Selection records the chosen name locally.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
     pub alternatives: Vec<String>,
     #[ts(type = "number")]
     pub timeout: u64,
@@ -435,22 +439,31 @@ pub struct SaveSettingsRequest {
     pub default_model: String,
     pub models: HashMap<String, ModelSettings>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub generation_presets: HashMap<String, GenerationPresetConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub tool_runtime: Option<ToolRuntimeSettings>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub tool_permissions: Option<ToolPermissionConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub hitl: Option<HitlConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub sandbox: Option<SandboxConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub context: Option<ContextConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub pricing: Option<PricingConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub observability: Option<ObservabilityConfig>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub communication: Option<CommunicationConfig>,
 }
 
