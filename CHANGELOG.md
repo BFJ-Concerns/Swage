@@ -67,6 +67,19 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- New-conversation controls now create and navigate immediately.
+- New-conversation agent pickers now show every available definition by name.
+- Live replies now remain with their conversation while the user changes conversations or opens Operator.
+- Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
+- Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
+- Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
+- Work-surface sockets now retain a page update emitted while their WebSocket handshake is completing.
+- One-shot self-wakes now retry after their active turn instead of being consumed as an overlap skip.
+- Continued workflow workers now retain the skill selection made when they were created.
+- Workflow terminal-budget audit entries now settle to failed after bounded completion-write retries, rather than remaining started.
+- Carried workflows excluded for invalid metadata are now recorded in the local audit trail.
+- Remote-device registration now refuses a Local target consistently, including pairing and recovery imports that have no local producer.
+- Workflow-script updates now retain source-header descriptions, expose their whole delivery grant in configuration history, and return 404 for an absent script.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.

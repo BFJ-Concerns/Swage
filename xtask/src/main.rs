@@ -22,7 +22,6 @@ const FRONTEND_RELEASE_STAMP: &str = "target/xtask/frontend-release.sha256";
 const DESKTOP_DEPS_STAMP: &str = "target/xtask/desktop-deps.sha256";
 const TARGET_MAX_SIZE_MB_ARG: &str = "50000";
 const TARGET_MAX_SIZE_BYTES: u64 = 50_000 * 1024 * 1024;
-const DEBUG_INCREMENTAL_DIR: &str = "target/debug/incremental";
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -250,6 +249,38 @@ fn cargo_target_directory() -> Result<PathBuf> {
     Ok(PathBuf::from(directory))
 }
 
+struct CargoTargetPaths {
+    root: PathBuf,
+    debug_binary: PathBuf,
+    debug_deps: PathBuf,
+    debug_incremental: PathBuf,
+}
+
+fn cargo_target_paths(target_directory: PathBuf) -> CargoTargetPaths {
+    CargoTargetPaths {
+        debug_binary: target_directory.join("debug").join(BINARY_NAME),
+        debug_deps: target_directory.join("debug/deps"),
+        debug_incremental: target_directory.join("debug/incremental"),
+        root: target_directory,
+    }
+}
+
+fn resolved_cargo_target_paths() -> Result<CargoTargetPaths> {
+    Ok(cargo_target_paths(cargo_target_directory()?))
+}
+
+fn dev_gateway_command(paths: &CargoTargetPaths, options: &DevOptions) -> Command {
+    let mut gateway = Command::new(&paths.debug_binary);
+    gateway
+        .env("SWAGE_DEV_FRONTEND_PORT", &options.vite_port)
+        .arg("gateway")
+        .arg("start")
+        .arg("--foreground")
+        .arg("--port")
+        .arg(&options.gateway_port);
+    gateway
+}
+
 fn dev(options: &DevOptions) -> Result<()> {
     build_dev(&BuildDevOptions::default())?;
     warn_if_vite_proxy_mismatch(&options.gateway_port)?;
@@ -258,14 +289,8 @@ fn dev(options: &DevOptions) -> Result<()> {
         "==> Starting Swage gateway on port {} (debug binary)",
         options.gateway_port
     );
-    let mut gateway = Command::new(format!("target/debug/{BINARY_NAME}"))
-        .env("SWAGE_DEV_FRONTEND_PORT", &options.vite_port)
-        .arg("gateway")
-        .arg("start")
-        .arg("--foreground")
-        .arg("--port")
-        .arg(&options.gateway_port)
-        .spawn()?;
+    let target_paths = resolved_cargo_target_paths()?;
+    let mut gateway = dev_gateway_command(&target_paths, options).spawn()?;
 
     println!(
         "==> Starting Vite dev server on {}:{}",
@@ -1103,21 +1128,23 @@ fn cargo_sweep() -> Result<()> {
         "Capping target/ at 50 GB",
         command("cargo", ["sweep", "--maxsize", TARGET_MAX_SIZE_MB_ARG]),
     )?;
-    prune_debug_incremental_if_needed()
+    prune_debug_incremental_if_needed(&resolved_cargo_target_paths()?)
 }
 
-fn prune_debug_incremental_if_needed() -> Result<()> {
-    if allocated_disk_usage(Path::new("target"))? <= TARGET_MAX_SIZE_BYTES {
+fn prune_debug_incremental_if_needed(paths: &CargoTargetPaths) -> Result<()> {
+    if allocated_disk_usage(&paths.root)? <= TARGET_MAX_SIZE_BYTES {
         return Ok(());
     }
 
-    let incremental_dir = Path::new(DEBUG_INCREMENTAL_DIR);
+    let incremental_dir = &paths.debug_incremental;
     if !incremental_dir.is_dir() {
         return Ok(());
     }
 
     println!(
-        "==> Removing {DEBUG_INCREMENTAL_DIR} because target/ is still above 50 GB after cargo sweep"
+        "==> Removing {} because {} is still above 50 GB after cargo sweep",
+        incremental_dir.display(),
+        paths.root.display(),
     );
     fs::remove_dir_all(incremental_dir)?;
     Ok(())
@@ -1132,10 +1159,12 @@ struct ArtifactBudgetSnapshot {
 
 impl ArtifactBudgetSnapshot {
     fn capture() -> io::Result<Self> {
+        let paths =
+            resolved_cargo_target_paths().map_err(|error| io::Error::other(error.to_string()))?;
         Ok(Self {
-            target: allocated_disk_usage(Path::new("target"))?,
-            debug_deps: allocated_disk_usage(Path::new("target/debug/deps"))?,
-            debug_incremental: allocated_disk_usage(Path::new(DEBUG_INCREMENTAL_DIR))?,
+            target: allocated_disk_usage(&paths.root)?,
+            debug_deps: allocated_disk_usage(&paths.debug_deps)?,
+            debug_incremental: allocated_disk_usage(&paths.debug_incremental)?,
         })
     }
 }
@@ -1394,7 +1423,52 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{component_style_lines, off_palette_colour_columns};
+    use std::path::PathBuf;
+
+    use super::{
+        DevOptions, cargo_target_paths, component_style_lines, dev_gateway_command,
+        off_palette_colour_columns,
+    };
+
+    #[test]
+    fn derives_all_xtask_artifact_paths_from_the_resolved_cargo_target_directory() {
+        let paths = cargo_target_paths(PathBuf::from("/custom/cargo-target"));
+
+        assert_eq!(paths.root, PathBuf::from("/custom/cargo-target"));
+        assert_eq!(
+            paths.debug_binary,
+            PathBuf::from("/custom/cargo-target/debug/swage")
+        );
+        assert_eq!(
+            paths.debug_deps,
+            PathBuf::from("/custom/cargo-target/debug/deps")
+        );
+        assert_eq!(
+            paths.debug_incremental,
+            PathBuf::from("/custom/cargo-target/debug/incremental")
+        );
+    }
+
+    #[test]
+    fn dev_gateway_command_uses_the_resolved_cargo_target_directory() {
+        let paths = cargo_target_paths(PathBuf::from("/custom/cargo-target"));
+        let options = DevOptions {
+            gateway_port: "32143".to_owned(),
+            vite_host: "127.0.0.1".to_owned(),
+            vite_port: "5173".to_owned(),
+        };
+
+        let command = dev_gateway_command(&paths, &options);
+
+        assert_eq!(
+            command.get_program(),
+            std::path::Path::new("/custom/cargo-target/debug/swage"),
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["gateway", "start", "--foreground", "--port", "32143"],
+        );
+    }
 
     fn component_colour_columns(contents: &str) -> Vec<(usize, usize)> {
         component_style_lines(contents)
