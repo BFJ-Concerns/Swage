@@ -29,6 +29,7 @@ import {
   createStreamingStore,
   withConversationAutoCreate,
 } from "../stores/streaming";
+import type { ServerEvent } from "../types";
 
 // ---------------------------------------------------------------------------
 // Mock dependency factories
@@ -45,6 +46,7 @@ function createMockConversationStore() {
   }> = [];
 
   return {
+    activeConversation: { id: "test-conversation", messages: messages as never[] },
     appendOptimisticUserMessage: vi.fn((msg) => {
       messages.push({ role: "user", turn_state: "pending", ...msg });
     }),
@@ -59,6 +61,7 @@ function createMockConnectionStore() {
   return {
     sendMessage: vi.fn(),
     cancelTurn: vi.fn(),
+    setStreamActive: vi.fn(),
   };
 }
 
@@ -189,11 +192,12 @@ describe("startTurn", () => {
 
   it("sends the message via the connection store", () => {
     const conn = createMockConnectionStore();
-    const store = createStreamingStore({ connectionStore: conn });
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
 
     store.startTurn("Tell me about Svelte");
 
-    expect(conn.sendMessage).toHaveBeenCalledWith("Tell me about Svelte", undefined);
+    expect(conn.sendMessage).toHaveBeenCalledWith("test-conversation", "Tell me about Svelte", undefined);
   });
 
   it("does not throw when no dependencies are injected", () => {
@@ -245,6 +249,80 @@ describe("turn_complete", () => {
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
 
     expect(store.isStreaming).toBe(false);
+  });
+
+  it("keeps a settled turn in the projection for the conversation that started it", () => {
+    let activeConversation = { id: "conv-a", messages: [] };
+    const appendAssistantMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage,
+      },
+    });
+
+    store.startTurn("Question for A");
+    store.handleServerEvent({ type: "token", content: "Answer for A" });
+    activeConversation = { id: "conv-b", messages: [] };
+    store.handleServerEvent({ type: "turn_complete", turn_id: "turn-a" }, "conv-a");
+
+    expect(store.streamFor?.("conv-a").isStreaming).toBe(false);
+    expect(store.streamFor?.("conv-b").streamedContent).toBe("");
+    expect(appendAssistantMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "Answer for A", turn_id: "turn-a" }),
+      "conv-a",
+    );
+  });
+
+  it("keeps concurrent turns in their owning conversation projections", () => {
+    let activeConversation = { id: "conv-a", messages: [] };
+    const appendAssistantMessage = vi.fn();
+    const connection = createMockConnectionStore();
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage,
+      },
+      connectionStore: connection,
+    });
+
+    store.startTurn("Question for A");
+    store.handleServerEvent({ type: "token", content: "A first" }, "conv-a");
+
+    activeConversation = { id: "conv-b", messages: [] };
+    store.startTurn("Question for B");
+    store.handleServerEvent({ type: "token", content: "B reply" }, "conv-b");
+
+    expect(store.streamFor?.("conv-a").isStreaming).toBe(true);
+    expect(store.streamFor?.("conv-a").streamedContent).toBe("A first");
+    expect(store.streamFor?.("conv-b").isStreaming).toBe(true);
+    expect(store.streamFor?.("conv-b").streamedContent).toBe("B reply");
+
+    store.handleServerEvent({ type: "turn_complete", turn_id: "turn-b" }, "conv-b");
+    expect(appendAssistantMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ content: "B reply", turn_id: "turn-b" }),
+      "conv-b",
+    );
+
+    activeConversation = { id: "conv-a", messages: [] };
+    store.handleServerEvent({ type: "token", content: " and last" }, "conv-a");
+    store.handleServerEvent({ type: "turn_complete", turn_id: "turn-a" }, "conv-a");
+
+    expect(appendAssistantMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ content: "A first and last", turn_id: "turn-a" }),
+      "conv-a",
+    );
+    expect(connection.sendMessage).toHaveBeenLastCalledWith(
+      "conv-b",
+      "Question for B",
+      undefined,
+    );
   });
 
   it("resets streamedContent to empty", () => {
@@ -413,6 +491,38 @@ describe("error events", () => {
     expect(assistantMessages[0].content).toBe("partial answer");
   });
 
+  const offscreenTerminalEvents: ServerEvent[] = [
+    { type: "error", code: "provider_error", message: "stopped" },
+    { type: "output_schema_failed", turn_id: "turn-a", attempts: 1, errors: [] },
+    { type: "shutdown", reason: "stopped" },
+  ];
+
+  it.each(offscreenTerminalEvents)("settles an off-screen partial response with its owning conversation for %o", (event) => {
+    let activeConversation = { id: "conv-a", messages: [] };
+    const appendAssistantMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        get activeConversation() {
+          return activeConversation;
+        },
+        appendOptimisticUserMessage: vi.fn(),
+        appendAssistantMessage,
+      },
+    });
+
+    store.startTurn("Question for A");
+    store.handleServerEvent({ type: "token", content: "Partial A" }, "conv-a");
+    activeConversation = { id: "conv-b", messages: [] };
+    store.handleServerEvent(event, "conv-a");
+
+    expect(appendAssistantMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "Partial A", turn_state: "failed" }),
+      "conv-a",
+    );
+    expect(store.streamFor?.("conv-a").streamedContent).toBe("");
+    expect(store.streamFor?.("conv-a").isStreaming).toBe(false);
+  });
+
   it("does not push an empty assistant message when no tokens arrived", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
@@ -490,11 +600,13 @@ describe("cancelled events", () => {
 describe("cancelTurn", () => {
   it("delegates to the connection store", () => {
     const conn = createMockConnectionStore();
-    const store = createStreamingStore({ connectionStore: conn });
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
 
+    store.startTurn("cancel me");
     store.cancelTurn();
 
-    expect(conn.cancelTurn).toHaveBeenCalledOnce();
+    expect(conn.cancelTurn).toHaveBeenCalledWith("test-conversation");
   });
 
   it("does not throw when no connection store is injected", () => {
@@ -1007,9 +1119,13 @@ describe("withConversationAutoCreate", () => {
 
     return {
       store,
+      base,
       connection,
       createConversation,
-      settleCreate: (id: string | null) => settleCreate(id),
+      settleCreate: (id: string | null) => {
+        if (id) conversation.activeConversation.id = id;
+        settleCreate(id);
+      },
     };
   }
 
@@ -1021,11 +1137,11 @@ describe("withConversationAutoCreate", () => {
     store.startTurn("hello", "model-a");
 
     expect(createConversation).not.toHaveBeenCalled();
-    expect(connection.sendMessage).toHaveBeenCalledWith("hello", "model-a");
+    expect(connection.sendMessage).toHaveBeenCalledWith("test-conversation", "hello", "model-a");
   });
 
   it("creates a conversation first when none is active, then starts the turn", async () => {
-    const { store, connection, createConversation, settleCreate } =
+    const { store, base, connection, createConversation, settleCreate } =
       createWrappedStore(() => false);
 
     store.startTurn("first message", "model-a", "researcher", "high");
@@ -1037,10 +1153,13 @@ describe("withConversationAutoCreate", () => {
     settleCreate("conv-9");
     await vi.waitFor(() =>
       expect(connection.sendMessage).toHaveBeenCalledWith(
+        "conv-9",
         "first message",
         "model-a",
       ),
     );
+    expect(base.streamFor?.("conv-9").isStreaming).toBe(true);
+    expect(connection.setStreamActive).toHaveBeenCalledWith("conv-9", true);
   });
 
   it("reports streaming during the creation window and ignores a second send", async () => {

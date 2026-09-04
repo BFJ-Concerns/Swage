@@ -11,6 +11,8 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Named context assemblies now keep the baseline a session starts with: an element the built-in assembly would have carried is restored when a script leaves it out, unless the script declares the omission and its reason, which the turn's context inspector shows.
+- Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
+- Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
 - Page template creation records its complete ordered module configuration in the local audit trail.
 - Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
@@ -70,6 +72,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Live replies now remain with their conversation while the user changes conversations or opens Operator.
+- Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
+- Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
+- Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
 - Work-surface sockets now retain a page update emitted while their WebSocket handshake is completing.
 - One-shot self-wakes now retry after their active turn instead of being consumed as an overlap skip.
 - Continued workflow workers now retain the skill selection made when they were created.

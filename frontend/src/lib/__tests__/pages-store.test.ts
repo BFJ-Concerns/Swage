@@ -14,8 +14,9 @@ import type { ServerEvent } from "../types";
 
 // A stand-in for the server end of the work-surface channel: whatever the
 // store subscribed with is what `emit` pushes into.
-function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void } {
+function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void; reconnect(): void } {
   const handlers: ((event: ServerEvent) => void)[] = [];
+  const reconnectHandlers: (() => void)[] = [];
   return {
     onSignal(handler) {
       handlers.push(handler);
@@ -23,6 +24,12 @@ function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void } {
     close() {},
     emit(event: unknown) {
       for (const handler of handlers) handler(event as ServerEvent);
+    },
+    onReconnect(handler) {
+      reconnectHandlers.push(handler);
+    },
+    reconnect() {
+      for (const handler of reconnectHandlers) handler();
     },
   };
 }
@@ -206,6 +213,26 @@ describe("pages store", () => {
     });
     await vi.waitFor(() => {
       expect(store.activePage?.modules[0].source).toBe("after");
+    });
+  });
+
+  it("refetches the open page after reconnecting, even when no page signal arrived", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(pageBody("before disconnect")))
+      .mockResolvedValueOnce(jsonResponse(pageBody("written while disconnected")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const channel = fakeChannel();
+    const store = createPagesStore({ channelFactory: () => channel });
+    await store.loadPages(SPACE_ID);
+    await store.openPage(PAGE_ID);
+
+    channel.reconnect();
+    await vi.waitFor(() => {
+      expect(store.activePage?.modules[0].source).toBe("written while disconnected");
     });
   });
 
