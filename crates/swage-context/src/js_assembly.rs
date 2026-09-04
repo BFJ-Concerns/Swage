@@ -131,15 +131,10 @@ pub fn assemble_named(
 
     let timeout = Duration::from_secs(config.timeout.max(1));
     match run_script(&source, elements, tokeniser, variables, timeout) {
-        Ok(outcome) if outcome.messages.is_empty() => fallback(
-            name,
-            format!("assembly '{name}' produced no messages"),
-            elements,
-            config,
-            tokeniser,
-            variables,
-        ),
-        Ok(outcome) => compose(name, outcome, elements, config, tokeniser, variables),
+        Ok(outcome) => match compose(name, outcome, elements, config, tokeniser, variables) {
+            Ok(output) => output,
+            Err(error) => fallback(name, error, elements, config, tokeniser, variables),
+        },
         Err(error) => fallback(
             name,
             format!("assembly '{name}' failed: {error}"),
@@ -170,7 +165,7 @@ fn compose(
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
     variables: &BTreeMap<String, String>,
-) -> AssemblyOutput {
+) -> Result<AssemblyOutput, String> {
     let started = Instant::now();
     let ScriptOutcome {
         messages,
@@ -285,7 +280,8 @@ fn compose(
         ));
     }
     report.duration = started.elapsed();
-    AssemblyOutput::new_unchecked(assembled, report)
+    AssemblyOutput::new(assembled, report)
+        .map_err(|_| format!("assembly '{name}' produced no messages"))
 }
 
 /// The elements a named assembly is held to: those the built-in default
@@ -974,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_script_output_falls_back() {
+    fn empty_script_output_is_restored_by_the_baseline_floor() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("assemblies").join("empty.js");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -991,7 +987,10 @@ mod tests {
         );
 
         assert!(!output.messages.is_empty());
-        assert!(output.report.errors[0].message.contains("no messages"));
+        assert!(
+            output.report.errors.is_empty(),
+            "the baseline floor makes an otherwise empty script a successful assembly"
+        );
     }
 
     // ── The baseline floor ────────────────────────────────────────────────────
@@ -1361,7 +1360,8 @@ mod tests {
             &ContextConfig::default(),
             &WordTokeniser,
             &BTreeMap::new(),
-        );
+        )
+        .expect("the supplied message keeps this synthetic composition non-empty");
 
         assert!(
             output
@@ -1413,6 +1413,35 @@ mod tests {
                 .any(|warning| warning.contains("working_norms")),
             "a declared omission is a choice, not a breach: {:?}",
             output.report.warnings
+        );
+    }
+
+    #[test]
+    fn an_omission_only_assembly_composes_the_baseline_floor() {
+        let elements = baseline_bearing_elements();
+        let output = assemble_source(
+            r#"
+            omit("history", "this assembly deliberately starts without prior messages");
+            "#,
+            &elements,
+        );
+
+        let names: Vec<&str> = output
+            .report
+            .elements
+            .iter()
+            .map(|element| element.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["orientation", "working_norms", "prompts"],
+            "the floor restores every baseline element except the declared omission"
+        );
+        assert_eq!(output.report.declared_omissions.len(), 1);
+        assert_eq!(output.report.declared_omissions[0].element, "history");
+        assert!(
+            output.report.errors.is_empty(),
+            "a composed floor is a successful assembly, not a fallback"
         );
     }
 
