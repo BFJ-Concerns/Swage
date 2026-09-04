@@ -2209,17 +2209,19 @@ async fn record_terminal_account(
     worktree_host: &crate::worktree::WorktreeHost,
     run_id: Uuid,
     account: WorkflowRunTerminalAccount,
-) {
-    worktree_host
-        .retain(run_id, &retained_placements(&account))
-        .await;
-    let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
-    if let Err(error) = storage
-        .set_workflow_run_terminal_account(run_id, account)
-        .await
-    {
-        tracing::warn!(%run_id, %error, "could not record the run's terminal account");
+) -> Result<(), swage_core::StorageError> {
+    let placements = retained_placements(&account);
+    if !placements.is_empty() {
+        worktree_host.retain(run_id, &placements).await;
     }
+    let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
+    storage
+        .set_workflow_run_terminal_account(run_id, account)
+        .await?;
+    if placements.is_empty() {
+        worktree_host.release(run_id).await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5539,9 +5541,22 @@ async fn launch_existing_run(
         // nothing to say for itself. It is also assembled before any worktree
         // is reclaimed, since it names the directories the workers ran in.
         let ending = ending_of_terminal_state(run_state, error.as_deref());
-        if let Some(account) = account_for_run_end(storage.as_ref(), run_id, ending).await {
-            record_terminal_account(storage.as_ref(), &worktree_host, run_id, account).await;
-        }
+        let account_error = match account_for_run_end(storage.as_ref(), run_id, ending).await {
+            Some(account) => {
+                record_terminal_account(storage.as_ref(), &worktree_host, run_id, account)
+                    .await
+                    .err()
+                    .map(|error| error.to_string())
+            }
+            None => Some("could not read the journal to record the run's terminal account".into()),
+        };
+        let (run_state, output, handover, error) = match account_error {
+            Some(account_error) => {
+                tracing::warn!(%run_id, %account_error, "leaving workflow run interrupted until its terminal account can be recorded");
+                ("interrupted", None, None, Some(account_error))
+            }
+            None => (run_state, output, handover, error),
+        };
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
@@ -5841,10 +5856,12 @@ pub async fn cancel_run(
         // The account lands before the state moves: a reader that sees the
         // run cancelled sees the account of how, never a run briefly ended
         // with nothing to say for itself.
-        if let Some(account) = account {
-            record_terminal_account(state.storage.as_ref(), &state.worktree_host, id, account)
-                .await;
-        }
+        let account = account.ok_or_else(|| {
+            internal("could not read the journal to record the run's terminal account")
+        })?;
+        record_terminal_account(state.storage.as_ref(), &state.worktree_host, id, account)
+            .await
+            .map_err(internal)?;
         state
             .storage
             .update_workflow_run_state(id, "cancelled", None, None, None)
@@ -5986,13 +6003,16 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                     if let Some(account) =
                         account_for_run_end(state.storage.as_ref(), run_id, ending).await
                     {
-                        record_terminal_account(
+                        if let Err(error) = record_terminal_account(
                             state.storage.as_ref(),
                             &state.worktree_host,
                             run_id,
                             account,
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::warn!(%run_id, %error, "could not record the interrupted run's terminal account");
+                        }
                     }
                 }
             }
@@ -17852,15 +17872,18 @@ mod tests {
     async fn failed_run_surfaces_its_completed_worker_as_a_partial_result() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let (state, _provider) =
-            scripted_state(&storage, vec![scripted_text_output("survey reply")]);
+        let (state, _provider) = scripted_state(
+            &storage,
+            vec![vec![swage_core::StreamChunk::Error {
+                message: "survey provider refused the work".into(),
+            }]],
+        );
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     await agent("survey the ground", {agent: "default", label: "survey"});
-                    throw new Error("stopped before returning");
                 "#
                 .into(),
                 args: Value::Null,
@@ -17875,8 +17898,22 @@ mod tests {
         let WorkflowRunEnding::Threw { error } = &account.ending else {
             panic!("unexpected ending: {:?}", account.ending);
         };
-        assert!(error.contains("stopped before returning"), "{error}");
-        assert_eq!(account.workers.done.len(), 1);
+        assert!(
+            error.contains("survey provider refused the work"),
+            "{error}"
+        );
+        assert!(account.workers.done.is_empty());
+        assert_eq!(account.workers.failed.len(), 1);
+        assert_eq!(account.workers.failed[0].label.as_deref(), Some("survey"));
+        let Some(WorkflowWorkerTermination::Failed { error }) =
+            &account.workers.failed[0].termination
+        else {
+            panic!("failed worker must retain its recorded failure");
+        };
+        assert!(
+            error.contains("survey provider refused the work"),
+            "{error}"
+        );
         let partial = account
             .partial_results
             .expect("a run that never returned offers its completed work");
@@ -17885,12 +17922,7 @@ mod tests {
             "{}",
             partial.reason
         );
-        assert_eq!(partial.results.len(), 1);
-        assert_eq!(partial.results[0].label.as_deref(), Some("survey"));
-        assert_eq!(
-            partial.results[0].output,
-            Value::String("survey reply".into())
-        );
+        assert!(partial.results.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
