@@ -7227,6 +7227,19 @@ mod tests {
                 .expect("resolve ungranted saved-script grant"),
             "a saved script without the grant must retain its persisted denial"
         );
+        launch_existing_run(state.clone(), ungranted.clone(), source.into(), None)
+            .await
+            .expect("launch ungranted saved run");
+        wait_for_terminal(&state, ungranted.id).await;
+        assert_eq!(
+            storage
+                .get_workflow_run(ungranted.id)
+                .await
+                .expect("ungranted saved run query")
+                .expect("ungranted saved run")
+                .final_output,
+            Some(Value::String("undefined".into()))
+        );
 
         let carried = storage
             .create_workflow_run(NewWorkflowRun {
@@ -7260,6 +7273,19 @@ mod tests {
                 .await
                 .expect("resolve carried grant"),
             "a carried workflow named like the built-in must retain its advertised denial"
+        );
+        launch_existing_run(state.clone(), carried.clone(), source.into(), None)
+            .await
+            .expect("launch ungranted carried run");
+        wait_for_terminal(&state, carried.id).await;
+        assert_eq!(
+            storage
+                .get_workflow_run(carried.id)
+                .await
+                .expect("ungranted carried run query")
+                .expect("ungranted carried run")
+                .final_output,
+            Some(Value::String("undefined".into()))
         );
 
         let builtin = storage
