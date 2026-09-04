@@ -180,6 +180,18 @@ fn add_codex_effort(provider_request: &mut Value, effort: Option<&ResolvedEffort
     }
 }
 
+fn settle_provider_round(
+    request: &CodexTurnRequest,
+    round: usize,
+    outcome: swage_agent::ProviderRoundOutcome,
+) {
+    let _ = request.event_tx.send(AgentEvent::ProviderRoundSettled {
+        turn_id: request.turn_id,
+        round,
+        outcome,
+    });
+}
+
 pub async fn run_turn(
     state: AppState,
     request: CodexTurnRequest,
@@ -262,10 +274,24 @@ async fn run_turn_inner(
                     round: 0,
                     request: json!({"method":"thread/resume","params":resume_request}),
                 });
-                client
-                    .request("thread/resume", resume_request)
-                    .await
-                    .map_err(provider_error)?;
+                match client.request("thread/resume", resume_request).await {
+                    Ok(_) => settle_provider_round(
+                        &request,
+                        0,
+                        swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+                    ),
+                    Err(error) => {
+                        let error = provider_error(error);
+                        settle_provider_round(
+                            &request,
+                            0,
+                            swage_agent::ProviderRoundOutcome::Failed {
+                                message: error.to_string(),
+                            },
+                        );
+                        return Err(error);
+                    }
+                }
                 thread_id
             }
             None => {
@@ -283,10 +309,27 @@ async fn run_turn_inner(
                     round: 0,
                     request: json!({"method":"thread/start","params":start_request}),
                 });
-                let response = client
-                    .request("thread/start", start_request)
-                    .await
-                    .map_err(provider_error)?;
+                let response = match client.request("thread/start", start_request).await {
+                    Ok(response) => {
+                        settle_provider_round(
+                            &request,
+                            0,
+                            swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+                        );
+                        response
+                    }
+                    Err(error) => {
+                        let error = provider_error(error);
+                        settle_provider_round(
+                            &request,
+                            0,
+                            swage_agent::ProviderRoundOutcome::Failed {
+                                message: error.to_string(),
+                            },
+                        );
+                        return Err(error);
+                    }
+                };
                 let thread_id = response
                     .pointer("/thread/id")
                     .or_else(|| response.get("threadId"))
@@ -324,10 +367,20 @@ async fn run_turn_inner(
         round: 1,
         request: json!({"method":"turn/start","params":provider_request.clone()}),
     });
-    let turn_response = client
-        .request("turn/start", provider_request)
-        .await
-        .map_err(provider_error)?;
+    let turn_response = match client.request("turn/start", provider_request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let error = provider_error(error);
+            settle_provider_round(
+                &request,
+                1,
+                swage_agent::ProviderRoundOutcome::Failed {
+                    message: error.to_string(),
+                },
+            );
+            return Err(error);
+        }
+    };
     let codex_turn_id = turn_response
         .pointer("/turn/id")
         .or_else(|| turn_response.get("turnId"))
@@ -354,12 +407,26 @@ async fn run_turn_inner(
                 }
                 state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
                 state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
+                settle_provider_round(
+                    &request,
+                    1,
+                    swage_agent::ProviderRoundOutcome::Failed {
+                        message: "Codex turn cancelled".to_string(),
+                    },
+                );
                 return Err(AgentError::Cancelled);
             }
             incoming = server_requests.recv() => {
-                let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )))?;
+                let incoming = match incoming {
+                    Ok(incoming) => incoming,
+                    Err(_) => {
+                        let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                            "Codex App Server transport closed mid-turn".to_string(),
+                        ));
+                        settle_provider_round(&request, 1, swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() });
+                        return Err(error);
+                    }
+                };
                 if incoming.method == "item/tool/call" {
                     tool_count += 1;
                     let tool_state = state.clone();
@@ -374,9 +441,16 @@ async fn run_turn_inner(
                 }
             }
             incoming = notifications.recv() => {
-                let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )))?;
+                let incoming = match incoming {
+                    Ok(incoming) => incoming,
+                    Err(_) => {
+                        let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                            "Codex App Server transport closed mid-turn".to_string(),
+                        ));
+                        settle_provider_round(&request, 1, swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() });
+                        return Err(error);
+                    }
+                };
                 match incoming.method.as_str() {
                     "item/started" | "item/updated" => {
                         let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
@@ -425,17 +499,26 @@ async fn run_turn_inner(
                         let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
                         if status != "completed" {
                             let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
-                            return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
+                            let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string()));
+                            settle_provider_round(&request, 1, swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() });
+                            return Err(error);
                         }
+                        settle_provider_round(
+                            &request,
+                            1,
+                            swage_agent::ProviderRoundOutcome::Responded { tool_calls: tool_count },
+                        );
                         break;
                     }
                     _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                 }
             }
             () = client.closed() => {
-                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
                     "Codex App Server transport closed mid-turn".to_string(),
-                )));
+                ));
+                settle_provider_round(&request, 1, swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() });
+                return Err(error);
             }
         }
     }
@@ -494,18 +577,6 @@ async fn run_turn_inner(
         .storage
         .update_state(request.thread_id, ThreadState::Idle)
         .await?;
-    let _ = request.event_tx.send(AgentEvent::ProviderRoundSettled {
-        turn_id: request.turn_id,
-        round: 0,
-        outcome: swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
-    });
-    let _ = request.event_tx.send(AgentEvent::ProviderRoundSettled {
-        turn_id: request.turn_id,
-        round: 1,
-        outcome: swage_agent::ProviderRoundOutcome::Responded {
-            tool_calls: tool_count,
-        },
-    });
     let _ = request.event_tx.send(AgentEvent::TurnCompleted {
         turn_id: request.turn_id,
         input_tokens,
@@ -1217,6 +1288,28 @@ mod tests {
                 .count(),
             1,
             "a failed Codex turn must emit exactly one error event"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ProviderRoundSettled {
+                    round: 0,
+                    outcome: swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+                    ..
+                }
+            )),
+            "the completed thread-start request must settle before the turn fails"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ProviderRoundSettled {
+                    round: 1,
+                    outcome: swage_agent::ProviderRoundOutcome::Failed { .. },
+                    ..
+                }
+            )),
+            "a failed Codex completion must settle its turn request as failed"
         );
     }
 
