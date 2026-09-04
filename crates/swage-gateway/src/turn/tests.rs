@@ -1163,6 +1163,7 @@ pub(crate) struct MockStorage {
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
     fail_provider_round_writes: AtomicBool,
+    fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
 }
 
@@ -1351,6 +1352,11 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, StorageError> {
+        if self.fail_workflow_attempt_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected workflow attempt write failure".into(),
+            ));
+        }
         // The mock keeps no journal, so no attempt precedes this one.
         Ok(Vec::new())
     }
@@ -1561,6 +1567,7 @@ impl MockStorage {
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
             fail_provider_round_writes: AtomicBool::new(false),
+            fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
         }
     }
@@ -1608,6 +1615,10 @@ impl MockStorage {
 
     pub(crate) fn fail_audit_writes(&self) {
         self.fail_audit_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_workflow_attempt_writes(&self) {
+        self.fail_workflow_attempt_writes.store(true, Ordering::SeqCst);
     }
 
     fn fail_snapshot_writes(&self) {
@@ -4881,6 +4892,54 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
             .await
             .expect_err("fake App Server should be stopped after the turn")
             .is_cancelled()
+    );
+}
+
+#[tokio::test]
+async fn failed_codex_attempt_recording_releases_the_prepared_turn() {
+    let _guard = SwageHomeGuard::isolate();
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_workflow_attempt_writes();
+    let (state, session_id) =
+        make_state_with_config_and_storage(Vec::new(), codex_turn_config(), Arc::clone(&storage))
+            .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("refuse before provider execution"),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition::default(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect_err("a failed attempt record must refuse the Codex turn");
+
+    assert!(error.to_string().contains("failed to record agent call attempt"));
+    let turn = storage
+        .list_turns_by_thread(
+            storage
+                .list_by_session(session_id)
+                .await
+                .expect("list session threads")[0]
+                .id,
+        )
+        .await
+        .expect("list prepared turn")
+        .pop()
+        .expect("prepared turn exists");
+    assert_eq!(turn.state, TurnState::Failed);
+    assert!(
+        state.active_turns.lock().await.is_empty(),
+        "a refused Codex turn must not remain active"
     );
 }
 
