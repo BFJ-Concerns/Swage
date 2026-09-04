@@ -2,4 +2,4 @@
 import type { ApprovalDecisionScope } from "./ApprovalDecisionScope";
 import type { ApprovalDecisionValue } from "./ApprovalDecisionValue";
 
-export type ApprovalDecisionRequest = { decision: ApprovalDecisionValue, scope: ApprovalDecisionScope, reason: string | null, };
+export type ApprovalDecisionRequest = { decision: ApprovalDecisionValue, scope?: ApprovalDecisionScope, reason: string | null, };
