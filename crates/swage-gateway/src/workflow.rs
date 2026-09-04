@@ -1712,12 +1712,14 @@ fn held_worker_replay_matches(
     requested: &HeldWorkerOpen,
     recorded: &HeldWorkerOpen,
 ) -> bool {
-    let requested_model = requested.model.as_deref().and_then(|model| {
-        crate::turn::resolve_requested_turn_model(config, model).ok()
-    });
-    let requested_fallback = requested.fallback_model.as_deref().and_then(|model| {
-        crate::turn::resolve_requested_turn_model(config, model).ok()
-    });
+    let requested_model = requested
+        .model
+        .as_deref()
+        .and_then(|model| crate::turn::resolve_requested_turn_model(config, model).ok());
+    let requested_fallback = requested
+        .fallback_model
+        .as_deref()
+        .and_then(|model| crate::turn::resolve_requested_turn_model(config, model).ok());
     requested.agent == recorded.agent
         && requested.task == recorded.task
         && requested.tools == recorded.tools

@@ -306,10 +306,7 @@ impl DelegationExecutor {
         let mut delegated_history = existing_child
             .map(|continuation| continuation.history)
             .unwrap_or_default();
-        let new_delegated_history = build_delegated_history(
-            &transferred_context,
-            task_description,
-        );
+        let new_delegated_history = build_delegated_history(&transferred_context, task_description);
         delegated_history.extend(new_delegated_history.iter().cloned());
         let turn = self
             .storage
