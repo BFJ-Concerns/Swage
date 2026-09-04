@@ -5,7 +5,9 @@ use std::{path::Path, sync::Arc, time::Instant};
 
 use serde_json::{Value, json};
 use swage_agent::event::SchemaValidationError;
-use swage_agent::{AgentConfig, AgentError, AgentEvent, OutboundMessage};
+use swage_agent::{
+    AgentConfig, AgentError, AgentEvent, OutboundMessage, extraction::extract_json_values,
+};
 use swage_codex::{AppServerClient, ClientError, ContentItem, DynamicToolSpec, ToolCallResponse};
 use swage_core::{
     ChatMessage, Effort, EffortCapability, EffortControl, ResolvedEffort, Role, StorageError,
@@ -317,7 +319,7 @@ async fn run_turn_inner(
         .agent_config
         .output_schema
         .as_ref()
-        .map(jsonschema::validator_for)
+        .map(swage_core::json_schema_validator)
         .transpose()
         .map_err(|error| AgentError::InvalidConfig(format!("invalid output schema: {error}")))?;
     let mut structured_output = None;
@@ -482,8 +484,9 @@ async fn run_turn_inner(
         let Some(validator) = validator.as_ref() else {
             break;
         };
-        if let Ok(value) = serde_json::from_str::<Value>(&response_text)
-            && validator.validate(&value).is_ok()
+        if let Some(value) = extract_json_values(&response_text)
+            .into_iter()
+            .rfind(|value| validator.validate(value).is_ok())
         {
             structured_output = Some(value);
             break;
@@ -1017,6 +1020,23 @@ mod tests {
         .await
     }
 
+    async fn run_scripted_turn_with_schema(
+        scenario: Value,
+        schema: Value,
+    ) -> Result<OutboundMessage, AgentError> {
+        run_scripted_turn_with_config(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+            false,
+            AgentConfig::new("gateway")
+                .with_workspace("/work", vec!["/work".into()])
+                .with_output_schema(schema, 0),
+        )
+        .await
+        .0
+    }
+
     async fn run_scripted_turn_inner(
         scenario: Value,
         dispatcher: ToolDispatcher,
@@ -1114,6 +1134,37 @@ mod tests {
             json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}}),
             json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}),
         ]
+    }
+
+    #[tokio::test]
+    async fn codex_output_schema_uses_the_last_valid_json_value() {
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"Draft:\n```json\n{\"answer\":\"draft\"}\n```\nFinal: {\"answer\":\"done\"}"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"fake-turn","status":"completed","error":null}}}
+                ]
+            }
+        ]});
+        let result = run_scripted_turn_with_schema(
+            scenario,
+            json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+        )
+        .await
+        .expect("the final schema-valid Codex value should win");
+
+        assert_eq!(result.structured_output, Some(json!({"answer": "done"})));
     }
 
     #[tokio::test]
@@ -1310,7 +1361,10 @@ mod tests {
             } if errors.len() == 1
         )));
         let turns = storage.db.lock().await.turns.clone();
-        let turn = turns.values().next().expect("schema-exhausted turn is retained");
+        let turn = turns
+            .values()
+            .next()
+            .expect("schema-exhausted turn is retained");
         assert_eq!(turn.state, TurnState::Failed);
         assert_eq!(turn.assistant_response.as_deref(), Some("not json"));
         assert_eq!(turn.structured_output, None);
@@ -1529,7 +1583,7 @@ mod tests {
                 "receiveExact":true,
                 "receive":tool_response("tool-second"),
                 "send":[
-                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"{\\\"result\\\":true}"}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":r#"{"result":true}"#}},
                     {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"second","status":"completed"}}}
                 ]
             }
