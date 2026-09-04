@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
-use std::{collections::HashSet, os::unix::fs::PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
-use swage_gateway::worktree::{WorktreeConfig, WorktreeHost};
+use swage_gateway::worktree::{WorktreeConfig, WorktreeHost, WorktreeRecoveryClaims};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -49,7 +49,11 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
     let _second_name = entries.next_entry().await.unwrap().unwrap().file_name();
     assert!(entries.next_entry().await.unwrap().is_none());
     let invalid = owner_path.join(&first_name);
-    let valid = if invalid == first { second } else { first };
+    let valid = if invalid == first.path {
+        second.path
+    } else {
+        first.path
+    };
     tokio::fs::write(invalid.join(".git"), "gitdir: /missing")
         .await
         .unwrap();
@@ -92,7 +96,7 @@ async fn recovery_continues_past_an_uninspectable_candidate_and_reclaims_the_lat
         ),
     );
     let recovered = WorktreeHost::new(WorktreeConfig { root: root.clone() })
-        .recover(&HashSet::new())
+        .recover(&WorktreeRecoveryClaims::default())
         .await
         .unwrap();
     let inspection_order = tokio::fs::read_to_string(&command_log).await.unwrap();
