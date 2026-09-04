@@ -805,6 +805,33 @@ fn fallback_spent_from_journal(journal: &[WorkflowJournalRecord], budget: &Workf
         })
 }
 
+fn routed_working_tokens_settled_after(
+    journal: &[WorkflowJournalRecord],
+    transition: &WorkflowJournalRecord,
+    route: &str,
+) -> u64 {
+    let Some(transition_order) = transition.completed_order else {
+        return 0;
+    };
+    journal
+        .iter()
+        .filter(|entry| {
+            entry.kind == "agent_call"
+                && entry.status == "completed"
+                && entry.seq < transition.seq
+                && entry
+                    .completed_order
+                    .is_some_and(|order| order > transition_order)
+                && journal_entry_provider_route(entry) == Some(route)
+        })
+        .filter_map(|entry| entry.result.as_ref())
+        .fold(0_u64, |spent, result| {
+            spent
+                .saturating_add(result["input_tokens"].as_u64().unwrap_or(0))
+                .saturating_add(result["output_tokens"].as_u64().unwrap_or(0))
+        })
+}
+
 fn terminal_budget_accounting_from_journal(
     journal: &[WorkflowJournalRecord],
     budget: &WorkflowBudget,
@@ -852,6 +879,9 @@ fn terminal_budget_accounting_from_journal(
             .result
             .as_ref()
             .and_then(|reading| reading["closing_limit"].as_u64())
+            .map(|limit| {
+                limit.saturating_add(routed_working_tokens_settled_after(journal, entry, route))
+            })
             .unwrap_or_else(|| {
                 accounting
                     .ledger_mut(route)
@@ -17653,6 +17683,108 @@ protocol = "openai"
                 .count(),
             1,
             "resume does not grant a second closing reserve"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resumed_route_restores_credit_for_work_settled_after_wind_down() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = empty_journal_run(&storage, space.id).await;
+        let late_request = route_test_request("late working call", Some("alpha"));
+        let mut late_json = serde_json::to_value(&late_request).expect("late request");
+        late_json["provider_route"] = Value::String("alpha-route".into());
+        let late = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(
+                    &serde_json::to_value(&late_request).expect("late request"),
+                ),
+                request: late_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("late working intent");
+        journal_routed_agent_call(
+            &storage,
+            run_id,
+            1,
+            &route_test_request("settled working call", Some("alpha")),
+            "alpha-route",
+            Some(4),
+        )
+        .await;
+        let transition_request = route_test_request("wind down", Some("alpha"));
+        let mut transition_json =
+            serde_json::to_value(&transition_request).expect("transition request");
+        transition_json["provider_route"] = Value::String("alpha-route".into());
+        let transition = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: 2,
+                kind: "wind_down".into(),
+                args_hash: journal_args_hash(
+                    &serde_json::to_value(&transition_request).expect("transition request"),
+                ),
+                request: transition_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("wind-down intent");
+        storage
+            .complete_workflow_journal_entry(
+                transition.id,
+                serde_json::json!({
+                    "spent": 4,
+                    "remaining": 0,
+                    "working_remaining": 0,
+                    "closing_remaining": 2,
+                    "closing_limit": 6,
+                    "winding_down": true,
+                }),
+            )
+            .await
+            .expect("wind-down completion");
+        storage
+            .complete_workflow_journal_entry(
+                late.id,
+                serde_json::to_value(AgentCallResult {
+                    output: Value::String("late work".into()),
+                    input_tokens: 3,
+                    output_tokens: 0,
+                    working_directory: None,
+                    served_model: Some("alpha".into()),
+                    provider_route: Some("alpha-route".into()),
+                    session_id: None,
+                    thread_id: None,
+                    turn_id: None,
+                })
+                .expect("late result"),
+            )
+            .await
+            .expect("late settlement");
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "per_route": {
+                "alpha-route": {"max_total_tokens": 6, "reserved_closing_tokens": 2}
+            }
+        }))
+        .expect("route budget");
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let accounting = terminal_budget_accounting_from_journal(&journal, &budget);
+        assert_eq!(accounting.ledgers["alpha-route"].spent, 7);
+        assert_eq!(accounting.ledgers["alpha-route"].closing_limit, Some(9));
+        assert_eq!(
+            terminal_budget_reading(&accounting, &budget)["per_route"]["alpha-route"]["closing_remaining"],
+            2
         );
     }
 
