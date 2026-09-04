@@ -10636,7 +10636,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             None,
-            None,
+            Some("reviewer"),
             DispatchContextComposition::default(),
             "wait-worktree-delegate-call",
             "gateway",
@@ -10660,17 +10660,18 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         storage.list_approvals().await.unwrap().is_empty(),
         "the waiting delegated turn must use its enforced grant without parking"
     );
-    assert!(
+    assert_eq!(
         state
             .worktree_host
             .list_owner(wait_owner_id)
             .await
-            .is_empty(),
-        "successful wait-mode delegation must release its worktree owner"
+            .len(),
+        1,
+        "a named wait-mode child keeps its worktree owner for continuation"
     );
     assert!(
-        !wait_worktree.exists(),
-        "successful wait-mode delegation must remove its worktree"
+        wait_worktree.exists(),
+        "a named wait-mode child's worktree remains available for continuation"
     );
 
     let outcome = GatewayDelegationHandler::new(state.clone())
@@ -10682,7 +10683,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             None,
-            None,
+            Some("builder"),
             DispatchContextComposition::default(),
             "worktree-delegate-call",
             "gateway",
@@ -10759,23 +10760,27 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         "the durable completion reports the real provisioned directory"
     );
     for _ in 0..20 {
-        if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
+        if !state.worktree_host.list_owner(owner_id).await.is_empty() && worktree.exists() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        state.worktree_host.list_owner(owner_id).await.is_empty(),
-        "successful detached delegation must release its worktree owner"
+    assert_eq!(
+        state.worktree_host.list_owner(owner_id).await.len(),
+        1,
+        "a named detached child keeps its worktree owner for continuation"
     );
     assert!(
-        !worktree.exists(),
-        "successful detached delegation must remove its worktree"
+        worktree.exists(),
+        "a named detached child's worktree remains available for continuation"
     );
     assert!(
         !repo.join("delegated-marker").exists(),
         "delegate writes must not touch the source repository"
     );
+    state.worktree_host.shutdown().await;
+    assert!(!wait_worktree.exists());
+    assert!(!worktree.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
