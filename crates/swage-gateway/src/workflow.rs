@@ -16186,7 +16186,7 @@ mod tests {
         storage
             .with_conn(move |connection| {
                 connection.execute_batch(&format!(
-                    "UPDATE workflow_journal SET result_json = '{{\"spent\":6,\"remaining\":0,\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
+                    "UPDATE workflow_journal SET result_json = '{{\"spent\":6,\"remaining\":0,\"closing_remaining\":99,\"usage_unavailable_calls\":0}}' WHERE id = '{terminal_id}';"
                 ))?;
                 Ok(())
             })
