@@ -764,10 +764,11 @@ impl DelegationHandler for GatewayDelegationHandler {
                             .await
                             .map_err(AgentError::InvalidConfig)?
                             .path,
-                    can_write: repo.can_write,
-                    authority_path: repo.authority_path,
-                    authority_context_id: repo.authority_context_id,
-                })
+                        can_write: repo.can_write,
+                        authority_path: repo.authority_path,
+                        authority_context_id: repo.authority_context_id,
+                    })
+                }
             }
         };
         if let Some(placement) = placement.as_ref() {
