@@ -1348,7 +1348,7 @@ mod tests {
                 "send":[
                     {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"second"}}},
                     {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":20,"outputTokens":4}}}},
-                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"{\\\"result\\\":true}"}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":r#"{"result":true}"#}},
                     {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"second","status":"completed"}}}
                 ]
             }
@@ -1367,6 +1367,8 @@ mod tests {
         .await;
 
         let output = result.expect("a valid retry completes the turn");
+        assert_eq!(output.response, r#"{"result":true}"#);
+        assert_eq!(output.structured_output, Some(json!({"result": true})));
         assert_eq!((output.input_tokens, output.output_tokens), (30, 7));
         let turn = storage
             .db
