@@ -84,13 +84,11 @@ impl Tool for AgentMemoryTool {
                     name: self.name().to_owned(),
                     message: "Missing required argument: operation".to_owned(),
                 })?;
-        let gateway_ctx = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: "agent_memory requires gateway execution context".to_owned(),
-            })?;
+        let gateway_ctx = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "agent_memory requires gateway execution context",
+        )?;
 
         match operation {
             "remember" => self.remember(gateway_ctx, &params, ctx).await,
