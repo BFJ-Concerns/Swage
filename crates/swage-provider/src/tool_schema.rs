@@ -168,7 +168,12 @@ fn describe_schema_choices(value: &Value, quantifier: &str, connector: &str) -> 
     );
 
     if choices.len() > MAX_DESCRIBED_SCHEMA_CHOICES {
-        format!("{description}; remaining alternatives are validated locally")
+        let remaining = if connector == "and" {
+            "remaining required conditions are validated locally"
+        } else {
+            "remaining alternatives are validated locally"
+        };
+        format!("{description}; {remaining}")
     } else {
         description
     }
@@ -296,7 +301,7 @@ fn object_schema() -> Value {
 mod tests {
     use serde_json::json;
 
-    use super::provider_tool_schema;
+    use super::{MAX_DESCRIBED_SCHEMA_CHOICES, provider_tool_schema};
 
     #[test]
     fn provider_tool_schema_strips_hostile_keywords_and_notes_local_validation() {
@@ -417,6 +422,33 @@ mod tests {
     }
 
     #[test]
+    fn provider_tool_schema_preserves_anyof_and_allof_guidance_without_sending_hostile_keywords() {
+        let schema = json!({
+            "type": "object",
+            "anyOf": [
+                {"required": ["url"]},
+                {"required": ["query"]}
+            ],
+            "allOf": [
+                {"required": ["source"]},
+                {"properties": {"source": {"type": "string"}}}
+            ]
+        });
+
+        let projected = provider_tool_schema(&schema);
+
+        assert!(projected.get("anyOf").is_none());
+        assert!(projected.get("allOf").is_none());
+        let description = projected["description"].as_str().unwrap();
+        assert!(
+            description.contains("anyOf (at least one of: requires `url`; or requires `query`)")
+        );
+        assert!(description.contains(
+            "allOf (all of: requires `source`; and an additional locally validated alternative)"
+        ));
+    }
+
+    #[test]
     fn provider_tool_schema_explains_all_of_requirements_conjunctively() {
         let schema = json!({
             "allOf": [
@@ -431,6 +463,21 @@ mod tests {
         assert!(description.contains("all of"));
         assert!(description.contains("requires `kind`; and requires `payload`"));
         assert!(!description.contains("requires `kind`; or requires `payload`"));
+    }
+
+    #[test]
+    fn provider_tool_schema_calls_overflowed_all_of_branches_required_conditions() {
+        let schema = json!({
+            "allOf": (0..=MAX_DESCRIBED_SCHEMA_CHOICES)
+                .map(|index| json!({"required": [format!("field_{index}")]}))
+                .collect::<Vec<_>>()
+        });
+
+        let projected = provider_tool_schema(&schema);
+        let description = projected["description"].as_str().unwrap();
+
+        assert!(description.contains("remaining required conditions are validated locally"));
+        assert!(!description.contains("remaining alternatives are validated locally"));
     }
 
     #[test]

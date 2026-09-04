@@ -1,5 +1,5 @@
 ---
-description: Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, and failure handover
+description: Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
 ---
 
 # Workflow engine
@@ -92,6 +92,16 @@ override, but `undefined` at the call site falls back to the default.
 | `budget.remaining()` | `number \| undefined` | Synchronous, not journalled — NOT safe for branching. |
 | `log(message)` | — | Records via `host.record("log", ...)`. `console.log/warn/error` alias this. |
 | `phase(title)` | — | Records via `host.record("phase", ...)`. |
+
+### Agent model fallback
+
+`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. The
+host uses it only when the requested model is unavailable or the provider
+refuses or fails it before any output; schema exhaustion and failures after output do
+not fall back. A completed `agent_call` result records `served_model`, the
+catalogue model that actually served the call. Continuation calls ignore
+`fallbackModel` and never make a fallback attempt; they use the worker's
+persisted model selection, including a fallback selected at creation.
 
 ### Composition bounds
 
@@ -454,6 +464,41 @@ evaluations. It is incremented in the host-command loop (deterministic
 boundary) and decremented in the spawned task on completion. The park
 guard reads this counter — the journal can lag a dispatch, so it must not
 be the guard.
+
+## Carried workflows
+
+A workflow script may be carried by a skill rather than authored as a
+space row. The `WorkflowScript` wire type carries a `carrying_skill`
+field (`Option<String>`) naming the skill that provides the workflow
+when it is not a standalone authored row. A carried workflow is
+immutable in place; an operator can shadow it by authoring a same-named
+workflow in the space.
+
+Each shipped skill carries its own workflows. When a skill is active on
+a session, its carried workflows become available, and any available
+workflow starts by name through `workflow_run`. The research skill
+(`shipped/skills/research/`) carries `research-sweep`.
+
+### Running a research sweep
+
+Activate the research skill on a session (via `activate_skill`), then
+dispatch its carried workflow with `workflow_run`:
+
+```json
+{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+```
+
+- `topic` — what to research, as the user phrased it.
+- `purpose` — what the findings must serve; the synthesis is judged
+  against this.
+- `maxSources` — optional ceiling on sources gathered (default 8).
+
+The sweep runs unattended: sources are gathered as immutable
+observations, an organising pass signposts what landed using
+`knowledge_curate_orientation` (which can author, supersede, and retire
+orientation cards), and a synthesis pass delivers cited findings. The
+sweep's roles — scout, gatherers, organiser, synthesist — are bare
+dispatches inside the script, not standalone agent definitions.
 
 ## Storage
 

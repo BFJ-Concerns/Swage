@@ -12,23 +12,24 @@ use futures::{StreamExt, stream};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use swage_core::{
-    ChatMessage, CompletionRequest, CompletionResponse, DelegateCompletionMode, MessageStatus,
-    ProviderError, SandboxError, StreamChunk, ToolCompletionRequest, ToolCompletionResponse,
-    ToolError, ToolReplayPart,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, DelegateCompletionMode,
+    MessageStatus, ProviderError, SandboxError, StreamChunk, ToolCompletionRequest,
+    ToolCompletionResponse, ToolError, ToolReplayPart,
 };
 use swage_core::{FinishReason, StorageError};
 use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
+use swage_protocol::client::turn::MessageAttachment;
 use swage_provider::LlmProvider;
 use swage_storage::{
     model::{
         ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
         Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
-        NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial, NewMessage,
-        NewSchedule, NewScheduleRun, NewSession, NewSpace, NewThread, NewToolCall, NewTurn,
-        NewWorkspaceAttachment, Schedule, ScheduleRun, ScheduleRunState, ScheduleRunUpdate,
-        ScheduleStatus, Session, Space, SpaceSlug, Thread, ThreadState, ToolCallRecord, Turn,
-        TurnState, UpdateSchedule, WorkspaceAttachment,
+        NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial,
+        NewMessage, NewSchedule, NewScheduleRun, NewSession, NewSpace, NewThread, NewToolCall,
+        NewTurn, NewWorkspaceAttachment, PageAnnotation, Schedule, ScheduleRun, ScheduleRunState,
+        ScheduleRunUpdate, ScheduleStatus, Session, Space, SpaceSlug, Thread, ThreadState,
+        ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
@@ -403,7 +404,7 @@ async fn provider_response_event_persists_witness_through_gateway_turn() {
         &state,
         session_id,
         None,
-        "Hello".into(),
+        TurnInput::from("Hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -437,7 +438,7 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
         &state,
         session_id,
         None,
-        "Hello".into(),
+        TurnInput::from("Hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -471,6 +472,7 @@ async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loo
         storage
             .append_message(AppendMessage {
                 thread_id,
+                attachments: Vec::new(),
                 turn_id: None,
                 role: if index % 2 == 0 {
                     swage_core::Role::User
@@ -489,7 +491,7 @@ async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loo
         &state,
         session_id,
         None,
-        "continue".into(),
+        TurnInput::from("continue"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -2865,6 +2867,7 @@ impl ThreadStore for MockStorage {
             db.messages.push(swage_storage::Message {
                 id: message_id,
                 thread_id: branch.child_thread_id,
+                attachments: Vec::new(),
                 turn_id: message.turn_id,
                 role: message.role,
                 content: message.content,
@@ -2947,6 +2950,50 @@ impl swage_storage::PageStore for MockStorage {
     async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
         unimplemented!()
     }
+    async fn create_page_template(
+        &self,
+        _: swage_storage::NewPageTemplate,
+    ) -> Result<swage_storage::PageTemplate, StorageError> {
+        unimplemented!()
+    }
+    async fn create_page_template_with_modules(
+        &self,
+        _: swage_storage::NewPageTemplate,
+        _: Vec<swage_storage::NewPageTemplateModuleInput>,
+    ) -> Result<swage_storage::PageTemplate, StorageError> {
+        unimplemented!()
+    }
+    async fn get_page_template(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::PageTemplate>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_templates_by_space(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageTemplate>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_page_template_module(
+        &self,
+        _: swage_storage::NewPageTemplateModule,
+    ) -> Result<swage_storage::PageTemplateModule, StorageError> {
+        unimplemented!()
+    }
+    async fn list_page_template_modules(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::PageTemplateModule>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_page_from_template(
+        &self,
+        _: swage_storage::NewPage,
+        _: Uuid,
+    ) -> Result<swage_storage::Page, StorageError> {
+        unimplemented!()
+    }
 }
 
 #[async_trait]
@@ -2977,7 +3024,11 @@ impl swage_storage::PageAnnotationStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
-    async fn delete_page_annotation(&self, _: Uuid) -> Result<(), StorageError> {
+    async fn delete_page_annotation_with_audit(
+        &self,
+        _: PageAnnotation,
+        _: NewAuditEvent,
+    ) -> Result<bool, StorageError> {
         unimplemented!()
     }
 }
@@ -3207,6 +3258,7 @@ impl MessageStore for MockStorage {
         let m = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
+            attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -3238,6 +3290,7 @@ impl MessageStore for MockStorage {
         let created = Message {
             id: Uuid::new_v4(),
             thread_id: message.thread_id,
+            attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
             content: message.content,
@@ -4452,7 +4505,7 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
             &state,
             session_id,
             None,
-            "exercise agent skill loading".into(),
+            TurnInput::from("exercise agent skill loading"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -4681,7 +4734,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
         &state,
         session_id,
         None,
-        "Hello Codex".into(),
+        TurnInput::from("Hello Codex"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -5754,7 +5807,7 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
             &task_state,
             session_id,
             None,
-            "Use echo after accepting degraded execution".into(),
+            TurnInput::from("Use echo after accepting degraded execution"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -5936,6 +5989,11 @@ async fn unattended_sandbox_failure_records_unattended_attendance() {
 
 #[tokio::test]
 async fn unattended_turn_rejects_a_relative_managed_scratch_root() {
+    swage_agent::AgentConfig::new("agent")
+        .with_workspace("relative", vec![])
+        .validate()
+        .expect("generic agent validation must leave execution-root policy to the turn owner");
+
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage_and_root(
         vec![],
@@ -6921,6 +6979,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
+                effort: None,
             },
         },
     )]
@@ -7353,6 +7412,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     storage
         .create_message(NewMessage {
             thread_id: parent_thread.id,
+            attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::User,
             content: "Use echo".to_string(),
@@ -7364,6 +7424,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let assistant_message = storage
         .create_message(NewMessage {
             thread_id: parent_thread.id,
+            attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::Assistant,
             content: "Echo complete".to_string(),
@@ -7543,6 +7604,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::User,
             content: "Run the command".to_string(),
@@ -7554,6 +7616,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     storage
         .create_message(NewMessage {
             thread_id: thread.id,
+            attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::Assistant,
             content: "Trying the command".to_string(),
@@ -7885,7 +7948,7 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
             &task_state,
             session_id,
             None,
-            "Use echo".into(),
+            TurnInput::from("Use echo"),
             tx,
             Arc::new(Mutex::new(SubscriptionState::new(true))),
             None,
@@ -9007,7 +9070,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         &state,
         session.id,
         None,
-        "Delegate this".into(),
+        TurnInput::from("Delegate this"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -9621,7 +9684,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         &state,
         child_session.id,
         None,
-        "continue the delegated work".into(),
+        TurnInput::from("continue the delegated work"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -9647,6 +9710,121 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             "the broad sender and target definitions must not restore shell"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_skill_selection_is_carried_by_the_composition_once() {
+    let swage_home = tempfile::TempDir::new().expect("temp swage home");
+    for skill in ["validated-skill", "composition-skill"] {
+        let skill_dir = swage_home.path().join("spaces/default/skills").join(skill);
+        std::fs::create_dir_all(&skill_dir).expect("create delegated skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\ndescription: {skill}\n---\nUse {skill}.\n"),
+        )
+        .expect("write delegated skill");
+    }
+    let _guard = SwageHomeGuard::set_to(swage_home.path());
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("parent session");
+    let thread = ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .expect("parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate with a selected skill".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("parent turn");
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "agent-b".into(),
+            space_id: Some(space.id),
+            display_name: "Agent B".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .expect("target agent definition");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(MockProvider::new(vec![
+            StreamChunk::Delta {
+                content: "delegated".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "agent-b",
+            "carry the composition",
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["validated-skill".into()]),
+            DispatchContextComposition {
+                skills: Some(vec!["composition-skill".into()]),
+                ..Default::default()
+            },
+            "composition-skill-owner",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Detach,
+        )
+        .await
+        .expect("detached delegation should start");
+    let detached = match outcome {
+        DelegationOutcome::Detached(detached) => detached,
+        DelegationOutcome::Completed(_) => panic!("expected detached delegation"),
+    };
+    let message = storage
+        .get_agent_message(detached.delegate_message_id)
+        .await
+        .expect("delegate message query")
+        .expect("durable delegate message");
+    assert_eq!(
+        message.payload["skills"],
+        serde_json::json!(["composition-skill"]),
+        "the composition must remain the sole delegate-payload carrier"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -10662,7 +10840,7 @@ async fn capture_provider_effort_for_selected_model(
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10676,6 +10854,7 @@ async fn capture_provider_effort_for_selected_model(
         .take()
         .expect("provider should receive the turn request")
         .effort
+        .map(|resolved| resolved.requested)
 }
 
 #[tokio::test]
@@ -10793,6 +10972,141 @@ async fn process_turn_uses_aliased_model_default_effort_without_session_metadata
     );
 }
 
+/// The effort exemplar's turn seam: the intent resolves once against the
+/// effective model's declared capability, the provider receives the resolved
+/// control, and the turn's audit snapshot records the outcome — a clamp
+/// included.
+#[tokio::test]
+async fn process_turn_resolves_effort_against_the_declared_capability_and_records_it() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) =
+        make_storage_with_session_metadata(Some(serde_json::json!({"effort": "max"}))).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-reasoner".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                reasoning_replay: false,
+                effort: Some(swage_core::EffortCapability::Levels {
+                    levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
+                    can_disable: false,
+                }),
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let resolved = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request")
+        .effort
+        .expect("effort reached the provider");
+    assert_eq!(resolved.requested, swage_core::Effort::Max);
+    assert_eq!(
+        resolved.control,
+        swage_core::EffortControl::Level {
+            level: swage_core::Effort::High
+        }
+    );
+    assert_eq!(resolved.clamped_to, Some(swage_core::Effort::High));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["effort"]["requested"], "max");
+    assert_eq!(report["provider_visible"]["effort"]["clamped_to"], "high");
+    assert_eq!(
+        report["provider_visible"]["effort"]["note"],
+        "max unsupported; clamped to high"
+    );
+}
+
+/// With no catalogue declaration, the provider adapter's own account of the
+/// documented control resolves the intent.
+#[test]
+fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5");
+    let capability = super::effort_capability_for_model(&config, "claude", &anthropic);
+    assert!(matches!(
+        capability,
+        swage_core::EffortCapability::Levels {
+            can_disable: true,
+            ..
+        }
+    ));
+
+    let declared = swage_core::EffortCapability::None;
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .effort = Some(declared.clone());
+    assert_eq!(
+        super::effort_capability_for_model(&config, "claude", &anthropic),
+        declared,
+        "the catalogue's own declaration wins over the adapter's"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::effort_capability_for_model(&config, "unknown", &mock),
+        swage_core::EffortCapability::None
+    );
+}
+
 #[tokio::test]
 async fn process_turn_passes_tool_context_to_tools() {
     let captured = Arc::new(std::sync::Mutex::new(None));
@@ -10837,7 +11151,7 @@ async fn process_turn_passes_tool_context_to_tools() {
         &state,
         session_id,
         None,
-        "capture".into(),
+        TurnInput::from("capture"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -10913,7 +11227,7 @@ async fn process_turn_resolves_config_per_space_and_completes_turn() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11003,7 +11317,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11045,7 +11359,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11097,7 +11411,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11202,7 +11516,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
         &state,
         session_id,
         None,
-        "hi".into(),
+        TurnInput::from("hi"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11361,7 +11675,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11409,7 +11723,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -11721,7 +12035,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
         &state,
         session_id,
         None,
-        "hello".into(),
+        TurnInput::from("hello"),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
@@ -14882,6 +15196,219 @@ fn delegation_result_renders_failure_and_unknown_shapes() {
     assert!(unknown.contains("verdict"));
 }
 
+fn vision_capable_config() -> swage_config::ResolvedConfig {
+    // The default provider protocol (OpenAI) advertises vision, which is
+    // what the intake gate reads.
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "openai".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::OpenAi,
+            ..Default::default()
+        },
+    );
+    config.models.default = "gpt".into();
+    config.models.entries.insert(
+        "gpt".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "openai".into(),
+            model_id: "gpt-4o".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+fn text_only_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "codex".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Codex,
+            ..Default::default()
+        },
+    );
+    config.models.default = "codex".into();
+    config.models.entries.insert(
+        "codex".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "codex".into(),
+            model_id: "fake-codex".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+/// The image intake journey at the gateway seam: an image part submitted
+/// beside the text is recorded with the user message in the wire's own
+/// shape, rebuilt into history as a content part, and reaches the provider
+/// request as `ContentPart::ImageUrl` in submission order.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_part() {
+    let storage = Arc::new(MockStorage::new());
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "a cat".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let space = storage.get_or_create_default().await.expect("space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "gateway".to_string(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("session");
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("thread");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        vision_capable_config(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    assert!(state.workflow_capabilities.vision);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session.id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn with an image completes");
+
+    // Recorded beside the text, in the wire's own shape.
+    let stored = storage.db.lock().await.messages.clone();
+    let user = stored
+        .iter()
+        .find(|message| message.role == Role::User)
+        .expect("stored user message");
+    assert_eq!(user.content, "What is in this picture?");
+    assert_eq!(
+        user.attachments,
+        vec![serde_json::json!({"kind": "image_url", "url": "https://example.test/cat.png"})]
+    );
+
+    // On the provider request as content parts, text first.
+    let requests = captured_requests.lock().expect("captured requests");
+    let user_message = requests[0]
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.text_content().contains("What is in this picture?")
+        })
+        .expect("user message reached the provider");
+    assert_eq!(
+        user_message.content(),
+        &[
+            ContentPart::Text {
+                text: "What is in this picture?".into()
+            },
+            ContentPart::ImageUrl {
+                url: "https://example.test/cat.png".into()
+            },
+        ]
+    );
+}
+
+/// A provider that cannot consume images refuses the submission before any
+/// record is written: a part the model never sees must not ride along.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lacks_vision() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], text_only_config(), Arc::clone(&storage)).await;
+    assert!(!state.workflow_capabilities.vision);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("an unsupported attachment must fail the turn");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("image")),
+        "{error}"
+    );
+
+    let db = storage.db.lock().await;
+    assert!(
+        db.messages.is_empty(),
+        "nothing is persisted for a refused turn"
+    );
+    assert!(
+        db.turns.is_empty(),
+        "no turn record is created for a refused turn"
+    );
+}
+
+/// A stored attachment outside the wire contract is corruption, refused
+/// when history is rebuilt rather than dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_attachment_outside_the_contract_fails_the_history_rebuild() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![serde_json::json!({"kind": "hologram", "url": "x"})],
+            turn_id: None,
+            role: Role::User,
+            content: "look".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+
+    let error = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .expect_err("an out-of-contract attachment must not be silently dropped");
+    assert!(
+        matches!(
+            &error,
+            GatewayError::Storage(StorageError::Corruption { message }) if message.contains("hologram")
+        ),
+        "{error}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn delivered_delegation_results_survive_the_history_rebuild() {
     let storage = MockStorage::new();
@@ -14894,6 +15421,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
             content: "Delegated agent researcher completed:\nGathered 3 sources.".into(),
@@ -14904,6 +15432,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
     storage
         .append_message(AppendMessage {
             thread_id,
+            attachments: Vec::new(),
             turn_id: None,
             role: Role::Tool,
             content: "orphaned tool row".into(),

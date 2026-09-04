@@ -341,9 +341,13 @@ impl SkillManager {
                 Err(warning) => warnings.push(warning),
             }
         }
+        // Shipped definitions sit at lowest precedence: after every authored
+        // skill at the same level, so an operator's global skill carrying a
+        // workflow of the same name as a shipped one wins the name.
         authored.sort_by(|left, right| {
             swage_config::skill::level_specificity(&left.level)
                 .cmp(&swage_config::skill::level_specificity(&right.level))
+                .then_with(|| left.shipped.cmp(&right.shipped))
                 .then_with(|| left.name.cmp(&right.name))
         });
         (authored, warnings)
@@ -779,7 +783,7 @@ mod tests {
         for name in ["global-skill", "space-skill", "agent-skill"] {
             assert!(skills.iter().any(|skill| skill.name == name));
         }
-        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 5);
+        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 6);
         assert!(warnings.is_empty());
     }
 
@@ -794,7 +798,7 @@ mod tests {
 
         let (skills, _) = SkillManager::discover_available(root_dir.path(), space_dir.path(), None);
 
-        assert_eq!(skills.len(), 7);
+        assert_eq!(skills.len(), 8);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
     }
 

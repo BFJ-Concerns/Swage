@@ -3,6 +3,8 @@
 //! Every error includes the address that was attempted and the underlying cause,
 //! so callers can produce actionable diagnostics without re-deriving context.
 
+pub use swage_protocol::client::error::ErrorCode;
+
 /// Errors produced by gateway client operations.
 ///
 /// Network variants carry the attempted `address` so callers can log or display
@@ -29,8 +31,18 @@ pub enum ClientError {
     #[error("WebSocket connection to {address} failed: {message}")]
     WebSocketFailed { address: String, message: String },
 
-    /// The gateway returned a non-success HTTP status with a body that can be shown
-    /// to the user for context.
+    /// The gateway refused the request in the wire error contract's shape:
+    /// a typed code a caller can branch on and a message for people.
+    #[error("Gateway at {address} refused the request ({code:?}): {message}")]
+    Gateway {
+        address: String,
+        code: ErrorCode,
+        message: String,
+    },
+
+    /// The gateway returned a non-success HTTP status whose body was not the
+    /// wire error contract — a proxy in the way, or a surface outside the
+    /// contract. The raw body is kept for diagnostics.
     #[error("Unexpected response from gateway at {address}: HTTP {status}: {body}")]
     UnexpectedResponse {
         address: String,
@@ -133,6 +145,19 @@ mod tests {
             msg.contains("protocol error"),
             "display should include message, got: {msg}"
         );
+    }
+
+    #[test]
+    fn gateway_refusal_display_names_the_code_and_message() {
+        let err = ClientError::Gateway {
+            address: "http://127.0.0.1:3000/api/spaces".to_string(),
+            code: ErrorCode::Conflict,
+            message: "space conflict: a space named 'ops' exists".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("http://127.0.0.1:3000/api/spaces"), "{msg}");
+        assert!(msg.contains("Conflict"), "{msg}");
+        assert!(msg.contains("a space named 'ops' exists"), "{msg}");
     }
 
     #[test]

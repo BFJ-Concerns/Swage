@@ -5,4 +5,4 @@ export type CreateWorkflowScriptRequest = { name: string, description: string, s
  * Server-side delivery targets granted to this script. Responses expose
  * only whether a grant exists, never its URLs or secret references.
  */
-delivery_grant: unknown, };
+delivery_grant?: unknown, };

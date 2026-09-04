@@ -11,7 +11,6 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::truncated_output_value;
-use crate::tool_executor::GatewayToolContext;
 
 pub struct ToolResultReadTool {
     pub max_output_bytes: usize,
@@ -63,13 +62,11 @@ impl Tool for ToolResultReadTool {
             name: self.name().to_owned(),
             message: "tool_result_read requires a turn ID".to_owned(),
         })?;
-        let gateway_ctx = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: "tool_result_read requires gateway execution context".to_owned(),
-            })?;
+        let gateway_ctx = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "tool_result_read requires gateway execution context",
+        )?;
 
         let current_turn = gateway_ctx
             .storage()
@@ -341,6 +338,7 @@ mod tests {
         storage
             .create_message(NewMessage {
                 thread_id: parent_thread.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 content: "read it".into(),
@@ -352,6 +350,7 @@ mod tests {
         let assistant_message = storage
             .create_message(NewMessage {
                 thread_id: parent_thread.id,
+                attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 content: "done".into(),

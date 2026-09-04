@@ -5,21 +5,20 @@ use std::sync::{
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use axum::{
-    Json,
-    extract::{Path, State},
-};
+use axum::extract::{Query, State};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
-use swage_core::{ChatMessage, CompletionRequest, Role, StorageError};
+use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role, StorageError};
 use swage_protocol::client::workflow::{
     CreateWorkflowScriptRequest, PostWorkflowRunEventRequest, PostWorkflowRunEventResponse,
     StartInlineWorkflowRunRequest, StartWorkflowRunRequest, UpdateWorkflowScriptRequest,
     WorkflowArgumentContract, WorkflowBudget, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
-    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEvent, WorkflowRunEventSource, WorkflowRunHandover,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind,
+    WorkflowJournalResult, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunListResponse, WorkflowRunState,
+    WorkflowScript, WorkflowScriptListResponse,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -38,8 +37,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    builtin_workflows::{self, BUILTIN_WORKFLOWS, BuiltinWorkflow},
-    error::ApiError,
+    error::{ApiError, Json, Path},
     state::AppState,
     subscription::SubscriptionState,
     turn::{
@@ -68,6 +66,8 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
         can_write: placement.can_write,
         authority_path: placement.authority_path.clone(),
         authority_context_id: placement.authority_context_id,
+        worktree_seq: None,
+        worktree_base_commit: None,
     }
 }
 
@@ -77,6 +77,8 @@ fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> Resol
         can_write: placement.can_write,
         authority_path: placement.authority_path.to_string_lossy().into_owned(),
         authority_context_id: placement.authority_context_id,
+        worktree_seq: None,
+        worktree_base_commit: None,
     }
 }
 
@@ -101,10 +103,10 @@ struct EffectiveWorkflow {
     delivery_grant: Option<Value>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
-    built_in: bool,
     immutable: bool,
     carrying_skill: Option<String>,
     argument_schema: Option<Value>,
+    task: Option<String>,
 }
 
 #[derive(Clone)]
@@ -115,36 +117,9 @@ struct InlineWorkflowIdentity {
 }
 
 impl EffectiveWorkflow {
-    fn from_builtin(space_id: Uuid, workflow: &'static BuiltinWorkflow) -> Result<Self, String> {
-        let released_at = builtin_workflows::released_at(workflow);
-        Ok(Self {
-            id: builtin_workflows::id(space_id, workflow.name),
-            space_id,
-            name: workflow.name.into(),
-            description: workflow.description.into(),
-            head_version: 1,
-            source: workflow.source.into(),
-            script_version_id: None,
-            delivery_grant: None,
-            created_at: released_at,
-            updated_at: released_at,
-            built_in: true,
-            immutable: true,
-            carrying_skill: None,
-            argument_schema: swage_workflow::script_meta(workflow.source)
-                .map_err(|error| {
-                    format!(
-                        "built-in workflow {} metadata is invalid: {error}",
-                        workflow.name
-                    )
-                })?
-                .argument_schema,
-        })
-    }
-
     fn inline_identity(&self) -> Option<InlineWorkflowIdentity> {
-        // Immutable workflows — built-in and skill-carried alike — keep their
-        // source inline rather than in the authored-version tables.
+        // Immutable workflows — skill-carried ones — keep their source inline
+        // rather than in the authored-version tables.
         self.immutable.then(|| InlineWorkflowIdentity {
             id: self.id,
             name: self.name.clone(),
@@ -159,14 +134,12 @@ impl EffectiveWorkflow {
         source: String,
     ) -> Result<Self, String> {
         let identity = format!("{}/{}", skill.name, name);
-        let argument_schema = swage_workflow::script_meta(&source)
-            .map_err(|error| {
-                format!(
-                    "workflow {name} carried by skill {} has invalid metadata: {error}",
-                    skill.name
-                )
-            })?
-            .argument_schema;
+        let meta = swage_workflow::script_meta(&source).map_err(|error| {
+            format!(
+                "workflow {name} carried by skill {} has invalid metadata: {error}",
+                skill.name
+            )
+        })?;
         Ok(Self {
             id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
             space_id,
@@ -178,15 +151,16 @@ impl EffectiveWorkflow {
             delivery_grant: None,
             created_at: chrono::DateTime::UNIX_EPOCH,
             updated_at: chrono::DateTime::UNIX_EPOCH,
-            built_in: false,
             immutable: true,
             carrying_skill: Some(skill.name.clone()),
-            argument_schema,
+            argument_schema: meta.argument_schema,
+            task: meta.task,
         })
     }
 }
 
-fn carried_workflows(
+async fn carried_workflows(
+    state: &AppState,
     space_id: Uuid,
     skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
@@ -207,7 +181,14 @@ fn carried_workflows(
                 ) {
                     Ok(workflow) => workflows.push(workflow),
                     Err(error) => {
-                        tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                        record_carried_workflow_exclusion(
+                            state,
+                            space_id,
+                            &skill.name,
+                            name,
+                            &error,
+                        )
+                        .await;
                     }
                 }
             }
@@ -258,12 +239,43 @@ fn carried_workflows(
             match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
                 Ok(workflow) => workflows.push(workflow),
                 Err(error) => {
-                    tracing::warn!(%error, "excluding carried workflow with invalid metadata")
+                    record_carried_workflow_exclusion(state, space_id, &skill.name, name, &error)
+                        .await;
                 }
             }
         }
     }
     Ok(workflows)
+}
+
+async fn record_carried_workflow_exclusion(
+    state: &AppState,
+    space_id: Uuid,
+    skill_name: &str,
+    workflow_name: &str,
+    error: &str,
+) {
+    tracing::warn!(%error, skill = skill_name, workflow = workflow_name, "excluding carried workflow with invalid metadata");
+    if let Err(audit_error) = state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "workflow_script".into(),
+            entity_id: format!("{skill_name}/{workflow_name}"),
+            event_kind: "excluded".into(),
+            summary: "Excluded carried workflow with invalid metadata".into(),
+            metadata: serde_json::json!({
+                "space_id": space_id,
+                "skill": skill_name,
+                "workflow": workflow_name,
+                "error": error,
+            }),
+        })
+        .await
+    {
+        tracing::warn!(%audit_error, skill = skill_name, workflow = workflow_name, "could not audit carried workflow exclusion");
+    }
 }
 
 async fn discover_skills_for_space(
@@ -288,7 +300,7 @@ async fn authored_workflow(
     // use, never the stored column: a model-authored script resolves none.
     // See service::workflow_script.
     let delivery_grant = record.effective_delivery_grant();
-    let argument_schema = swage_workflow::script_meta(&head.source)?.argument_schema;
+    let meta = swage_workflow::script_meta(&head.source)?;
     Ok(EffectiveWorkflow {
         id: record.id,
         space_id: record.space_id,
@@ -300,10 +312,10 @@ async fn authored_workflow(
         delivery_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
-        built_in: false,
         immutable: false,
         carrying_skill: None,
-        argument_schema,
+        argument_schema: meta.argument_schema,
+        task: meta.task,
     })
 }
 
@@ -323,15 +335,10 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    if let Some(workflow) = carried_workflows(space_id, skills)?
+    Ok(carried_workflows(state, space_id, skills)
+        .await?
         .into_iter()
-        .find(|workflow| workflow.name == name)
-    {
-        return Ok(Some(workflow));
-    }
-    builtin_workflows::find_by_name(name)
-        .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow))
-        .transpose()
+        .find(|workflow| workflow.name == name))
 }
 
 async fn resolve_workflow_by_id(
@@ -387,23 +394,18 @@ async fn list_effective_workflows(
         .map_err(|error| error.to_string())?;
     let authored_names: std::collections::HashSet<_> =
         records.iter().map(|record| record.name.clone()).collect();
-    let mut workflows = Vec::with_capacity(records.len() + BUILTIN_WORKFLOWS.len());
+    let mut workflows = Vec::with_capacity(records.len());
     for record in records {
         workflows.push(authored_workflow(state, record).await?);
     }
+    // Carried workflows arrive in skill precedence order (the discovery
+    // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
-    for workflow in carried_workflows(space_id, skills)? {
+    for workflow in carried_workflows(state, space_id, skills).await? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
     }
-    workflows.extend(
-        BUILTIN_WORKFLOWS
-            .iter()
-            .filter(|workflow| !effective_names.contains(workflow.name))
-            .map(|workflow| EffectiveWorkflow::from_builtin(space_id, workflow))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
     workflows.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(workflows)
 }
@@ -509,29 +511,54 @@ fn journal_wire(
             target_kind: entry.target_kind.unwrap_or_default(),
             idempotency_key,
         });
+    let result = entry.result.as_ref().and_then(|stored| {
+        journal_result_from_storage(kind, stored)
+            .map_err(|error| {
+                tracing::warn!(
+                    entry_id = %entry.id,
+                    entry_kind = %entry.kind,
+                    %error,
+                    "excluding invalid workflow journal result from client projection"
+                );
+            })
+            .ok()
+    });
     let agent_call = (entry.kind == "agent_call").then(|| {
-        let result = entry.result.as_ref();
+        let result = result.as_ref();
         WorkflowAgentCallDetail {
             agent_definition_id: entry
                 .request
                 .get("agent")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            session_id: result
-                .and_then(|v| v.get("session_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            thread_id: result
-                .and_then(|v| v.get("thread_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            turn_id: result
-                .and_then(|v| v.get("turn_id"))
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
-            input_tokens: result
-                .and_then(|v| v.get("input_tokens"))
-                .and_then(Value::as_u64),
-            output_tokens: result
-                .and_then(|v| v.get("output_tokens"))
-                .and_then(Value::as_u64),
+            session_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { session_id, .. } => *session_id,
+                _ => None,
+            }),
+            thread_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { thread_id, .. } => *thread_id,
+                _ => None,
+            }),
+            turn_id: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { turn_id, .. } => *turn_id,
+                _ => None,
+            }),
+            input_tokens: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { input_tokens, .. } => Some(*input_tokens),
+                _ => None,
+            }),
+            output_tokens: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { output_tokens, .. } => Some(*output_tokens),
+                _ => None,
+            }),
+            worktree: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { worktree, .. } => worktree.clone(),
+                _ => None,
+            }),
+            served_model: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { served_model, .. } => served_model.clone(),
+                _ => None,
+            }),
         }
     });
     let label = entry
@@ -547,13 +574,149 @@ fn journal_wire(
         status,
         label,
         request: entry.request,
-        result: entry.result,
+        result,
         error_message: entry.error_message,
         agent_call,
         effect,
         started_at: entry.started_at,
         completed_at: entry.completed_at,
     })
+}
+
+fn journal_result_from_storage(
+    kind: WorkflowJournalEntryKind,
+    stored: &Value,
+) -> Result<WorkflowJournalResult, String> {
+    let stored_tag = stored.get("kind").and_then(Value::as_str);
+    if kind != WorkflowJournalEntryKind::WorkflowCall
+        && let Some(tag) = stored_tag
+        && is_journal_result_tag(tag)
+        && !journal_result_tag_matches_kind(kind, tag)
+    {
+        return Err(format!(
+            "stored workflow journal result tag {tag:?} does not match entry kind {kind:?}"
+        ));
+    }
+
+    let tagged_object = |tag: &str| {
+        let mut object = stored
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "workflow journal result is not an object".to_string())?;
+        object.insert("kind".into(), Value::String(tag.into()));
+        Ok::<_, String>(Value::Object(object))
+    };
+    let event_object = |tag: &str| {
+        let mut object = stored
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "workflow journal result is not an object".to_string())?;
+        let event_kind = object
+            .remove("kind")
+            .ok_or_else(|| "workflow journal event result has no kind".to_string())?;
+        object.insert("event_kind".into(), event_kind);
+        object.insert("kind".into(), Value::String(tag.into()));
+        Ok::<_, String>(Value::Object(object))
+    };
+
+    let tagged = match kind {
+        WorkflowJournalEntryKind::AgentCall => tagged_object("agent_call")?,
+        WorkflowJournalEntryKind::WorkerPlacement if stored.get("paths").is_some() => {
+            tagged_object("worker_placement_list")?
+        }
+        WorkflowJournalEntryKind::WorkerPlacement => tagged_object("worker_placement")?,
+        WorkflowJournalEntryKind::Effect => tagged_object("effect")?,
+        WorkflowJournalEntryKind::Log => serde_json::json!({"kind": "log"}),
+        WorkflowJournalEntryKind::Phase => serde_json::json!({"kind": "phase"}),
+        WorkflowJournalEntryKind::WorkflowCall => {
+            serde_json::json!({"kind": "workflow_call", "output": stored})
+        }
+        WorkflowJournalEntryKind::Timer => tagged_object("timer")?,
+        WorkflowJournalEntryKind::Event if stored.get("delivered").is_some() => {
+            tagged_object("event_delivery")?
+        }
+        WorkflowJournalEntryKind::Event => event_object("event")?,
+        WorkflowJournalEntryKind::AwaitEvent => event_object("await_event")?,
+        WorkflowJournalEntryKind::Gate => tagged_object("gate")?,
+        WorkflowJournalEntryKind::Budget => tagged_object("budget")?,
+        WorkflowJournalEntryKind::TerminalBudget => tagged_object("terminal_budget")?,
+        WorkflowJournalEntryKind::WindDown => tagged_object("wind_down")?,
+    };
+
+    serde_json::from_value(tagged)
+        .map_err(|error| format!("invalid workflow journal result: {error}"))
+}
+
+fn is_journal_result_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "agent_call"
+            | "worker_placement"
+            | "worker_placement_list"
+            | "effect"
+            | "log"
+            | "phase"
+            | "workflow_call"
+            | "timer"
+            | "event"
+            | "event_delivery"
+            | "await_event"
+            | "gate"
+            | "budget"
+            | "terminal_budget"
+            | "wind_down"
+    )
+}
+
+fn journal_result_tag_matches_kind(kind: WorkflowJournalEntryKind, tag: &str) -> bool {
+    matches!(
+        (kind, tag),
+        (WorkflowJournalEntryKind::AgentCall, "agent_call")
+            | (
+                WorkflowJournalEntryKind::WorkerPlacement,
+                "worker_placement" | "worker_placement_list"
+            )
+            | (WorkflowJournalEntryKind::Effect, "effect")
+            | (WorkflowJournalEntryKind::Log, "log")
+            | (WorkflowJournalEntryKind::Phase, "phase")
+            | (WorkflowJournalEntryKind::WorkflowCall, "workflow_call")
+            | (WorkflowJournalEntryKind::Timer, "timer")
+            | (WorkflowJournalEntryKind::Event, "event" | "event_delivery")
+            | (WorkflowJournalEntryKind::AwaitEvent, "await_event")
+            | (WorkflowJournalEntryKind::Gate, "gate")
+            | (WorkflowJournalEntryKind::Budget, "budget")
+            | (WorkflowJournalEntryKind::TerminalBudget, "terminal_budget")
+            | (WorkflowJournalEntryKind::WindDown, "wind_down")
+    )
+}
+
+#[cfg(test)]
+mod journal_result_contract_tests {
+    use super::*;
+
+    #[test]
+    fn journal_result_kind_mismatch_is_rejected_at_the_storage_to_wire_seam() {
+        let entry = WorkflowJournalRecord {
+            id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            seq: 0,
+            completed_order: Some(0),
+            kind: "timer".into(),
+            status: "completed".into(),
+            args_hash: String::new(),
+            request: Value::Null,
+            result: Some(serde_json::json!({"kind": "log", "fired": true})),
+            error_message: None,
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+        };
+
+        let projected = journal_wire(entry).expect("journal entry projects");
+        assert_eq!(projected.result, None);
+    }
 }
 
 #[derive(Default)]
@@ -598,9 +761,35 @@ fn terminal_budget_reading(accounting: &TokenBudgetState, budget: &WorkflowBudge
 }
 
 const TERMINAL_BUDGET_SEQUENCE: u64 = i64::MAX as u64;
+const TERMINAL_BUDGET_WRITE_ATTEMPTS: usize = 3;
 
 fn is_positional_journal_entry(entry: &WorkflowJournalRecord) -> bool {
     entry.kind != "terminal_budget"
+}
+
+async fn complete_terminal_budget_entry(
+    state: &AppState,
+    entry_id: Uuid,
+    reading: Value,
+) -> Result<(), String> {
+    let mut last_error = None;
+    for _ in 0..TERMINAL_BUDGET_WRITE_ATTEMPTS {
+        match state
+            .complete_workflow_journal_entry(entry_id, reading.clone())
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+    let error = last_error.expect("the bounded retry loop always attempts a write");
+    state
+        .fail_workflow_journal_entry(entry_id, &error)
+        .await
+        .map_err(|failure| {
+            format!("{error}; could not mark terminal budget entry failed: {failure}")
+        })?;
+    Err(error)
 }
 
 async fn record_terminal_budget(
@@ -632,11 +821,7 @@ async fn record_terminal_budget(
                 .unwrap_or_else(|| "recorded terminal budget failure".into())),
             "started" => {
                 let reading = terminal_budget_reading(&*accounting.lock().await, budget);
-                state
-                    .complete_workflow_journal_entry(entry.id, reading.clone())
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
+                complete_terminal_budget_entry(state, entry.id, reading).await
             }
             other => Err(format!("unknown terminal budget entry status: {other}")),
         };
@@ -661,11 +846,7 @@ async fn record_terminal_budget(
         })
         .await
         .map_err(|error| error.to_string())?;
-    state
-        .complete_workflow_journal_entry(intent.id, reading)
-        .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    complete_terminal_budget_entry(state, intent.id, reading).await
 }
 
 fn completed_agent_tokens_before(replay: &[WorkflowJournalRecord], transition_seq: u64) -> u64 {
@@ -849,6 +1030,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             script.delivery_grant,
             script.carrying_skill,
             script.argument_schema,
+            script.task,
             args,
             budget,
             wait,
@@ -871,6 +1053,9 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("session {session_id} was not found"))?;
+        let task = swage_workflow::script_meta(source)
+            .map_err(|error| format!("inline workflow has invalid metadata: {error}"))?
+            .task;
         self.start_for_session(
             session,
             None,
@@ -879,6 +1064,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             None,
             None,
             None,
+            task,
             args,
             budget,
             wait,
@@ -897,6 +1083,7 @@ impl GatewayWorkflowLauncher {
         delivery_grant: Option<Value>,
         carrying_skill: Option<String>,
         argument_schema: Option<Value>,
+        task: Option<String>,
         args: Value,
         budget: Option<WorkflowBudget>,
         wait: bool,
@@ -930,6 +1117,7 @@ impl GatewayWorkflowLauncher {
             inline_identity,
             source,
             argument_schema,
+            task,
             args,
             budget.unwrap_or_default(),
             delivery_grant,
@@ -943,7 +1131,7 @@ impl GatewayWorkflowLauncher {
             inherited_worker_placement,
         )
         .await
-        .map_err(|error| error.0.to_string())?;
+        .map_err(|error| error.message().to_owned())?;
         if !wait {
             return serde_json::to_value(run).map_err(|error| error.to_string());
         }
@@ -964,7 +1152,7 @@ impl GatewayWorkflowLauncher {
         })
         .await
         .map_err(|_| "workflow wait timed out".to_string())??;
-        serde_json::to_value(run_wire(record).map_err(|error| error.0.to_string())?)
+        serde_json::to_value(run_wire(record).map_err(|error| error.message().to_owned())?)
             .map_err(|error| error.to_string())
     }
 }
@@ -1291,6 +1479,155 @@ impl WorkflowHost for ChannelWorkflowHost {
     }
 }
 
+struct WorkflowTurnAttempt {
+    outcome: Result<(), GatewayError>,
+    events: Vec<ServerEvent>,
+    provider_failure: Option<String>,
+}
+
+enum FallbackFailure {
+    Provider,
+    UnknownModel,
+}
+
+fn fallback_failure(error: &GatewayError) -> Option<FallbackFailure> {
+    match error {
+        GatewayError::Provider(_) => Some(FallbackFailure::Provider),
+        GatewayError::ValidationError(message) if message.starts_with("unknown model ") => {
+            Some(FallbackFailure::UnknownModel)
+        }
+        _ => None,
+    }
+}
+
+fn fallback_is_eligible(
+    failure: FallbackFailure,
+    emitted_output: bool,
+    dispatched_tool: bool,
+) -> bool {
+    if emitted_output || dispatched_tool {
+        return false;
+    }
+
+    matches!(
+        failure,
+        FallbackFailure::Provider | FallbackFailure::UnknownModel
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_workflow_agent_turn(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    prompt: String,
+    schema: Option<Value>,
+    schema_retries: Option<u32>,
+    effort: Option<swage_core::Effort>,
+    timeout_ms: Option<u64>,
+    cancellation: CancellationToken,
+    composition: crate::turn::DispatchContextComposition,
+    journal_entry_id: Uuid,
+    requested_model: Option<String>,
+    reuse_persisted_input: bool,
+) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
+    let (event_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let mut events = Vec::new();
+    let provider_failure = Arc::new(std::sync::Mutex::new(None));
+    let call_cancellation = cancellation.child_token();
+    let mut processing = Box::pin(crate::turn::process_turn_with_composition_and_model(
+        state,
+        session_id,
+        Some(thread_id),
+        prompt,
+        event_tx,
+        // Workflow fallback decisions must see tool dispatches as output
+        // activity. Force delivery to this private channel so the normal
+        // client subscription policy cannot hide them.
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        schema,
+        schema_retries,
+        effort,
+        Some(call_cancellation.clone()),
+        None,
+        crate::turn::TurnAttendance::Unattended,
+        composition,
+        Some(journal_entry_id),
+        requested_model,
+        Some(provider_failure.clone()),
+        reuse_persisted_input,
+    ));
+    let timeout = timeout_ms.map(std::time::Duration::from_millis);
+    let mut timeout_wait = Box::pin(async {
+        match timeout {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => std::future::pending().await,
+        }
+    });
+    let outcome = loop {
+        tokio::select! {
+            biased;
+            result = &mut processing => {
+                if cancellation.is_cancelled() {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                    }
+                    return Err("WorkflowCancelledError".into());
+                }
+                break result;
+            }
+            Some(event) = events_rx.recv() => events.push(event),
+            () = cancellation.cancelled() => {
+                call_cancellation.cancel();
+                if let Err(error) = processing.await {
+                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
+                }
+                return Err("WorkflowCancelledError".into());
+            }
+            () = &mut timeout_wait => {
+                call_cancellation.cancel();
+                if let Err(error) = processing.await {
+                    tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
+                }
+                return Err(format!(
+                    "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
+                    timeout_ms.expect("timeout branch requires a deadline")
+                ).into());
+            }
+        }
+    };
+    // The turn's event relay can finish immediately after the turn future.
+    // Give already-dispatched relay work a bounded chance to publish before
+    // deciding whether the attempt was safe to replace with a fallback.
+    while let Ok(Some(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(50), events_rx.recv()).await
+    {
+        events.push(event);
+    }
+    events.extend(std::iter::from_fn(|| events_rx.try_recv().ok()));
+    Ok(WorkflowTurnAttempt {
+        outcome,
+        events,
+        provider_failure: provider_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone(),
+    })
+}
+
+async fn latest_turn(
+    state: &AppState,
+    thread_id: Uuid,
+) -> Result<Option<swage_storage::Turn>, WorkflowHostError> {
+    state
+        .storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .map_err(|error| error.to_string())
+        .map(|turns| turns.into_iter().max_by_key(|turn| turn.created_at))
+        .map_err(Into::into)
+}
+
 async fn run_ephemeral_agent_call(
     state: &AppState,
     run_id: Uuid,
@@ -1327,7 +1664,7 @@ async fn run_ephemeral_agent_call(
     // ids exclude underscores. Bare workflow workers therefore receive the
     // inherited session configuration, bounded by their dispatch ancestry,
     // without inventing or resolving a default definition.
-    let (session_id, thread_id) = match request.session.as_ref() {
+    let (session_id, thread_id, persisted_skills) = match request.session.as_ref() {
         // Continuation: the next turn lands on a session this run already
         // created. The token must name one of the run's own journalled
         // workers — an id from anywhere else (another run, an interactive
@@ -1341,6 +1678,12 @@ async fn run_ephemeral_agent_call(
                     "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
                 )
                 .into());
+            }
+            if request.model.is_some() {
+                return Err(
+                    "AgentCallError: model cannot be selected on a continued session; the worker keeps the model resolved at creation"
+                        .into(),
+                );
             }
             let created_here = state
                 .storage
@@ -1373,6 +1716,41 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            let persisted_skills = session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills"))
+                .map(|skills| serde_json::from_value::<Vec<String>>(skills.clone()))
+                .transpose()
+                .map_err(|error| {
+                    format!(
+                        "AgentCallError: continued session has invalid requested skills: {error}"
+                    )
+                })?
+                .unwrap_or_default();
+            if let Some(requested_skills) = request.skills.as_ref()
+                && requested_skills != &persisted_skills
+            {
+                return Err(
+                    "AgentCallError: skills cannot be changed on a continued session; select them when creating the worker"
+                        .into(),
+                );
+            }
+            if !persisted_skills.is_empty() {
+                let space = state
+                    .space_store
+                    .get(space_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                crate::turn::resolve_requested_skills_for_agent(
+                    &space.slug,
+                    &session.agent_id,
+                    Some(crate::turn::resolve_swage_root(state)),
+                    &persisted_skills,
+                )
+                .map_err(|error| format!("AgentCallError: {error}"))?;
+            }
             if request.tools.is_some() {
                 let persisted_tools = session
                     .metadata
@@ -1404,14 +1782,7 @@ async fn run_ephemeral_agent_call(
                         session_ref.thread_id, session_ref.session_id
                     )
                 })?;
-            if let Some(model) = request.model.as_deref() {
-                state
-                    .storage
-                    .set_session_selected_model(session.id, Some(model.to_string()))
-                    .await
-                    .map_err(|error| error.to_string())?;
-            }
-            (session.id, thread.id)
+            (session.id, thread.id, Some(persisted_skills))
         }
         None => {
             let agent_id = request
@@ -1493,97 +1864,152 @@ async fn run_ephemeral_agent_call(
             )
             .await
             .map_err(|error| error.to_string())?;
-            (session.id, thread.id)
+            (session.id, thread.id, None)
         }
     };
-    let (events, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let request_schema = request.schema.clone();
     let request_schema_retries = request
         .schema
         .as_ref()
         .map(|_| request.max_attempts.saturating_sub(1));
-    let call_cancellation = cancellation.child_token();
     let composition = crate::turn::DispatchContextComposition {
         elements: request.elements.clone(),
         variables: request.variables.clone(),
         assembly: request.assembly.clone(),
-        skills: request.skills.clone(),
+        skills: persisted_skills.or_else(|| request.skills.clone()),
     };
-    let processing = crate::turn::process_turn_with_composition(
+    let primary = execute_workflow_agent_turn(
         state,
         session_id,
-        Some(thread_id),
-        request.prompt,
-        events,
-        Arc::new(Mutex::new(SubscriptionState::new(false))),
-        request.schema,
+        thread_id,
+        request.prompt.clone(),
+        request.schema.clone(),
         request_schema_retries,
         request.effort,
-        Some(call_cancellation.clone()),
-        None,
-        crate::turn::TurnAttendance::Unattended,
-        composition,
-        Some(journal_entry_id),
-    );
-    tokio::pin!(processing);
-    let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
-    tokio::select! {
-        biased;
-        result = &mut processing => {
-            // Parent cancellation propagates through call_cancellation and can
-            // settle the turn before this select observes the cancelled arm.
-            // A turn interrupted that way is a cancellation outcome, not an
-            // agent-call failure.
-            if cancellation.is_cancelled() {
-                if let Err(error) = result {
-                    tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
-                }
-                return Err("WorkflowCancelledError".into());
-            }
-            result.map_err(|error| error.to_string())?
-        }
-        () = cancellation.cancelled() => {
-            call_cancellation.cancel();
-            // The turn path owns the sandbox and active-turn registration.
-            // Let it observe cancellation and run that cleanup before the
-            // workflow cancellation is surfaced.
-            if let Err(error) = processing.await {
-                tracing::warn!(%error, "cancelled agent turn failed while settling cancellation");
-            }
-            return Err("WorkflowCancelledError".into());
-        }
-        () = async {
-            match timeout {
-                Some(duration) => tokio::time::sleep(duration).await,
-                None => std::future::pending().await,
-            }
-        } => {
-            call_cancellation.cancel();
-            // The turn path owns the sandbox and active-turn registration.
-            // Let it observe cancellation and run that cleanup before the
-            // timeout is surfaced to the workflow journal.
-            if let Err(error) = processing.await {
-                tracing::warn!(%error, "timed-out agent turn failed while settling cancellation");
-            }
-            return Err(format!(
-                "AgentCallTimeoutError: agent call exceeded its {}ms deadline",
-                request.timeout_ms.expect("timeout branch requires a deadline")
-            )
-            .into());
-        }
-    }
-    let turn = state
-        .storage
-        .list_turns_by_thread(thread_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .max_by_key(|turn| turn.created_at)
-        .ok_or_else(|| "agent call produced no turn".to_string())?;
-    let schema_exhausted = std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| {
+        request.timeout_ms,
+        cancellation.clone(),
+        composition.clone(),
+        journal_entry_id,
+        request.model.clone(),
+        false,
+    )
+    .await?;
+    let emitted_output = primary
+        .events
+        .iter()
+        .any(|event| matches!(event, ServerEvent::Token { .. }));
+    let dispatched_tool = primary.events.iter().any(|event| {
         matches!(
             event,
-            ServerEvent::OutputSchemaFailed { turn_id, .. } if turn_id == turn.id
+            ServerEvent::ToolStart { .. } | ServerEvent::ToolEnd { .. }
+        )
+    });
+    let primary_error = match primary.outcome {
+        Err(error) => {
+            if fallback_failure(&error).is_some_and(|failure| {
+                fallback_is_eligible(failure, emitted_output, dispatched_tool)
+            }) {
+                Some(error.to_string())
+            } else {
+                return Err(error.to_string().into());
+            }
+        }
+        Ok(()) => {
+            let turn = latest_turn(state, thread_id).await?;
+            if let Some(turn) = turn
+                .as_ref()
+                .filter(|turn| turn.state != swage_storage::TurnState::Completed)
+            {
+                let schema_exhausted = primary.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        ServerEvent::OutputSchemaFailed { turn_id, .. } if *turn_id == turn.id
+                    )
+                });
+                if schema_exhausted {
+                    return Err(WorkflowHostError::SchemaExhausted {
+                        host_reference: None,
+                        message: format!(
+                            "SchemaExhaustedError: agent turn {} produced no schema-valid output",
+                            turn.id
+                        ),
+                    });
+                }
+            }
+            if let Some(message) = primary.provider_failure
+                && fallback_is_eligible(FallbackFailure::Provider, emitted_output, dispatched_tool)
+            {
+                Some(format!(
+                    "AgentCallError: provider failed before output: {message}"
+                ))
+            } else if let Some(turn) =
+                turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
+            {
+                return Err(format!(
+                    "AgentCallError: agent turn {} failed before completion",
+                    turn.id
+                )
+                .into());
+            } else {
+                None
+            }
+        }
+    };
+    let final_events = match primary_error {
+        None => primary.events,
+        Some(error) => {
+            let Some(fallback_model) = request
+                .session
+                .is_none()
+                .then(|| request.fallback_model.clone())
+                .flatten()
+            else {
+                return Err(error.into());
+            };
+            crate::turn::resolve_requested_turn_model(&state.active_config(), &fallback_model)
+                .map_err(|fallback_error| {
+                    format!(
+                        "AgentCallError: selected model failed before output ({error}); declared fallback {fallback_model:?} is unavailable: {fallback_error}"
+                    )
+                })?;
+            let fallback = execute_workflow_agent_turn(
+                state,
+                session_id,
+                thread_id,
+                request.prompt.clone(),
+                request.schema.clone(),
+                request_schema_retries,
+                request.effort,
+                request.timeout_ms,
+                cancellation,
+                composition,
+                journal_entry_id,
+                Some(fallback_model.clone()),
+                true,
+            )
+            .await?;
+            fallback.outcome.map_err(|fallback_error| {
+                format!(
+                    "AgentCallError: selected model failed before output ({error}); fallback model {fallback_model:?} failed: {fallback_error}"
+                )
+            })?;
+            if request.session.is_none() {
+                state
+                    .storage
+                    .set_session_selected_model(session_id, Some(fallback_model.clone()))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            fallback.events
+        }
+    };
+    let turn = latest_turn(state, thread_id)
+        .await?
+        .ok_or_else(|| "agent call produced no turn".to_string())?;
+    let schema_exhausted = final_events.iter().any(|event| {
+        matches!(
+            event,
+            ServerEvent::OutputSchemaFailed { turn_id, .. } if *turn_id == turn.id
         )
     });
     // The turn's failure must surface as this call's error — the shared turn
@@ -1627,14 +2053,32 @@ async fn run_ephemeral_agent_call(
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
         }
     };
+    // The turn resolves its model after applying the agent, task, and space
+    // overlays. Its persisted effective-model snapshot is therefore the
+    // authoritative identity for this call; re-resolving from the gateway
+    // configuration here would misattribute an overlay-served turn.
+    let served_model = state
+        .storage
+        .get_snapshot(turn.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .and_then(|snapshot| serde_json::from_str::<Value>(&snapshot).ok())
+        .and_then(|snapshot| {
+            snapshot
+                .pointer("/provider_visible/effective_model/catalogue_entry")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
     Ok(AgentCallResult {
         output,
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
         working_directory: resolved_working_directory.map(|placement| placement.path),
+        served_model,
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
+        worktree: None,
     })
 }
 
@@ -1781,18 +2225,20 @@ async fn provision_worker_command(
         if entry.kind != "worker_placement" || entry.args_hash != hash {
             Err("NondeterministicReplayError".into())
         } else if entry.status == "completed" {
-            let (path, can_write, authority_path, authority_context_id) = entry
-                .result
-                .as_ref()
-                .and_then(|result| {
-                    Some((
-                        result.get("path")?.as_str()?.to_string(),
-                        result.get("can_write")?.as_bool()?,
-                        result.get("authority_path")?.as_str()?.to_string(),
-                        Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
-                    ))
-                })
-                .ok_or_else(|| "completed worker placement has no path".to_string())?;
+            let (path, can_write, authority_path, authority_context_id, worktree_base_commit) =
+                entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| {
+                        Some((
+                            result.get("path")?.as_str()?.to_string(),
+                            result.get("can_write")?.as_bool()?,
+                            result.get("authority_path")?.as_str()?.to_string(),
+                            Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
+                            result.get("base_commit")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .ok_or_else(|| "completed worker placement has no path".to_string())?;
             cwd.as_deref().ok_or_else(|| {
                 "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
                     .to_string()
@@ -1805,21 +2251,24 @@ async fn provision_worker_command(
                     can_write,
                     authority_path,
                     authority_context_id,
+                    worktree_seq: Some(current_seq),
+                    worktree_base_commit: Some(worktree_base_commit),
                 },
             )
             .await?;
-            let restored_path = state
+            let restored = state
                 .worktree_host
                 .restore(
                     run_id,
                     current_seq,
                     std::path::Path::new(&placement.authority_path),
                     std::path::Path::new(&placement.path),
+                    placement.worktree_base_commit.clone(),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(Some(ResolvedWorkerPlacement {
-                path: restored_path.to_string_lossy().into_owned(),
+                path: restored.path.to_string_lossy().into_owned(),
                 ..placement
             }))
         } else if entry.status == "failed" {
@@ -1904,6 +2353,8 @@ async fn resolve_worker_directory_command(
                             result.get("authority_context_id")?.as_str()?,
                         )
                         .ok()?,
+                        worktree_seq: None,
+                        worktree_base_commit: None,
                     })
                 })
                 .ok_or_else(|| "completed worker directory resolution has no result".to_string())?;
@@ -3533,13 +3984,14 @@ async fn complete_worker_placement(
         }
     };
     match state.worktree_host.provision(run_id, seq, &repo.path).await {
-        Ok(path) => {
-            let path = path.to_string_lossy().into_owned();
+        Ok(worktree) => {
+            let path = worktree.path.to_string_lossy().into_owned();
             state
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::json!({
-                        "path": path,
+                        "path": &path,
+                        "base_commit": &worktree.base_commit,
                         "can_write": repo.can_write,
                         "authority_path": repo.authority_path,
                         "authority_context_id": repo.authority_context_id,
@@ -3552,6 +4004,8 @@ async fn complete_worker_placement(
                 can_write: repo.can_write,
                 authority_path: repo.authority_path.to_string_lossy().into_owned(),
                 authority_context_id: repo.authority_context_id,
+                worktree_seq: Some(seq),
+                worktree_base_commit: Some(worktree.base_commit),
             }))
         }
         Err(error) => {
@@ -3662,6 +4116,9 @@ async fn complete_agent_entry(
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    let worktree_seq = resolved_working_directory
+        .as_ref()
+        .and_then(|placement| placement.worktree_seq);
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -3675,7 +4132,20 @@ async fn complete_agent_entry(
     )
     .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
+            if let Some(worktree_seq) = worktree_seq {
+                let completion = state
+                    .worktree_host
+                    .finish(run_id, worktree_seq)
+                    .await
+                    .map_err(WorkflowHostError::Message)?;
+                result.worktree = Some(swage_workflow::WorktreeCompletion {
+                    base_commit: completion.base_commit,
+                    tip_commit: completion.tip_commit,
+                    changed: completion.changed,
+                    removed: completion.removed,
+                });
+            }
             state
                 .complete_workflow_journal_entry(
                     entry_id,
@@ -4151,7 +4621,7 @@ async fn complete_workflow_call_entry(
                     .ok_or_else(|| "child workflow run disappeared".to_string())?;
                 launch_existing_run(state.clone(), running, source, grant)
                     .await
-                    .map_err(|error| error.0.to_string())?;
+                    .map_err(|error| error.message().to_owned())?;
                 child
             }
             _ => child,
@@ -4188,6 +4658,7 @@ async fn complete_workflow_call_entry(
                         .map(|identity| identity.name.clone()),
                     inline_workflow_version: inline_identity.map(|identity| identity.version),
                     carrying_skill: script.carrying_skill.clone(),
+                    task: script.task.clone(),
                     source: script
                         .script_version_id
                         .is_none()
@@ -4226,7 +4697,7 @@ async fn complete_workflow_call_entry(
                 script.delivery_grant.clone(),
             )
             .await
-            .map_err(|error| error.0.to_string())?;
+            .map_err(|error| error.message().to_owned())?;
             record
         }
     };
@@ -4355,7 +4826,7 @@ fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
         name: workflow.name,
         description: workflow.description,
         head_version: workflow.head_version,
-        built_in: workflow.built_in,
+        carrying_skill: workflow.carrying_skill,
         has_delivery_grant: workflow.delivery_grant.is_some(),
         argument_contract: argument_contract(workflow.argument_schema),
         created_at: workflow.created_at,
@@ -4374,7 +4845,7 @@ fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(
     let Some(schema) = schema else {
         return Ok(());
     };
-    let validator = jsonschema::validator_for(schema).map_err(|error| {
+    let validator = swage_core::json_schema_validator(schema).map_err(|error| {
         ApiError::validation(format!("workflow argument schema is invalid: {error}"))
     })?;
     validator.validate(args).map_err(|error| {
@@ -4414,6 +4885,7 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
         script_name: record.script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
+        task: record.task,
         source: record.source,
         source_hash: record.source_hash,
         state: run_state(&record.state)?,
@@ -4522,11 +4994,11 @@ pub async fn update_script(
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
-    if resolve_workflow_by_id(&state, id, None)
+    let workflow = resolve_workflow_by_id(&state, id, None)
         .await
         .map_err(internal)?
-        .is_some_and(|workflow| workflow.immutable)
-    {
+        .ok_or_else(|| ApiError::not_found("workflow script", id))?;
+    if workflow.immutable {
         return Err(ApiError::conflict(
             "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
         ));
@@ -4565,6 +5037,7 @@ async fn start_run(
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
     argument_schema: Option<Value>,
+    task: Option<String>,
     args: Value,
     budget: WorkflowBudget,
     delivery_grant: Option<Value>,
@@ -4596,6 +5069,7 @@ async fn start_run(
                 .map(|identity| identity.name.clone()),
             inline_workflow_version: inline_identity.map(|identity| identity.version),
             carrying_skill,
+            task,
             source: script_version_id.is_none().then(|| source.clone()),
             source_hash: source_hash(&source),
             args,
@@ -5101,6 +5575,11 @@ pub async fn start_inline_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("space", space_id))?;
+    let task = swage_workflow::script_meta(&request.source)
+        .map_err(|error| {
+            ApiError::validation(format!("inline workflow has invalid metadata: {error}"))
+        })?
+        .task;
     Ok(Json(
         start_run(
             state,
@@ -5109,6 +5588,7 @@ pub async fn start_inline_run(
             None,
             request.source,
             None,
+            task,
             request.args,
             request.budget.unwrap_or_default(),
             None,
@@ -5141,6 +5621,7 @@ pub async fn start_saved_run(
             script.inline_identity(),
             script.source,
             script.argument_schema,
+            script.task,
             request.args,
             request.budget.unwrap_or_default(),
             script.delivery_grant,
@@ -5215,9 +5696,15 @@ pub async fn get_run(
     }))
 }
 
+#[derive(Default, Deserialize)]
+pub struct WorkflowRunListQuery {
+    task: Option<String>,
+}
+
 pub async fn list_runs(
     State(state): State<AppState>,
     Path(space_id): Path<Uuid>,
+    Query(query): Query<WorkflowRunListQuery>,
 ) -> Result<Json<WorkflowRunListResponse>, ApiError> {
     let runs = state
         .storage
@@ -5225,6 +5712,12 @@ pub async fn list_runs(
         .await
         .map_err(internal)?
         .into_iter()
+        .filter(|run| {
+            query
+                .task
+                .as_ref()
+                .is_none_or(|task| run.task.as_ref() == Some(task))
+        })
         .map(run_wire)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Json(WorkflowRunListResponse { runs }))
@@ -5378,7 +5871,7 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                 tracing::info!(%run_id, from_state = %was, "resumed workflow run");
             }
             Err(error) => {
-                tracing::warn!(%run_id, error = %error.0, "failed to resume workflow run");
+                tracing::warn!(%run_id, error = %error, "failed to resume workflow run");
             }
         }
     }
@@ -5462,10 +5955,27 @@ mod tests {
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
         NewWorkspaceAttachment, ObservationStore, OrientationCardStore, SessionStore, SpaceStore,
-        SqliteStorage, Storage, TaskDefinitionStore, ToolCallStore, TurnState, TurnStore,
-        WorkflowStore, WorkspaceAttachmentStore,
+        SqliteStorage, Storage, TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
+
+    /// The research sweep as the shipped research skill carries it.
+    fn research_sweep_source() -> &'static str {
+        crate::shipped_skills::workflow_files("research")
+            .find(|file| file.path.ends_with("/research-sweep.js"))
+            .expect("embedded research sweep")
+            .contents
+    }
+
+    /// The carried workflow's per-space identity, as listing assigns it.
+    fn research_sweep_id(space_id: Uuid) -> Uuid {
+        crate::synthetic_id::synthetic_id(
+            CARRIED_WORKFLOW_ID_DOMAIN,
+            space_id,
+            "research/research-sweep",
+        )
+    }
 
     fn workflow_test_state() -> (AppState, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
@@ -5517,7 +6027,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_space_lists_shipped_carried_and_built_in_workflows() {
+    async fn empty_space_lists_every_shipped_carried_workflow_and_nothing_else() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -5526,21 +6036,21 @@ mod tests {
             .await
             .expect("workflow list");
 
-        let names = list
+        // Nothing ships as a global built-in: every listed workflow on a
+        // fresh space names the shipped skill that carries it.
+        let carried = list
             .scripts
             .iter()
-            .map(|script| script.name.as_str())
+            .map(|script| {
+                (
+                    script.name.as_str(),
+                    script.carrying_skill.as_deref().expect("a carrying skill"),
+                )
+            })
             .collect::<Vec<_>>();
-        assert!(names.contains(&"research-sweep"));
-        assert!(names.contains(&"build-verify"));
-        assert!(names.contains(&"teardown-audit"));
-        assert_eq!(
-            list.scripts
-                .iter()
-                .find(|script| script.name == "research-sweep")
-                .map(|script| script.built_in),
-            Some(true)
-        );
+        assert!(carried.contains(&("research-sweep", "research")));
+        assert!(carried.contains(&("build-verify", "assembly")));
+        assert!(carried.contains(&("teardown-audit", "maestro")));
         assert!(
             list.scripts
                 .iter()
@@ -5549,7 +6059,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn authored_workflow_shadows_the_same_named_builtin() {
+    async fn authored_workflow_shadows_the_same_named_shipped_workflow() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -5579,14 +6089,14 @@ mod tests {
             .json::<Value>()
             .await
             .expect("serialise built-in listing");
-        let builtin = initial_list["scripts"]
+        let shipped = initial_list["scripts"]
             .as_array()
             .expect("script array")
             .iter()
             .find(|script| script["name"] == "research-sweep")
-            .expect("research-sweep built-in");
-        let builtin_id = builtin["id"].as_str().expect("built-in id").to_string();
-        assert_eq!(builtin["built_in"], true);
+            .expect("shipped research-sweep");
+        let shipped_id = shipped["id"].as_str().expect("shipped id").to_string();
+        assert_eq!(shipped["carrying_skill"], "research");
 
         let authored = client
             .post(format!(
@@ -5608,14 +6118,14 @@ mod tests {
             .await
             .expect("serialise authored shadow");
         let authored_id = authored["id"].as_str().expect("authored id");
-        assert_ne!(authored_id, builtin_id);
-        assert_eq!(authored["built_in"], false);
+        assert_ne!(authored_id, shipped_id);
+        assert!(authored["carrying_skill"].is_null());
 
         let hidden_read = client
-            .get(format!("{base_url}/api/workflow-scripts/{builtin_id}"))
+            .get(format!("{base_url}/api/workflow-scripts/{shipped_id}"))
             .send()
             .await
-            .expect("read hidden built-in over HTTP");
+            .expect("read hidden shipped workflow over HTTP");
         assert_eq!(hidden_read.status(), reqwest::StatusCode::NOT_FOUND);
         assert_eq!(
             hidden_read
@@ -5626,11 +6136,11 @@ mod tests {
         );
 
         let hidden_start = client
-            .post(format!("{base_url}/api/workflow-scripts/{builtin_id}/runs"))
+            .post(format!("{base_url}/api/workflow-scripts/{shipped_id}/runs"))
             .json(&serde_json::json!({ "args": null, "budget": null }))
             .send()
             .await
-            .expect("start hidden built-in over HTTP");
+            .expect("start hidden shipped workflow over HTTP");
         assert_eq!(hidden_start.status(), reqwest::StatusCode::NOT_FOUND);
         assert_eq!(
             hidden_start
@@ -5652,7 +6162,7 @@ mod tests {
             .expect("serialise authored winner");
         assert_eq!(read["id"], authored_id);
         assert_eq!(read["name"], "research-sweep");
-        assert_eq!(read["built_in"], false);
+        assert!(read["carrying_skill"].is_null());
 
         let started = client
             .post(format!(
@@ -5689,7 +6199,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn carried_workflow_shadows_the_same_named_builtin_when_listed_and_started() {
+    async fn operator_carried_workflow_shadows_the_same_named_shipped_workflow_when_listed_and_started()
+     {
         let root = tempfile::tempdir().expect("skill root");
         let skill_dir = root.path().join("skills/research-shadow");
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -5717,7 +6228,7 @@ mod tests {
             .into_iter()
             .find(|script| script.name == "research-sweep")
             .expect("research sweep");
-        assert!(!listed.built_in);
+        assert_eq!(listed.carrying_skill.as_deref(), Some("research-shadow"));
 
         let Json(started) = start_saved_run(
             State(state.clone()),
@@ -5779,6 +6290,16 @@ mod tests {
             !list.scripts.iter().any(|script| script.name == "invalid"),
             "the malformed carried workflow must be excluded: {list:?}"
         );
+        let audit = storage
+            .list_audit_events()
+            .await
+            .expect("carried-workflow audit records");
+        assert!(audit.iter().any(|event| {
+            event.entity_kind == "workflow_script"
+                && event.event_kind == "excluded"
+                && event.metadata["skill"] == "invalid-meta"
+                && event.metadata["workflow"] == "invalid"
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5808,7 +6329,7 @@ mod tests {
         .await
         .expect_err("invalid arguments must be rejected");
         assert!(
-            error.0.to_string().contains("/task"),
+            error.message().contains("/task"),
             "validation must name the failing field: {error:?}"
         );
         assert!(
@@ -5822,7 +6343,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn listed_builtin_can_be_read_and_started_but_not_updated() {
+    async fn shipped_research_sweep_can_be_read_and_started_but_not_updated() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -5837,9 +6358,9 @@ mod tests {
 
         let Json(read) = get_script(State(state.clone()), Path(listed.id))
             .await
-            .expect("read built-in");
+            .expect("read shipped workflow");
         assert_eq!(read.id, listed.id);
-        assert!(read.built_in);
+        assert_eq!(read.carrying_skill.as_deref(), Some("research"));
 
         let update_error = update_script(
             State(state.clone()),
@@ -5850,9 +6371,9 @@ mod tests {
             }),
         )
         .await
-        .expect_err("built-in update must fail");
+        .expect_err("shipped update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -5864,34 +6385,45 @@ mod tests {
             }),
         )
         .await
-        .expect("start listed built-in");
+        .expect("start shipped research sweep");
         wait_for_terminal(&state, started.id).await;
         let run = storage
             .get_workflow_run(started.id)
             .await
             .expect("run query")
             .expect("run");
+        let embedded = research_sweep_source();
         assert_eq!(run.engine_version, "rquickjs-0.12.2");
         assert_eq!(run.state, "failed");
         assert_eq!(run.script_version_id, None);
         assert_eq!(run.script_id, Some(listed.id));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
+        assert_eq!(run.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(run.source.as_deref(), Some(embedded));
+        assert_eq!(run.source_hash, source_hash(embedded));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn updating_an_absent_workflow_script_returns_not_found() {
+        let (state, _) = workflow_test_state();
+        let missing = Uuid::new_v4();
+
+        let error = update_script(
+            State(state),
+            Path(missing),
+            Json(UpdateWorkflowScriptRequest {
+                description: Some("still absent".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("an absent workflow script must remain absent");
+
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
         assert_eq!(
-            run.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
-        assert_eq!(
-            run.source_hash,
-            source_hash(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
+            error.code(),
+            swage_protocol::client::error::ErrorCode::NotFound
         );
     }
 
@@ -5908,7 +6440,7 @@ mod tests {
             .into_iter()
             .find(|script| script.name == "build-verify")
             .expect("shipped carried workflow");
-        assert!(!listed.built_in);
+        assert_eq!(listed.carrying_skill.as_deref(), Some("assembly"));
 
         let update_error = update_script(
             State(state.clone()),
@@ -5921,7 +6453,7 @@ mod tests {
         .await
         .expect_err("carried update must fail");
         assert!(
-            matches!(update_error.0, swage_core::GatewayError::SpaceConflict(message) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -5970,7 +6502,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_tool_name_resolution_falls_back_to_a_builtin() {
+    async fn workflow_tool_name_resolution_reaches_a_shipped_carried_workflow() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let session = storage
@@ -5987,7 +6519,7 @@ mod tests {
         let started = GatewayWorkflowLauncher::new(state.clone())
             .start_by_name(session.id, "research-sweep", Value::Null, None, false)
             .await
-            .expect("built-in name resolution");
+            .expect("shipped name resolution");
         let run_id: Uuid = serde_json::from_value(started["id"].clone()).expect("run id");
         wait_for_terminal(&state, run_id).await;
         let run = storage
@@ -5995,24 +6527,15 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
-        assert_eq!(
-            run.script_id,
-            Some(builtin_workflows::id(space.id, "research-sweep"))
-        );
+        assert_eq!(run.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
-        assert_eq!(
-            run.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(run.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(run.source.as_deref(), Some(research_sweep_source()));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workflow_composition_resolves_a_builtin_child() {
+    async fn workflow_composition_resolves_a_shipped_carried_child() {
         let (state, storage) = workflow_test_state();
         let space = storage.get_or_create_default().await.expect("space");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
@@ -6058,22 +6581,13 @@ mod tests {
             .expect("runs")
             .into_iter()
             .find(|run| run.parent_run_id == Some(started.id))
-            .expect("built-in child run");
+            .expect("shipped child run");
         assert_eq!(child.engine_version, "rquickjs-0.12.2");
-        assert_eq!(
-            child.script_id,
-            Some(builtin_workflows::id(space.id, "research-sweep"))
-        );
+        assert_eq!(child.script_id, Some(research_sweep_id(space.id)));
         assert_eq!(child.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(child.script_version, Some(1));
-        assert_eq!(
-            child.source.as_deref(),
-            Some(
-                builtin_workflows::find_by_name("research-sweep")
-                    .unwrap()
-                    .source
-            )
-        );
+        assert_eq!(child.carrying_skill.as_deref(), Some("research"));
+        assert_eq!(child.source.as_deref(), Some(research_sweep_source()));
         assert!(
             child
                 .error_message
@@ -6240,6 +6754,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: Some("operator-proof".into()),
+                task: None,
                 source: Some(recorded_source.into()),
                 source_hash: source_hash(recorded_source),
                 args: Value::Null,
@@ -6300,6 +6815,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -6411,6 +6927,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -6488,6 +7005,7 @@ mod tests {
             tools: None,
             skills,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -6558,8 +7076,11 @@ mod tests {
         );
     }
 
+    /// A shipped workflow's roles are bare dispatches: a fresh space holds no
+    /// definition for them, and the role's whole grant rides the call's
+    /// `tools` list, narrowed further by a later call the same way.
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_workflow_call_applies_the_shipped_researcher_definition() {
+    async fn fresh_space_workflow_call_grants_a_role_through_its_call_scoped_tools() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -6582,8 +7103,39 @@ mod tests {
             ]),
             None,
         );
+        assert!(
+            crate::service::resolve_effective_agent_definition(
+                storage.as_ref(),
+                "researcher",
+                space.id
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "a workflow role is not a definition"
+        );
 
         let journal_entry_id = Uuid::new_v4();
+        let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
+            cwd: None,
+            isolation: None,
+            effort: None,
+            timeout_ms: None,
+            prompt: prompt.into(),
+            agent: None,
+            task: None,
+            tools: Some(tools.into_iter().map(String::from).collect()),
+            skills: None,
+            model: None,
+            fallback_model: None,
+            schema: None,
+            max_attempts: 1,
+            label: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
         let result = run_ephemeral_agent_call(
             &state,
             Uuid::new_v4(),
@@ -6591,39 +7143,17 @@ mod tests {
             &[],
             &[],
             journal_entry_id,
-            AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Gather the selected source".into(),
-                agent: Some("researcher".into()),
-                task: None,
-                tools: None,
-                skills: None,
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
-            },
+            gather(
+                "Record gathered source material in the knowledge base.\n\nGather the selected source",
+                vec!["web_search", "knowledge_record"],
+            ),
             None,
             CancellationToken::new(),
         )
         .await
-        .expect("shipped researcher workflow call");
+        .expect("bare role workflow call");
 
         assert_eq!(result.output, Value::String("gathered".into()));
-        assert!(
-            storage
-                .list_agent_definitions(None)
-                .await
-                .unwrap()
-                .is_empty()
-        );
         let requests = provider.requests.lock().expect("requests");
         let advertised_tools = requests[0]
             .tool_definitions
@@ -6643,7 +7173,7 @@ mod tests {
         // The worker session carries its journalled call's identity, so its
         // knowledge captures dedup across an interrupted call's re-run.
         let session = storage
-            .list_sessions_by_agent_id("researcher")
+            .list_sessions_by_agent_id(BARE_WORKFLOW_AGENT_ID)
             .await
             .unwrap()
             .into_iter()
@@ -6661,30 +7191,12 @@ mod tests {
             &[],
             &[],
             Uuid::new_v4(),
-            AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Scope sources without recording".into(),
-                agent: Some("researcher".into()),
-                task: None,
-                tools: Some(vec!["web_search".into()]),
-                skills: None,
-                model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
-            },
+            gather("Scope sources without recording", vec!["web_search"]),
             None,
             CancellationToken::new(),
         )
         .await
-        .expect("call-scoped researcher workflow call");
+        .expect("narrower bare role workflow call");
         assert_eq!(scoped.output, Value::String("scoped".into()));
         let requests = provider.requests.lock().expect("requests");
         let advertised_tools = requests[1]
@@ -6733,7 +7245,7 @@ mod tests {
 
         let Json(started) = start_saved_run(
             State(state.clone()),
-            Path(builtin_workflows::id(space.id, "research-sweep")),
+            Path(research_sweep_id(space.id)),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({
                     "topic": "contract evidence",
@@ -6866,6 +7378,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -6923,6 +7436,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             effort: None,
             timeout_ms: None,
             cwd: None,
@@ -7064,8 +7578,8 @@ mod tests {
         .expect_err("reserve without ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens requires max_total_tokens"
         ));
     }
@@ -7081,8 +7595,8 @@ mod tests {
         .expect_err("reserve above ceiling must be rejected");
 
         assert!(matches!(
-            error.0,
-            swage_core::GatewayError::ValidationError(message)
+            error.cause(),
+            Some(swage_core::GatewayError::ValidationError(message))
                 if message == "reserved_closing_tokens cannot exceed max_total_tokens"
         ));
     }
@@ -7216,6 +7730,7 @@ mod tests {
                     inline_workflow_name: None,
                     inline_workflow_version: None,
                     carrying_skill: None,
+                    task: None,
                     source: Some("return null".into()),
                     source_hash: source_hash("return null"),
                     args: Value::Null,
@@ -7334,6 +7849,9 @@ mod tests {
                 .map(swage_core::ChatMessage::text_content)
                 .collect::<Vec<_>>()
                 .join("\n");
+            if text.contains("leave worktree unchanged") {
+                return Box::pin(futures::stream::iter(scripted_text_output("unchanged")));
+            }
             let file = if text.contains("first-marker") {
                 "first-marker"
             } else {
@@ -7765,6 +8283,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8193,6 +8712,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -8250,6 +8770,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8304,6 +8825,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -8383,6 +8905,15 @@ mod tests {
         let worker_directory = tempfile::tempdir().expect("worker directory");
         grant_workspace(&storage, space.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
+        let skill_dir = swage_home
+            .path()
+            .join("spaces/default/skills/workflow-specialist");
+        std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: Workflow specialist\n---\nUse the persisted workflow specialist skill.\n",
+        )
+        .expect("write workflow skill");
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
             let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
@@ -8402,6 +8933,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -8416,6 +8948,16 @@ mod tests {
             .expect("run");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "continued-history-tool".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
                 vec![
                     swage_core::StreamChunk::Delta {
                         content: "restated: gather the sources".into(),
@@ -8480,8 +9022,9 @@ mod tests {
                 agent: Some("worker".into()),
                 task: None,
                 tools: None,
-                skills: None,
+                skills: Some(vec!["workflow-specialist".into()]),
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -8523,6 +9066,13 @@ mod tests {
                 .and_then(Value::as_array),
             Some(&vec![Value::String("lead".into())]),
         );
+        assert_eq!(
+            worker_session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("workflow_call_skills")),
+            Some(&serde_json::json!(["workflow-specialist"])),
+        );
 
         // Revoke shell after the first worker turn. The continuation must
         // re-resolve this changed bound rather than retaining the authority
@@ -8549,6 +9099,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -8604,6 +9155,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -8662,7 +9214,7 @@ mod tests {
         // The continued turn met its own history: the second provider request
         // carries the first exchange, not a fresh context.
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(
             requests[0]
                 .tool_definitions
@@ -8671,20 +9223,73 @@ mod tests {
             "shell is available while the lead still grants it"
         );
         assert!(
-            requests[1]
+            requests[2]
                 .tool_definitions
                 .iter()
                 .all(|definition| definition["name"] != "shell"),
             "the continued turn must observe the lead's revoked shell grant"
         );
-        let second_request = requests[1]
+        let second_request = &requests[2];
+        let anthropic =
+            swage_provider::anthropic::AnthropicProvider::new("test-key", "claude-test");
+        let outbound = swage_provider::LlmProvider::provider_request_snapshot(
+            &anthropic,
+            second_request,
+            true,
+        );
+        if let Some(path) = std::env::var_os("SWAGE_PROVIDER_REQUEST_CAPTURE") {
+            std::fs::write(
+                path,
+                serde_json::to_vec_pretty(&outbound["body"])
+                    .expect("serialise outbound provider request"),
+            )
+            .expect("write outbound provider request capture");
+        }
+        let second_request_text = second_request
             .messages
             .iter()
             .map(swage_core::ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(second_request.contains("restate the brief"));
-        assert!(second_request.contains("restated: gather the sources"));
+        assert!(second_request_text.contains("restate the brief"));
+        assert!(second_request_text.contains("restated: gather the sources"));
+        assert!(
+            second_request_text.contains("Use the persisted workflow specialist skill."),
+            "the continued turn must compose the persisted skill selection: {second_request_text}"
+        );
+        let replayed_tool_names = second_request
+            .messages
+            .iter()
+            .filter_map(swage_core::ChatMessage::tool_replay)
+            .flat_map(|replay| replay.iter())
+            .filter_map(|part| match part {
+                swage_core::ToolReplayPart::ToolCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replayed_tool_names, vec!["shell"]);
+        assert!(
+            replayed_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every replayed tool_use entry in the continued provider request must carry its name"
+        );
+        let outbound_tool_names = outbound["body"]["messages"]
+            .as_array()
+            .expect("Anthropic request messages")
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|block| block["type"] == "tool_use")
+            .map(|block| block["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(outbound_tool_names, vec!["shell"]);
+        assert!(
+            outbound_tool_names
+                .iter()
+                .all(|name| !name.trim().is_empty()),
+            "every tool_use in the Anthropic outbound body must carry its persisted name"
+        );
 
         drop(tx);
         task.await.expect("host loop");
@@ -8718,6 +9323,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -8827,6 +9433,7 @@ mod tests {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("not JSON"),
                 scripted_text_output("still not JSON"),
+                scripted_text_output(r#"{"answer":"fallback must not run"}"#),
             ])),
             requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -8834,11 +9441,12 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            fallback_test_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
         let source = r#"return await agent("return a JSON object", {
+            model: "pinned", fallbackModel: "fallback",
             schema: {type: "object", required: ["answer"]}, maxAttempts: 2
         });"#;
         let Json(started) = start_inline_run(
@@ -8885,7 +9493,11 @@ mod tests {
                 .status,
             "completed"
         );
-        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            2,
+            "schema exhaustion must not invoke the declared fallback"
+        );
 
         storage
             .update_workflow_run_state(started.id, "interrupted", None, None, None)
@@ -9353,6 +9965,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             effort: None,
             timeout_ms: None,
             cwd: None,
@@ -9558,6 +10171,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -9907,6 +10521,18 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        let base_commit = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("read repository base")
+                .stdout,
+        )
+        .expect("base commit is UTF-8")
+        .trim()
+        .to_string();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let space = storage.get_or_create_default().await.unwrap();
         grant_workspace(storage.as_ref(), space.id, &repo).await;
@@ -9927,8 +10553,9 @@ mod tests {
             r#"
             const first = agentStart("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
             const second = agentStart("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
-            await Promise.all([first.result, second.result]);
-            return {{ first: first.workingDirectory, second: second.workingDirectory }};
+            const unchanged = agentStart("leave worktree unchanged", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            await Promise.all([first.result, second.result, unchanged.result]);
+            return {{ first: first.workingDirectory, second: second.workingDirectory, unchanged: unchanged.workingDirectory }};
         "#
         );
         let Json(started) = start_inline_run(
@@ -9938,7 +10565,7 @@ mod tests {
                 source,
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
-                    max_concurrent_agent_calls: Some(2),
+                    max_concurrent_agent_calls: Some(3),
                     ..WorkflowBudget::default()
                 }),
             }),
@@ -9955,7 +10582,7 @@ mod tests {
             .filter_map(|entry| entry.result.as_ref()?.get("path")?.as_str())
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 3);
         let agent_call_results = journal
             .iter()
             .filter(|entry| entry.kind == "agent_call")
@@ -9973,7 +10600,7 @@ mod tests {
                     .expect("completed worker call records its host-resolved directory")
             })
             .collect::<Vec<_>>();
-        assert_eq!(agent_call_results.len(), 2);
+        assert_eq!(agent_call_results.len(), 3);
         assert!(
             agent_call_results.iter().all(|path| paths.contains(path)),
             "each call result must report one of this run's provisioned paths"
@@ -10000,23 +10627,71 @@ mod tests {
         );
         drop(writes);
         assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        let path_for = |prompt: &str| {
+            journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call" && entry.request["prompt"] == prompt)
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result["working_directory"].as_str())
+                .map(std::path::PathBuf::from)
+                .expect("worker call records its host-resolved directory")
+        };
+        let completion_for = |prompt: &str| {
+            journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call" && entry.request["prompt"] == prompt)
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result.get("worktree"))
+                .cloned()
+                .map(serde_json::from_value::<swage_workflow::WorktreeCompletion>)
+                .transpose()
+                .expect("worktree completion record is well formed")
+                .expect("isolated worker call persists its worktree completion")
+        };
+        let first_path = path_for("write first-marker");
+        let second_path = path_for("write second-marker");
+        let unchanged_path = path_for("leave worktree unchanged");
+        for prompt in ["write first-marker", "write second-marker"] {
+            let completion = completion_for(prompt);
+            assert_eq!(completion.base_commit, base_commit);
+            assert_eq!(completion.tip_commit, base_commit);
+            assert!(completion.changed);
+            assert!(!completion.removed);
+        }
+        let unchanged_completion = completion_for("leave worktree unchanged");
+        assert_eq!(unchanged_completion.base_commit, base_commit);
+        assert_eq!(unchanged_completion.tip_commit, base_commit);
+        assert!(!unchanged_completion.changed);
+        assert!(unchanged_completion.removed);
+        assert!(
+            first_path.join("first-marker").exists(),
+            "the first marker remains inside its changed worktree"
+        );
+        assert!(
+            second_path.join("second-marker").exists(),
+            "the second marker remains inside its changed worktree"
+        );
         let completed_run_root = fixture
             .path()
             .join("worker-worktrees")
             .join(started.id.to_string());
         for _ in 0..20 {
-            if paths.iter().all(|path| !path.exists()) && !completed_run_root.exists() {
+            if !unchanged_path.exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         assert!(
-            paths.iter().all(|path| !path.exists()),
-            "completed-run cleanup must remove every provisioned worktree: {paths:?}"
+            !unchanged_path.exists(),
+            "the unchanged worktree must be removed after its async cleanup: {unchanged_path:?}"
         );
         assert!(
-            !completed_run_root.exists(),
-            "completed-run cleanup must remove the empty per-run directory"
+            first_path.exists() && second_path.exists(),
+            "changed worktrees remain available as completion evidence: {first_path:?}, {second_path:?}"
+        );
+        assert!(
+            completed_run_root.exists(),
+            "retained worktrees keep their per-run directory"
         );
 
         let failed_source = format!(
@@ -10050,8 +10725,8 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            retained_path.exists(),
-            "failed-run worktree should remain available for inspection"
+            !retained_path.exists(),
+            "the failed run reclaims its unchanged worker worktree"
         );
 
         let cancelled_source = format!(
@@ -10088,8 +10763,8 @@ mod tests {
             .expect("cancel parked placement run");
         assert_eq!(cancelled_record.state, WorkflowRunState::Cancelled);
         assert!(
-            cancelled_path.exists(),
-            "cancelled-run worktree should remain available for inspection"
+            !cancelled_path.exists(),
+            "a terminal cancelled run reclaims its completed worker worktree"
         );
 
         state.worktree_host.shutdown().await;
@@ -10233,6 +10908,7 @@ mod tests {
                 budget: serde_json::json!({}),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10284,7 +10960,10 @@ mod tests {
         {
             let requests = provider.requests.lock().expect("requests");
             assert_eq!(requests.len(), 1);
-            assert_eq!(requests[0].effort, Some(swage_core::Effort::High));
+            assert_eq!(
+                requests[0].effort.as_ref().map(|effort| effort.requested),
+                Some(swage_core::Effort::High)
+            );
         }
         wait_for_worker_turn_interrupted(&storage).await;
         assert!(
@@ -10352,6 +11031,7 @@ mod tests {
                 .expect("budget"),
                 engine_version: "test".into(),
                 carrying_skill: None,
+                task: None,
                 dispatch_bound_agent_ids: vec![],
                 dispatch_bound_task_definition_ids: vec![],
                 workflow_call_tools: None,
@@ -10447,6 +11127,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.clone()),
                 source_hash: source_hash(&source),
                 args: Value::Null,
@@ -10553,6 +11234,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -10621,6 +11303,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 schema: None,
                 max_attempts: 1,
                 label: None,
@@ -10671,6 +11354,7 @@ mod tests {
                 tools: None,
                 skills: None,
                 model: None,
+                fallback_model: None,
                 effort: None,
                 timeout_ms: None,
                 cwd: None,
@@ -10820,6 +11504,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -10911,6 +11596,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12209,6 +12895,7 @@ mod tests {
             inline_workflow_name: None,
             inline_workflow_version: None,
             carrying_skill: None,
+            task: None,
             source: Some(source.into()),
             source_hash: source_hash(source),
             args: Value::Null,
@@ -12301,6 +12988,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -12331,6 +13019,10 @@ mod tests {
         )
         .await
         .expect("worker thread");
+        storage
+            .update_state(thread.id, ThreadState::Processing)
+            .await
+            .expect("persist processing worker thread");
         let orphan = storage
             .create_turn(swage_storage::NewTurn {
                 thread_id: thread.id,
@@ -12352,6 +13044,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 3,
             label: None,
@@ -12382,9 +13075,11 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     working_directory: None,
+                    served_model: None,
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
+                    worktree: None,
                 })
                 .expect("first result"),
             )
@@ -12401,6 +13096,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             session: Some(AgentSessionRef {
                 session_id: session.id,
@@ -12437,6 +13133,14 @@ mod tests {
             storage.get_turn(orphan.id).await.unwrap().unwrap().state,
             TurnState::Interrupted
         );
+        assert_eq!(
+            ThreadStore::get(storage.as_ref(), thread.id)
+                .await
+                .expect("read worker thread")
+                .expect("worker thread")
+                .state,
+            ThreadState::Idle
+        );
         assert_eq!(storage.interrupt_running_workflow_runs().await.unwrap(), 1);
 
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -12448,7 +13152,7 @@ mod tests {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            provider,
+            provider.clone(),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
@@ -12459,6 +13163,74 @@ mod tests {
         assert_eq!(
             recovered.final_output,
             Some(Value::String("continued after recovery".into()))
+        );
+        assert!(
+            !provider.requests.lock().expect("requests").is_empty(),
+            "replayed worker call should reach the provider"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_recovery_keeps_turn_non_terminal_when_worker_thread_release_fails() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "worker".into(),
+                metadata: Some(serde_json::json!({})),
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("worker session");
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "worker".into(),
+            },
+        )
+        .await
+        .expect("worker thread");
+        storage
+            .update_state(thread.id, ThreadState::Processing)
+            .await
+            .expect("persist processing worker thread");
+        let orphan = storage
+            .create_turn(swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: "worker".into(),
+                state: TurnState::Processing,
+                user_input: Some("continue".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("orphaned worker turn");
+
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_orphaned_worker_thread_release
+                     BEFORE UPDATE OF state ON threads
+                     WHEN NEW.id = OLD.id AND NEW.state = 'idle'
+                     BEGIN SELECT RAISE(FAIL, 'injected worker thread release failure'); END;",
+                )
+            })
+            .await
+            .expect("install thread release failure trigger");
+
+        let error = crate::shutdown::recover_orphaned_turns(storage.as_ref(), storage.as_ref())
+            .await
+            .expect_err("thread release failure aborts recovery");
+        assert!(
+            error
+                .to_string()
+                .contains("injected worker thread release failure")
+        );
+        assert_eq!(
+            storage.get_turn(orphan.id).await.unwrap().unwrap().state,
+            TurnState::Processing,
+            "a failed worker release must leave the turn recoverable on the next startup"
         );
     }
 
@@ -12476,6 +13248,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12535,6 +13308,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12615,6 +13389,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12702,6 +13477,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12847,6 +13623,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -12870,6 +13647,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -12985,6 +13763,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13008,6 +13787,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13138,6 +13918,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13196,6 +13977,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13219,6 +14001,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13250,9 +14033,11 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     working_directory: None,
+                    served_model: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    worktree: None,
                 })
                 .expect("work result"),
             )
@@ -13441,6 +14226,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some("return null".into()),
                 source_hash: source_hash("return null"),
                 args: Value::Null,
@@ -13464,6 +14250,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13495,9 +14282,11 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     working_directory: None,
+                    served_model: None,
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    worktree: None,
                 })
                 .expect("work result"),
             )
@@ -13673,6 +14462,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -13696,6 +14486,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -13814,6 +14605,83 @@ mod tests {
         assert_eq!(
             completed.final_output,
             Some(serde_json::json!({ "value": 42 }))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workflow_run_task_identity_is_persisted_and_filters_the_listing() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"export const meta = { task: "run-task-identity" }; return null;"#;
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "task identity".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("script");
+
+        let Json(saved) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start saved run");
+        let Json(inline) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        let Json(without_task) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return null;".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start unlabelled run");
+
+        let stored = storage
+            .get_workflow_run(saved.id)
+            .await
+            .expect("read saved run")
+            .expect("saved run exists");
+        assert_eq!(stored.task.as_deref(), Some("run-task-identity"));
+        assert_eq!(without_task.task, None);
+
+        let Json(list) = list_runs(
+            State(state),
+            Path(space.id),
+            Query(WorkflowRunListQuery {
+                task: Some("run-task-identity".into()),
+            }),
+        )
+        .await
+        .expect("list task runs");
+        assert_eq!(list.runs.len(), 2);
+        assert!(list.runs.iter().any(|run| run.id == saved.id));
+        assert!(list.runs.iter().any(|run| run.id == inline.id));
+        assert!(
+            list.runs
+                .iter()
+                .all(|run| run.task.as_deref() == Some("run-task-identity"))
         );
     }
 
@@ -14200,14 +15068,17 @@ mod tests {
 
         assert_eq!(resume_owed_workflow_runs(&state).await, 0);
         assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
         assert_eq!(
-            storage
-                .get_workflow_run(started.id)
-                .await
-                .expect("run")
-                .expect("present")
-                .state,
-            "failed"
+            run.state,
+            "failed",
+            "tool-only failure must stay primary: {:?}; requests: {}",
+            run.error_message,
+            provider.requests.lock().expect("requests").len()
         );
     }
 
@@ -14411,6 +15282,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14434,6 +15306,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: None,
@@ -14520,6 +15393,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14543,6 +15417,7 @@ mod tests {
             tools: None,
             skills: None,
             model: None,
+            fallback_model: None,
             schema: None,
             max_attempts: 1,
             label: Some("recorded failure".into()),
@@ -14625,6 +15500,7 @@ mod tests {
                 inline_workflow_name: None,
                 inline_workflow_version: None,
                 carrying_skill: None,
+                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
                 args: Value::Null,
@@ -14778,6 +15654,90 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn run_detail_survives_malformed_results_and_preserves_workflow_output() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { completed: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let malformed_await = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: started.id,
+                seq: 100,
+                kind: "await_event".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("malformed await intent");
+        storage
+            .complete_workflow_journal_entry(
+                malformed_await.id,
+                serde_json::json!({"delivered": 3}),
+            )
+            .await
+            .expect("malformed await result");
+
+        let workflow_call = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: started.id,
+                seq: 101,
+                kind: "workflow_call".into(),
+                args_hash: journal_args_hash(&Value::Null),
+                request: Value::Null,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("workflow call intent");
+        let workflow_output = serde_json::json!({"kind": "gate", "answer": 7});
+        storage
+            .complete_workflow_journal_entry(workflow_call.id, workflow_output.clone())
+            .await
+            .expect("workflow call result");
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail remains available");
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == malformed_await.id)
+                .expect("malformed await entry remains visible")
+                .result,
+            None
+        );
+        assert!(matches!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == workflow_call.id)
+                .expect("workflow call entry")
+                .result
+                .as_ref(),
+            Some(WorkflowJournalResult::WorkflowCall { output }) if output == &workflow_output
+        ));
+        assert!(detail.journal.iter().any(|entry| {
+            entry.kind == WorkflowJournalEntryKind::TerminalBudget && entry.result.is_some()
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -14839,7 +15799,7 @@ mod tests {
         storage
             .with_conn(move |connection| {
                 connection.execute_batch(&format!(
-                    "UPDATE workflow_journal SET result_json = '{{\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
+                    "UPDATE workflow_journal SET result_json = '{{\"spent\":6,\"remaining\":0,\"closing_remaining\":99}}' WHERE id = '{terminal_id}';"
                 ))?;
                 Ok(())
             })
@@ -14854,15 +15814,45 @@ mod tests {
             .expect("resume");
         wait_for_terminal(&state, started.id).await;
 
+        let bad_entry_id = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal after replay")
+            .into_iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("agent call beside terminal reading")
+            .id;
+        storage
+            .with_conn(move |connection| {
+                connection.execute_batch(&format!(
+                    "UPDATE workflow_journal SET result_json = '{{\"input_tokens\":\"invalid\"}}' WHERE id = '{bad_entry_id}';"
+                ))?;
+                Ok(())
+            })
+            .await
+            .expect("replace one stored result with an invalid shape");
+
         let Json(detail) = get_run(State(state), Path(started.id))
             .await
             .expect("get run");
+        let invalid = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == bad_entry_id)
+            .expect("invalid entry remains in run detail");
+        assert_eq!(invalid.result, None);
         let replayed = detail
             .journal
             .iter()
             .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
             .expect("projected terminal budget entry");
-        assert_eq!(replayed.result.as_ref().unwrap()["closing_remaining"], 99);
+        assert!(matches!(
+            replayed.result,
+            Some(WorkflowJournalResult::TerminalBudget {
+                closing_remaining: Some(99),
+                ..
+            })
+        ));
         assert_eq!(
             detail
                 .journal
@@ -14898,6 +15888,7 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        let mut events = state.broadcast.subscribe();
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
@@ -14928,7 +15919,16 @@ mod tests {
             .into_iter()
             .find(|entry| entry.kind == "terminal_budget")
             .expect("terminal budget intent");
-        assert_eq!(terminal.status, "started");
+        assert_eq!(terminal.status, "failed");
+        let event = loop {
+            if let ServerEvent::WorkflowEntryCompleted { event } =
+                events.recv().await.expect("terminal journal broadcast")
+                && event.entry.id == terminal.id
+            {
+                break event;
+            }
+        };
+        assert_eq!(event.entry.status, WorkflowJournalEntryStatus::Failed);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15251,7 +16251,13 @@ mod tests {
             .find(|entry| entry.kind == WorkflowJournalEntryKind::WindDown)
             .expect("wind-down journal entry");
         assert_eq!(wind_down.status, WorkflowJournalEntryStatus::Completed);
-        assert_eq!(wind_down.result.as_ref().unwrap()["winding_down"], true);
+        assert!(matches!(
+            wind_down.result,
+            Some(WorkflowJournalResult::WindDown {
+                winding_down: true,
+                ..
+            })
+        ));
         assert_eq!(provider.requests.lock().unwrap().len(), 6);
 
         storage
@@ -15993,6 +16999,620 @@ mod tests {
                 .filter(|entry| entry.kind == "timer")
                 .count(),
             1
+        );
+    }
+
+    fn fallback_test_config() -> swage_config::ResolvedConfig {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.default = "pinned".into();
+        config.models.entries.insert(
+            "pinned".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "pinned-wire".into(),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "fallback".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "fallback-wire".into(),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    async fn fallback_test_state(
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+    ) -> (
+        AppState,
+        Arc<SqliteStorage>,
+        Arc<ScriptedRecordingProvider>,
+        Uuid,
+    ) {
+        fallback_test_state_with_tools(outputs, vec![]).await
+    }
+
+    async fn fallback_test_state_with_tools(
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+        tools: Vec<Arc<dyn crate::tool::Tool>>,
+    ) -> (
+        AppState,
+        Arc<SqliteStorage>,
+        Arc<ScriptedRecordingProvider>,
+        Uuid,
+    ) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let mut config = fallback_test_config();
+        config.tools.permissions.allow = tools.iter().map(|tool| tool.name().to_string()).collect();
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(outputs.into()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(tools),
+            None,
+        );
+        (state, storage, provider, space.id)
+    }
+
+    async fn run_declared_fallback(state: &AppState, space_id: Uuid, model: &str) -> Uuid {
+        let source = format!(
+            r#"return await agent("answer", {{ agent: "default", model: {model:?}, fallbackModel: "fallback" }});"#
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(state, started.id).await;
+        started.id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_agent_calls_journal_the_effective_catalogue_model() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            scripted_text_output("pinned answer"),
+            scripted_text_output("default answer"),
+            scripted_text_output("task answer"),
+        ])
+        .await;
+        let mut config = fallback_test_config();
+        config.models.default = "default".into();
+        config.models.entries.insert(
+            "default".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "default-wire".into(),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "task-overlay".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "scripted".into(),
+                model_id: "task-overlay-wire".into(),
+                ..Default::default()
+            },
+        );
+        state.replace_runtime(
+            config,
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+        storage
+            .upsert_task_definition(swage_storage::NewTaskDefinition {
+                id: "task-overlay".into(),
+                instructions: "Use the task's model.".into(),
+                model_id: Some("task-overlay".into()),
+                tool_permissions: None,
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store task overlay");
+
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const pinned = await agent("pinned", { agent: "default", model: "pinned" });
+                    const defaultModel = await agent("default", { agent: "default" });
+                    const task = await agent("task", { agent: "default", task: "task-overlay" });
+                    return { pinned, defaultModel, task };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let calls = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|entry| {
+                    entry
+                        .result
+                        .as_ref()
+                        .and_then(|result| result["served_model"].as_str())
+                })
+                .collect::<Vec<_>>(),
+            vec![Some("pinned"), Some("default"), Some("task-overlay")],
+            "each successful primary call must name the catalogue entry that actually served it"
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("pinned-wire"),
+                Some("default-wire"),
+                Some("task-overlay-wire")
+            ],
+            "each call must complete on its primary model without a fallback"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_model_retries_only_before_output_and_records_the_served_model() {
+        let (state, storage, provider, space_id) =
+            fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
+        let run_id = run_declared_fallback(&state, space_id, "missing").await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.state, "completed",
+            "an absent pinned model must use its declared fallback"
+        );
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("agent call");
+        assert_eq!(
+            call.result
+                .as_ref()
+                .and_then(|result| result["served_model"].as_str()),
+            Some("fallback")
+        );
+        let Json(detail) = get_run(State(state.clone()), Path(run_id))
+            .await
+            .expect("workflow detail");
+        assert_eq!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.agent_call.is_some())
+                .and_then(|entry| entry.agent_call.as_ref())
+                .and_then(|call| call.served_model.as_deref()),
+            Some("fallback"),
+            "the workflow projection must expose the model that served"
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the unknown model must fail before a provider request"
+        );
+        assert_eq!(requests[0].model.as_deref(), Some("fallback-wire"));
+
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "pinned refused".into(),
+            }],
+            scripted_text_output("fallback answer"),
+        ])
+        .await;
+        let run_id = run_declared_fallback(&state, space_id, "pinned").await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.state, "completed",
+            "a pre-output provider failure must use the fallback"
+        );
+        let journal = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal");
+        let call = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("agent call");
+        assert_eq!(
+            call.result
+                .as_ref()
+                .and_then(|result| result["served_model"].as_str()),
+            Some("fallback")
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("pinned-wire"), Some("fallback-wire")]
+        );
+        assert_eq!(
+            requests[1]
+                .messages
+                .iter()
+                .filter(|message| message.text_content() == "answer")
+                .count(),
+            1,
+            "the fallback must reuse the primary prompt rather than append it again"
+        );
+
+        let (state, storage, provider, space_id) = fallback_test_state(vec![vec![
+            swage_core::StreamChunk::Delta {
+                content: "partial".into(),
+            },
+            swage_core::StreamChunk::Error {
+                message: "failed after output".into(),
+            },
+        ]])
+        .await;
+        let run_id = run_declared_fallback(&state, space_id, "pinned").await;
+        let run = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.state, "failed",
+            "a failure after output must preserve the worker failure"
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "a partial response must not trigger fallback"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_does_not_retry_agent_construction_errors() {
+        let (state, storage, provider, space_id) =
+            fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
+        let source = r#"return await agent("answer", {
+            agent: "default", model: "pinned", fallbackModel: "fallback",
+            schema: {type: 17}
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|error| error.contains("agent construction failed")),
+            "the primary construction error must survive unchanged: {:?}",
+            run.error_message
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            0,
+            "a construction failure must not issue a fallback provider request"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_does_not_retry_after_a_tool_only_turn_fails() {
+        let (state, _, requests) = crate::turn::tests::make_state_with_capturing_tools(vec![
+            vec![
+                swage_core::StreamChunk::ToolUse {
+                    call_id: "echo-1".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "work"}),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![swage_core::StreamChunk::Error {
+                message: "failed after tool".into(),
+            }],
+            scripted_text_output("must not be used"),
+        ])
+        .await;
+        state.replace_runtime(
+            fallback_test_config(),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                crate::test_support::NamedTool::new("echo"),
+            )
+                as Arc<dyn crate::tool::Tool>]),
+        );
+        let error = run_ephemeral_agent_call(
+            &state,
+            Uuid::new_v4(),
+            state
+                .space_store
+                .get_or_create_default()
+                .await
+                .expect("space")
+                .id,
+            &[],
+            &[],
+            Uuid::new_v4(),
+            AgentCallRequest {
+                cwd: None,
+                isolation: None,
+                effort: None,
+                timeout_ms: None,
+                prompt: "answer".into(),
+                agent: Some("gateway".into()),
+                task: None,
+                tools: Some(vec!["echo".into()]),
+                skills: None,
+                model: Some("pinned".into()),
+                fallback_model: Some("fallback".into()),
+                schema: None,
+                max_attempts: 1,
+                label: None,
+                session: None,
+                elements: None,
+                variables: None,
+                assembly: None,
+            },
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the tool-only primary failure must not use the fallback");
+        assert!(error.to_string().contains("AgentCallError"));
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            2,
+            "the failure after a tool dispatch must not start a fallback turn"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_retries_a_pre_output_failure_with_tools_configured() {
+        let (state, storage, provider, space_id) = fallback_test_state_with_tools(
+            vec![
+                vec![swage_core::StreamChunk::Error {
+                    message: "pinned refused".into(),
+                }],
+                scripted_text_output("fallback answer"),
+            ],
+            vec![
+                Arc::new(crate::test_support::NamedTool::new("echo")) as Arc<dyn crate::tool::Tool>
+            ],
+        )
+        .await;
+        let source = r#"return await agent("answer", {
+            agent: "default", model: "pinned", fallbackModel: "fallback", tools: ["echo"]
+        });"#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "completed"
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("pinned-wire"), Some("fallback-wire")],
+            "configured tools do not count as a dispatched tool"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn held_worker_persists_the_fallback_model_for_continuation() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            scripted_text_output("created by fallback"),
+            scripted_text_output("continued by fallback"),
+        ])
+        .await;
+        let source = r#"
+            const worker = agentStart("create", {
+                agent: "default", model: "missing", fallbackModel: "fallback"
+            });
+            await worker.result;
+            return await agent("continue", { agent: "default", session: worker.session });
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let calls = journal
+            .iter()
+            .filter(|entry| entry.kind == "agent_call")
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|entry| {
+            entry
+                .result
+                .as_ref()
+                .and_then(|result| result["served_model"].as_str())
+                == Some("fallback")
+        }));
+        let session_id = calls[0]
+            .result
+            .as_ref()
+            .and_then(|result| result["session_id"].as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("worker session id");
+        assert_eq!(
+            storage
+                .get_session(session_id)
+                .await
+                .expect("session")
+                .expect("worker session")
+                .selected_model_id
+                .as_deref(),
+            Some("fallback")
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("fallback-wire"), Some("fallback-wire")],
+            "continuation must use the persisted fallback without retrying the missing primary"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn continuation_ignores_declared_fallback_and_keeps_its_creation_model() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            scripted_text_output("created by pinned"),
+            vec![swage_core::StreamChunk::Error {
+                message: "pinned refused continuation".into(),
+            }],
+            scripted_text_output("fallback must not run"),
+        ])
+        .await;
+        let source = r#"
+            const worker = agentStart("create", { agent: "default", model: "pinned" });
+            await worker.result;
+            return await agent("continue", {
+                agent: "default", session: worker.session, fallbackModel: "fallback"
+            });
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        assert_eq!(
+            storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "failed"
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        let session_id = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result["session_id"].as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("worker session id");
+        assert_eq!(
+            storage
+                .get_session(session_id)
+                .await
+                .expect("session")
+                .expect("worker session")
+                .selected_model_id
+                .as_deref(),
+            Some("pinned")
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("pinned-wire"), Some("pinned-wire")],
+            "the continuation must not run its declared fallback"
         );
     }
 
