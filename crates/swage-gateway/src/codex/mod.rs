@@ -971,7 +971,15 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_inner(scenario, dispatcher, permissions, effort, false).await
+        run_scripted_turn_inner(
+            scenario,
+            dispatcher,
+            permissions,
+            effort,
+            false,
+            CancellationToken::new(),
+        )
+        .await
     }
 
     async fn run_scripted_turn_with_audit_failure(
@@ -985,7 +993,15 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_inner(scenario, dispatcher, permissions, None, fail_audit_writes).await
+        run_scripted_turn_inner(
+            scenario,
+            dispatcher,
+            permissions,
+            None,
+            fail_audit_writes,
+            CancellationToken::new(),
+        )
+        .await
     }
 
     async fn run_scripted_turn_inner(
@@ -994,6 +1010,7 @@ mod tests {
         permissions: PermissionConfig,
         effort: Option<ResolvedEffort>,
         fail_audit_writes: bool,
+        cancellation: CancellationToken,
     ) -> (
         Result<OutboundMessage, AgentError>,
         Vec<Value>,
@@ -1056,7 +1073,7 @@ mod tests {
             permissions,
             dispatcher: Arc::new(dispatcher),
             event_tx,
-            cancellation: CancellationToken::new(),
+            cancellation,
         };
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(3), run_turn(state, request))
@@ -1077,6 +1094,23 @@ mod tests {
             };
         let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
         (result, frames, storage, events)
+    }
+
+    async fn run_cancelled_scripted_turn(
+        scenario: Value,
+    ) -> (Result<OutboundMessage, AgentError>, Vec<AgentEvent>) {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let (result, _, _, events) = run_scripted_turn_inner(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+            None,
+            false,
+            cancellation,
+        )
+        .await;
+        (result, events)
     }
 
     fn successful_turn_notifications() -> Vec<Value> {
@@ -1241,6 +1275,36 @@ mod tests {
                 .to_string()
                 .contains("transport closed")
         );
+    }
+
+    #[tokio::test]
+    async fn scripted_mid_turn_cancellation_interrupts_the_provider_round() {
+        let scenario = json!({"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}}]
+            },
+            {
+                "receive":{"method":"turn/interrupt"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{}}]
+            }
+        ]});
+
+        let (result, events) = run_cancelled_scripted_turn(scenario).await;
+
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderRoundSettled {
+                round: 1,
+                outcome: swage_agent::ProviderRoundOutcome::Interrupted,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
