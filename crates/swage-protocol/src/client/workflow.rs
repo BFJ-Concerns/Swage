@@ -549,11 +549,13 @@ pub enum WorkflowJournalResult {
         working_remaining: Option<u64>,
         closing_remaining: Option<u64>,
         winding_down: bool,
+        usage_unavailable_calls: u32,
     },
     TerminalBudget {
         spent: u64,
         remaining: Option<u64>,
         closing_remaining: Option<u64>,
+        usage_unavailable_calls: u32,
     },
     WindDown {
         spent: u64,
