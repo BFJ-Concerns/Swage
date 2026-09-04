@@ -18182,6 +18182,42 @@ mod tests {
         .expect("worker turn becomes interrupted");
     }
 
+    async fn wait_for_open_worker_round(storage: &SqliteStorage) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let sessions = storage
+                    .list_sessions_by_agent_id(BARE_WORKFLOW_AGENT_ID)
+                    .await
+                    .expect("worker sessions");
+                for session in sessions {
+                    for thread in storage
+                        .list_by_session(session.id)
+                        .await
+                        .expect("worker threads")
+                    {
+                        for turn in storage
+                            .list_turns_by_thread(thread.id)
+                            .await
+                            .expect("worker turns")
+                        {
+                            if !storage
+                                .list_provider_rounds_by_turn(turn.id)
+                                .await
+                                .expect("provider rounds")
+                                .is_empty()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("open worker provider round");
+    }
+
     /// The fixture behind the worker-call-record tests: one run, one host
     /// loop, and a provider scripted with whatever the case needs.
     async fn worker_call_record_fixture(
@@ -18595,6 +18631,7 @@ mod tests {
 
         // Replay re-dispatches the same entry under a fresh turn.
         let resumed = worker_turn(&storage, run.space_id, "resumed attempt").await;
+        let interruption_not_before = chrono::Utc::now();
         record_agent_call_attempt(
             storage.as_ref(),
             entry.id,
@@ -18660,9 +18697,9 @@ mod tests {
             .completed_at
             .expect("the interrupted round ends when the re-dispatch made it unanswerable");
         assert!(
-            interrupted_end >= rounds[1].started_at,
+            interrupted_end >= interruption_not_before,
             "the interrupted round's end is the moment the interruption landed, \
-             after the request went out"
+             not the earlier request start"
         );
         assert_eq!(
             rounds[2].outcome,
@@ -18979,6 +19016,8 @@ mod tests {
         // round open, so this is the live path rather than a run parked with
         // an outstanding entry nobody is working on.
         round_opened.notified().await;
+        wait_for_open_worker_round(&storage).await;
+        let cancellation_not_before = chrono::Utc::now();
         cancel_run(State(state.clone()), Path(run.id))
             .await
             .expect("cancel the running run");
@@ -19031,8 +19070,8 @@ mod tests {
             .completed_at
             .expect("the round the run's end caught still ends, at the moment it was cut short");
         assert!(
-            caught_end >= caught.started_at,
-            "the cut-short round's end is when the run ended, after its request went out"
+            caught_end >= cancellation_not_before,
+            "the cut-short round's end is when the run ended, not the earlier request start"
         );
     }
 
