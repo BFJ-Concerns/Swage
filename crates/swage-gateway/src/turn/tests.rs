@@ -13268,6 +13268,51 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
 }
 
 #[tokio::test]
+async fn named_child_placement_rederives_revoked_write_access() {
+    let placement = tempfile::tempdir().expect("placement");
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .expect("session query")
+        .expect("session");
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location grants")
+        .insert(crate::state::ApprovalGrantKey::location(
+            Some(session_id),
+            None,
+            placement.path().to_string_lossy(),
+            "read",
+        ));
+    let authority_context_id = Uuid::new_v4();
+    let metadata = serde_json::json!({
+        WORKER_PLACEMENT_CWD_METADATA_KEY: placement.path(),
+        WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: true,
+        WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: placement.path(),
+        WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: authority_context_id,
+    });
+
+    let current = super::delegation::reauthorise_named_child_placement(
+        &state,
+        session.space_id,
+        Uuid::new_v4(),
+        session_id,
+        None,
+        None,
+        &metadata,
+    )
+    .await
+    .expect("read authority remains valid")
+    .expect("named child placement");
+
+    assert!(!current.can_write, "the creation-time write bit is revoked");
+    assert_eq!(current.authority_context_id, authority_context_id);
+}
+
+#[tokio::test]
 async fn workspace_summary_only_aggregates_target_space() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
     let target_space = Uuid::new_v4();
