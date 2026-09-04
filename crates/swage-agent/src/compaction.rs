@@ -1229,13 +1229,15 @@ mod tests {
     #[tokio::test]
     async fn failed_recount_without_native_breach_keeps_estimate_fallback() {
         let messages = vec![
-            text_msg(Role::User, "a"),
-            text_msg(Role::Assistant, "b"),
-            text_msg(Role::User, "c"),
-            text_msg(Role::Assistant, "d"),
+            text_msg(Role::User, &"a".repeat(21)),
+            text_msg(Role::Assistant, &"b".repeat(21)),
+            text_msg(Role::User, &"c".repeat(21)),
+            text_msg(Role::Assistant, &"d".repeat(21)),
         ];
         let storage = stub_storage();
-        let provider = TransientCountFailureProvider::new();
+        // SummaryProvider does not implement native token counting, so both
+        // evaluations use the estimate fallback and never establish a breach.
+        let provider = SummaryProvider::new("brief");
 
         let (result, record) = compact_with_model(
             messages,
@@ -1250,11 +1252,12 @@ mod tests {
         .await
         .expect("the estimate fallback must remain available without a native breach");
 
-        let record = record.expect("compaction records the failed summarisation attempt");
+        let record = record.expect("compaction records the summary that fit by estimate");
         assert_eq!(record.actual_strategy, "summarisation");
-        assert_eq!(record.messages_removed, 0);
-        assert_eq!(record.tokens_before, record.tokens_after);
-        assert_eq!(result.len(), 4);
+        assert_eq!(record.messages_removed, 2);
+        assert!(record.tokens_before > 20);
+        assert!(record.tokens_after <= 20);
+        assert_eq!(result.len(), 3);
     }
 
     #[tokio::test]
