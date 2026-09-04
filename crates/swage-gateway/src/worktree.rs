@@ -90,6 +90,23 @@ impl WorktreeHost {
         }
     }
 
+    /// Withdraw every durable placement claim for an owner whose run returned.
+    pub async fn release(&self, owner_id: Uuid) {
+        let owner_root = self.config.root.join(owner_id.to_string());
+        let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
+        let claimed = read_retained_placements(&marker).await;
+        self.retained.lock().await.retain(|path| !claimed.contains(path));
+        match tokio::fs::remove_file(&marker).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                path = %marker.display(),
+                %error,
+                "could not release the run's retained placement claims"
+            ),
+        }
+    }
+
     pub async fn provision(
         &self,
         owner_id: Uuid,
@@ -551,6 +568,43 @@ mod tests {
                 .count(),
             1,
             "recovery must remove registrations as well as directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn returned_owner_releases_a_claim_recovered_from_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        seed_repo(&repo).await;
+        let config = WorktreeConfig {
+            root: temp.path().join("worktrees"),
+        };
+        let owner = Uuid::new_v4();
+        let path;
+        {
+            let host = WorktreeHost::new(config.clone());
+            path = host.provision(owner, 0, &repo).await.unwrap();
+            host.retain(owner, &[path.to_string_lossy().into_owned()])
+                .await;
+        }
+
+        let restarted = WorktreeHost::new(config.clone());
+        restarted
+            .recover(&HashSet::new())
+            .await
+            .expect("recover retained placement");
+        assert!(path.exists(), "the durable claim survives recovery");
+        restarted.restore(owner, 0, &repo, &path).await.unwrap();
+        restarted.release(owner).await;
+        restarted.cleanup_owner(owner).await;
+        assert!(!path.exists(), "a returned owner no longer retains its placement");
+        assert!(
+            !config
+                .root
+                .join(owner.to_string())
+                .join(RETAINED_PLACEMENTS_MARKER)
+                .exists(),
+            "releasing a returned owner removes the durable claim"
         );
     }
 
