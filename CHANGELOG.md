@@ -73,6 +73,8 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Workflow calls that name an unknown model now fail at that call instead of silently using the default model.
+- New-conversation controls now create and navigate immediately.
+- New-conversation agent pickers now show every available definition by name.
 - Live replies now remain with their conversation while the user changes conversations or opens Operator.
 - Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
 - Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
