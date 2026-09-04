@@ -146,12 +146,7 @@ const gathered = await pipeline(
 const captured = await capturedSources();
 const capturedByUrl = new Map(captured.sources.map((source) => [source.url, source]));
 const landed = plan.sources
-  .map((source, index) =>
-    capturedByUrl.get(source.url) ??
-    (gathered[index]?.observation_id
-      ? { url: source.url, observation_id: gathered[index].observation_id }
-      : null),
-  )
+  .map((source) => capturedByUrl.get(source.url))
   .filter(Boolean);
 const failed = plan.sources
   .map((source, index) => ({ source, outcome: gathered[index], landed: landed.find((entry) => entry.url === source.url) }))
