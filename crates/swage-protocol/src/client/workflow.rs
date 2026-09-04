@@ -17,8 +17,8 @@ pub struct WorkflowScript {
     /// The shipped or operator skill that carries this workflow, when it is
     /// not an authored row of the space. A carried workflow is immutable in
     /// place; a same-named authored row shadows it.
-    #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub carrying_skill: Option<String>,
     pub has_delivery_grant: bool,
     pub argument_contract: WorkflowArgumentContract,
@@ -49,6 +49,7 @@ pub struct CreateWorkflowScriptRequest {
     /// Server-side delivery targets granted to this script. Responses expose
     /// only whether a grant exists, never its URLs or secret references.
     #[serde(default)]
+    #[ts(optional)]
     #[ts(type = "unknown")]
     pub delivery_grant: Option<Value>,
 }
@@ -58,6 +59,7 @@ pub struct UpdateWorkflowScriptRequest {
     pub description: Option<String>,
     pub source: Option<String>,
     #[serde(default)]
+    #[ts(optional)]
     #[ts(type = "unknown")]
     pub delivery_grant: Option<Value>,
 }
@@ -130,7 +132,7 @@ pub struct WorkflowDecisionEventPayload {
     pub nonce: String,
     pub verdict: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "unknown[]")]

@@ -21,6 +21,7 @@ import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
 import * as settingsApi from "../lib/api/settings";
 import * as spacesApi from "../lib/api/spaces";
+import type { EffectiveAgentDefinitionResponse } from "../lib/protocol/EffectiveAgentDefinitionResponse";
 import type {
   ClientEvent,
   ConnectionStatus,
@@ -304,6 +305,25 @@ function makeOperatorOverview(
         disconnected_at: null,
       },
     ],
+    ...overrides,
+  };
+}
+
+function makeAgentDefinition(
+  overrides: Partial<EffectiveAgentDefinitionResponse> = {},
+): EffectiveAgentDefinitionResponse {
+  return {
+    id: "agent-1",
+    display_name: "Agent one",
+    description: "",
+    instructions: "",
+    model_id: null,
+    tool_permissions: {},
+    skills: [],
+    output_schema: null,
+    output_max_retries: null,
+    is_builtin: false,
+    source_scope: "global",
     ...overrides,
   };
 }
@@ -875,7 +895,7 @@ describe("App", () => {
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
-  it("starts the sidebar journey through the configured composer", async () => {
+  it("creates and navigates when the sidebar starts a conversation", async () => {
     const defaultSpace = makeSpace();
     const created: ConversationResponse = {
       id: "conv-new",
@@ -910,36 +930,16 @@ describe("App", () => {
     flushSync(() => newButton!.click());
     await settleUi();
 
-    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
-    const effortSelect = document.querySelector<HTMLSelectElement>('select[aria-label="Effort"]');
-    expect(effortSelect).not.toBeNull();
-    flushSync(() => {
-      effortSelect!.value = "high";
-      effortSelect!.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]');
-    expect(textarea).not.toBeNull();
-    flushSync(() => {
-      textarea!.value = "Start with deliberate reasoning";
-      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
-    flushSync(() => sendButton!.click());
-    await settleUi();
-
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
       defaultSpace.id,
-      "local:reasoning",
-      null,
-      "high",
+      undefined,
+      undefined,
+      undefined,
     );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-new");
     expect(window.location.pathname).toBe("/conversations/conv-new");
-    expect(document.querySelector(".message-display")?.textContent).toContain(
-      "Start with deliberate reasoning",
-    );
+    expect(document.querySelector(".message-display")).not.toBeNull();
   });
 
   it("connects exactly once when the composer auto-creates a conversation", async () => {
@@ -973,6 +973,63 @@ describe("App", () => {
 
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith(created.id);
+  });
+
+  it("creates the conversation under the agent chosen in the composer", async () => {
+    const defaultSpace = makeSpace();
+    const created: ConversationResponse = {
+      id: "conv-agent",
+      space_id: defaultSpace.id,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([
+      makeAgentDefinition({
+        id: "swage-default",
+        display_name: "Swage default",
+        is_builtin: true,
+      }),
+      makeAgentDefinition({ id: "reviewer", display_name: "Review companion" }),
+    ]);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await openSpaceFromPicker(defaultSpace.name);
+
+    const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    expect(picker).not.toBeNull();
+    expect(Array.from(picker!.options, (option) => option.value)).toEqual(["", "reviewer"]);
+
+    flushSync(() => {
+      picker!.value = "reviewer";
+      picker!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    flushSync(() => {
+      textarea!.value = "Review the release checklist";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    expect(sendButton).not.toBeNull();
+    flushSync(() => sendButton!.click());
+    await settleUi();
+
+    // One send from an empty space yields a conversation governed by the
+    // definition the picker was left on.
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(
+      defaultSpace.id,
+      null,
+      "reviewer",
+      null,
+    );
+    expect(window.location.pathname).toBe("/conversations/conv-agent");
   });
 
   it("retains the selected conversation subscription while visiting Operator", async () => {

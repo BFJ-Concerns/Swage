@@ -83,7 +83,7 @@
   });
 
   function presetIsEmpty(preset: GenerationPresetConfig): boolean {
-    return !preset.max_tokens && preset.temperature == null && preset.stop_sequences.length === 0 && !preset.metadata;
+    return !preset.max_tokens && preset.temperature == null && (preset.stop_sequences ?? []).length === 0 && !preset.metadata;
   }
 
   // <input type="number"> coerces to "" when emptied — Svelte's bind:value
