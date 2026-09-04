@@ -3925,11 +3925,11 @@ impl swage_storage::store::ObservationStore for MockStorage {
         unimplemented!("turn tests do not exercise the knowledge base")
     }
 
-    async fn list_observations_by_capture_scopes(
+    async fn list_source_captures_by_scopes(
         &self,
         _: uuid::Uuid,
         _: Vec<String>,
-    ) -> Result<Vec<swage_storage::SourceObservation>, StorageError> {
+    ) -> Result<Vec<swage_storage::SourceCapture>, StorageError> {
         unimplemented!("turn tests do not exercise the knowledge base")
     }
 

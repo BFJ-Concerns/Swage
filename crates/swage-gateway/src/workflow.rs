@@ -4122,15 +4122,14 @@ async fn complete_captured_sources(
         .collect();
     let sources = state
         .storage
-        .list_observations_by_capture_scopes(space_id, scopes)
+        .list_source_captures_by_scopes(space_id, scopes)
         .await
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter_map(|observation| {
-            observation
-                .origin
-                .url
-                .map(|url| serde_json::json!({"url": url, "observation_id": observation.id}))
+        .filter_map(|capture| {
+            capture.origin.url.map(
+                |url| serde_json::json!({"url": url, "observation_id": capture.observation_id}),
+            )
         })
         .collect::<Vec<_>>();
     let result = serde_json::json!({"sources": sources});
@@ -7355,6 +7354,21 @@ mod tests {
             })
             .await
             .expect("worker entry");
+        let prior = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/prior".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "a".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: None,
+            })
+            .await
+            .expect("record prior source");
         let recorded = storage
             .record_observation(NewSourceObservation {
                 space_id: space.id,
@@ -7370,6 +7384,10 @@ mod tests {
             })
             .await
             .expect("record source");
+        assert_eq!(
+            recorded.id, prior.id,
+            "the body deduplicates to prior evidence"
+        );
         let other_run = storage
             .create_workflow_run(NewWorkflowRun {
                 space_id: space.id,
@@ -7442,13 +7460,13 @@ mod tests {
             serde_json::json!({"sources": [{"url": "https://example.test/first", "observation_id": recorded.id}]})
         );
         let independent = storage
-            .list_observations_by_capture_scopes(space.id, vec![worker.id.to_string()])
+            .list_source_captures_by_scopes(space.id, vec![worker.id.to_string()])
             .await
             .expect("independent store read");
         assert_eq!(
             independent
                 .iter()
-                .map(|source| source.id)
+                .map(|source| source.observation_id)
                 .collect::<Vec<_>>(),
             vec![recorded.id]
         );
