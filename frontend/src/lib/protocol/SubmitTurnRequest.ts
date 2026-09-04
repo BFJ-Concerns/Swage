@@ -6,4 +6,4 @@ export type SubmitTurnRequest = { conversation_id: string, thread_id: string | n
  * Content parts submitted beside the text, in order. Absent means
  * text only.
  */
-attachments?: Array<MessageAttachment>, output_schema: unknown, compaction_focus?: string, model?: string, };
+attachments?: Array<MessageAttachment>, output_schema: unknown, compaction_focus?: string | null, model?: string | null, };
