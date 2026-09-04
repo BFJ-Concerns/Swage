@@ -10300,6 +10300,9 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 finish_reason: None,
             },
         ],
+        vec![StreamChunk::Error {
+            message: "delegated provider failed".into(),
+        }],
     ]);
     let worktree_root = fixture.path().join("worker-worktrees");
     let mut config = swage_config::ResolvedConfig::default();
@@ -10484,6 +10487,69 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     assert!(
         !repo.join("delegated-marker").exists(),
         "delegate writes must not touch the source repository"
+    );
+
+    let failed_outcome = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "Fail after isolated worktree placement",
+            None,
+            None,
+            Some(repo.to_string_lossy().into_owned()),
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
+            DispatchContextComposition::default(),
+            "failed-worktree-delegate-call",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Detach,
+        )
+        .await
+        .expect("failing worktree delegation should start");
+    let failed_detached = match failed_outcome {
+        DelegationOutcome::Detached(detached) => detached,
+        DelegationOutcome::Completed(_) => panic!("expected detached delegation"),
+    };
+    let failed_delegate = storage
+        .get_agent_message(failed_detached.delegate_message_id)
+        .await
+        .expect("read failing delegate record")
+        .expect("durable failing delegate record");
+    let failed_worktree = failed_delegate.payload["placement"]["cwd"]
+        .as_str()
+        .expect("failing delegate resolved placement")
+        .to_string();
+
+    let mut failed_results = Vec::new();
+    for _ in 0..20 {
+        failed_results = storage
+            .list_by_correlation(failed_detached.delegate_message_id)
+            .await
+            .expect("list failing delegated result messages");
+        if failed_results
+            .iter()
+            .any(|message| message.kind == swage_core::MessageKind::Result)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let failed_result = failed_results
+        .iter()
+        .find(|message| {
+            message.kind == swage_core::MessageKind::Result
+                && message.payload.get("error").is_some()
+        })
+        .expect("the detached delegate should record a failed terminal result");
+    assert_eq!(
+        failed_result.payload["working_directory"], failed_worktree,
+        "the first durable failure reports the real provisioned directory"
+    );
+    assert!(
+        !storage.result_was_created_without_working_directory(),
+        "successful and failed detached Results must carry placement in their initial durable payloads"
     );
 }
 
