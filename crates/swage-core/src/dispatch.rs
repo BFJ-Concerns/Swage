@@ -37,11 +37,7 @@ impl DispatchContextComposition {
 
 /// Validate the stable identifier used to address a context assembly.
 pub fn validate_context_assembly_name(name: &str) -> Result<(), String> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-    {
+    if !crate::is_lowercase_identifier(name) {
         return Err(format!(
             "invalid context assembly name '{name}': use lowercase letters, digits, and hyphens"
         ));

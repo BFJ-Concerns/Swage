@@ -7,6 +7,27 @@ use crate::model::{HierarchyLevel, ResolvedConfig};
 use crate::validation;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+
+/// Construct the active Global → Space → optional-Agent configuration hierarchy.
+///
+/// The reserved workflow identity is dispatch-only, so it intentionally stops
+/// at the space level and never addresses an authored agent directory.
+pub fn configuration_hierarchy(
+    root: &Path,
+    space: &str,
+    agent: Option<&str>,
+) -> Vec<(HierarchyLevel, PathBuf)> {
+    let space_path = root.join("spaces").join(space);
+    let mut hierarchy = vec![
+        (HierarchyLevel::Global, root.to_path_buf()),
+        (HierarchyLevel::Space, space_path.clone()),
+    ];
+    if let Some(agent) = agent.filter(|agent| *agent != RESERVED_WORKFLOW_AGENT_ID) {
+        hierarchy.push((HierarchyLevel::Agent, space_path.join("agents").join(agent)));
+    }
+    hierarchy
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -64,31 +85,17 @@ pub fn load_resolved_config_from(
 ) -> Result<ResolvedConfig, ConfigError> {
     // Build the Global → Space → Agent hierarchy.
     // Build paths for each hierarchy level.
-    let global_config = root.join("config.toml");
-    let space_dir = root.join("spaces").join(space);
-    let space_config = space_dir.join("config.toml");
-    let agent_dir =
-        (agent != RESERVED_WORKFLOW_AGENT_ID).then(|| space_dir.join("agents").join(agent));
-
-    let global_instrs = root.join("instructions");
-    let space_instrs = space_dir.join("instructions");
-    let agent_config = agent_dir.as_ref().map(|dir| dir.join("config.toml"));
-    let agent_instrs = agent_dir.as_ref().map(|dir| dir.join("instructions"));
+    let hierarchy = configuration_hierarchy(root, space, Some(agent));
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
     // Active merge levels: Global → Space → Agent.
     let mut config_chain: Vec<PartialConfig> = Vec::new();
-    for path in &[&global_config, &space_config] {
-        if let Some(partial) = try_load_file(path, &mut all_problems) {
+    for (_, directory) in &hierarchy {
+        let path = directory.join("config.toml");
+        if let Some(partial) = try_load_file(&path, &mut all_problems) {
             config_chain.push(partial);
         }
-    }
-
-    if let Some(agent_config) = &agent_config
-        && let Some(partial) = try_load_file(agent_config, &mut all_problems)
-    {
-        config_chain.push(partial);
     }
 
     // Fail fast if any file had errors — report everything collected.
@@ -105,15 +112,16 @@ pub fn load_resolved_config_from(
     }
 
     // Assemble instructions from the same active levels.
-    let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
-        (HierarchyLevel::Global, global_instrs.as_path()),
-        (HierarchyLevel::Space, space_instrs.as_path()),
-    ];
-    if let Some(agent_instrs) = &agent_instrs {
-        levels.push((HierarchyLevel::Agent, agent_instrs.as_path()));
-    }
+    let levels = hierarchy
+        .iter()
+        .map(|(level, directory)| (level.clone(), directory.join("instructions")))
+        .collect::<Vec<_>>();
+    let level_refs = levels
+        .iter()
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect::<Vec<_>>();
 
-    match instructions::assemble_instructions(&levels) {
+    match instructions::assemble_instructions(&level_refs) {
         Ok(text) => resolved.instructions = text,
         Err(problem) => return Err(ConfigError::new(vec![problem])),
     }

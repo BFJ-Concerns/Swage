@@ -6,7 +6,10 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 use uuid::Uuid;
 
-use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
+use crate::{state::AppState, tool::Tool};
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 
 pub const WORKFLOW_LIST_TOOL: &str = "workflow_list";
 
@@ -119,14 +122,11 @@ impl Tool for WorkflowListTool {
                 name: self.name().into(),
                 message: error.to_string(),
             })?;
-        let state = ctx
-            .as_any()
-            .downcast_ref::<GatewayToolContext>()
-            .and_then(GatewayToolContext::app_state)
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().into(),
-                message: "workflow_list requires gateway execution".into(),
-            })?;
+        let state = super::require_gateway_state(
+            ctx,
+            self.name(),
+            "workflow_list requires gateway execution",
+        )?;
         workflows_for_session(state, session_id)
             .await
             .map_err(|message| ToolError::ExecutionFailed {
