@@ -31,13 +31,13 @@ pub enum TurnState {
 #[serde(deny_unknown_fields)]
 pub struct CreateConversationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub selected_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub effort: Option<Effort>,
 }
 
@@ -136,6 +136,7 @@ pub struct MessageView {
     /// Content parts recorded beside the text when the message was
     /// submitted; absent for text-only messages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
     pub attachments: Vec<super::turn::MessageAttachment>,
     pub timestamp: DateTime<Utc>,
     pub turn_state: Option<TurnState>,

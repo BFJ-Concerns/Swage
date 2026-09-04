@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub struct CreateSpaceRequest {
     pub name: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub description: String,
 }
 
@@ -42,13 +43,16 @@ pub struct CreateWorkspaceAttachmentRequest {
     #[ts(optional)]
     pub label: Option<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub set_as_default: bool,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, as = "Option<_>")]
     pub active_session_id: Option<Uuid>,
     #[serde(default = "default_workspace_permissions")]
+    #[ts(optional, as = "Option<_>")]
     pub permissions: Vec<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub is_trusted: bool,
 }
 
