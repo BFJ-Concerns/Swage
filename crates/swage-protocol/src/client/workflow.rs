@@ -455,6 +455,8 @@ pub struct WorkflowAgentCallDetail {
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
+    /// The resolved state of the isolated worktree after the worker settled.
+    pub worktree: Option<WorkflowWorktreeCompletion>,
     pub served_model: Option<String>,
     /// What the call spent, or why that is not known. A call the provider
     /// reported no usage for reads as unavailable with a reason, so budget
@@ -470,6 +472,15 @@ pub struct WorkflowAgentCallDetail {
     /// as a call that made no provider request. The run detail always
     /// carries them.
     pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
+}
+
+/// The final Git state of an isolated worker worktree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorktreeCompletion {
+    pub base_commit: String,
+    pub tip_commit: String,
+    pub changed: bool,
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -495,6 +506,8 @@ pub enum WorkflowJournalResult {
         session_id: Option<Uuid>,
         thread_id: Option<Uuid>,
         turn_id: Option<Uuid>,
+        /// The resolved state of the isolated worktree after the worker settled.
+        worktree: Option<WorkflowWorktreeCompletion>,
     },
     WorkerPlacement {
         path: String,

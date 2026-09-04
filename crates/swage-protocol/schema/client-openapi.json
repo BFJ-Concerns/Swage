@@ -5159,6 +5159,17 @@
           "usage": {
             "$ref": "#/components/schemas/WorkflowCallUsage",
             "description": "What the call spent, or why that is not known. A call the provider\nreported no usage for reads as unavailable with a reason, so budget\nreconstruction never reads absence as zero spend."
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorktreeCompletion"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The resolved state of the isolated worktree after the worker settled."
           }
         },
         "required": [
@@ -5760,6 +5771,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "worktree": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkflowWorktreeCompletion"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The resolved state of the isolated worktree after the worker settled."
               }
             },
             "required": [
@@ -6776,6 +6798,30 @@
             "type": "object"
           }
         ]
+      },
+      "WorkflowWorktreeCompletion": {
+        "description": "The final Git state of an isolated worker worktree.",
+        "properties": {
+          "base_commit": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "removed": {
+            "type": "boolean"
+          },
+          "tip_commit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_commit",
+          "tip_commit",
+          "changed",
+          "removed"
+        ],
+        "type": "object"
       },
       "WorkspaceAttachmentListResponse": {
         "properties": {

@@ -3,8 +3,13 @@ import type { WorkflowAgentCallDispatch } from "./WorkflowAgentCallDispatch";
 import type { WorkflowCallUsage } from "./WorkflowCallUsage";
 import type { WorkflowProviderRound } from "./WorkflowProviderRound";
 import type { WorkflowWorkerTermination } from "./WorkflowWorkerTermination";
+import type { WorkflowWorktreeCompletion } from "./WorkflowWorktreeCompletion";
 
-export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null, served_model: string | null,
+export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null,
+/**
+ * The resolved state of the isolated worktree after the worker settled.
+ */
+worktree: WorkflowWorktreeCompletion | null, served_model: string | null,
 /**
  * What the call spent, or why that is not known. A call the provider
  * reported no usage for reads as unavailable with a reason, so budget
