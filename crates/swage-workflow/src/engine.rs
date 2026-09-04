@@ -2454,6 +2454,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_preserves_identified_schema_exhaustion_and_skips_later_stages() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: "SchemaExhaustedError: no valid object".into(),
+            }));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather", {
+                        identity: true,
+                        label: "schema leg",
+                        phase: "research",
+                        schema: { type: "object" },
+                    }),
+                    () => {
+                        laterStageRan = true;
+                        return "overwritten";
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline schema collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{
+                    "label": "schema leg",
+                    "phase": "research",
+                    "output": null,
+                    "failure": {"message": "SchemaExhaustedError: no valid object"},
+                }],
+                "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn agent_start_surfaces_the_continuation_token_and_the_session_option_returns_it() {
         let host = Arc::new(SurfaceHost::new());
         host.agent_outputs
