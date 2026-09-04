@@ -18250,6 +18250,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_dispatch_record_failure_prevents_the_provider_call() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("must not run"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (storage, state, run) = worker_call_record_fixture(Arc::clone(&provider)).await;
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TEMP TRIGGER reject_worker_dispatch_record
+                     BEFORE UPDATE OF dispatch_json ON workflow_journal
+                     BEGIN SELECT RAISE(FAIL, 'injected dispatch record failure'); END;",
+                )
+            })
+            .await
+            .expect("install dispatch-record failure trigger");
+        let (_, entry_id) = journalled_agent_call(&storage, run.space_id).await;
+
+        let error = run_ephemeral_agent_call(
+            &state,
+            run.id,
+            run.space_id,
+            &[],
+            &[],
+            entry_id,
+            worker_call_request("must be recorded before execution"),
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("a worker without a dispatch record must not run");
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected dispatch record failure"),
+            "the constitutive write failure is returned: {error}"
+        );
+        assert!(
+            provider.requests.lock().expect("requests").is_empty(),
+            "no paid provider work begins before its dispatch account exists"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_worker_call_records_what_it_was_dispatched_with_and_what_it_resolved() {
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
