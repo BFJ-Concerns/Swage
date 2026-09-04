@@ -306,10 +306,11 @@ impl DelegationExecutor {
         let mut delegated_history = existing_child
             .map(|continuation| continuation.history)
             .unwrap_or_default();
-        delegated_history.extend(build_delegated_history(
+        let new_delegated_history = build_delegated_history(
             &transferred_context,
             task_description,
-        ));
+        );
+        delegated_history.extend(new_delegated_history.iter().cloned());
         let turn = self
             .storage
             .create_turn(NewTurn {
@@ -321,31 +322,33 @@ impl DelegationExecutor {
             })
             .await?;
         let turn_id = turn.id;
-        // The child's own thread records the task it was given, so a later
-        // delegation that returns to this child rebuilds a conversation with
-        // both halves of every exchange rather than its answers alone.
-        if let Err(error) = self
-            .storage
-            .append_message(swage_storage::model::AppendMessage {
-                thread_id: thread.id,
-                attachments: Vec::new(),
-                turn_id: Some(turn_id),
-                role: Role::User,
-                content: task_description.to_string(),
-                agent_id: target_agent_id.clone(),
-            })
-            .await
-        {
-            if let Err(update_error) = self
+        // The child's own thread records everything this turn was told, so a
+        // later delegation that returns to it rebuilds the original inherited
+        // background as well as both halves of every task exchange.
+        for message in &new_delegated_history {
+            if let Err(error) = self
                 .storage
-                .update_turn_state(turn_id, TurnState::Failed)
+                .append_message(swage_storage::model::AppendMessage {
+                    thread_id: thread.id,
+                    attachments: Vec::new(),
+                    turn_id: Some(turn_id),
+                    role: message.role(),
+                    content: message.text_content(),
+                    agent_id: target_agent_id.clone(),
+                })
                 .await
             {
-                return Err(AgentError::InvalidConfig(format!(
-                    "failed to record delegated task ({error}) and mark turn {turn_id} failed ({update_error})"
-                )));
+                if let Err(update_error) = self
+                    .storage
+                    .update_turn_state(turn_id, TurnState::Failed)
+                    .await
+                {
+                    return Err(AgentError::InvalidConfig(format!(
+                        "failed to record delegated context ({error}) and mark turn {turn_id} failed ({update_error})"
+                    )));
+                }
+                return Err(error.into());
             }
-            return Err(error.into());
         }
         let assembled = match self
             .context_assembler
