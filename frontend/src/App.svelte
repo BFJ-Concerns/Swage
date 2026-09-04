@@ -154,8 +154,8 @@
     }
   }
 
-  function startNewConversation(): void {
-    void createAndNavigate();
+  function startNewConversation(agentId?: string): void {
+    void createAndNavigate(undefined, agentId);
   }
 
   // Proxy that implements ConversationStore but overrides the two navigation-
