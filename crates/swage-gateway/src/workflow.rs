@@ -22,7 +22,7 @@ use swage_protocol::client::workflow::{
     WorkflowRunDetailResponse, WorkflowRunEnding, WorkflowRunEvent, WorkflowRunEventSource,
     WorkflowRunHandover, WorkflowRunListResponse, WorkflowRunState, WorkflowRunTerminalAccount,
     WorkflowScript, WorkflowScriptListResponse, WorkflowWorkerAccount, WorkflowWorkerPartition,
-    WorkflowWorkerTermination,
+    WorkflowWorkerTermination, WorkflowWorktreeCompletion,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -70,6 +70,8 @@ fn runtime_worker_placement(placement: &WorkflowRunWorkerPlacement) -> ResolvedW
         can_write: placement.can_write,
         authority_path: placement.authority_path.clone(),
         authority_context_id: placement.authority_context_id,
+        worktree_seq: None,
+        worktree_base_commit: None,
     }
 }
 
@@ -79,6 +81,8 @@ fn runtime_placement_from_directory(placement: ResolvedWorkerDirectory) -> Resol
         can_write: placement.can_write,
         authority_path: placement.authority_path.to_string_lossy().into_owned(),
         authority_context_id: placement.authority_context_id,
+        worktree_seq: None,
+        worktree_base_commit: None,
     }
 }
 
@@ -549,6 +553,10 @@ fn journal_wire(
             }),
             output_tokens: result.and_then(|result| match result {
                 WorkflowJournalResult::AgentCall { output_tokens, .. } => Some(*output_tokens),
+                _ => None,
+            }),
+            worktree: result.and_then(|result| match result {
+                WorkflowJournalResult::AgentCall { worktree, .. } => worktree.clone(),
                 _ => None,
             }),
             served_model: result.and_then(|result| match result {
@@ -2074,6 +2082,7 @@ async fn run_ephemeral_agent_call(
         session_id: Some(session_id),
         thread_id: Some(thread_id),
         turn_id: Some(turn.id),
+        worktree: None,
     })
 }
 
@@ -2172,6 +2181,9 @@ fn worker_placement_of(
     entry: &WorkflowJournalRecord,
     placements: &HashMap<u64, String>,
 ) -> Option<String> {
+    if worker_worktree_completion(entry).is_some_and(|completion| completion.removed) {
+        return None;
+    }
     entry
         .result
         .as_ref()
@@ -2185,6 +2197,19 @@ fn worker_placement_of(
             _ => None,
         })
         .or_else(|| placements.get(&entry.seq).cloned())
+}
+
+fn worker_worktree_completion(entry: &WorkflowJournalRecord) -> Option<WorkflowWorktreeCompletion> {
+    entry
+        .result
+        .as_ref()
+        .and_then(|result| {
+            journal_result_from_storage(WorkflowJournalEntryKind::AgentCall, result).ok()
+        })
+        .and_then(|result| match result {
+            WorkflowJournalResult::AgentCall { worktree, .. } => worktree,
+            _ => None,
+        })
 }
 
 fn worker_account(
@@ -2206,6 +2231,7 @@ fn worker_account(
             .and_then(Value::as_str)
             .map(str::to_string),
         placement: worker_placement_of(entry, placements),
+        worktree: worker_worktree_completion(entry),
         termination,
     }
 }
@@ -2498,18 +2524,20 @@ async fn provision_worker_command(
         if entry.kind != "worker_placement" || entry.args_hash != hash {
             Err("NondeterministicReplayError".into())
         } else if entry.status == "completed" {
-            let (path, can_write, authority_path, authority_context_id) = entry
-                .result
-                .as_ref()
-                .and_then(|result| {
-                    Some((
-                        result.get("path")?.as_str()?.to_string(),
-                        result.get("can_write")?.as_bool()?,
-                        result.get("authority_path")?.as_str()?.to_string(),
-                        Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
-                    ))
-                })
-                .ok_or_else(|| "completed worker placement has no path".to_string())?;
+            let (path, can_write, authority_path, authority_context_id, worktree_base_commit) =
+                entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| {
+                        Some((
+                            result.get("path")?.as_str()?.to_string(),
+                            result.get("can_write")?.as_bool()?,
+                            result.get("authority_path")?.as_str()?.to_string(),
+                            Uuid::parse_str(result.get("authority_context_id")?.as_str()?).ok()?,
+                            result.get("base_commit")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .ok_or_else(|| "completed worker placement has no path".to_string())?;
             cwd.as_deref().ok_or_else(|| {
                 "WorkerPlacementError: isolation=worktree requires cwd to name the git repository"
                     .to_string()
@@ -2522,21 +2550,24 @@ async fn provision_worker_command(
                     can_write,
                     authority_path,
                     authority_context_id,
+                    worktree_seq: Some(current_seq),
+                    worktree_base_commit: Some(worktree_base_commit),
                 },
             )
             .await?;
-            let restored_path = state
+            let restored = state
                 .worktree_host
                 .restore(
                     run_id,
                     current_seq,
                     std::path::Path::new(&placement.authority_path),
                     std::path::Path::new(&placement.path),
+                    placement.worktree_base_commit.clone(),
                 )
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(Some(ResolvedWorkerPlacement {
-                path: restored_path.to_string_lossy().into_owned(),
+                path: restored.path.to_string_lossy().into_owned(),
                 ..placement
             }))
         } else if entry.status == "failed" {
@@ -2621,6 +2652,8 @@ async fn resolve_worker_directory_command(
                             result.get("authority_context_id")?.as_str()?,
                         )
                         .ok()?,
+                        worktree_seq: None,
+                        worktree_base_commit: None,
                     })
                 })
                 .ok_or_else(|| "completed worker directory resolution has no result".to_string())?;
@@ -4250,13 +4283,14 @@ async fn complete_worker_placement(
         }
     };
     match state.worktree_host.provision(run_id, seq, &repo.path).await {
-        Ok(path) => {
-            let path = path.to_string_lossy().into_owned();
+        Ok(worktree) => {
+            let path = worktree.path.to_string_lossy().into_owned();
             state
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::json!({
-                        "path": path,
+                        "path": &path,
+                        "base_commit": &worktree.base_commit,
                         "can_write": repo.can_write,
                         "authority_path": repo.authority_path,
                         "authority_context_id": repo.authority_context_id,
@@ -4269,6 +4303,8 @@ async fn complete_worker_placement(
                 can_write: repo.can_write,
                 authority_path: repo.authority_path.to_string_lossy().into_owned(),
                 authority_context_id: repo.authority_context_id,
+                worktree_seq: Some(seq),
+                worktree_base_commit: Some(worktree.base_commit),
             }))
         }
         Err(error) => {
@@ -4379,6 +4415,9 @@ async fn complete_agent_entry(
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    let worktree_seq = resolved_working_directory
+        .as_ref()
+        .and_then(|placement| placement.worktree_seq);
     match run_ephemeral_agent_call(
         state,
         run_id,
@@ -4392,7 +4431,20 @@ async fn complete_agent_entry(
     )
     .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
+            if let Some(worktree_seq) = worktree_seq {
+                let completion = state
+                    .worktree_host
+                    .finish(run_id, worktree_seq)
+                    .await
+                    .map_err(WorkflowHostError::Message)?;
+                result.worktree = Some(swage_workflow::WorktreeCompletion {
+                    base_commit: completion.base_commit,
+                    tip_commit: completion.tip_commit,
+                    changed: completion.changed,
+                    removed: completion.removed,
+                });
+            }
             state
                 .complete_workflow_journal_entry(
                     entry_id,
@@ -8158,6 +8210,9 @@ mod tests {
                 .map(swage_core::ChatMessage::text_content)
                 .collect::<Vec<_>>()
                 .join("\n");
+            if text.contains("leave worktree unchanged") {
+                return Box::pin(futures::stream::iter(scripted_text_output("unchanged")));
+            }
             let file = if text.contains("first-marker") {
                 "first-marker"
             } else {
@@ -10827,6 +10882,18 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        let base_commit = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("read repository base")
+                .stdout,
+        )
+        .expect("base commit is UTF-8")
+        .trim()
+        .to_string();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let space = storage.get_or_create_default().await.unwrap();
         grant_workspace(storage.as_ref(), space.id, &repo).await;
@@ -10847,8 +10914,9 @@ mod tests {
             r#"
             const first = agentStart("write first-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
             const second = agentStart("write second-marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
-            await Promise.all([first.result, second.result]);
-            return {{ first: first.workingDirectory, second: second.workingDirectory }};
+            const unchanged = agentStart("leave worktree unchanged", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+            await Promise.all([first.result, second.result, unchanged.result]);
+            return {{ first: first.workingDirectory, second: second.workingDirectory, unchanged: unchanged.workingDirectory }};
         "#
         );
         let Json(started) = start_inline_run(
@@ -10858,7 +10926,7 @@ mod tests {
                 source,
                 args: Value::Null,
                 budget: Some(WorkflowBudget {
-                    max_concurrent_agent_calls: Some(2),
+                    max_concurrent_agent_calls: Some(3),
                     ..WorkflowBudget::default()
                 }),
             }),
@@ -10875,7 +10943,7 @@ mod tests {
             .filter_map(|entry| entry.result.as_ref()?.get("path")?.as_str())
             .map(std::path::PathBuf::from)
             .collect::<Vec<_>>();
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 3);
         let agent_call_results = journal
             .iter()
             .filter(|entry| entry.kind == "agent_call")
@@ -10893,7 +10961,7 @@ mod tests {
                     .expect("completed worker call records its host-resolved directory")
             })
             .collect::<Vec<_>>();
-        assert_eq!(agent_call_results.len(), 2);
+        assert_eq!(agent_call_results.len(), 3);
         assert!(
             agent_call_results.iter().all(|path| paths.contains(path)),
             "each call result must report one of this run's provisioned paths"
@@ -10920,23 +10988,71 @@ mod tests {
         );
         drop(writes);
         assert!(!repo.join("first-marker").exists() && !repo.join("second-marker").exists());
+        let path_for = |prompt: &str| {
+            journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call" && entry.request["prompt"] == prompt)
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result["working_directory"].as_str())
+                .map(std::path::PathBuf::from)
+                .expect("worker call records its host-resolved directory")
+        };
+        let completion_for = |prompt: &str| {
+            journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call" && entry.request["prompt"] == prompt)
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result.get("worktree"))
+                .cloned()
+                .map(serde_json::from_value::<swage_workflow::WorktreeCompletion>)
+                .transpose()
+                .expect("worktree completion record is well formed")
+                .expect("isolated worker call persists its worktree completion")
+        };
+        let first_path = path_for("write first-marker");
+        let second_path = path_for("write second-marker");
+        let unchanged_path = path_for("leave worktree unchanged");
+        for prompt in ["write first-marker", "write second-marker"] {
+            let completion = completion_for(prompt);
+            assert_eq!(completion.base_commit, base_commit);
+            assert_eq!(completion.tip_commit, base_commit);
+            assert!(completion.changed);
+            assert!(!completion.removed);
+        }
+        let unchanged_completion = completion_for("leave worktree unchanged");
+        assert_eq!(unchanged_completion.base_commit, base_commit);
+        assert_eq!(unchanged_completion.tip_commit, base_commit);
+        assert!(!unchanged_completion.changed);
+        assert!(unchanged_completion.removed);
+        assert!(
+            first_path.join("first-marker").exists(),
+            "the first marker remains inside its changed worktree"
+        );
+        assert!(
+            second_path.join("second-marker").exists(),
+            "the second marker remains inside its changed worktree"
+        );
         let completed_run_root = fixture
             .path()
             .join("worker-worktrees")
             .join(started.id.to_string());
         for _ in 0..20 {
-            if paths.iter().all(|path| !path.exists()) && !completed_run_root.exists() {
+            if !unchanged_path.exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         assert!(
-            paths.iter().all(|path| !path.exists()),
-            "completed-run cleanup must remove every provisioned worktree: {paths:?}"
+            !unchanged_path.exists(),
+            "the unchanged worktree must be removed after its async cleanup: {unchanged_path:?}"
         );
         assert!(
-            !completed_run_root.exists(),
-            "completed-run cleanup must remove the empty per-run directory"
+            first_path.exists() && second_path.exists(),
+            "changed worktrees remain available as completion evidence: {first_path:?}, {second_path:?}"
+        );
+        assert!(
+            completed_run_root.exists(),
+            "retained worktrees keep their per-run directory"
         );
 
         let failed_source = format!(
@@ -10970,16 +11086,18 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            retained_path.exists(),
-            "failed-run worktree should remain available for inspection"
+            !retained_path.exists(),
+            "the failed run reclaims its unchanged worker worktree"
         );
-        // Retention only helps a reader who can find the directory: the
-        // account has to name it, and the run's ending is what keeps it.
+        // An unchanged worktree has already been removed, so the account
+        // records that completion rather than naming a stale directory.
         let failed_account = terminal_account_of(&storage, failed.id).await;
-        assert_eq!(
-            failed_account.workers.done[0].placement.as_deref(),
-            retained_path.to_str(),
-            "the account must name the retained worktree"
+        assert!(failed_account.workers.done[0].placement.is_none());
+        assert!(
+            failed_account.workers.done[0]
+                .worktree
+                .as_ref()
+                .is_some_and(|completion| !completion.changed && completion.removed)
         );
         assert_eq!(
             failed_account
@@ -10989,7 +11107,7 @@ mod tests {
                 .results[0]
                 .placement
                 .as_deref(),
-            retained_path.to_str()
+            None
         );
 
         let cancelled_source = format!(
@@ -11026,14 +11144,16 @@ mod tests {
             .expect("cancel parked placement run");
         assert_eq!(cancelled_record.state, WorkflowRunState::Cancelled);
         assert!(
-            cancelled_path.exists(),
-            "cancelled-run worktree should remain available for inspection"
+            !cancelled_path.exists(),
+            "a terminal cancelled run reclaims its completed worker worktree"
         );
         let cancelled_account = terminal_account_of(&storage, cancelled.id).await;
-        assert_eq!(
-            cancelled_account.workers.done[0].placement.as_deref(),
-            cancelled_path.to_str(),
-            "the account must name the cancelled run's retained worktree"
+        assert!(cancelled_account.workers.done[0].placement.is_none());
+        assert!(
+            cancelled_account.workers.done[0]
+                .worktree
+                .as_ref()
+                .is_some_and(|completion| !completion.changed && completion.removed)
         );
 
         // A worktree no account names is still the gateway's to reclaim; this
@@ -11044,40 +11164,16 @@ mod tests {
             .provision(unclaimed_owner, 0, &repo)
             .await
             .expect("provision a worktree no account names");
-        assert!(unclaimed_path.exists());
+        assert!(unclaimed_path.path.exists());
 
         state.worktree_host.shutdown().await;
         assert!(
-            !unclaimed_path.exists(),
+            !unclaimed_path.path.exists(),
             "shutdown must still reclaim a worktree no terminal account names"
         );
-        // The account outlives the gateway that wrote it, so the directories
-        // it names have to outlive that gateway too: a reader coming back to
-        // a run that never returned must find the work, not a path that used
-        // to hold it.
         assert!(
-            retained_path.exists(),
-            "shutdown must keep the placement the failed run's account names"
-        );
-        assert!(
-            cancelled_path.exists(),
-            "shutdown must keep the placement the cancelled run's account names"
-        );
-        assert_eq!(
-            terminal_account_of(&storage, failed.id).await.workers.done[0]
-                .placement
-                .as_deref(),
-            retained_path.to_str(),
-            "the account must still resolve to the placement it named"
-        );
-        assert_eq!(
-            terminal_account_of(&storage, cancelled.id)
-                .await
-                .workers
-                .done[0]
-                .placement
-                .as_deref(),
-            cancelled_path.to_str()
+            !retained_path.exists() && !cancelled_path.exists(),
+            "unchanged completed worktrees remain removed through shutdown"
         );
 
         // Nor may the next gateway's reclaim sweep take them. It starts with
@@ -11092,25 +11188,16 @@ mod tests {
             root: fixture.path().join("worker-worktrees"),
         });
         restarted
-            .recover(&std::collections::HashSet::new())
+            .recover(&crate::worktree::WorktreeRecoveryClaims::default())
             .await
             .expect("startup worktree recovery");
         assert!(
-            !leftover_path.exists(),
+            !leftover_path.path.exists(),
             "startup recovery must still reclaim a crash-stranded worktree no account names"
         );
         assert!(
-            retained_path.exists() && cancelled_path.exists(),
-            "startup recovery must leave the placements the accounts name"
-        );
-        restarted
-            .restore(failed.id, 0, &repo, &retained_path)
-            .await
-            .expect("restore the retained placement into the restarted host");
-        restarted.shutdown().await;
-        assert!(
-            retained_path.exists(),
-            "the restarted gateway must honour the claim it read back"
+            !retained_path.exists() && !cancelled_path.exists(),
+            "startup recovery leaves no stale unchanged placements behind"
         );
     }
 
@@ -13405,6 +13492,7 @@ mod tests {
                     session_id: Some(session.id),
                     thread_id: Some(thread.id),
                     turn_id: Some(Uuid::new_v4()),
+                    worktree: None,
                 })
                 .expect("first result"),
             )
@@ -14362,6 +14450,7 @@ mod tests {
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    worktree: None,
                 })
                 .expect("work result"),
             )
@@ -14610,6 +14699,7 @@ mod tests {
                     session_id: None,
                     thread_id: None,
                     turn_id: None,
+                    worktree: None,
                 })
                 .expect("work result"),
             )
