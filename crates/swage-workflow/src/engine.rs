@@ -1228,6 +1228,7 @@ mod tests {
                 thread_id: None,
                 turn_id: None,
                 liveness: None,
+                worktree: None,
             })
         }
         async fn deliver(
@@ -1277,6 +1278,7 @@ mod tests {
                 thread_id: None,
                 turn_id: None,
                 liveness: None,
+                worktree: None,
             })
         }
 
@@ -1383,6 +1385,7 @@ mod tests {
                 thread_id: Some(uuid::Uuid::from_u128(0xB)),
                 turn_id: None,
                 liveness: None,
+                worktree: None,
             })
         }
 
@@ -1402,6 +1405,8 @@ mod tests {
                     can_write: true,
                     authority_path: request.cwd.clone().unwrap_or_default(),
                     authority_context_id: uuid::Uuid::nil(),
+                    worktree_seq: None,
+                    worktree_base_commit: None,
                 }),
                 None => request
                     .cwd
@@ -1411,6 +1416,8 @@ mod tests {
                         path,
                         can_write: true,
                         authority_context_id: uuid::Uuid::nil(),
+                        worktree_seq: None,
+                        worktree_base_commit: None,
                     }),
             })
         }
