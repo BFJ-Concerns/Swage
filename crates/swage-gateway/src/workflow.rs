@@ -6002,17 +6002,15 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
                     };
                     if let Some(account) =
                         account_for_run_end(state.storage.as_ref(), run_id, ending).await
-                    {
-                        if let Err(error) = record_terminal_account(
+                        && let Err(error) = record_terminal_account(
                             state.storage.as_ref(),
                             &state.worktree_host,
                             run_id,
                             account,
                         )
                         .await
-                        {
-                            tracing::warn!(%run_id, %error, "could not record the interrupted run's terminal account");
-                        }
+                    {
+                        tracing::warn!(%run_id, %error, "could not record the interrupted run's terminal account");
                     }
                 }
             }
