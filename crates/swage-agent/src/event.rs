@@ -224,6 +224,8 @@ pub enum ProviderRoundOutcome {
     Responded { tool_calls: u32 },
     /// The round ended without a usable response.
     Failed { message: String },
+    /// The caller stopped the round before a response could arrive.
+    Interrupted,
 }
 
 #[cfg(test)]
