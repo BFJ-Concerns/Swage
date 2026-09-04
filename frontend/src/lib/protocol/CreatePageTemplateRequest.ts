@@ -5,4 +5,4 @@ import type { PageTemplateModuleInput } from "./PageTemplateModuleInput";
  * Create a reusable page shape for a space, with its module rows in the
  * order they will seed.
  */
-export type CreatePageTemplateRequest = { name: string, modules: Array<PageTemplateModuleInput>, };
+export type CreatePageTemplateRequest = { name: string, modules?: Array<PageTemplateModuleInput>, };

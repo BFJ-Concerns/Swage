@@ -55,7 +55,7 @@ pub struct DeviceHeartbeatRequest {
     pub device_id: String,
     pub label: Option<String>,
     #[serde(default = "default_device_stale_after_secs")]
-    #[ts(type = "number")]
+    #[ts(optional, as = "Option<f64>")]
     pub stale_after_secs: u64,
 }
 
@@ -84,6 +84,7 @@ pub struct ApprovalListQuery {
 pub struct ApprovalDecisionRequest {
     pub decision: approval::ApprovalDecisionValue,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub scope: approval::ApprovalDecisionScope,
     pub reason: Option<String>,
 }
@@ -200,6 +201,7 @@ pub struct CreateAgentDefinitionRequest {
     #[ts(type = "unknown")]
     pub tool_permissions: Option<serde_json::Value>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
@@ -218,6 +220,7 @@ pub struct UpdateAgentDefinitionRequest {
     #[ts(type = "unknown")]
     pub tool_permissions: Option<serde_json::Value>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,

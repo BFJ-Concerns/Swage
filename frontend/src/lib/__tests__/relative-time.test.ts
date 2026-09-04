@@ -51,8 +51,8 @@ describe("relativeTime", () => {
 
   it("returns a short date for timestamps older than 2 days", () => {
     const result = relativeTime(ago(3 * DAY));
-    // Should be a day+month format (en-GB locale: "17 Mar") — not a relative string.
-    expect(result).toMatch(/^\d{1,2} [A-Z][a-z]{2}$/);
+    // A day+month format (en-GB locale: "17 Mar"; "1 Sept" under newer ICU data) — not a relative string.
+    expect(result).toMatch(/^\d{1,2} [A-Z][a-z]{2,3}$/);
   });
 
   it("handles ISO string input (not just Date objects)", () => {

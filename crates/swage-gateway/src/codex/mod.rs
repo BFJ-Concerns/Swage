@@ -448,7 +448,7 @@ async fn run_turn_inner(
 
     let structured_output = match request.agent_config.output_schema.as_ref() {
         Some(schema) => {
-            let validator = jsonschema::validator_for(schema).map_err(|error| {
+            let validator = swage_core::json_schema_validator(schema).map_err(|error| {
                 AgentError::InvalidConfig(format!("invalid output schema: {error}"))
             })?;
             let candidates = extract_json_values(&response_text);

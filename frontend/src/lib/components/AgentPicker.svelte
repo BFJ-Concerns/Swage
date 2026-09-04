@@ -20,7 +20,7 @@
   <span>Agent</span>
   <select bind:value={selectedAgentId} aria-label="Agent" {disabled}>
     <option value="">{builtin?.display_name ?? "Swage default"}</option>
-    {#each definitions.filter((definition) => !definition.is_builtin) as definition (definition.id)}
+    {#each definitions.filter((definition) => definition.id !== builtin?.id) as definition (definition.id)}
       <option value={definition.id}>{definition.display_name}</option>
     {/each}
   </select>
