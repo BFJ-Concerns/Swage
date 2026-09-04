@@ -1645,6 +1645,9 @@ async fn run_ephemeral_agent_call(
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    let call_config = resolve_agent_call_config(state, space_id, &request)
+        .await
+        .map_err(|error| format!("AgentCallError: {error}"))?;
     let inherited_workflow_call_tools = state
         .storage
         .get_workflow_run(run_id)
@@ -1667,9 +1670,8 @@ async fn run_ephemeral_agent_call(
         (None, None) => None,
     };
     if let Some(model) = request.model.as_deref() {
-        let config = state.active_config();
-        if let Err(error) = crate::turn::resolve_requested_turn_model(&config, model)
-            && !declared_fallback_can_serve(&config, &request)
+        if let Err(error) = crate::turn::resolve_requested_turn_model(&call_config, model)
+            && !declared_fallback_can_serve(&call_config, &request)
         {
             // The model the call names is not in the catalogue and no declared
             // fallback can serve it. The call fails here, before a worker is
@@ -1986,7 +1988,7 @@ async fn run_ephemeral_agent_call(
             else {
                 return Err(error.into());
             };
-            crate::turn::resolve_requested_turn_model(&state.active_config(), &fallback_model)
+            crate::turn::resolve_requested_turn_model(&call_config, &fallback_model)
                 .map_err(|fallback_error| {
                     format!(
                         "AgentCallError: selected model failed before output ({error}); declared fallback {fallback_model:?} is unavailable: {fallback_error}"
@@ -2519,24 +2521,14 @@ const FALLBACK_PROVIDER_ROUTE: &str = "default";
 /// settlement. A continued worker inherits its session's selected model.
 async fn resolve_agent_budget_route(
     state: &AppState,
+    space_id: Uuid,
     request: &AgentCallRequest,
-) -> Option<String> {
-    let selected_model = match (&request.model, &request.session) {
-        (Some(model), _) => Some(model.clone()),
-        (None, Some(session)) => state
-            .storage
-            .get_session(session.session_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|session| session.selected_model_id),
-        (None, None) => None,
-    };
-    let config = state.active_config();
+) -> Result<Option<String>, String> {
+    let config = resolve_agent_call_config(state, space_id, request).await?;
     if let Some(route) =
-        swage_config::resolve_provider_route(&config.models, selected_model.as_deref())
+        swage_config::resolve_provider_route(&config.models, request.model.as_deref())
     {
-        return Some(route.provider_id.to_string());
+        return Ok(Some(route.provider_id.to_string()));
     }
     if request.model.is_some() {
         // An unavailable model can still be served by a declared fallback, and
@@ -2544,13 +2536,83 @@ async fn resolve_agent_budget_route(
         // fallback to serve it the call fails as its catalogue error before a
         // worker exists: it draws on nothing, so it has no route and no
         // ceiling may refuse it.
-        return declared_fallback_model(request)
+        return Ok(declared_fallback_model(request)
             .and_then(|fallback| {
                 swage_config::resolve_provider_route(&config.models, Some(fallback))
             })
-            .map(|route| route.provider_id.to_string());
+            .map(|route| route.provider_id.to_string()));
     }
-    Some(FALLBACK_PROVIDER_ROUTE.into())
+    Ok(Some(FALLBACK_PROVIDER_ROUTE.into()))
+}
+
+async fn resolve_agent_call_config(
+    state: &AppState,
+    space_id: Uuid,
+    request: &AgentCallRequest,
+) -> Result<swage_config::ResolvedConfig, String> {
+    let (agent_id, selected_model, task_id) = match request.session.as_ref() {
+        Some(session_ref) => {
+            let session = state
+                .storage
+                .get_session(session_ref.session_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("session {} no longer exists", session_ref.session_id))?;
+            let task_id = session
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("task_definition"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            (session.agent_id, session.selected_model_id, task_id)
+        }
+        None => (
+            request
+                .agent
+                .clone()
+                .unwrap_or_else(|| BARE_WORKFLOW_AGENT_ID.to_string()),
+            request.model.clone(),
+            request.task.clone(),
+        ),
+    };
+    let space = state
+        .space_store
+        .get(space_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("space {space_id} no longer exists"))?;
+    let mut config = crate::turn::load_session_config(state, &space.slug, &agent_id)
+        .map_err(|error| error.to_string())?;
+    match crate::service::resolve_effective_agent_definition(
+        state.storage.as_ref(),
+        &agent_id,
+        space_id,
+    )
+    .await
+    {
+        Ok(Some(definition)) => {
+            config = crate::turn::apply_agent_definition(config, &definition.definition);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                %agent_id,
+                %error,
+                "failed to resolve the workflow agent definition for budget admission; using file config alone"
+            );
+        }
+    }
+    if let Some(task_id) = task_id {
+        let definition = crate::service::resolve_task_definition(state.storage.as_ref(), &task_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        config = crate::turn::apply_task_definition(config, &definition)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(crate::turn::effective_session_config(
+        config,
+        selected_model.as_deref(),
+    ))
 }
 
 /// The fallback model a call may fall back to, if it declared one it is
@@ -2829,17 +2891,25 @@ async fn run_host_commands_inner(
                 let request_json =
                     serde_json::to_value(&request).expect("agent request serialises");
                 let request_hash = journal_args_hash(&request_json);
-                // The route an entry was admitted on is its allowance identity
-                // for the rest of its life. A replayed entry that recorded one
-                // keeps it, so moving the model to another provider between
-                // runs cannot charge the resumed call — or the terminal record
-                // reconstructed from the same entries — to a different ceiling.
+                // A replayed entry keeps its recorded admission route, so
+                // moving the model to another provider between runs cannot
+                // charge resumed work to a different ceiling. Fresh calls
+                // settle to the provider route captured by the completed turn.
                 let budget_route = match existing_call
                     .and_then(|entry| entry.request.get("provider_route"))
                     .and_then(Value::as_str)
                 {
                     Some(route) => Some(route.to_string()),
-                    None => resolve_agent_budget_route(&state, &request).await,
+                    None => match resolve_agent_budget_route(&state, space_id, &request).await {
+                        Ok(route) => route,
+                        Err(error) => {
+                            seq.fetch_add(1, Ordering::SeqCst);
+                            let _ = reply.send(Err(WorkflowHostError::Message(format!(
+                                "AgentCallError: {error}"
+                            ))));
+                            continue;
+                        }
+                    },
                 };
                 let route_limit = budget_route
                     .as_ref()
@@ -17238,6 +17308,95 @@ mod tests {
             1
         );
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_admission_uses_the_space_model_catalogue() {
+        let config_root = tempfile::tempdir().expect("config root");
+        let space_config_dir = config_root.path().join("spaces/default");
+        std::fs::create_dir_all(&space_config_dir).expect("space config directory");
+        std::fs::write(
+            space_config_dir.join("config.toml"),
+            r#"
+[models]
+default = "space-model"
+
+[models.entries.space-model]
+provider_id = "space-route"
+model_id = "space-wire"
+
+[providers]
+default = "space-route"
+
+[providers.entries.space-route]
+protocol = "openai"
+"#,
+        )
+        .expect("space config");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output_with_usage("must not run", 1, 0),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            route_test_config("global-model", "global-route"),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            config_root.path().to_path_buf(),
+        );
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "per_route": {
+                "global-route": {"max_total_tokens": 5},
+                "space-route": {"max_total_tokens": 0}
+            }
+        }))
+        .expect("route budget");
+        assert_eq!(
+            resolve_agent_budget_route(
+                &state,
+                space.id,
+                &route_test_request("space default", None)
+            )
+            .await
+            .expect("resolve scoped route"),
+            Some("space-route".into())
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    try { await agent("space default", { agent: "default" }); }
+                    catch (error) { return error.name; }
+                "#
+                .into(),
+                args: Value::Null,
+                budget: Some(budget),
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.final_output,
+            Some(Value::String("BudgetExceededError".into()))
+        );
+        assert!(
+            provider.requests.lock().expect("requests").is_empty(),
+            "the exhausted space route must refuse before provider work"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
