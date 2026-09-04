@@ -8585,7 +8585,7 @@ mod tests {
                 }
             } else if text.contains("Source: https://example.test/failed") {
                 scripted_text_output(
-                    r#"{"url":"https://example.test/failed","recorded":true,"observation_id":null,"note":"unreachable"}"#,
+                    r#"{"url":"https://example.test/failed","recorded":true,"observation_id":"00000000-0000-0000-0000-000000000001","note":"unreachable"}"#,
                 )
             } else if text.contains("Organise them into the space's knowledge base.") {
                 match tool_result("orient-landed") {
