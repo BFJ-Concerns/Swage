@@ -325,6 +325,8 @@ async fn run_turn_inner(
     let mut tool_count = 0u32;
     for attempt in 0..=request.agent_config.max_output_retries {
         response_text.clear();
+        let mut attempt_input_tokens = 0u32;
+        let mut attempt_output_tokens = 0u32;
         // A retry corrects the shape of the previous answer. The user request
         // and every tool call it already made stay in the retained thread, so
         // resubmitting it here would repeat its side effects.
@@ -434,8 +436,8 @@ async fn run_turn_inner(
                         }
                         "thread/tokenUsage/updated" => {
                             let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
-                            input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(input_tokens);
-                            output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(output_tokens);
+                            attempt_input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(attempt_input_tokens);
+                            attempt_output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(attempt_output_tokens);
                         }
                         "turn/completed" => {
                             let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
@@ -461,6 +463,9 @@ async fn run_turn_inner(
                 tracing::warn!(%error, "Codex dynamic-tool dispatch task panicked");
             }
         }
+
+        input_tokens = input_tokens.saturating_add(attempt_input_tokens);
+        output_tokens = output_tokens.saturating_add(attempt_output_tokens);
 
         let Some(validator) = validator.as_ref() else {
             break;
@@ -1260,6 +1265,58 @@ mod tests {
             vec![1, 2],
             "reasoning must remain attributed to the provider turn that emitted it"
         );
+    }
+
+    #[tokio::test]
+    async fn scripted_schema_retry_accumulates_usage_from_each_attempt() {
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"scripted turn"}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"first"}}},
+                    {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":10,"outputTokens":3}}}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"first","status":"completed"}}}
+                ]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema."}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"second"}}},
+                    {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":20,"outputTokens":4}}}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"{\\\"result\\\":true}"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"second","status":"completed"}}}
+                ]
+            }
+        ]});
+        let config = AgentConfig::new("gateway")
+            .with_workspace("/work", vec!["/work".into()])
+            .with_output_schema(json!({"type":"object","required":["result"]}), 1);
+
+        let (result, _, storage, _) = run_scripted_turn_with_config(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+            false,
+            config,
+        )
+        .await;
+
+        let output = result.expect("a valid retry completes the turn");
+        assert_eq!((output.input_tokens, output.output_tokens), (30, 7));
+        let turn = storage
+            .db
+            .lock()
+            .await
+            .turns
+            .get(&output.turn_id)
+            .cloned()
+            .expect("completed turn is retained");
+        assert_eq!((turn.input_tokens, turn.output_tokens), (Some(30), Some(7)));
     }
 
     #[tokio::test]
