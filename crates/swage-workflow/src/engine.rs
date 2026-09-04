@@ -516,7 +516,11 @@ impl WorkflowEngine {
                                         {
                                             return serde_json::json!({
                                                 "ok": false,
-                                                "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
+                                                "error": {
+                                                    "name": "EmptyAgentOutputError",
+                                                    "message": "agent returned empty output",
+                                                    "agent_call_admitted": true,
+                                                }
                                             }).to_string();
                                         }
                                         // Worker metadata rides beside the output so
@@ -2030,6 +2034,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn parallel_preserves_an_identified_empty_output_failure() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!("   ")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await parallel([() => agent("gather", { identity: true, label: "empty leg", phase: "research" })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("parallel collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!([{
+                "label": "empty leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "agent returned empty output"},
+            }])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn invalid_identified_phase_propagates_through_parallel() {
         let host = Arc::new(SurfaceHost::new());
         let error = WorkflowEngine::new(EngineLimits::default())
@@ -2505,6 +2538,51 @@ mod tests {
                     "phase": "research",
                     "output": null,
                     "failure": {"message": "SchemaExhaustedError: no valid object"},
+                }],
+                "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_preserves_identified_empty_output_and_skips_later_stages() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(json!("")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather", {
+                        identity: true,
+                        label: "empty leg",
+                        phase: "research",
+                    }),
+                    () => {
+                        laterStageRan = true;
+                        return "overwritten";
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{
+                    "label": "empty leg",
+                    "phase": "research",
+                    "output": null,
+                    "failure": {"message": "agent returned empty output"},
                 }],
                 "laterStageRan": false,
             })
