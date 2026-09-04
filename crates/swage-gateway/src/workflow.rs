@@ -1419,11 +1419,6 @@ fn check_held_worker_turn(
             serde_json::json!(worker.open.skills),
         ),
         (
-            "model",
-            serde_json::json!(request.model),
-            serde_json::json!(worker.open.model),
-        ),
-        (
             "effort",
             serde_json::json!(request.effort),
             serde_json::json!(worker.open.effort),
@@ -1444,7 +1439,17 @@ fn check_held_worker_turn(
             "HeldWorkerError: worker {worker_id} must start in its creation placement"
         ));
     }
-    if request.fallback_model.is_some()
+    if request.session.is_none() && request.model != worker.open.model
+        || request.session.is_some()
+            && request.model.is_some()
+            && request.model != worker.open.model
+    {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} fixes model at creation"
+        ));
+    }
+    if (request.session.is_none() && request.fallback_model != worker.open.fallback_model)
+        || (request.session.is_some() && request.fallback_model.is_some())
         || request.elements.is_some()
         || request.variables.is_some()
         || request.assembly.is_some()
@@ -1508,6 +1513,12 @@ async fn resolve_held_worker_open(
         ),
         None => Some(config.models.default.clone()).filter(|model| !model.is_empty()),
     };
+    open.fallback_model = open
+        .fallback_model
+        .as_deref()
+        .map(|model| crate::turn::resolve_requested_turn_model(&config, model))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     if open.effort.is_none() {
         open.effort = model
             .as_ref()
@@ -1526,6 +1537,7 @@ fn held_worker_replay_matches(requested: &HeldWorkerOpen, recorded: &HeldWorkerO
         && requested.cwd == recorded.cwd
         && requested.isolation == recorded.isolation
         && requested.label == recorded.label
+        && requested.fallback_model == recorded.fallback_model
         && requested
             .model
             .as_ref()
@@ -18414,18 +18426,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn held_worker_persists_the_fallback_model_for_continuation() {
+    async fn held_worker_resolves_and_persists_the_fallback_model_for_continuation() {
         let (state, storage, provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "pinned refused".into(),
+            }],
             scripted_text_output("created by fallback"),
             scripted_text_output("continued by fallback"),
         ])
         .await;
         let source = r#"
-            const worker = agentStart("create", {
-                agent: "default", model: "missing", fallbackModel: "fallback"
+            const worker = await session({
+                agent: "default", model: "pinned", fallbackModel: "fallback"
             });
-            await worker.result;
-            return await agent("continue", { agent: "default", session: worker.session });
+            await send(worker, "create");
+            const result = await send(worker, "continue");
+            await close(worker);
+            return {result, creation: worker.creation};
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
@@ -18439,6 +18456,12 @@ mod tests {
         .await
         .expect("start workflow");
         wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
 
         let journal = storage
             .list_workflow_journal(started.id)
@@ -18449,6 +18472,18 @@ mod tests {
             .filter(|entry| entry.kind == "agent_call")
             .collect::<Vec<_>>();
         assert_eq!(calls.len(), 2);
+        let open = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
+            .expect("worker open");
+        assert_eq!(
+            open.result.as_ref().expect("open result")["creation"]["fallback_model"],
+            "fallback",
+            "the resolved fallback is part of the worker's recorded creation envelope"
+        );
         assert!(calls.iter().all(|entry| {
             entry
                 .result
@@ -18480,8 +18515,12 @@ mod tests {
                 .iter()
                 .map(|request| request.model.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("fallback-wire"), Some("fallback-wire")],
-            "continuation must use the persisted fallback without retrying the missing primary"
+            vec![
+                Some("pinned-wire"),
+                Some("fallback-wire"),
+                Some("fallback-wire")
+            ],
+            "continuation must use the persisted fallback without retrying the failed primary"
         );
     }
 
