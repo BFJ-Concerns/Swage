@@ -32,7 +32,7 @@ fn validate_full_json_schema(
     schema: &Value,
     params: &Value,
 ) -> Result<(), ToolError> {
-    let validator = jsonschema::validator_for(schema).map_err(|error| {
+    let validator = swage_core::json_schema_validator(schema).map_err(|error| {
         invalid(
             tool_name,
             format!("tool parameter schema is invalid: {error}"),
