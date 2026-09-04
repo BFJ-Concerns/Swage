@@ -1471,8 +1471,11 @@
       "type": "object",
       "properties": {
         "captured_sources_grant": {
-          "type": "boolean",
-          "default": false
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         },
         "delivery_grant": {
           "description": "Server-side delivery targets granted to this script. Responses expose\nonly whether a grant exists, never its URLs or secret references.",
@@ -5447,6 +5450,12 @@
           "format": "uint64",
           "minimum": 0
         },
+        "served_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "session_id": {
           "type": [
             "string",
@@ -5753,7 +5762,16 @@
           ]
         },
         "request": true,
-        "result": true,
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowJournalResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "seq": {
           "type": "integer",
           "format": "uint64",
@@ -5833,6 +5851,434 @@
         "started",
         "completed",
         "failed"
+      ]
+    },
+    "WorkflowJournalResult": {
+      "description": "A completed workflow journal entry's client-visible result. Durable\nstorage keeps this as JSON, but clients receive only one of these\nkind-specific shapes.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "input_tokens": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent_call"
+            },
+            "output": true,
+            "output_tokens": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "served_model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "thread_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "turn_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "working_directory": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "output",
+            "input_tokens",
+            "output_tokens"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "authority_context_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "authority_path": {
+              "type": "string"
+            },
+            "can_write": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "worker_placement"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "can_write",
+            "authority_path",
+            "authority_context_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "worker_placement_list"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "paths"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delivered": {
+              "type": "boolean"
+            },
+            "effect_seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "effect"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "delivered",
+            "target",
+            "effect_seq"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "log"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "phase"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "workflow_call"
+            },
+            "output": true
+          },
+          "required": [
+            "kind",
+            "output"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fired": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "timer"
+            }
+          },
+          "required": [
+            "kind",
+            "fired"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event_kind": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "event"
+            },
+            "payload": true,
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "source": {
+              "$ref": "#/$defs/WorkflowRunEventSource"
+            }
+          },
+          "required": [
+            "kind",
+            "seq",
+            "event_kind",
+            "payload",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "delivered": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "event_delivery"
+            }
+          },
+          "required": [
+            "kind",
+            "delivered"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event_kind": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "await_event"
+            },
+            "payload": true,
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "source": {
+              "$ref": "#/$defs/WorkflowRunEventSource"
+            }
+          },
+          "required": [
+            "kind",
+            "seq",
+            "event_kind",
+            "payload",
+            "source"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "events": true,
+            "kind": {
+              "type": "string",
+              "const": "gate"
+            },
+            "read_up_to_seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "reasoning": {
+              "type": "string"
+            },
+            "wake": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "wake",
+            "reasoning",
+            "events",
+            "read_up_to_seq"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "closing_remaining": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "budget"
+            },
+            "remaining": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "spent": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "winding_down": {
+              "type": "boolean"
+            },
+            "working_remaining": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "spent",
+            "winding_down"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "closing_remaining": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "terminal_budget"
+            },
+            "remaining": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
+            "spent": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "spent"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "captured_sources"
+            },
+            "sources": true
+          },
+          "required": [
+            "kind",
+            "sources"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "closing_remaining": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "wind_down"
+            },
+            "remaining": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "spent": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "winding_down": {
+              "type": "boolean"
+            },
+            "working_remaining": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "spent",
+            "remaining",
+            "working_remaining",
+            "closing_remaining",
+            "winding_down"
+          ]
+        }
       ]
     },
     "WorkflowRun": {

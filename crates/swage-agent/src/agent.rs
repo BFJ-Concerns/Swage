@@ -283,6 +283,7 @@ impl Agent {
                     self.fail_turn_and_idle(turn.id, thread_id).await;
                     let _ = event_tx.send(AgentEvent::Error {
                         message: error.to_string(),
+                        provider_failure: matches!(&error, AgentError::ProviderFailed(_)),
                     });
                     return Err(error);
                 }
@@ -575,7 +576,7 @@ impl Agent {
         // retry streams tokens independently. Without a schema, this block is skipped.
         let structured_output = if let Some(ref schema_value) = self.config.output_schema {
             // Compile once — AgentConfig::validate() already proved this succeeds.
-            let validator = jsonschema::validator_for(schema_value)
+            let validator = swage_core::json_schema_validator(schema_value)
                 .expect("schema was validated at config time");
 
             let max_retries = self.config.max_output_retries;
@@ -710,6 +711,7 @@ impl Agent {
                 self.fail_turn_and_idle(turn.id, thread_id).await;
                 let _ = event_tx.send(AgentEvent::Error {
                     message: e.to_string(),
+                    provider_failure: matches!(&e, AgentError::ProviderFailed(_)),
                 });
                 return Err(e);
             }
@@ -855,14 +857,20 @@ impl Agent {
                         }
                         Some(StreamChunk::Error { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
-                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: message.clone(),
+                                provider_failure: true,
+                            });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
                             ));
                         }
                         Some(StreamChunk::ProviderAnomaly { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
-                            let _ = event_tx.send(AgentEvent::Error { message: message.clone() });
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: message.clone(),
+                                provider_failure: true,
+                            });
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::ProviderAnomaly(message),
                             ));

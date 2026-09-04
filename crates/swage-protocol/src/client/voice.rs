@@ -10,6 +10,7 @@ pub struct VoiceCapabilitiesResponse {
     pub synthesis: bool,
     pub default_voice: Option<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub supported_voices: Vec<String>,
 }
 
@@ -28,8 +29,10 @@ pub struct TranscribeAudioResponse {
 pub struct SynthesiseSpeechRequest {
     pub text: String,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub voice: Option<String>,
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub format: Option<String>,
 }
 

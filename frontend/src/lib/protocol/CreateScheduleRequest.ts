@@ -15,4 +15,4 @@ message: string, spec: ScheduleSpec, session: SessionPolicy,
 /**
  * Defaults to local-record-only routing when omitted.
  */
-routing: DeliveryRoutingRequest | null, gate: GateConfig | null, };
+routing?: DeliveryRoutingRequest | null, gate?: GateConfig | null, };
