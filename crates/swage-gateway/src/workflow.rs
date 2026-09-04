@@ -678,17 +678,9 @@ fn journal_wire(
                 thread_id,
                 turn_id,
                 served_model,
-                input_tokens,
-                output_tokens,
+                usage,
                 ..
-            } => Some((
-                session_id,
-                thread_id,
-                turn_id,
-                served_model,
-                input_tokens,
-                output_tokens,
-            )),
+            } => Some((session_id, thread_id, turn_id, served_model, usage)),
             _ => None,
         });
         let usage = match stored_result.and_then(|result| result.get("usage")) {
@@ -702,10 +694,7 @@ fn journal_wire(
                 WorkflowCallUsage::Unavailable {
                     reason: WorkflowUsageUnavailableReason::CallDidNotSettle,
                 },
-                |(_, _, _, _, input_tokens, output_tokens)| WorkflowCallUsage::Known {
-                    input_tokens: *input_tokens,
-                    output_tokens: *output_tokens,
-                },
+                |(_, _, _, _, usage)| (*usage).clone(),
             ),
         };
         let mut dispatch = entry
@@ -749,25 +738,25 @@ fn journal_wire(
                 .and_then(|result| result.get("session_id"))
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .or(agent_result
-                    .and_then(|(session_id, _, _, _, _, _)| *session_id)
+                    .and_then(|(session_id, _, _, _, _)| *session_id)
                     .or(resolved.and_then(|resolution| resolution.session_id))),
             thread_id: stored_result
                 .and_then(|result| result.get("thread_id"))
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .or(agent_result
-                    .and_then(|(_, thread_id, _, _, _, _)| *thread_id)
+                    .and_then(|(_, thread_id, _, _, _)| *thread_id)
                     .or(resolved.and_then(|resolution| resolution.thread_id))),
             turn_id: stored_result
                 .and_then(|result| result.get("turn_id"))
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .or(agent_result
-                    .and_then(|(_, _, turn_id, _, _, _)| *turn_id)
+                    .and_then(|(_, _, turn_id, _, _)| *turn_id)
                     .or(resolved.and_then(|resolution| resolution.turn_id))),
             served_model: stored_result
                 .and_then(|result| result.get("served_model"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .or(agent_result.and_then(|(_, _, _, served_model, _, _)| (*served_model).clone())),
+                .or(agent_result.and_then(|(_, _, _, served_model, _)| (*served_model).clone())),
             worktree: result.as_ref().and_then(|result| match result {
                 WorkflowJournalResult::AgentCall { worktree, .. } => worktree.clone(),
                 _ => None,
@@ -11058,6 +11047,27 @@ mod tests {
         let run = storage.get_workflow_run(started.id).await.unwrap().unwrap();
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
         let journal = storage.list_workflow_journal(started.id).await.unwrap();
+        let detail = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("project completed worker calls")
+            .0;
+        let projected_first = detail
+            .journal
+            .iter()
+            .find(|entry| {
+                entry.kind == WorkflowJournalEntryKind::AgentCall
+                    && entry.request["prompt"] == "write first-marker"
+            })
+            .and_then(|entry| entry.result.as_ref())
+            .expect("the completed worker result survives its typed projection");
+        assert!(matches!(
+            projected_first,
+            WorkflowJournalResult::AgentCall {
+                output,
+                worktree: Some(_),
+                ..
+            } if output == "written"
+        ));
         let paths = journal
             .iter()
             .filter(|entry| entry.kind == "worker_placement")
