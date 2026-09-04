@@ -107,6 +107,8 @@ pub struct ResolvedWorkerPlacement {
     pub can_write: bool,
     pub authority_path: String,
     pub authority_context_id: Uuid,
+    pub worktree_seq: Option<u64>,
+    pub worktree_base_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,6 +131,16 @@ pub struct AgentCallResult {
     pub thread_id: Option<Uuid>,
     #[serde(default)]
     pub turn_id: Option<Uuid>,
+    #[serde(default)]
+    pub worktree: Option<WorktreeCompletion>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorktreeCompletion {
+    pub base_commit: String,
+    pub tip_commit: String,
+    pub changed: bool,
+    pub removed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -232,6 +244,8 @@ pub trait WorkflowHost: Send + Sync {
             path,
             can_write: true,
             authority_context_id: Uuid::nil(),
+            worktree_seq: None,
+            worktree_base_commit: None,
         }))
     }
 
