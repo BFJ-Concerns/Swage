@@ -311,7 +311,18 @@ pub struct WorkflowAgentCallDetail {
     pub turn_id: Option<Uuid>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// The resolved state of the isolated worktree after the worker settled.
+    pub worktree: Option<WorkflowWorktreeCompletion>,
     pub served_model: Option<String>,
+}
+
+/// The final Git state of an isolated worker worktree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorktreeCompletion {
+    pub base_commit: String,
+    pub tip_commit: String,
+    pub changed: bool,
+    pub removed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -337,6 +348,8 @@ pub enum WorkflowJournalResult {
         session_id: Option<Uuid>,
         thread_id: Option<Uuid>,
         turn_id: Option<Uuid>,
+        /// The resolved state of the isolated worktree after the worker settled.
+        worktree: Option<WorkflowWorktreeCompletion>,
     },
     WorkerPlacement {
         path: String,
