@@ -10,7 +10,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Images now reach every provider protocol that advertises vision, and an image reference a provider cannot resolve is refused when it is submitted rather than failing the turn at the provider.
+- Images now reach every selected provider protocol that advertises vision, and an image reference that provider cannot resolve is refused before the turn reaches it.
 - Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
 - Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.

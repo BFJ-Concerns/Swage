@@ -150,7 +150,7 @@ pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> 
     parts
 }
 
-/// Refuse a submission whose attachments the configured provider cannot
+/// Refuse a submission whose attachments the selected provider cannot
 /// consume. The check runs before anything is persisted: a part the model
 /// would never see must fail the turn, not ride along silently.
 pub(crate) fn check_attachment_support(
@@ -167,12 +167,12 @@ pub(crate) fn check_attachment_support(
                 }
                 if !capabilities.vision() {
                     return Err(GatewayError::ValidationError(
-                        "the configured provider does not accept image attachments".into(),
+                        "the selected provider does not accept image attachments".into(),
                     ));
                 }
                 if !capabilities.accepts_image_reference(url) {
                     return Err(GatewayError::ValidationError(
-                        "the configured provider cannot resolve this image reference: attach the \
+                        "the selected provider cannot resolve this image reference: attach the \
                          image inline as a base64 data URL"
                             .into(),
                     ));
@@ -1008,9 +1008,6 @@ async fn process_turn_with_composition_and_focus(
         text: content,
         attachments,
     } = input;
-    // An attachment the provider cannot consume fails the turn before any
-    // record is written — a part the model never sees must not ride along.
-    check_attachment_support(&state.workflow_capabilities, &attachments)?;
 
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -1194,6 +1191,12 @@ async fn process_turn_with_composition_and_focus(
         None => "configured_default",
     };
     let config = effective_session_config(config, selected_model_id);
+    // Admission follows the same effective model/provider selection as the
+    // request. A startup default must neither grant nor deny capabilities for
+    // a turn that selected a different provider protocol.
+    let workflow_capabilities =
+        crate::capabilities::WorkflowCapabilities::for_protocol(config.default_provider_protocol());
+    check_attachment_support(&workflow_capabilities, &attachments)?;
 
     // Skill discovery, space memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.

@@ -1346,9 +1346,6 @@ pub async fn submit_turn(
         crate::turn::resolve_requested_turn_model(&state.active_config(), model)
             .map_err(ApiError::from)?;
     }
-    crate::turn::check_attachment_support(&state.workflow_capabilities, &req.attachments)
-        .map_err(ApiError::from)?;
-
     if state
         .active_turns
         .lock()
@@ -2143,7 +2140,7 @@ mod tests {
     use uuid::Uuid;
 
     use swage_provider::LlmProvider;
-    use swage_storage::store::{MessageStore, SessionStore, SpaceStore, Storage};
+    use swage_storage::store::{MessageStore, SessionStore, SpaceStore, Storage, TurnStore};
 
     use super::*;
     use crate::{
@@ -3607,27 +3604,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_turns_refuses_an_image_attachment_the_provider_cannot_consume() {
+    async fn post_turns_defers_image_admission_to_the_selected_provider() {
         let storage = Arc::new(MockStorage::new());
         let mut config = swage_config::ResolvedConfig::default();
         config.providers.entries.insert(
-            "codex".into(),
+            "google".into(),
             swage_config::ProviderEndpointConfig {
-                protocol: swage_config::Protocol::Codex,
+                protocol: swage_config::Protocol::Google,
                 ..Default::default()
             },
         );
-        config.models.default = "codex".into();
+        config.providers.entries.insert(
+            "openai".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::OpenAi,
+                ..Default::default()
+            },
+        );
+        config.models.default = "gemini".into();
         config.models.entries.insert(
-            "codex".into(),
+            "gemini".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "codex".into(),
-                model_id: "fake-codex".into(),
+                provider_id: "google".into(),
+                model_id: "gemini-wire".into(),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "gpt".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "openai".into(),
+                model_id: "gpt-wire".into(),
                 ..Default::default()
             },
         );
         let (router, storage) = make_router_with_provider_and_config(
-            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            Arc::new(MockProvider::new(vec![
+                swage_core::StreamChunk::Delta {
+                    content: "a cat".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])) as Arc<dyn LlmProvider>,
             storage,
             config,
         );
@@ -3658,6 +3677,7 @@ mod tests {
                         serde_json::json!({
                             "conversation_id": conversation_id,
                             "message": "what is this?",
+                            "model": "gpt",
                             "attachments": [{"kind": "image_url", "url": "https://example.test/cat.png"}]
                         })
                         .to_string(),
@@ -3665,21 +3685,31 @@ mod tests {
                     .unwrap(),
             )
             .await
-            .expect("refused response");
+            .expect("turn response");
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = body_json(response).await;
-        assert_eq!(body["code"], "validation_error");
-        assert!(
-            body["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("image")),
-            "{body}"
-        );
-        assert!(
-            storage.db.lock().await.turns.is_empty(),
-            "a refused attachment must not create a pending turn"
-        );
+        let turn_id = body["turn_id"]
+            .as_str()
+            .expect("turn id")
+            .parse()
+            .expect("turn UUID");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let turn = storage
+                    .get_turn(turn_id)
+                    .await
+                    .expect("read turn")
+                    .expect("turn exists");
+                if turn.state == swage_storage::TurnState::Completed {
+                    break;
+                }
+                assert_ne!(turn.state, swage_storage::TurnState::Failed);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("selected-provider turn completes");
     }
 
     // -----------------------------------------------------------------------
