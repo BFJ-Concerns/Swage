@@ -1553,12 +1553,14 @@ impl WorkflowHost for ChannelWorkflowHost {
 struct HeldWorker {
     open: HeldWorkerOpen,
     session: Arc<std::sync::Mutex<Option<swage_workflow::AgentSessionRef>>>,
+    selected_model: Arc<std::sync::Mutex<Option<String>>>,
     last_completed_at: Arc<std::sync::Mutex<chrono::DateTime<chrono::Utc>>>,
 }
 
 #[derive(Clone)]
 struct HeldWorkerTurnState {
     session: Arc<std::sync::Mutex<Option<swage_workflow::AgentSessionRef>>>,
+    selected_model: Arc<std::sync::Mutex<Option<String>>>,
     last_completed_at: Arc<std::sync::Mutex<chrono::DateTime<chrono::Utc>>>,
 }
 
@@ -1780,10 +1782,15 @@ fn held_worker_staleness_reading(
         .signed_duration_since(last_completed_at)
         .num_milliseconds()
         .max(0) as u64;
+    let selected_model = worker
+        .selected_model
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
     let route = swage_config::resolve_provider_route(
         &config.models,
         &config.providers,
-        worker.open.model.as_deref(),
+        selected_model.as_deref(),
     );
     let threshold_ms = route.and_then(|route| route.endpoint.worker_staleness_threshold_ms);
     serde_json::json!({
@@ -3227,6 +3234,7 @@ async fn run_host_commands_inner(
                         .get(&worker_id)
                         .map(|worker| HeldWorkerTurnState {
                             session: Arc::clone(&worker.session),
+                            selected_model: Arc::clone(&worker.selected_model),
                             last_completed_at: Arc::clone(&worker.last_completed_at),
                         })
                 });
@@ -3595,6 +3603,13 @@ async fn run_host_commands_inner(
                                     session_id,
                                     thread_id,
                                 });
+                        }
+                        if let Some(served_model) = completed.served_model.as_ref() {
+                            *worker
+                                .selected_model
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) =
+                                Some(served_model.clone());
                         }
                         let completed_at = existing
                             .and_then(|entry| entry.completed_at)
@@ -4209,6 +4224,7 @@ async fn run_host_commands_inner(
                     held_workers.insert(
                         worker_id,
                         HeldWorker {
+                            selected_model: Arc::new(std::sync::Mutex::new(open.model.clone())),
                             open,
                             session: Arc::new(std::sync::Mutex::new(None)),
                             last_completed_at: Arc::new(std::sync::Mutex::new(chrono::Utc::now())),
@@ -18539,11 +18555,25 @@ mod tests {
 
     fn fallback_test_config() -> swage_config::ResolvedConfig {
         let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "primary-route".into(),
+            swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: Some(111),
+                ..Default::default()
+            },
+        );
+        config.providers.entries.insert(
+            "fallback-route".into(),
+            swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: Some(222),
+                ..Default::default()
+            },
+        );
         config.models.default = "pinned".into();
         config.models.entries.insert(
             "pinned".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "scripted".into(),
+                provider_id: "primary-route".into(),
                 model_id: "pinned-wire".into(),
                 ..Default::default()
             },
@@ -18551,7 +18581,7 @@ mod tests {
         config.models.entries.insert(
             "fallback".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "scripted".into(),
+                provider_id: "fallback-route".into(),
                 model_id: "fallback-wire".into(),
                 ..Default::default()
             },
@@ -19023,8 +19053,9 @@ mod tests {
             });
             await send(worker, "create");
             const result = await send(worker, "continue");
+            const reading = await staleness(worker);
             await close(worker);
-            return {result, creation: worker.creation};
+            return {result, creation: worker.creation, reading};
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
@@ -19044,6 +19075,11 @@ mod tests {
             .expect("run")
             .expect("present");
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        assert_eq!(
+            run.final_output.as_ref().expect("worker output")["reading"]["thresholdMs"],
+            222,
+            "staleness follows the fallback route that now serves the worker"
+        );
 
         let journal = storage
             .list_workflow_journal(started.id)
