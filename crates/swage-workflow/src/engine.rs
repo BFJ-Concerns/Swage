@@ -1103,7 +1103,7 @@ impl WorkflowEngine {
                         // seen. Grants are not frozen with them — the turn
                         // path re-derives effective authority every turn.
                         const workerCreationOptions = new Set([
-                            "agent", "task", "tools", "skills", "model",
+                            "agent", "task", "tools", "skills", "model", "fallbackModel",
                             "effort", "cwd", "isolation", "label",
                         ]);
                         // What a single turn may vary. Everything else about
@@ -1154,6 +1154,8 @@ impl WorkflowEngine {
                                     ? {} : { skills: merged.skills.map(String) }),
                                 ...(merged.model === undefined || merged.model === null
                                     ? {} : { model: String(merged.model) }),
+                                ...(merged.fallbackModel === undefined || merged.fallbackModel === null
+                                    ? {} : { fallback_model: String(merged.fallbackModel) }),
                                 ...(merged.effort === undefined || merged.effort === null
                                     ? {} : { effort: String(merged.effort) }),
                                 ...(merged.cwd === undefined || merged.cwd === null
@@ -1199,8 +1201,10 @@ impl WorkflowEngine {
                             if (worker.busy) {
                                 throw heldWorkerError("this worker is already taking a turn; a worker's turns are sequential");
                             }
+                            const { fallback_model: fallbackModel, ...creation } = worker.creation;
                             const request = buildAgentRequest({
-                                ...worker.creation,
+                                ...creation,
+                                fallbackModel,
                                 schema: options.schema,
                                 maxAttempts: options.maxAttempts,
                                 timeoutMs: options.timeoutMs,
@@ -1209,8 +1213,10 @@ impl WorkflowEngine {
                                 worker: worker.workerId,
                             });
                             if (worker.session !== null) {
+                                delete request.model;
                                 delete request.cwd;
                                 delete request.isolation;
+                                delete request.fallback_model;
                             }
                             worker.busy = true;
                             try {
@@ -1827,6 +1833,7 @@ mod tests {
                 const worker = await session({
                     agent: "reviewer",
                     model: "strong",
+                    fallbackModel: "steady",
                     effort: "high",
                     cwd: "/repo",
                     isolation: "worktree",
@@ -1834,7 +1841,13 @@ mod tests {
                 const first = await send(worker, "read the diff");
                 const second = await send(worker, "now judge it", {schema: {type: "string"}});
                 await close(worker);
-                return {first, second, turns: worker.turns, closed: worker.closed};
+                return {
+                    first,
+                    second,
+                    fallback: worker.creation.fallback_model,
+                    turns: worker.turns,
+                    closed: worker.closed,
+                };
                 "#,
                 "null",
                 CancellationToken::new(),
@@ -1845,7 +1858,13 @@ mod tests {
             .expect("held worker script runs");
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
-            json!({"first": "first", "second": "second", "turns": 2, "closed": true})
+            json!({
+                "first": "first",
+                "second": "second",
+                "fallback": "steady",
+                "turns": 2,
+                "closed": true,
+            })
         );
 
         let opened = host.opened_workers.lock().unwrap();
@@ -1858,7 +1877,6 @@ mod tests {
         let worker_id = uuid::Uuid::from_u128(1);
         for request in requests.iter() {
             assert_eq!(request.agent.as_deref(), Some("reviewer"));
-            assert_eq!(request.model.as_deref(), Some("strong"));
             assert_eq!(
                 request.worker,
                 Some(worker_id),
@@ -1869,7 +1887,9 @@ mod tests {
             requests[0].session.is_none(),
             "the first turn opens the session"
         );
+        assert_eq!(requests[0].model.as_deref(), Some("strong"));
         assert_eq!(requests[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(requests[0].fallback_model.as_deref(), Some("steady"));
         assert_eq!(
             requests[0].isolation,
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
@@ -1880,8 +1900,16 @@ mod tests {
             "the second turn continues the first turn's session"
         );
         assert_eq!(
+            requests[1].model, None,
+            "the continuation uses the model persisted with its session"
+        );
+        assert_eq!(
             requests[1].cwd, None,
             "a continuation inherits the worker's resolved directory"
+        );
+        assert_eq!(
+            requests[1].fallback_model, None,
+            "the creation-time fallback is not re-declared on continuation"
         );
         assert_eq!(
             requests[1].isolation, None,
