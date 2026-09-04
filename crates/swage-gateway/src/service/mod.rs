@@ -15,12 +15,7 @@ pub use workflow_script::*;
 pub use workspace_attachment::*;
 
 /// Whether an identifier is a non-empty lowercase ASCII slug.
-pub(crate) fn is_lowercase_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
+pub(crate) use swage_core::is_lowercase_identifier;
 
 #[cfg(test)]
 use serde_json::Value as JsonValue;

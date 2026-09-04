@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
 
 use crate::error::ApiError;
 use crate::secret::{CreateSecretRequest, RotateSecretRequest};
@@ -37,36 +36,22 @@ fn config_from_wire<C: DeserializeOwned, W: Serialize>(value: W) -> Result<C, Ap
 }
 
 async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(), ApiError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ApiError::validation("config path has no parent directory".to_string()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ApiError::validation("config path has no valid file name".to_string()))?;
-    let temporary_path = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
-
-    let write_result = async {
-        let mut temporary = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .await?;
-        temporary.write_all(body.as_bytes()).await?;
-        temporary.flush().await?;
-        temporary.sync_all().await?;
-        drop(temporary);
-        tokio::fs::rename(&temporary_path, path).await
+    if path.parent().is_none() {
+        return Err(ApiError::validation(
+            "config path has no parent directory".to_string(),
+        ));
     }
-    .await;
-
-    if let Err(error) = write_result {
-        let _ = tokio::fs::remove_file(&temporary_path).await;
-        return Err(ApiError::validation(format!(
-            "failed to write config: {error}"
-        )));
+    if path.file_name().and_then(|name| name.to_str()).is_none() {
+        return Err(ApiError::validation(
+            "config path has no valid file name".to_string(),
+        ));
     }
-    Ok(())
+    let path = path.to_path_buf();
+    let body = body.as_bytes().to_vec();
+    tokio::task::spawn_blocking(move || swage_client::runtime::write_atomically(&path, &body))
+        .await
+        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))?
+        .map_err(|error| ApiError::validation(format!("failed to write config: {error}")))
 }
 
 fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Value, ApiError> {

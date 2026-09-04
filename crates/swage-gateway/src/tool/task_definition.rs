@@ -1,5 +1,8 @@
 //! Granted authoring surface for durable task definitions.
-use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
+use crate::{state::AppState, tool::Tool};
+
+#[cfg(test)]
+use crate::tool_executor::GatewayToolContext;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::{GatewayError, ToolError};
@@ -8,13 +11,11 @@ use swage_tool::context::ToolContext;
 pub struct TaskDefinitionTool;
 const NAME: &str = "task_definition";
 fn state(ctx: &dyn ToolContext) -> Result<&AppState, ToolError> {
-    ctx.as_any()
-        .downcast_ref::<GatewayToolContext>()
-        .and_then(GatewayToolContext::app_state)
-        .ok_or_else(|| ToolError::ExecutionFailed {
-            name: NAME.into(),
-            message: "task-definition configuration runs only in a gateway host turn".into(),
-        })
+    super::require_gateway_state(
+        ctx,
+        NAME,
+        "task-definition configuration runs only in a gateway host turn",
+    )
 }
 fn invalid(message: impl Into<String>) -> ToolError {
     ToolError::InvalidParameters {

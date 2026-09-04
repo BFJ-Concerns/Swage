@@ -37,7 +37,7 @@
 {#if currentPreset}
   <div class="field"><div class="key">Max tokens<small>Upper bound on generated output length.</small></div><div class="val"><input type="number" class="text small" bind:value={currentPreset.max_tokens} oninput={changed} min="1" placeholder="—" /></div></div>
   <div class="field"><div class="key">Temperature<small>0 is deterministic, 2 is most varied. Provider default if blank.</small></div><div class="val"><input type="number" class="text small" bind:value={currentPreset.temperature} oninput={changed} min="0" max="2" step="0.1" placeholder="—" /></div></div>
-  <div class="field"><div class="key">Stop sequences<small>One per line. Generation halts as soon as any sequence is produced.</small></div><div class="val"><textarea class="text" rows="4" value={currentPreset.stop_sequences.join("\n")} oninput={(event) => { currentPreset.stop_sequences = event.currentTarget.value.split("\n").filter(Boolean); changed(); }} placeholder="One stop sequence per line"></textarea></div></div>
+  <div class="field"><div class="key">Stop sequences<small>One per line. Generation halts as soon as any sequence is produced.</small></div><div class="val"><textarea class="text" rows="4" value={(currentPreset.stop_sequences ?? []).join("\n")} oninput={(event) => { currentPreset.stop_sequences = event.currentTarget.value.split("\n").filter(Boolean); changed(); }} placeholder="One stop sequence per line"></textarea></div></div>
 {:else}
   <div class="field"><div class="key">No preset selected<small>Pick a preset above, or create one.</small></div><div class="val"><p class="empty">Models without a preset use the provider's defaults.</p></div></div>
 {/if}

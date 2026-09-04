@@ -534,7 +534,7 @@ async fn run_turn_inner(
             let value: Value = serde_json::from_str(&response_text).map_err(|error| {
                 AgentError::InvalidConfig(format!("Codex structured output was not JSON: {error}"))
             })?;
-            let validator = jsonschema::validator_for(schema).map_err(|error| {
+            let validator = swage_core::json_schema_validator(schema).map_err(|error| {
                 AgentError::InvalidConfig(format!("invalid output schema: {error}"))
             })?;
             if validator.validate(&value).is_err() {

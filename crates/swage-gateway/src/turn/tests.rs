@@ -1618,7 +1618,8 @@ impl MockStorage {
     }
 
     fn fail_workflow_attempt_writes(&self) {
-        self.fail_workflow_attempt_writes.store(true, Ordering::SeqCst);
+        self.fail_workflow_attempt_writes
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_snapshot_writes(&self) {
@@ -4923,7 +4924,11 @@ async fn failed_codex_attempt_recording_releases_the_prepared_turn() {
     .await
     .expect_err("a failed attempt record must refuse the Codex turn");
 
-    assert!(error.to_string().contains("failed to record agent call attempt"));
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record agent call attempt")
+    );
     let turn = storage
         .list_turns_by_thread(
             storage
