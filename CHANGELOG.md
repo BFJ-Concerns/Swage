@@ -11,6 +11,8 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - A workflow can raise a decision it cannot make itself, naming the question and at least two verdicts it accepts, and park until an agent answers it through a granted tool; an answer outside the accepted set is refused with feedback and the decision keeps waiting, with the raise, the answer, and every refused attempt kept on the run record.
+- Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
+- Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
 - Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
