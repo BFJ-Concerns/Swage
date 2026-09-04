@@ -908,6 +908,24 @@ impl WorkflowEngine {
                         // unset; only *defined* call-site values override, so a
                         // conditional spread leaving `model: undefined` still
                         // falls back to the default it was meant to.
+                        const isJsonValue = (candidate, seen = new Set()) => {
+                            if (candidate === null) return true;
+                            switch (typeof candidate) {
+                                case "boolean":
+                                case "string": return true;
+                                case "number": return Number.isFinite(candidate);
+                                case "object":
+                                    if (seen.has(candidate)) return false;
+                                    seen.add(candidate);
+                                    const valid = Array.isArray(candidate)
+                                        ? candidate.every((value) => isJsonValue(value, seen))
+                                        : Object.getPrototypeOf(candidate) === Object.prototype
+                                            && Object.values(candidate).every((value) => isJsonValue(value, seen));
+                                    seen.delete(candidate);
+                                    return valid;
+                                default: return false;
+                            }
+                        };
                         const mergeDefaults = (options) => {
                             const merged = { ...__defaults };
                             for (const key of Object.keys(options)) {
@@ -986,6 +1004,14 @@ impl WorkflowEngine {
                                 assembly: merged.assembly ?? null,
                             };
                         };
+                        const agentRequestJson = (request, caller) => {
+                            if (!isJsonValue(request)) {
+                                const error = new TypeError(`${caller}() options must be JSON values`);
+                                error.name = "InvalidAgentOptionError";
+                                throw error;
+                            }
+                            return JSON.stringify(request);
+                        };
                         const validateAgentPrompt = (prompt, caller) => {
                             if (typeof prompt !== "string") {
                                 const error = new TypeError(`${caller} prompt must be a string`);
@@ -996,7 +1022,7 @@ impl WorkflowEngine {
                         globalThis.agent = async (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agent");
                             const request = buildAgentRequest(options);
-                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)));
+                            const response = unwrapAgentResponse(await __agent(prompt, agentRequestJson(request, "agent")));
                             return response.value;
                         };
                         globalThis.workerPlacements = async () => {
@@ -1019,13 +1045,14 @@ impl WorkflowEngine {
                         globalThis.agentStart = (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agentStart");
                             const request = buildAgentRequest(options);
+                            const requestJson = agentRequestJson(request, "agentStart");
                             const handle = {
                                 label: request.label,
                                 done: false,
                                 session: request.session ?? null,
                                 workingDirectory: null,
                             };
-                            handle.result = __agent(prompt, JSON.stringify(request))
+                            handle.result = __agent(prompt, requestJson)
                                 .then((json) => {
                                     const response = unwrapAgentResponse(json);
                                     handle.done = true;
@@ -1087,25 +1114,6 @@ impl WorkflowEngine {
                         if (typeof __workflow !== "undefined") {
                             const workflowArgumentsJson = (args) => {
                                 const value = args ?? null;
-                                const seen = new Set();
-                                const isJsonValue = (candidate) => {
-                                    if (candidate === null) return true;
-                                    switch (typeof candidate) {
-                                        case "boolean":
-                                        case "string": return true;
-                                        case "number": return Number.isFinite(candidate);
-                                        case "object":
-                                            if (seen.has(candidate)) return false;
-                                            seen.add(candidate);
-                                            const valid = Array.isArray(candidate)
-                                                ? candidate.every(isJsonValue)
-                                                : Object.getPrototypeOf(candidate) === Object.prototype
-                                                    && Object.values(candidate).every(isJsonValue);
-                                            seen.delete(candidate);
-                                            return valid;
-                                        default: return false;
-                                    }
-                                };
                                 if (!isJsonValue(value)) {
                                     const error = new TypeError("workflow() arguments must be JSON values");
                                     error.name = "WorkflowArgumentsError";
@@ -1887,6 +1895,64 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| !message.is_empty()),
             "invalid option must name its decoding failure: {error}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_non_json_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { schema: () => "not JSON" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("non-JSON agent option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "InvalidAgentOptionError",
+                "message": "agent() options must be JSON values",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_start_rejects_non_json_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    const handle = agentStart("inspect the unit", { schema: () => "not JSON" });
+                    await handle.result;
+                    return null;
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("non-JSON agentStart option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "InvalidAgentOptionError",
+                "message": "agentStart() options must be JSON values",
+            })
         );
         assert!(host.agent_requests.lock().unwrap().is_empty());
     }
