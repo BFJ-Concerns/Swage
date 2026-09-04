@@ -13791,6 +13791,56 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_watcher_ends_when_a_guard_refused_wait_is_cancelled() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+
+        let (timer_reply, _timer_receive) = oneshot::channel();
+        tx.send(HostCommand::Timer {
+            ms: 30_000,
+            timer_id: 0,
+            cancellation: CancellationToken::new(),
+            reply: timer_reply,
+        })
+        .expect("arm a sibling timer");
+
+        let cancellation = CancellationToken::new();
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Hold {
+            request: decision_hold("ship it, or hold it?"),
+            cancellation: cancellation.clone(),
+            reply,
+        })
+        .expect("raise the hold");
+
+        wait_for_open_hold(&storage, run.id).await;
+        let waiting = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(waiting.state, "running", "the timer refused the park");
+
+        cancellation.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .expect("the in-process watcher ends on cancellation")
+            .expect("hold reply")
+            .expect_err("a cancelled hold does not produce a verdict");
+        assert!(
+            error.contains("WorkflowCancelledError"),
+            "the watcher reports cancellation: {error}"
+        );
+
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_raised_beside_an_in_flight_call_refuses_the_park_and_keeps_its_engine() {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
