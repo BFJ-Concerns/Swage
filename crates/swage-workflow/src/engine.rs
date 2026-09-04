@@ -573,7 +573,12 @@ impl WorkflowEngine {
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": name, "message": message, "host_reference": host_reference}
+                                            "error": {
+                                                "name": name,
+                                                "message": message,
+                                                "host_reference": host_reference,
+                                                "agent_call_admitted": true,
+                                            }
                                         }).to_string()
                                     }
                                 }
@@ -895,7 +900,7 @@ impl WorkflowEngine {
                                         value: response.error.host_reference,
                                     });
                                 }
-                                if (request.identity === true) {
+                                if (request.identity === true && response.error.agent_call_admitted === true) {
                                     Object.defineProperty(error, "__swageAgentCallIdentity", {
                                         value: {
                                             label: request.label ?? null,
@@ -940,6 +945,14 @@ impl WorkflowEngine {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
                                 throw error;
+                            }
+                            for (const [key, type] of [["phase", "string"], ["identity", "boolean"]]) {
+                                const value = merged[key];
+                                if (value !== undefined && value !== null && typeof value !== type) {
+                                    const error = new TypeError(`opts.${key} must be a ${type}`);
+                                    error.name = "InvalidAgentOptionError";
+                                    throw error;
+                                }
                             }
                             return {
                                 prompt: "",
@@ -1112,10 +1125,16 @@ impl WorkflowEngine {
                             })));
                         globalThis.deliverEvents = async (upToSeq) =>
                             unwrapHostResponse(await __deliverEvents(upToSeq));
+                        const isPreSpawnAuthorError = (error) => new Set([
+                            "UnknownAgentOptionError",
+                            "AgentRequiredError",
+                            "InvalidAgentOptionError",
+                        ]).has(error.name);
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
                                 try { return await thunk(); }
                                 catch (error) {
+                                    if (isPreSpawnAuthorError(error)) throw error;
                                     __log(`parallel thunk ${index} failed: ${error.name}: ${error.message}`);
                                     const identity = error.__swageAgentCallIdentity;
                                     if (identity !== undefined) {
@@ -1141,6 +1160,7 @@ impl WorkflowEngine {
                                     try {
                                         previous = await stages[stageIndex](previous, item, index);
                                     } catch (error) {
+                                        if (isPreSpawnAuthorError(error)) throw error;
                                         __log(`pipeline item ${index} stage ${stageIndex} failed: ${error.name}: ${error.message}`);
                                         const identity = error.__swageAgentCallIdentity;
                                         if (identity !== undefined) {
@@ -1992,6 +2012,50 @@ mod tests {
                 "failure": {"message": "provider unavailable"},
             }])
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_identified_phase_propagates_through_parallel() {
+        let host = Arc::new(SurfaceHost::new());
+        let error = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await parallel([() => agent("gather", { identity: true, phase: 1 })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect_err("invalid identified phase must fail the run");
+
+        assert!(
+            error.to_string().contains("opts.phase must be a string"),
+            "unexpected propagated error: {error:?}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_identity_option_propagates_through_pipeline() {
+        let host = Arc::new(SurfaceHost::new());
+        let error = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await pipeline(["source"], () => agent("gather", { identity: "yes" }));"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect_err("invalid identity option must fail the run");
+
+        assert!(
+            error
+                .to_string()
+                .contains("opts.identity must be a boolean"),
+            "unexpected propagated error: {error:?}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
