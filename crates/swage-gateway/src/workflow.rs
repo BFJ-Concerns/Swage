@@ -3700,12 +3700,16 @@ async fn run_host_commands_inner(
                 // remains open. Raising a hold is itself idempotent, so when
                 // a guard refuses the park the engine simply stays up and
                 // watches the decision in process.
-                let answered_sibling_hold =
-                    replay_has_answered_sibling_hold(&state, run_id, replay.as_ref(), current_seq)
-                        .await;
+                let answered_concurrent_hold = replay_has_answered_concurrent_hold(
+                    &state,
+                    run_id,
+                    replay.as_ref(),
+                    current_seq,
+                )
+                .await;
                 if pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
-                    && !answered_sibling_hold
+                    && !answered_concurrent_hold
                 {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
                     match state
@@ -4458,17 +4462,24 @@ async fn complete_event_post(
 /// when a park guard refused — a parked run is woken by the answer itself.
 const HOLD_WATCH_INTERVAL_MS: u64 = 200;
 
-/// Whether replay has an answered hold other than the one currently being
-/// raised. The answer is runnable work: keeping the engine alive lets it
-/// reach the script and win any concurrent composition it belongs to.
-/// Storage uncertainty refuses the durable park because parking could hide a
-/// valid answer behind an open sibling.
-async fn replay_has_answered_sibling_hold(
+/// Whether this replayed hold has an answered sibling that was raised in the
+/// same generation. The answer is runnable work: keeping the engine alive
+/// lets it reach the script and win any concurrent composition it belongs to.
+/// A new hold raised after replaying a sequential answer is not concurrent
+/// with it and can park normally. Storage uncertainty refuses the durable
+/// park because parking could hide a valid answer behind an open sibling.
+async fn replay_has_answered_concurrent_hold(
     state: &AppState,
     run_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
 ) -> bool {
+    if !replay
+        .iter()
+        .any(|entry| entry.seq == current_seq && entry.kind == "hold")
+    {
+        return false;
+    }
     let sibling_hold_entries = replay
         .iter()
         .filter(|entry| entry.seq != current_seq && entry.kind == "hold")
