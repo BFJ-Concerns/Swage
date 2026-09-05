@@ -4,4 +4,4 @@ import type { ExternalChannelIntegration } from "./ExternalChannelIntegration";
 /**
  * A destination for a run's output.
  */
-export type DeliveryTarget = { "kind": "channel", integration: ExternalChannelIntegration, account: string, conversation: string, } | { "kind": "local_storage" } | { "kind": "webhook", url: string, };
+export type DeliveryTarget = { "kind": "channel", integration: ExternalChannelIntegration, account: string, conversation: string, } | { "kind": "local_storage" } | { "kind": "page", page_id: string, } | { "kind": "webhook", url: string, };
