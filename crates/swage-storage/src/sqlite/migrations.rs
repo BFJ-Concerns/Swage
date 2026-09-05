@@ -83,10 +83,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("052_task_definitions", CREATE_TASK_DEFINITION_TABLE),
         ("053_session_variables", CREATE_SESSION_VARIABLES),
         (
-            "054_observation_capture_scope",
-            ADD_OBSERVATION_CAPTURE_SCOPE,
-        ),
-        (
             "055_tool_call_display_summary",
             ADD_TOOL_CALL_DISPLAY_SUMMARY,
         ),
@@ -186,21 +182,6 @@ ALTER TABLE turns ADD COLUMN delegated_output_tokens INTEGER;
 /// NULL and renderers use their generic fallback.
 const ADD_TOOL_CALL_DISPLAY_SUMMARY: &str = "
 ALTER TABLE tool_calls ADD COLUMN display_summary TEXT;
-";
-
-/// Retry-safe capture identity for observations. A caller that may run the
-/// same capture twice — a workflow's journalled agent call re-executed after
-/// an interruption — records under a stable scope; a second capture of the
-/// same origin in the same scope returns the existing observation instead of
-/// forking the evidence. Additive on the knowledge-base family: existing
-/// rows keep NULL (no scope, no dedup change) and bodies and origin
-/// metadata are untouched.
-const ADD_OBSERVATION_CAPTURE_SCOPE: &str = "
-    ALTER TABLE source_observations ADD COLUMN capture_scope TEXT;
-
-    CREATE INDEX IF NOT EXISTS idx_source_observations_space_scope
-        ON source_observations(space_id, capture_scope)
-        WHERE capture_scope IS NOT NULL;
 ";
 
 const CREATE_SESSION_VARIABLES: &str = "
@@ -313,7 +294,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'terminal_budget', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'terminal_budget', 'captured_sources', 'wind_down')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
@@ -1056,6 +1037,7 @@ const COMPLETE_SCHEMA: &str = "
         name                TEXT NOT NULL,
         description         TEXT NOT NULL,
         delivery_grant_json TEXT,
+        captured_sources_grant INTEGER NOT NULL DEFAULT 0,
         authoring_session_id TEXT,
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL,
@@ -1343,6 +1325,7 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
         body_sha256       TEXT NOT NULL,
         body_bytes        INTEGER NOT NULL,
         media_type        TEXT NOT NULL,
+        capture_scope     TEXT,
         created_at        TEXT NOT NULL,
         CHECK (origin_url IS NOT NULL OR origin_local_path IS NOT NULL)
     );
@@ -1351,6 +1334,26 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
         ON source_observations(space_id, body_sha256);
     CREATE INDEX IF NOT EXISTS idx_source_observations_space
         ON source_observations(space_id, retrieved_at DESC);
+
+    CREATE TABLE IF NOT EXISTS source_captures (
+        id                TEXT NOT NULL PRIMARY KEY,
+        observation_id    TEXT NOT NULL REFERENCES source_observations(id) ON DELETE CASCADE,
+        space_id          TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        origin_url        TEXT,
+        origin_local_path TEXT,
+        capture_scope     TEXT NOT NULL,
+        captured_at       TEXT NOT NULL,
+        CHECK (origin_url IS NOT NULL OR origin_local_path IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_source_captures_scope_origin
+        ON source_captures(
+            space_id,
+            capture_scope,
+            COALESCE(origin_url, ''),
+            COALESCE(origin_local_path, '')
+        );
+    CREATE INDEX IF NOT EXISTS idx_source_captures_space_scope
+        ON source_captures(space_id, capture_scope);
 
     CREATE TABLE IF NOT EXISTS extraction_derivations (
         id             TEXT NOT NULL PRIMARY KEY,

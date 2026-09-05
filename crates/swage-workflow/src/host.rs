@@ -257,6 +257,13 @@ pub trait WorkflowHost: Send + Sync {
         Err("WorkerPlacementError: this host does not support placement listing".into())
     }
 
+    /// Return source observations captured by this run's worker-call scopes.
+    /// The durable host journals this observable store read so replay returns
+    /// the original corpus view rather than reading the store again.
+    async fn captured_sources(&self, _cancellation: CancellationToken) -> Result<Value, String> {
+        Err("KnowledgeStoreError: this host does not support captured-source listing".into())
+    }
+
     async fn deliver(
         &self,
         payload: EffectPayload,
