@@ -7,7 +7,6 @@
   because it is the record of an ending rather than a progress reading.
 -->
 <script lang="ts">
-  import { onMount } from "svelte";
   import { fetchWorkflowRun } from "../api/workflows";
   import type { WorkflowRun } from "../protocol/WorkflowRun";
   import type { WorkflowRunEnding } from "../protocol/WorkflowRunEnding";
@@ -17,7 +16,7 @@
     runId: string;
   }
 
-  const { runId }: Props = $props();
+  let { runId }: Props = $props();
 
   let run = $state<WorkflowRun | null>(null);
   let isLoading = $state(true);
@@ -73,14 +72,24 @@
     return typeof output === "string" ? output : JSON.stringify(output);
   }
 
-  onMount(async () => {
-    try {
-      run = (await fetchWorkflowRun(runId)).run;
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : String(error);
-    } finally {
-      isLoading = false;
-    }
+  $effect(() => {
+    let isCurrent = true;
+    run = null;
+    isLoading = true;
+    errorMessage = null;
+    fetchWorkflowRun(runId)
+      .then((response) => {
+        if (isCurrent) run = response.run;
+      })
+      .catch((error: unknown) => {
+        if (isCurrent) errorMessage = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => {
+        if (isCurrent) isLoading = false;
+      });
+    return () => {
+      isCurrent = false;
+    };
   });
 </script>
 

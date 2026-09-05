@@ -2,17 +2,22 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
 import WorkflowRunView from "../components/WorkflowRunView.svelte";
+import WorkflowRunViewHarness from "./fixtures/WorkflowRunViewHarness.svelte";
 import type { WorkflowRun } from "../protocol/WorkflowRun";
 import type { WorkflowRunTerminalAccount } from "../protocol/WorkflowRunTerminalAccount";
 
 type MountedComponent = ReturnType<typeof mount>;
 
-function run(terminalAccount: WorkflowRunTerminalAccount | null): WorkflowRun {
+function run(
+  terminalAccount: WorkflowRunTerminalAccount | null,
+  id = "run-1",
+  scriptName = "nightly sweep",
+): WorkflowRun {
   return {
-    id: "run-1",
+    id,
     space_id: "space-1",
     script_id: null,
-    script_name: "nightly sweep",
+    script_name: scriptName,
     script_version: null,
     carrying_skill: null,
     state: terminalAccount ? "cancelled" : "running",
@@ -149,5 +154,51 @@ describe("WorkflowRunView", () => {
     await vi.waitFor(() =>
       expect(document.querySelector('[role="alert"]')?.textContent).toContain("404"),
     );
+  });
+
+  it("reloads for a new run ID and ignores the previous run's late response", async () => {
+    let resolveFirst: ((response: Response) => void) | undefined;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/run-a")) {
+        return new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      if (url.endsWith("/run-b")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              run: run(null, "run-b", "second run"),
+              journal: [],
+              wake_metrics: {},
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const harness = mount(WorkflowRunViewHarness, { target: document.body });
+    component = harness;
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run-a", { method: "GET" }));
+
+    harness.show("run-b");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("second run"));
+
+    resolveFirst?.(
+      new Response(
+        JSON.stringify({
+          run: run(null, "run-a", "first run"),
+          journal: [],
+          wake_metrics: {},
+        }),
+        { status: 200 },
+      ),
+    );
+    await tick();
+    expect(document.body.textContent).toContain("second run");
+    expect(document.body.textContent).not.toContain("first run");
   });
 });
