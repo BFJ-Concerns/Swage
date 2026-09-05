@@ -8336,7 +8336,9 @@ mod tests {
             if text.contains("leave worktree unchanged") {
                 return Box::pin(futures::stream::iter(scripted_text_output("unchanged")));
             }
-            let file = if text.contains("first-marker") {
+            let file = if text.contains("retained marker") {
+                "retained-marker"
+            } else if text.contains("first-marker") {
                 "first-marker"
             } else {
                 "second-marker"
@@ -11209,18 +11211,19 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            !retained_path.exists(),
-            "the failed run reclaims its unchanged worker worktree"
+            retained_path.join("retained-marker").exists(),
+            "the failed run keeps its changed worker worktree"
         );
-        // An unchanged worktree has already been removed, so the account
-        // records that completion rather than naming a stale directory.
         let failed_account = terminal_account_of(&storage, failed.id).await;
-        assert!(failed_account.workers.done[0].placement.is_none());
+        assert_eq!(
+            failed_account.workers.done[0].placement.as_deref(),
+            Some(retained_path.to_string_lossy().as_ref())
+        );
         assert!(
             failed_account.workers.done[0]
                 .worktree
                 .as_ref()
-                .is_some_and(|completion| !completion.changed && completion.removed)
+                .is_some_and(|completion| completion.changed && !completion.removed)
         );
         assert_eq!(
             failed_account
@@ -11230,7 +11233,7 @@ mod tests {
                 .results[0]
                 .placement
                 .as_deref(),
-            None
+            Some(retained_path.to_string_lossy().as_ref())
         );
 
         let cancelled_source = format!(
@@ -11295,8 +11298,8 @@ mod tests {
             "shutdown must still reclaim a worktree no terminal account names"
         );
         assert!(
-            !retained_path.exists() && !cancelled_path.exists(),
-            "unchanged completed worktrees remain removed through shutdown"
+            retained_path.join("retained-marker").exists() && !cancelled_path.exists(),
+            "shutdown keeps the changed placement named by the failed run's account"
         );
 
         // Nor may the next gateway's reclaim sweep take them. It starts with
@@ -11319,8 +11322,8 @@ mod tests {
             "startup recovery must still reclaim a crash-stranded worktree no account names"
         );
         assert!(
-            !retained_path.exists() && !cancelled_path.exists(),
-            "startup recovery leaves no stale unchanged placements behind"
+            retained_path.join("retained-marker").exists() && !cancelled_path.exists(),
+            "startup recovery honours the failed run account's durable placement claim"
         );
     }
 
