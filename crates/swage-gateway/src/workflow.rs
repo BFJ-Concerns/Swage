@@ -3695,17 +3695,17 @@ async fn run_host_commands_inner(
                 // Parking honours the same two guards a durable timer wait
                 // does: an in-flight call would be double-executed by wake
                 // replay, and an armed sibling timer would die unfired. A
-                // later answered hold must also reach the script first: it
-                // may be the winner of a concurrent race while this earlier
-                // hold remains open. Raising a hold is itself idempotent, so
-                // when a guard refuses the park the engine simply stays up
-                // and watches the decision in process.
-                let later_answered_hold =
-                    replay_has_later_answered_hold(&state, run_id, replay.as_ref(), current_seq)
+                // An answered sibling must also reach the script first: it
+                // may be the winner of a concurrent race while this hold
+                // remains open. Raising a hold is itself idempotent, so when
+                // a guard refuses the park the engine simply stays up and
+                // watches the decision in process.
+                let answered_sibling_hold =
+                    replay_has_answered_sibling_hold(&state, run_id, replay.as_ref(), current_seq)
                         .await;
                 if pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
-                    && !later_answered_hold
+                    && !answered_sibling_hold
                 {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
                     match state
@@ -4454,34 +4454,34 @@ async fn complete_event_post(
 /// when a park guard refused — a parked run is woken by the answer itself.
 const HOLD_WATCH_INTERVAL_MS: u64 = 200;
 
-/// Whether replay still has an answered hold after the hold currently being
-/// raised. The later answer is runnable work: keeping the engine alive lets
-/// it reach the script and win any concurrent composition it belongs to.
+/// Whether replay has an answered hold other than the one currently being
+/// raised. The answer is runnable work: keeping the engine alive lets it
+/// reach the script and win any concurrent composition it belongs to.
 /// Storage uncertainty refuses the durable park because parking could hide a
-/// valid answer behind an earlier open hold.
-async fn replay_has_later_answered_hold(
+/// valid answer behind an open sibling.
+async fn replay_has_answered_sibling_hold(
     state: &AppState,
     run_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
 ) -> bool {
-    let later_hold_entries = replay
+    let sibling_hold_entries = replay
         .iter()
-        .filter(|entry| entry.seq > current_seq && entry.kind == "hold")
+        .filter(|entry| entry.seq != current_seq && entry.kind == "hold")
         .map(|entry| entry.id)
         .collect::<std::collections::HashSet<_>>();
-    if later_hold_entries.is_empty() {
+    if sibling_hold_entries.is_empty() {
         return false;
     }
     match state.storage.list_workflow_run_holds(run_id).await {
         Ok(holds) => holds.iter().any(|hold| {
-            hold.state == "answered" && later_hold_entries.contains(&hold.journal_entry_id)
+            hold.state == "answered" && sibling_hold_entries.contains(&hold.journal_entry_id)
         }),
         Err(error) => {
             tracing::warn!(
                 %run_id,
                 %error,
-                "could not inspect later replay holds; keeping the workflow engine"
+                "could not inspect answered replay holds; keeping the workflow engine"
             );
             true
         }
@@ -12614,6 +12614,89 @@ mod tests {
                 .expect("list open holds")
                 .is_empty(),
             "completed runs leave no answerable holds"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answering_the_first_concurrent_hold_advances_the_workflow() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            const first = hold({ content: "Choose the release channel", verdicts: ["stable", "beta"] });
+            const second = hold({ content: "Choose the announcement", verdicts: ["publish", "quiet"] });
+            const answer = await Promise.race([first, second]);
+            return { content: answer.content, verdict: answer.verdict };
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start concurrently held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+
+        let holds = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let holds = storage
+                    .list_workflow_run_holds(started.id)
+                    .await
+                    .expect("list concurrent holds");
+                if holds.len() == 2 {
+                    return holds;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both concurrent holds are opened");
+        let first = &holds[0];
+        assert!(
+            holds[1].state == "open",
+            "the second hold is still open when the first decision is answered"
+        );
+
+        answer_run_hold(
+            &state,
+            AnswerWorkflowRunHoldRequest {
+                hold_id: first.id,
+                verdict: "stable".into(),
+            },
+            None,
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await
+        .expect("answer the first concurrent hold");
+
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_for_run_state(&storage, started.id, "completed"),
+        )
+        .await
+        .expect("answering the first concurrent hold advances the workflow");
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({
+                "content": "Choose the release channel",
+                "verdict": "stable",
+            }))
         );
     }
 
