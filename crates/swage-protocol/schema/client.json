@@ -1620,6 +1620,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "page"
+            },
+            "page_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "page_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "webhook"
             },
             "url": {
