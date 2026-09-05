@@ -491,9 +491,22 @@ async fn run_turn_inner(
                     }
                     "thread/tokenUsage/updated" => {
                         let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
-                        input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(input_tokens);
-                        output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(output_tokens);
-                        usage_reported = true;
+                        let counts = last.and_then(|last| {
+                            let input = last
+                                .get("inputTokens")
+                                .and_then(Value::as_u64)
+                                .and_then(|value| u32::try_from(value).ok())?;
+                            let output = last
+                                .get("outputTokens")
+                                .and_then(Value::as_u64)
+                                .and_then(|value| u32::try_from(value).ok())?;
+                            Some((input, output))
+                        });
+                        if let Some((input, output)) = counts {
+                            input_tokens = input;
+                            output_tokens = output;
+                            usage_reported = true;
+                        }
                     }
                     "turn/completed" => {
                         let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
@@ -1310,6 +1323,54 @@ mod tests {
                 .response,
             "done"
         );
+    }
+
+    #[tokio::test]
+    async fn incomplete_codex_usage_notifications_do_not_persist_known_usage() {
+        for (case, usage_params) in [
+            ("missing last", json!({})),
+            (
+                "partial last",
+                json!({"tokenUsage":{"last":{"inputTokens":4}}}),
+            ),
+            (
+                "unparseable last",
+                json!({"tokenUsage":{"last":{"inputTokens":"four","outputTokens":2}}}),
+            ),
+            (
+                "overflowing last",
+                json!({"tokenUsage":{"last":{"inputTokens":4_294_967_296_u64,"outputTokens":2}}}),
+            ),
+        ] {
+            let notifications = successful_turn_notifications();
+            let scenario = json!({"keepOpen":true,"steps":[
+                {
+                    "receive":{"method":"thread/start"},
+                    "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+                },
+                {
+                    "receive":{"method":"turn/start"},
+                    "send":[
+                        {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                        {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":usage_params},
+                        notifications[0].clone(),
+                        notifications[1].clone()
+                    ]
+                }
+            ]});
+            let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+            let (result, _, storage, _) =
+                run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+            result.unwrap_or_else(|error| panic!("{case} turn failed: {error}"));
+            let db = storage.db.lock().await;
+            let turn = db.turns.values().next().expect("scripted turn");
+            assert_eq!(
+                (turn.input_tokens, turn.output_tokens),
+                (None, None),
+                "{case} must remain unavailable instead of fabricating known usage"
+            );
+        }
     }
 
     #[tokio::test]
