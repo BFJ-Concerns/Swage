@@ -89,6 +89,11 @@ pub struct AgentCallRequest {
     pub max_attempts: u32,
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Opts this call into an envelope that preserves its identity at fan-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elements: Option<Vec<String>>,
@@ -373,6 +378,8 @@ mod task_request_tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -415,6 +422,25 @@ mod task_request_tests {
         assert_eq!(value["task"], "review");
         let restored: AgentCallRequest = serde_json::from_value(value).expect("read request");
         assert_eq!(restored.task.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn identified_request_round_trips_without_changing_unidentified_shape() {
+        let bare = serde_json::to_value(request(None)).expect("serialise bare request");
+        assert!(bare.get("phase").is_none());
+        assert!(bare.get("identity").is_none());
+
+        let mut identified = request(None);
+        identified.label = Some("gather source".into());
+        identified.phase = Some("research".into());
+        identified.identity = Some(true);
+        let value = serde_json::to_value(&identified).expect("serialise identified request");
+        assert_eq!(value["phase"], "research");
+        assert_eq!(value["identity"], true);
+        let restored: AgentCallRequest =
+            serde_json::from_value(value).expect("read identified request");
+        assert_eq!(restored.phase.as_deref(), Some("research"));
+        assert_eq!(restored.identity, Some(true));
     }
 
     #[test]
@@ -485,6 +511,8 @@ mod tests {
             schema: None,
             max_attempts: 3,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,

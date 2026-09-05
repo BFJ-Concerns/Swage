@@ -516,7 +516,11 @@ impl WorkflowEngine {
                                         {
                                             return serde_json::json!({
                                                 "ok": false,
-                                                "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
+                                                "error": {
+                                                    "name": "EmptyAgentOutputError",
+                                                    "message": "agent returned empty output",
+                                                    "agent_call_admitted": true,
+                                                }
                                             }).to_string();
                                         }
                                         // Worker metadata rides beside the output so
@@ -529,18 +533,40 @@ impl WorkflowEngine {
                                                 "session_id": session_id,
                                                 "thread_id": thread_id,
                                             }));
+                                        let value = if request.identity == Some(true) {
+                                            serde_json::json!({
+                                                "label": request.label,
+                                                "phase": request.phase,
+                                                "output": result.output,
+                                                "failure": null,
+                                            })
+                                        } else {
+                                            result.output
+                                        };
                                         serde_json::json!({
                                             "ok": true,
-                                            "value": result.output,
+                                            "value": value,
                                             "session": session,
                                             "working_directory": result.working_directory,
                                         }).to_string()
                                     }
-                                    Err(WorkflowHostError::SchemaExhausted { .. }) => {
+                                    Err(WorkflowHostError::SchemaExhausted { message, .. }) => {
                                         // Exhausting a schema's validation attempts is a
                                         // script-visible absence, not an ordinary agent
-                                        // failure. Keep this typed so other failures throw.
-                                        serde_json::json!({"ok": true, "value": null, "session": null}).to_string()
+                                        // failure. Identified calls retain that distinction
+                                        // for a fan-in; unmarked calls keep the bare-null
+                                        // contract.
+                                        let value = if request.identity == Some(true) {
+                                            serde_json::json!({
+                                                "label": request.label,
+                                                "phase": request.phase,
+                                                "output": null,
+                                                "failure": {"message": message},
+                                            })
+                                        } else {
+                                            Value::Null
+                                        };
+                                        serde_json::json!({"ok": true, "value": value, "session": null}).to_string()
                                     }
                                     Err(error) => {
                                         let (host_reference, error) = match error {
@@ -551,7 +577,12 @@ impl WorkflowEngine {
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": name, "message": message, "host_reference": host_reference}
+                                            "error": {
+                                                "name": name,
+                                                "message": message,
+                                                "host_reference": host_reference,
+                                                "agent_call_admitted": true,
+                                            }
                                         }).to_string()
                                     }
                                 }
@@ -861,9 +892,16 @@ impl WorkflowEngine {
                             }
                             return response.value;
                         };
+                        const identifiedAgentEnvelopes = new WeakSet();
+                        const markIdentifiedAgentEnvelope = (value) => {
+                            if (value !== null && typeof value === "object") {
+                                identifiedAgentEnvelopes.add(value);
+                            }
+                            return value;
+                        };
                         // Agent responses carry a continuation token beside the
                         // value; only agentStart handles surface it.
-                        const unwrapAgentResponse = (json) => {
+                        const unwrapAgentResponse = (json, request) => {
                             const response = JSON.parse(json);
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
@@ -873,10 +911,20 @@ impl WorkflowEngine {
                                         value: response.error.host_reference,
                                     });
                                 }
+                                if (request.identity === true && response.error.agent_call_admitted === true) {
+                                    Object.defineProperty(error, "__swageAgentCallIdentity", {
+                                        value: {
+                                            label: request.label ?? null,
+                                            phase: request.phase ?? null,
+                                        },
+                                    });
+                                }
                                 throw error;
                             }
                             return {
-                                value: response.value,
+                                value: request.identity === true
+                                    ? markIdentifiedAgentEnvelope(response.value)
+                                    : response.value,
                                 session: response.session ?? null,
                                 workingDirectory: response.working_directory ?? null,
                             };
@@ -896,7 +944,7 @@ impl WorkflowEngine {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
                                 "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
-                                "cwd", "isolation", "schema", "maxAttempts", "label",
+                                "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
                                 "session", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
@@ -910,6 +958,14 @@ impl WorkflowEngine {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
                                 throw error;
+                            }
+                            for (const [key, type] of [["phase", "string"], ["identity", "boolean"]]) {
+                                const value = merged[key];
+                                if (value !== undefined && value !== null && typeof value !== type) {
+                                    const error = new TypeError(`opts.${key} must be a ${type}`);
+                                    error.name = "InvalidAgentOptionError";
+                                    throw error;
+                                }
                             }
                             return {
                                 prompt: "",
@@ -944,6 +1000,10 @@ impl WorkflowEngine {
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
+                                phase: merged.phase ?? null,
+                                ...(merged.identity === undefined || merged.identity === null
+                                    ? {}
+                                    : { identity: merged.identity }),
                                 session: merged.session ?? null,
                                 elements: merged.elements ?? null,
                                 variables: merged.variables ?? null,
@@ -958,7 +1018,7 @@ impl WorkflowEngine {
                         globalThis.agent = async (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agent");
                             const request = buildAgentRequest(options);
-                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)));
+                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)), request);
                             return response.value;
                         };
                         globalThis.workerPlacements = async () => {
@@ -989,7 +1049,7 @@ impl WorkflowEngine {
                             };
                             handle.result = __agent(prompt, JSON.stringify(request))
                                 .then((json) => {
-                                    const response = unwrapAgentResponse(json);
+                                    const response = unwrapAgentResponse(json, request);
                                     handle.done = true;
                                     handle.session = response.session ?? handle.session;
                                     handle.workingDirectory = response.workingDirectory;
@@ -1078,11 +1138,28 @@ impl WorkflowEngine {
                             })));
                         globalThis.deliverEvents = async (upToSeq) =>
                             unwrapHostResponse(await __deliverEvents(upToSeq));
+                        const isPreSpawnAuthorError = (error) => new Set([
+                            "UnknownAgentOptionError",
+                            "AgentRequiredError",
+                            "InvalidAgentOptionError",
+                        ]).has(error.name);
+                        const isIdentifiedFailure = (value) => identifiedAgentEnvelopes.has(value)
+                            && value.failure !== null;
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
                                 try { return await thunk(); }
                                 catch (error) {
+                                    if (isPreSpawnAuthorError(error)) throw error;
                                     __log(`parallel thunk ${index} failed: ${error.name}: ${error.message}`);
+                                    const identity = error.__swageAgentCallIdentity;
+                                    if (identity !== undefined) {
+                                        return markIdentifiedAgentEnvelope({
+                                            label: identity.label,
+                                            phase: identity.phase,
+                                            output: null,
+                                            failure: { message: error.message },
+                                        });
+                                    }
                                     return null;
                                 }
                             })
@@ -1097,8 +1174,19 @@ impl WorkflowEngine {
                                 for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
                                     try {
                                         previous = await stages[stageIndex](previous, item, index);
+                                        if (isIdentifiedFailure(previous)) return previous;
                                     } catch (error) {
+                                        if (isPreSpawnAuthorError(error)) throw error;
                                         __log(`pipeline item ${index} stage ${stageIndex} failed: ${error.name}: ${error.message}`);
+                                        const identity = error.__swageAgentCallIdentity;
+                                        if (identity !== undefined) {
+                                            return markIdentifiedAgentEnvelope({
+                                                label: identity.label,
+                                                phase: identity.phase,
+                                                output: null,
+                                                failure: { message: error.message },
+                                            });
+                                        }
                                         return null;
                                     }
                                 }
@@ -1306,7 +1394,7 @@ mod tests {
                 Option<swage_protocol::client::workflow::WorkerIsolation>,
             )>,
         >,
-        agent_outputs: Mutex<VecDeque<Result<Value, String>>>,
+        agent_outputs: Mutex<VecDeque<Result<Value, WorkflowHostError>>>,
         workflow_calls: Mutex<Vec<WorkflowCallRequest>>,
         workflow_output: Value,
         timer_calls: Mutex<Vec<u64>>,
@@ -1793,7 +1881,7 @@ mod tests {
                 r#"await agent("inspect the unit", {
                     agent: "worker", task: "review", model: "cheap", fallbackModel: "sonnet", effort: "low",
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
-                    schema: { type: "object" }, maxAttempts: 2, label: "inspect",
+                    schema: { type: "object" }, maxAttempts: 2, label: "inspect", phase: "review", identity: true,
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
                     skills: ["code-review", "testing"],
                     elements: ["current-work"], variables: { owner: "operator" }, assembly: "focused",
@@ -1816,6 +1904,8 @@ mod tests {
         assert_eq!(request.timeout_ms, Some(75));
         assert_eq!(request.max_attempts, 2);
         assert_eq!(request.label.as_deref(), Some("inspect"));
+        assert_eq!(request.phase.as_deref(), Some("review"));
+        assert_eq!(request.identity, Some(true));
         assert_eq!(
             request.elements.as_deref(),
             Some(["current-work".to_string()].as_slice())
@@ -1826,6 +1916,198 @@ mod tests {
             request.skills.as_deref(),
             Some(["code-review".to_string(), "testing".to_string()].as_slice())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_preserves_a_successful_worker_result() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!({"answer": "ready"})));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "source", phase: "research" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified success");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "source",
+                "phase": "research",
+                "output": {"answer": "ready"},
+                "failure": null,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_preserves_a_genuine_null_worker_result() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(Value::Null));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "empty source", phase: "research" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified null success");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "empty source",
+                "phase": "research",
+                "output": null,
+                "failure": null,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_reports_schema_exhaustion_without_losing_its_leg() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: "SchemaExhaustedError: no valid object".into(),
+            }));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "schema leg", phase: "research", schema: {type: "object"} });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified schema collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "schema leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "SchemaExhaustedError: no valid object"},
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_preserves_an_identified_operational_failure() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err("provider unavailable".into()));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await parallel([() => agent("gather", { identity: true, label: "network leg", phase: "research" })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("parallel collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!([{
+                "label": "network leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "provider unavailable"},
+            }])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_preserves_an_identified_empty_output_failure() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!("   ")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await parallel([() => agent("gather", { identity: true, label: "empty leg", phase: "research" })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("parallel collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!([{
+                "label": "empty leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "agent returned empty output"},
+            }])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_identified_phase_propagates_through_parallel() {
+        let host = Arc::new(SurfaceHost::new());
+        let error = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await parallel([() => agent("gather", { identity: true, phase: 1 })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect_err("invalid identified phase must fail the run");
+
+        assert!(
+            error.to_string().contains("opts.phase must be a string"),
+            "unexpected propagated error: {error:?}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_identity_option_propagates_through_pipeline() {
+        let host = Arc::new(SurfaceHost::new());
+        let error = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await pipeline(["source"], () => agent("gather", { identity: "yes" }));"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect_err("invalid identity option must fail the run");
+
+        assert!(
+            error
+                .to_string()
+                .contains("opts.identity must be a boolean"),
+            "unexpected propagated error: {error:?}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2213,6 +2495,144 @@ mod tests {
             serde_json::from_str::<Value>(&output).expect("output"),
             json!(["one-gathered|one|0", null, "three-gathered|three|2"])
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_preserves_identified_schema_exhaustion_and_skips_later_stages() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: "SchemaExhaustedError: no valid object".into(),
+            }));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather", {
+                        identity: true,
+                        label: "schema leg",
+                        phase: "research",
+                        schema: { type: "object" },
+                    }),
+                    () => {
+                        laterStageRan = true;
+                        return "overwritten";
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline schema collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{
+                    "label": "schema leg",
+                    "phase": "research",
+                    "output": null,
+                    "failure": {"message": "SchemaExhaustedError: no valid object"},
+                }],
+                "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_preserves_identified_empty_output_and_skips_later_stages() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(json!("")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather", {
+                        identity: true,
+                        label: "empty leg",
+                        phase: "research",
+                    }),
+                    () => {
+                        laterStageRan = true;
+                        return "overwritten";
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{
+                    "label": "empty leg",
+                    "phase": "research",
+                    "output": null,
+                    "failure": {"message": "agent returned empty output"},
+                }],
+                "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_continues_after_unmarked_output_matching_identified_failure_shape() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(json!({
+            "label": "domain label",
+            "phase": "domain phase",
+            "output": "domain output",
+            "failure": {"message": "domain failure"},
+        })));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather"),
+                    (previous) => {
+                        laterStageRan = true;
+                        return { continuedWith: previous.output };
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline result");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{"continuedWith": "domain output"}],
+                "laterStageRan": true,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
