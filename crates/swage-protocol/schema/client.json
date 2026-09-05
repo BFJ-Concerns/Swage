@@ -1470,6 +1470,13 @@
     "CreateWorkflowScriptRequest": {
       "type": "object",
       "properties": {
+        "captured_sources_grant": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "delivery_grant": {
           "description": "Server-side delivery targets granted to this script. Responses expose\nonly whether a grant exists, never its URLs or secret references.",
           "default": null
@@ -1613,6 +1620,23 @@
           },
           "required": [
             "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "page"
+            },
+            "page_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "page_id"
           ]
         },
         {
@@ -5367,6 +5391,12 @@
     "UpdateWorkflowScriptRequest": {
       "type": "object",
       "properties": {
+        "captured_sources_grant": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "delivery_grant": {
           "default": null
         },
@@ -5848,6 +5878,11 @@
           "description": "The authoritative closing-partition balance when the run settled.",
           "type": "string",
           "const": "terminal_budget"
+        },
+        {
+          "description": "A read-only view of source observations captured by this workflow run.",
+          "type": "string",
+          "const": "captured_sources"
         },
         {
           "description": "The working allowance was exhausted. The triggering agent call was\nnot started; replay returns the same wind-down signal at this point.",
@@ -6333,6 +6368,20 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "captured_sources"
+            },
+            "sources": true
+          },
+          "required": [
+            "kind",
+            "sources"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "closing_remaining": {
               "type": "integer",
               "format": "uint64",
@@ -6729,6 +6778,10 @@
         "description": {
           "type": "string"
         },
+        "has_captured_sources_grant": {
+          "description": "Whether this script may read the observations captured by this run.",
+          "type": "boolean"
+        },
         "has_delivery_grant": {
           "type": "boolean"
         },
@@ -6760,6 +6813,7 @@
         "description",
         "head_version",
         "has_delivery_grant",
+        "has_captured_sources_grant",
         "argument_contract",
         "created_at",
         "updated_at"

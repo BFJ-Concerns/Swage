@@ -7,6 +7,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use uuid::Uuid;
 
 /// An external channel integration that can receive delivered output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS, JsonSchema)]
@@ -51,6 +52,9 @@ pub enum DeliveryTarget {
         conversation: String,
     },
     LocalStorage,
+    Page {
+        page_id: Uuid,
+    },
     Webhook {
         url: String,
     },

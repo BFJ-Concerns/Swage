@@ -1209,6 +1209,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: Option<&str>,
         _: Option<serde_json::Value>,
+        _: Option<bool>,
         _: Option<Uuid>,
     ) -> Result<swage_storage::WorkflowScriptRecord, StorageError> {
         unimplemented!()
@@ -3921,6 +3922,14 @@ impl swage_storage::store::ObservationStore for MockStorage {
         &self,
         _: uuid::Uuid,
     ) -> Result<Vec<swage_storage::SourceObservation>, StorageError> {
+        unimplemented!("turn tests do not exercise the knowledge base")
+    }
+
+    async fn list_source_captures_by_scopes(
+        &self,
+        _: uuid::Uuid,
+        _: Vec<String>,
+    ) -> Result<Vec<swage_storage::SourceCapture>, StorageError> {
         unimplemented!("turn tests do not exercise the knowledge base")
     }
 
