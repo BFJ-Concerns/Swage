@@ -48,9 +48,10 @@ fn script_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowScriptRecord>
                     Box::new(error),
                 )
             })?,
-        authoring_session_id: row.get::<_, Option<String>>(5)?.map(uuid).transpose()?,
-        created_at: time(row.get(6)?)?,
-        updated_at: time(row.get(7)?)?,
+        captured_sources_grant: row.get(5)?,
+        authoring_session_id: row.get::<_, Option<String>>(6)?.map(uuid).transpose()?,
+        created_at: time(row.get(7)?)?,
+        updated_at: time(row.get(8)?)?,
     })
 }
 
@@ -166,7 +167,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     })
 }
 
-const SCRIPT_COLUMNS: &str = "id, space_id, name, description, delivery_grant_json, authoring_session_id, created_at, updated_at";
+const SCRIPT_COLUMNS: &str = "id, space_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at";
 const VERSION_COLUMNS: &str = "id, script_id, version, source, created_at";
 const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_version_id, \
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
@@ -256,7 +257,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         let created = self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            tx.execute("INSERT INTO workflow_scripts (id, space_id, name, description, delivery_grant_json, authoring_session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)", params![id.to_string(), script.space_id.to_string(), script.name, script.description, grant, script.authoring_session_id.map(|id| id.to_string()), now.to_rfc3339()])?;
+            tx.execute("INSERT INTO workflow_scripts (id, space_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)", params![id.to_string(), script.space_id.to_string(), script.name, script.description, grant, script.captured_sources_grant, script.authoring_session_id.map(|id| id.to_string()), now.to_rfc3339()])?;
             tx.execute("INSERT INTO workflow_script_versions (id, script_id, version, source, created_at) VALUES (?1, ?2, 1, ?3, ?4)", params![version_id.to_string(), id.to_string(), script.source, now.to_rfc3339()])?;
             tx.commit()?;
             Ok((id, version_id))
@@ -328,6 +329,7 @@ impl WorkflowStore for SqliteStorage {
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        captured_sources_grant: Option<bool>,
         authoring_session_id: Option<Uuid>,
     ) -> Result<WorkflowScriptRecord, StorageError> {
         let description = description.map(str::to_string);
@@ -337,7 +339,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         let authoring_session_id = authoring_session_id.map(|id| id.to_string());
         let now = Utc::now().to_rfc3339();
-        self.with_conn(move |conn| { conn.execute("UPDATE workflow_scripts SET description=COALESCE(?2,description), delivery_grant_json=COALESCE(?3,delivery_grant_json), authoring_session_id=COALESCE(?4,authoring_session_id), updated_at=?5 WHERE id=?1",params![id.to_string(),description,grant,authoring_session_id,now])?; conn.query_row(&format!("SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE id=?1"),[id.to_string()],script_row) }).await
+        self.with_conn(move |conn| { conn.execute("UPDATE workflow_scripts SET description=COALESCE(?2,description), delivery_grant_json=COALESCE(?3,delivery_grant_json), captured_sources_grant=COALESCE(?4,captured_sources_grant), authoring_session_id=COALESCE(?5,authoring_session_id), updated_at=?6 WHERE id=?1",params![id.to_string(),description,grant,captured_sources_grant,authoring_session_id,now])?; conn.query_row(&format!("SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE id=?1"),[id.to_string()],script_row) }).await
     }
 
     async fn list_workflow_scripts(
@@ -821,6 +823,7 @@ mod tests {
                 description: "reviewed delivery".into(),
                 source: "return 1".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await

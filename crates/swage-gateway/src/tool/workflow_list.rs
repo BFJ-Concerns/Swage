@@ -309,6 +309,7 @@ mod tests {
                 description: "Produce an operator report.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -359,6 +360,7 @@ mod tests {
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["topic"]} }; return {};"#.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -370,6 +372,7 @@ mod tests {
                 description: String::new(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -423,6 +426,7 @@ mod tests {
                 description: "Only in the first space.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
