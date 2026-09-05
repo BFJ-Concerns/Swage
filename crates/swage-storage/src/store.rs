@@ -1150,6 +1150,10 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         space_id: Uuid,
     ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError>;
+    /// Close every unanswered hold once its run has completed without using
+    /// it. Closed holds remain on the run record but are no longer decisions
+    /// an agent can answer.
+    async fn close_open_workflow_run_holds(&self, run_id: Uuid) -> Result<u64, StorageError>;
     /// Settle a hold with an accepted verdict. `false` means it was no
     /// longer open — another answerer won the race — and the caller must not
     /// treat its own answer as the decision.
@@ -2694,6 +2698,9 @@ mod tests {
             _: Uuid,
         ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
             Ok(Vec::new())
+        }
+        async fn close_open_workflow_run_holds(&self, _: Uuid) -> Result<u64, StorageError> {
+            Ok(0)
         }
         async fn answer_workflow_run_hold(
             &self,

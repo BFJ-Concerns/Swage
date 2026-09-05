@@ -1364,6 +1364,9 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<Vec<swage_storage::WorkflowRunHoldRecord>, StorageError> {
         Ok(Vec::new())
     }
+    async fn close_open_workflow_run_holds(&self, _: Uuid) -> Result<u64, StorageError> {
+        Ok(0)
+    }
     async fn answer_workflow_run_hold(
         &self,
         _: Uuid,

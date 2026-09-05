@@ -4551,10 +4551,10 @@ fn project_hold(
         seq: hold.seq,
         content: hold.content,
         verdicts: hold.verdicts,
-        state: if hold.state == "answered" {
-            WorkflowRunHoldState::Answered
-        } else {
-            WorkflowRunHoldState::Open
+        state: match hold.state.as_str() {
+            "answered" => WorkflowRunHoldState::Answered,
+            "closed" => WorkflowRunHoldState::Closed,
+            _ => WorkflowRunHoldState::Open,
         },
         verdict: hold.verdict,
         answered_by: hold.answer_surface.map(|surface| WorkflowRunEventSource {
@@ -5927,6 +5927,15 @@ async fn launch_existing_run(
         let handover = handover.map(|handover| {
             serde_json::to_value(&handover).expect("workflow handover serialises to JSON")
         });
+        // Once the engine has a terminal result, no outstanding decision can
+        // affect it. Stop their in-process watchers and remove the remaining
+        // rows from the answering queue before publishing the completed run.
+        cancellation.cancel();
+        if run_state == "completed"
+            && let Err(error) = storage.close_open_workflow_run_holds(run_id).await
+        {
+            tracing::warn!(%run_id, %error, "could not close unanswered workflow holds");
+        }
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
@@ -12589,6 +12598,22 @@ mod tests {
                 "content": "Choose the announcement",
                 "verdict": "publish",
             }))
+        );
+        let holds = storage
+            .list_workflow_run_holds(started.id)
+            .await
+            .expect("read terminal holds");
+        assert!(
+            holds.iter().any(|hold| hold.state == "closed"),
+            "the losing concurrent hold closes when the run completes"
+        );
+        assert!(
+            storage
+                .list_open_workflow_run_holds(space.id)
+                .await
+                .expect("list open holds")
+                .is_empty(),
+            "completed runs leave no answerable holds"
         );
     }
 

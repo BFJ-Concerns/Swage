@@ -6752,7 +6752,8 @@
       "type": "string",
       "enum": [
         "open",
-        "answered"
+        "answered",
+        "closed"
       ]
     },
     "WorkflowRunListResponse": {
