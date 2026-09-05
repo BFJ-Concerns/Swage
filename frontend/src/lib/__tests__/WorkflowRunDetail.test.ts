@@ -211,6 +211,34 @@ describe("WorkflowRunDetail", () => {
     expect(rows[1].textContent).toContain("no response yet");
   });
 
+  it("renders a failed provider round as failed rather than outstanding", async () => {
+    await render(
+      runWith({
+        ...baseCall,
+        termination: {
+          termination: "failed",
+          message: "scripted provider failure",
+        },
+        provider_rounds: [
+          {
+            attempt: 1,
+            round: 1,
+            started_at: "2026-09-02T10:00:01Z",
+            completed_at: "2026-09-02T10:00:02Z",
+            outcome: {
+              outcome: "failed",
+              message: "scripted provider failure",
+            },
+          },
+        ],
+      } as unknown as WorkflowAgentCallDetail),
+    );
+
+    const row = document.querySelector("table.rounds tbody tr")!.textContent!;
+    expect(row).toContain("failed — scripted provider failure");
+    expect(row).not.toContain("no response yet");
+  });
+
   it("keeps an interrupted attempt's rounds beside the attempt that followed", async () => {
     await render(
       runWith({

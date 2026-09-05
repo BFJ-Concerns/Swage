@@ -18565,6 +18565,47 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_provider_failure_records_a_settled_failed_round() {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
+                swage_core::StreamChunk::Error {
+                    message: "scripted provider failure".into(),
+                },
+            ]])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let (_storage, state, run) = worker_call_record_fixture(provider).await;
+        let (tx, task) = spawn_worker_call_host(state.clone(), &run);
+        let error = send_worker_call(&tx, worker_call_request("exercise provider failure"), None)
+            .await
+            .expect_err("the provider failure must fail the worker call");
+        assert!(error.to_string().contains("scripted provider failure"));
+        drop(tx);
+        task.await.expect("host loop");
+
+        let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
+        let call = only_agent_call(&detail);
+        assert_eq!(
+            call.termination,
+            WorkflowWorkerTermination::Failed {
+                message: error.to_string(),
+            }
+        );
+        let rounds = call.provider_rounds.as_ref().expect("provider rounds");
+        assert_eq!(rounds.len(), 1, "one failed provider request was made");
+        assert!(
+            rounds[0].completed_at.is_some(),
+            "the failed provider request must be settled"
+        );
+        assert_eq!(
+            rounds[0].outcome,
+            swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Failed {
+                message: "scripted provider failure".into(),
+            }
+        );
+    }
+
     /// One journal entry, two turns: the attempt the run's end interrupted
     /// and the attempt replay re-dispatched. The record has to carry both
     /// attempts' rounds — reading only the settled turn hides everything the
