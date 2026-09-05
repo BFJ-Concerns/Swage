@@ -1470,6 +1470,13 @@
     "CreateWorkflowScriptRequest": {
       "type": "object",
       "properties": {
+        "captured_sources_grant": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "delivery_grant": {
           "description": "Server-side delivery targets granted to this script. Responses expose\nonly whether a grant exists, never its URLs or secret references.",
           "default": null
@@ -5366,6 +5373,12 @@
     "UpdateWorkflowScriptRequest": {
       "type": "object",
       "properties": {
+        "captured_sources_grant": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "delivery_grant": {
           "default": null
         },
@@ -5849,6 +5862,11 @@
           "const": "terminal_budget"
         },
         {
+          "description": "A read-only view of source observations captured by this workflow run.",
+          "type": "string",
+          "const": "captured_sources"
+        },
+        {
           "description": "The working allowance was exhausted. The triggering agent call was\nnot started; replay returns the same wind-down signal at this point.",
           "type": "string",
           "const": "wind_down"
@@ -6244,6 +6262,20 @@
           "required": [
             "kind",
             "spent"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "captured_sources"
+            },
+            "sources": true
+          },
+          "required": [
+            "kind",
+            "sources"
           ]
         },
         {
@@ -6645,6 +6677,10 @@
         "description": {
           "type": "string"
         },
+        "has_captured_sources_grant": {
+          "description": "Whether this script may read the observations captured by this run.",
+          "type": "boolean"
+        },
         "has_delivery_grant": {
           "type": "boolean"
         },
@@ -6676,6 +6712,7 @@
         "description",
         "head_version",
         "has_delivery_grant",
+        "has_captured_sources_grant",
         "argument_contract",
         "created_at",
         "updated_at"

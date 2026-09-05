@@ -16,7 +16,7 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 13] = [
+    const NAMES: [(&str, &str); 14] = [
         ("AgentCallError", "AgentCallError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
@@ -30,6 +30,7 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         ("WaitTimerError", "WaitTimerError"),
         ("RunEventError", "RunEventError"),
         ("BudgetSnapshotError", "BudgetSnapshotError"),
+        ("KnowledgeStoreError", "KnowledgeStoreError"),
     ];
     NAMES
         .iter()
@@ -59,6 +60,7 @@ pub struct EngineLimits {
 pub struct ScriptCapabilities {
     pub delivery: bool,
     pub composition: bool,
+    pub captured_sources: bool,
 }
 
 /// Metadata carried by portable workflow scripts. It is deliberately save-time
@@ -607,6 +609,28 @@ impl WorkflowEngine {
                         }),
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__workerPlacements", placements).map_err(|error| error.to_string())?;
+
+                    if capabilities.captured_sources {
+                        let captured_sources_host = Arc::clone(&host);
+                        let captured_sources_cancellation = host_cancellation.clone();
+                        let captured_sources = Function::new(
+                            ctx.clone(),
+                            Async(move || {
+                                let host = Arc::clone(&captured_sources_host);
+                                let cancellation = captured_sources_cancellation.clone();
+                                async move {
+                                    match host.captured_sources(cancellation).await {
+                                        Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                        Err(error) => {
+                                            let (name, message) = named_host_error(&error, "KnowledgeStoreError");
+                                            serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
+                                        }
+                                    }
+                                }
+                            }),
+                        ).map_err(|error| error.to_string())?;
+                        ctx.globals().set("__capturedSources", captured_sources).map_err(|error| error.to_string())?;
+                    }
 
                     let log_host = Arc::clone(&host);
                     let log = Function::new(ctx.clone(), move |message: String| log_host.record("log", message)).map_err(|error| error.to_string())?;
@@ -1206,6 +1230,10 @@ impl WorkflowEngine {
                         });
                         globalThis.budgetSnapshot = async () =>
                             unwrapHostResponse(await __budgetSnapshot());
+                        if (typeof __capturedSources === "function") {
+                            globalThis.capturedSources = async () =>
+                                unwrapHostResponse(await __capturedSources());
+                        }
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };
@@ -1406,6 +1434,7 @@ mod tests {
         gate_verdict: Value,
         deliveries_up_to: Mutex<Vec<u64>>,
         budget_snapshot: Value,
+        captured_sources: Value,
     }
 
     impl SurfaceHost {
@@ -1432,6 +1461,7 @@ mod tests {
                     "closing_remaining": null,
                     "winding_down": false,
                 }),
+                captured_sources: json!({"sources": []}),
             }
         }
     }
@@ -1581,6 +1611,10 @@ mod tests {
 
         async fn budget_snapshot(&self, _: CancellationToken) -> Result<Value, String> {
             Ok(self.budget_snapshot.clone())
+        }
+
+        async fn captured_sources(&self, _: CancellationToken) -> Result<Value, String> {
+            Ok(self.captured_sources.clone())
         }
     }
 
@@ -2821,6 +2855,7 @@ mod tests {
                 ScriptCapabilities {
                     delivery: false,
                     composition: true,
+                    ..ScriptCapabilities::default()
                 },
             )
             .await
@@ -2841,6 +2876,48 @@ mod tests {
                 "null",
                 CancellationToken::new(),
                 Some(Arc::new(SurfaceHost::new()) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("ungranted run");
+        assert_eq!(
+            serde_json::from_str::<Value>(&ungranted).unwrap(),
+            "undefined"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn captured_sources_are_exposed_only_when_granted() {
+        let host = Arc::new(SurfaceHost {
+            captured_sources: json!({
+                "sources": [{"url": "https://example.test/source", "observation_id": "obs-1"}]
+            }),
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "return await capturedSources();",
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities {
+                    captured_sources: true,
+                    ..ScriptCapabilities::default()
+                },
+            )
+            .await
+            .expect("captured sources run");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"sources": [{"url": "https://example.test/source", "observation_id": "obs-1"}]})
+        );
+
+        let ungranted = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "return typeof capturedSources;",
+                "null",
+                CancellationToken::new(),
+                Some(host as Arc<dyn WorkflowHost>),
                 ScriptCapabilities::default(),
             )
             .await
@@ -2999,7 +3076,7 @@ mod tests {
             r#"{"brief":"write"}"#,
             CancellationToken::new(),
             Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
-            ScriptCapabilities { delivery: true, composition: false },
+            ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
         ).await.expect("composition");
 
         assert_eq!(
@@ -3106,7 +3183,7 @@ return review.content;
                 r#"{"writerPrompt":"draft","writerAgent":"writer","reviewerAgent":"reviewer","deliveryTarget":"public"}"#,
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
-                ScriptCapabilities { delivery: true, composition: false },
+                ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
             )
             .await
             .expect("write-review-deliver script runs");
@@ -3140,7 +3217,7 @@ return review.content;
                 r#"{"writerPrompt":"draft","writerAgent":"writer","reviewerAgent":"reviewer","deliveryTarget":"public"}"#,
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
-                ScriptCapabilities { delivery: true, composition: false },
+                ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
             )
             .await;
 
