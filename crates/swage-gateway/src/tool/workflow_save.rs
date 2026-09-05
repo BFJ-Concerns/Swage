@@ -166,6 +166,7 @@ impl Tool for WorkflowSaveTool {
                         description: description.unwrap_or_default(),
                         source: source.expect("save validates its source"),
                         delivery_grant: None,
+                        captured_sources_grant: Default::default(),
                         authoring_session_id: Some(session_id),
                     },
                     WORKFLOW_SAVE_TOOL,
@@ -193,6 +194,7 @@ impl Tool for WorkflowSaveTool {
                         description,
                         source,
                         delivery_grant: None,
+                        captured_sources_grant: Some(false),
                         authoring_session_id: Some(session_id),
                     },
                     WORKFLOW_SAVE_TOOL,
@@ -401,6 +403,7 @@ mod tests {
                 None,
                 Some(json!({"targets": [{"kind": "webhook", "url": "https://example.invalid/"}]})),
                 None,
+                None,
             )
             .await
             .expect("an operator-side column write");
@@ -430,6 +433,17 @@ mod tests {
             )
             .await
             .expect("the workflow saves");
+        let script = storage
+            .list_workflow_scripts(space_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("saved workflow");
+        storage
+            .update_workflow_script(script.id, None, None, Some(true), None)
+            .await
+            .expect("operator grants the store read");
         let updated = WorkflowSaveTool
             .execute(
                 json!({"action": "update", "name": "keeper", "source": "return 2;"}),
@@ -442,6 +456,15 @@ mod tests {
         assert_eq!(
             storage.list_workflow_scripts(space_id).await.unwrap().len(),
             1
+        );
+        assert!(
+            !storage
+                .get_workflow_script(script.id)
+                .await
+                .unwrap()
+                .expect("updated workflow")
+                .captured_sources_grant,
+            "conversation authorship must clear the privileged store read"
         );
 
         let error = WorkflowSaveTool
@@ -507,6 +530,7 @@ mod tests {
                 description: "The operator's own.".into(),
                 source: "return { delivery: typeof deliver };".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             },
             "operator_http",
@@ -535,6 +559,7 @@ mod tests {
                 operator.script_id,
                 None,
                 Some(json!({"targets": [{"kind": "webhook", "url": "https://example.invalid/"}]})),
+                None,
                 None,
             )
             .await
@@ -567,6 +592,7 @@ mod tests {
                 description: "The operator's delivering script.".into(),
                 source: "return { delivery: typeof deliver };".into(),
                 delivery_grant: Some(grant.clone()),
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             },
             "operator_http",

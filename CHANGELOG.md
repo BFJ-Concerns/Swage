@@ -11,6 +11,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Images now reach every selected provider protocol that advertises vision, and an image reference that provider cannot resolve is refused before the turn reaches it.
+- Workflow fan-in calls can opt into an identified result envelope, preserving each leg's label, phase, successful output, or failure account through parallel and pipeline collapse; malformed identity options fail before dispatch rather than being reported as worker failures.
 - Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
 - Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
@@ -32,11 +33,15 @@ All notable changes to Swage are documented in this file.
 - The research sweep ships inside a research skill that carries its workflow; its researcher, organiser, and synthesist roles are dispatches inside that workflow rather than agent definitions, so a fresh installation lists only the shipped default agent and no compiled-in workflow catalogue. The workflow listing names each carried workflow's skill in place of the former built-in flag.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
 - Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
+- Research sweeps now derive gathered sources and failures from the knowledge store through a read-only journalled script query.
 - Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
 - Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
+- Schedules and workflows can deliver output to a page in their own space.
+- `LocalStorage` remains the log target, retaining output in the local delivery record.
+- Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
 - Agents can now run newly authored workflow source directly without saving or registering it first.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
