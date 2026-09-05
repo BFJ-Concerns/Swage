@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Every workflow agent call is now recorded with the prompt and resolved options each attempt of it was dispatched under, the provider rounds every attempt ran with start, end, and outcome, and a usage record that reads as unavailable with a reason where the provider reported none. Unknown usage marks budget readings incomplete and closes the token dispatch gate instead of being treated as zero spend. A worker the run's own end cut short is recorded as cut short rather than as its own failure, and a call the run's end interrupted keeps that attempt's rounds beside those of the attempt replay dispatched after it.
+- Workflow fan-in calls can opt into an identified result envelope, preserving each leg's label, phase, successful output, or failure account through parallel and pipeline collapse; malformed identity options fail before dispatch rather than being reported as worker failures.
 - Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
 - Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
@@ -27,6 +28,7 @@ All notable changes to Swage are documented in this file.
 - The research sweep ships inside a research skill that carries its workflow; its researcher, organiser, and synthesist roles are dispatches inside that workflow rather than agent definitions, so a fresh installation lists only the shipped default agent and no compiled-in workflow catalogue. The workflow listing names each carried workflow's skill in place of the former built-in flag.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
 - Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
+- Research sweeps now derive gathered sources and failures from the knowledge store through a read-only journalled script query.
 - Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
 - Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
