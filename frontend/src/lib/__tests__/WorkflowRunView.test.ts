@@ -4,6 +4,7 @@ import { mount, tick, unmount } from "svelte";
 import WorkflowRunView from "../components/WorkflowRunView.svelte";
 import WorkflowRunViewHarness from "./fixtures/WorkflowRunViewHarness.svelte";
 import type { WorkflowRun } from "../protocol/WorkflowRun";
+import type { WorkflowRunEnding } from "../protocol/WorkflowRunEnding";
 import type { WorkflowRunTerminalAccount } from "../protocol/WorkflowRunTerminalAccount";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -34,6 +35,15 @@ function respondWith(body: unknown): ReturnType<typeof vi.spyOn> {
   return vi
     .spyOn(globalThis, "fetch")
     .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+}
+
+function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
+  return {
+    ending,
+    workers: { done: [], failed: [], cut_short: [], unsettled: [] },
+    partial_results: undefined,
+    settled_at: "2026-09-02T10:05:00Z",
+  };
 }
 
 describe("WorkflowRunView", () => {
@@ -144,6 +154,31 @@ describe("WorkflowRunView", () => {
     await vi.waitFor(() => expect(document.body.textContent).toContain("has not ended yet"));
 
     expect(document.body.textContent).not.toContain("Cut short");
+  });
+
+  it.each([
+    [{ ending: "returned" } satisfies WorkflowRunEnding, "Returned"],
+    [
+      { ending: "threw", error: "the script rejected its input" } satisfies WorkflowRunEnding,
+      "Threw — the script rejected its input",
+    ],
+    [
+      { ending: "wound_down", error: "the closing reserve was exhausted" } satisfies WorkflowRunEnding,
+      "Wound down — the closing reserve was exhausted",
+    ],
+    [
+      {
+        ending: "interrupted_without_resume",
+        reason: "the workflow source was unavailable",
+      } satisfies WorkflowRunEnding,
+      "Interrupted without resume — the workflow source was unavailable",
+    ],
+  ])("describes the %s ending", async (ending, expected) => {
+    respondWith({ run: run(emptyAccount(ending)), journal: [], wake_metrics: {} });
+
+    component = mount(WorkflowRunView, { target: document.body, props: { runId: "run-1" } });
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain(expected));
   });
 
   it("surfaces a failed read rather than an empty run", async () => {
