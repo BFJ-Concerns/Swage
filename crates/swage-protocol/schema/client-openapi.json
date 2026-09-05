@@ -1303,6 +1303,23 @@
           {
             "properties": {
               "kind": {
+                "const": "page",
+                "type": "string"
+              },
+              "page_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "page_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
                 "const": "webhook",
                 "type": "string"
               },
@@ -5147,6 +5164,17 @@
               "string",
               "null"
             ]
+          },
+          "worktree": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorktreeCompletion"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The resolved state of the isolated worktree after the worker settled."
           }
         },
         "type": "object"
@@ -5572,6 +5600,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "worktree": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/WorkflowWorktreeCompletion"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The resolved state of the isolated worktree after the worker settled."
               }
             },
             "required": [
@@ -6376,6 +6415,30 @@
           "gate_suppressions",
           "events_posted",
           "events_pending"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorktreeCompletion": {
+        "description": "The final Git state of an isolated worker worktree.",
+        "properties": {
+          "base_commit": {
+            "type": "string"
+          },
+          "changed": {
+            "type": "boolean"
+          },
+          "removed": {
+            "type": "boolean"
+          },
+          "tip_commit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_commit",
+          "tip_commit",
+          "changed",
+          "removed"
         ],
         "type": "object"
       },

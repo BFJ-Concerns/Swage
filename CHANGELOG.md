@@ -10,6 +10,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
+- Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
 - Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
@@ -34,6 +36,9 @@ All notable changes to Swage are documented in this file.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
+- Schedules and workflows can deliver output to a page in their own space.
+- `LocalStorage` remains the log target, retaining output in the local delivery record.
+- Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
 - Agents can now run newly authored workflow source directly without saving or registering it first.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.

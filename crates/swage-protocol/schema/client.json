@@ -1620,6 +1620,23 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "page"
+            },
+            "page_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "page_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "webhook"
             },
             "url": {
@@ -5463,6 +5480,17 @@
             "null"
           ],
           "format": "uuid"
+        },
+        "worktree": {
+          "description": "The resolved state of the isolated worktree after the worker settled.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorktreeCompletion"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -5887,6 +5915,17 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "worktree": {
+              "description": "The resolved state of the isolated worktree after the worker settled.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkflowWorktreeCompletion"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -6692,6 +6731,30 @@
         "gate_suppressions",
         "events_posted",
         "events_pending"
+      ]
+    },
+    "WorkflowWorktreeCompletion": {
+      "description": "The final Git state of an isolated worker worktree.",
+      "type": "object",
+      "properties": {
+        "base_commit": {
+          "type": "string"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "boolean"
+        },
+        "tip_commit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_commit",
+        "tip_commit",
+        "changed",
+        "removed"
       ]
     },
     "WorkspaceAttachmentListResponse": {
