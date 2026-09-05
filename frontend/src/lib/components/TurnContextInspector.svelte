@@ -120,11 +120,11 @@
       </section>
     {/if}
 
-    {#if report.declared_omissions.length > 0}
+    {#if (report.declared_omissions ?? []).length > 0}
       <section>
         <h3>Declared omissions</h3>
         <ul>
-          {#each report.declared_omissions as omission}
+          {#each report.declared_omissions ?? [] as omission}
             <li>
               <strong>{omission.element}</strong>
               <span class="reason">{omission.reason}</span>

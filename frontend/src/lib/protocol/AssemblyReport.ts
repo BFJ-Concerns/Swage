@@ -10,4 +10,4 @@ export type AssemblyReport = { assembly_name: string, elements: Array<ElementRep
  * reason it gave. An element absent from the assembled context and
  * absent from this list is a floor breach, not a choice.
  */
-declared_omissions: Array<DeclaredOmission>, effective_tool_permissions?: Record<string, unknown>, tool_scope?: Record<string, unknown>, provider_visible?: Record<string, unknown>, duration: { secs: number; nanos: number }, };
+declared_omissions?: Array<DeclaredOmission>, effective_tool_permissions?: Record<string, unknown>, tool_scope?: Record<string, unknown>, provider_visible?: Record<string, unknown>, duration: { secs: number; nanos: number }, };

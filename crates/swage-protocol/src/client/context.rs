@@ -19,6 +19,7 @@ pub struct AssemblyReport {
     /// reason it gave. An element absent from the assembled context and
     /// absent from this list is a floor breach, not a choice.
     #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub declared_omissions: Vec<DeclaredOmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, unknown>")]
