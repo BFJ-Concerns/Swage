@@ -21,6 +21,8 @@ pub struct WorkflowScript {
     #[ts(optional)]
     pub carrying_skill: Option<String>,
     pub has_delivery_grant: bool,
+    /// Whether this script may read the observations captured by this run.
+    pub has_captured_sources_grant: bool,
     pub argument_contract: WorkflowArgumentContract,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -52,6 +54,9 @@ pub struct CreateWorkflowScriptRequest {
     #[ts(optional)]
     #[ts(type = "unknown")]
     pub delivery_grant: Option<Value>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub captured_sources_grant: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
@@ -62,6 +67,8 @@ pub struct UpdateWorkflowScriptRequest {
     #[ts(optional)]
     #[ts(type = "unknown")]
     pub delivery_grant: Option<Value>,
+    #[ts(optional)]
+    pub captured_sources_grant: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -298,6 +305,8 @@ pub enum WorkflowJournalEntryKind {
     Budget,
     /// The authoritative closing-partition balance when the run settled.
     TerminalBudget,
+    /// A read-only view of source observations captured by this workflow run.
+    CapturedSources,
     /// The working allowance was exhausted. The triggering agent call was
     /// not started; replay returns the same wind-down signal at this point.
     WindDown,
@@ -429,6 +438,10 @@ pub enum WorkflowJournalResult {
         #[serde(default)]
         #[ts(optional, as = "Option<_>")]
         per_route: std::collections::BTreeMap<String, WorkflowRouteBudgetReading>,
+    },
+    CapturedSources {
+        #[ts(type = "unknown")]
+        sources: Value,
     },
     WindDown {
         spent: u64,

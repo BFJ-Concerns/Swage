@@ -9,6 +9,7 @@ const SYNTHETIC_ID_DOMAIN: &[u8] = b"swage shipped skill";
 pub(crate) struct ShippedFile {
     pub(crate) path: &'static str,
     pub(crate) contents: &'static str,
+    pub(crate) captured_sources_grant: bool,
 }
 
 pub(crate) struct ShippedSkill {
@@ -22,6 +23,17 @@ macro_rules! shipped_file {
         ShippedFile {
             path: $path,
             contents: include_str!(concat!("../../../shipped/skills/", $path)),
+            captured_sources_grant: false,
+        }
+    };
+}
+
+macro_rules! shipped_workflow_file {
+    ($path:literal, $captured_sources_grant:expr) => {
+        ShippedFile {
+            path: $path,
+            contents: include_str!(concat!("../../../shipped/skills/", $path)),
+            captured_sources_grant: $captured_sources_grant,
         }
     };
 }
@@ -90,7 +102,7 @@ const PROJECT_DOCS_FILES: &[ShippedFile] = &[
 
 const RESEARCH_FILES: &[ShippedFile] = &[
     shipped_file!("research/SKILL.md"),
-    shipped_file!("research/workflows/research-sweep.js"),
+    shipped_workflow_file!("research/workflows/research-sweep.js", true),
 ];
 
 const WORKFLOW_AUTHORING_FILES: &[ShippedFile] = &[shipped_file!("workflow-authoring/SKILL.md")];

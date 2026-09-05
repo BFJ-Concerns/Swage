@@ -7,7 +7,7 @@ use swage_core::StorageError;
 
 use crate::model::{
     ExtractionDerivation, KnowledgeSearchHit, NewSourceObservation, ObservationOrigin,
-    SourceObservation,
+    SourceCapture, SourceObservation,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ObservationStore;
@@ -34,6 +34,45 @@ fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceObserva
         capture_scope: row.get(8)?,
         created_at: parse_dt(&row.get::<_, String>(9)?)?,
     })
+}
+
+fn row_to_capture(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceCapture> {
+    Ok(SourceCapture {
+        observation_id: parse_uuid(&row.get::<_, String>(0)?)?,
+        space_id: parse_uuid(&row.get::<_, String>(1)?)?,
+        origin: ObservationOrigin {
+            url: row.get(2)?,
+            local_path: row.get(3)?,
+        },
+        capture_scope: row.get(4)?,
+        captured_at: parse_dt(&row.get::<_, String>(5)?)?,
+    })
+}
+
+fn record_source_capture(
+    conn: &rusqlite::Connection,
+    observation_id: Uuid,
+    observation: &NewSourceObservation,
+) -> rusqlite::Result<()> {
+    let Some(scope) = observation.capture_scope.as_deref() else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT OR IGNORE INTO source_captures (
+             id, observation_id, space_id, origin_url, origin_local_path,
+             capture_scope, captured_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            Uuid::new_v4().to_string(),
+            observation_id.to_string(),
+            observation.space_id.to_string(),
+            observation.origin.url,
+            observation.origin.local_path,
+            scope,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
@@ -73,20 +112,17 @@ impl ObservationStore for SqliteStorage {
             // observational act, even when the live body differs between
             // attempts, so it deduplicates to the first capture. A lost
             // race between two concurrent same-scope captures costs a
-            // duplicate row — the pre-scope status quo — never a gap. Body
-            // identity below still wins over scope: a first attempt whose
-            // bytes matched foreign evidence created no scoped row, so its
-            // changed-bytes retry records a distinct observation — a
-            // bounded edge accepted over stamping scopes onto rows the
-            // scope did not create.
+            // duplicate row — the pre-scope status quo — never a gap.
             if let Some(scope) = observation.capture_scope.as_deref()
                 && let Some(existing) = conn
                     .query_row(
-                        &format!(
-                            "SELECT {OBSERVATION_COLUMNS} FROM source_observations
-                             WHERE space_id = ?1 AND capture_scope = ?2
-                               AND origin_url IS ?3 AND origin_local_path IS ?4"
-                        ),
+                        "SELECT o.id, o.space_id, o.origin_url, o.origin_local_path,
+                                    o.retrieved_at, o.body_sha256, o.body_bytes, o.media_type,
+                                    o.capture_scope, o.created_at
+                             FROM source_captures c
+                             JOIN source_observations o ON o.id = c.observation_id
+                             WHERE c.space_id = ?1 AND c.capture_scope = ?2
+                               AND c.origin_url IS ?3 AND c.origin_local_path IS ?4",
                         params![
                             observation.space_id.to_string(),
                             scope,
@@ -114,6 +150,7 @@ impl ObservationStore for SqliteStorage {
                 )
                 .optional()?
             {
+                record_source_capture(conn, existing.id, &observation)?;
                 return Ok(existing);
             }
 
@@ -137,6 +174,8 @@ impl ObservationStore for SqliteStorage {
                     now.to_rfc3339(),
                 ],
             )?;
+
+            record_source_capture(conn, id, &observation)?;
 
             Ok(SourceObservation {
                 id,
@@ -175,6 +214,35 @@ impl ObservationStore for SqliteStorage {
                  WHERE space_id = ?1 ORDER BY retrieved_at DESC"
             ))?;
             let rows = stmt.query_map(params![space_id.to_string()], row_to_observation)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+    }
+
+    async fn list_source_captures_by_scopes(
+        &self,
+        space_id: Uuid,
+        capture_scopes: Vec<String>,
+    ) -> Result<Vec<SourceCapture>, StorageError> {
+        if capture_scopes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_conn(move |conn| {
+            let placeholders = std::iter::repeat_n("?", capture_scopes.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT observation_id, space_id, origin_url, origin_local_path,
+                        capture_scope, captured_at FROM source_captures
+                 WHERE space_id = ?1 AND capture_scope IN ({placeholders})
+                 ORDER BY captured_at DESC"
+            );
+            let mut parameters = Vec::with_capacity(capture_scopes.len() + 1);
+            parameters.push(space_id.to_string());
+            parameters.extend(capture_scopes);
+            let mut statement = conn.prepare(&query)?;
+            let rows =
+                statement.query_map(rusqlite::params_from_iter(parameters), row_to_capture)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .await
