@@ -103,6 +103,7 @@ struct EffectiveWorkflow {
     source: String,
     script_version_id: Option<Uuid>,
     delivery_grant: Option<Value>,
+    captured_sources_grant: bool,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     immutable: bool,
@@ -134,6 +135,7 @@ impl EffectiveWorkflow {
         skill: &SkillDefinition,
         name: String,
         source: String,
+        captured_sources_grant: bool,
     ) -> Result<Self, String> {
         let identity = format!("{}/{}", skill.name, name);
         let meta = swage_workflow::script_meta(&source).map_err(|error| {
@@ -151,6 +153,7 @@ impl EffectiveWorkflow {
             source,
             script_version_id: None,
             delivery_grant: None,
+            captured_sources_grant,
             created_at: chrono::DateTime::UNIX_EPOCH,
             updated_at: chrono::DateTime::UNIX_EPOCH,
             immutable: true,
@@ -180,6 +183,7 @@ async fn carried_workflows(
                     skill,
                     name.into(),
                     file.contents.into(),
+                    file.captured_sources_grant,
                 ) {
                     Ok(workflow) => workflows.push(workflow),
                     Err(error) => {
@@ -238,7 +242,7 @@ async fn carried_workflows(
                     skill.name
                 )
             })?;
-            match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source) {
+            match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source, false) {
                 Ok(workflow) => workflows.push(workflow),
                 Err(error) => {
                     record_carried_workflow_exclusion(state, space_id, &skill.name, name, &error)
@@ -312,6 +316,7 @@ async fn authored_workflow(
         source: head.source,
         script_version_id: Some(head.id),
         delivery_grant,
+        captured_sources_grant: record.captured_sources_grant,
         created_at: record.created_at,
         updated_at: record.updated_at,
         immutable: false,
@@ -618,6 +623,7 @@ fn journal_wire(
         "gate" => WorkflowJournalEntryKind::Gate,
         "budget" => WorkflowJournalEntryKind::Budget,
         "terminal_budget" => WorkflowJournalEntryKind::TerminalBudget,
+        "captured_sources" => WorkflowJournalEntryKind::CapturedSources,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
@@ -848,6 +854,7 @@ fn journal_result_from_storage(
         WorkflowJournalEntryKind::Gate => tagged_object("gate")?,
         WorkflowJournalEntryKind::Budget => tagged_object("budget")?,
         WorkflowJournalEntryKind::TerminalBudget => tagged_object("terminal_budget")?,
+        WorkflowJournalEntryKind::CapturedSources => tagged_object("captured_sources")?,
         WorkflowJournalEntryKind::WindDown => tagged_object("wind_down")?,
     };
 
@@ -872,6 +879,7 @@ fn is_journal_result_tag(tag: &str) -> bool {
             | "gate"
             | "budget"
             | "terminal_budget"
+            | "captured_sources"
             | "wind_down"
     )
 }
@@ -894,6 +902,10 @@ fn journal_result_tag_matches_kind(kind: WorkflowJournalEntryKind, tag: &str) ->
             | (WorkflowJournalEntryKind::Gate, "gate")
             | (WorkflowJournalEntryKind::Budget, "budget")
             | (WorkflowJournalEntryKind::TerminalBudget, "terminal_budget")
+            | (
+                WorkflowJournalEntryKind::CapturedSources,
+                "captured_sources"
+            )
             | (WorkflowJournalEntryKind::WindDown, "wind_down")
     )
 }
@@ -1424,6 +1436,9 @@ enum HostCommand {
     ListWorkerPlacements {
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    CapturedSources {
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     Deliver {
         payload: EffectPayload,
         cancellation: CancellationToken,
@@ -1575,6 +1590,16 @@ impl WorkflowHost for ChannelWorkflowHost {
         receive
             .await
             .map_err(|_| "workflow host dropped placement-list reply".to_string())?
+    }
+
+    async fn captured_sources(&self, _cancellation: CancellationToken) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::CapturedSources { reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped captured-sources reply".to_string())?
     }
 
     async fn deliver(
@@ -3079,6 +3104,46 @@ async fn run_host_commands_inner(
                 };
                 let _ = reply.send(result);
             }
+            HostCommand::CapturedSources { reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({"action": "captured_sources"});
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "captured_sources" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed captured-sources entry has no result".into()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded captured-sources failure".into())),
+                    Some(entry) => {
+                        complete_captured_sources(&state, run_id, space_id, entry.id).await
+                    }
+                    None => match state
+                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                            run_id,
+                            seq: current_seq,
+                            kind: "captured_sources".into(),
+                            args_hash: hash,
+                            request,
+                            effect_kind: None,
+                            idempotency_key: None,
+                            target_kind: None,
+                        })
+                        .await
+                    {
+                        Ok(intent) => {
+                            complete_captured_sources(&state, run_id, space_id, intent.id).await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    },
+                };
+                let _ = reply.send(result);
+            }
             HostCommand::DispatchAgent { .. } => {
                 unreachable!("dispatch commands are resolved before journal admission")
             }
@@ -4456,6 +4521,41 @@ async fn complete_worker_directory_resolution(
     }
 }
 
+async fn complete_captured_sources(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    entry_id: Uuid,
+) -> Result<Value, String> {
+    let scopes = state
+        .storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|entry| entry.kind == "agent_call")
+        .map(|entry| entry.id.to_string())
+        .collect();
+    let sources = state
+        .storage
+        .list_source_captures_by_scopes(space_id, scopes)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter_map(|capture| {
+            capture.origin.url.map(
+                |url| serde_json::json!({"url": url, "observation_id": capture.observation_id}),
+            )
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({"sources": sources});
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
 async fn complete_worker_placement_listing(
     state: &AppState,
     run_id: Uuid,
@@ -5225,6 +5325,7 @@ fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
         head_version: workflow.head_version,
         carrying_skill: workflow.carrying_skill,
         has_delivery_grant: workflow.delivery_grant.is_some(),
+        has_captured_sources_grant: workflow.captured_sources_grant,
         argument_contract: argument_contract(workflow.argument_schema),
         created_at: workflow.created_at,
         updated_at: workflow.updated_at,
@@ -5324,6 +5425,7 @@ pub async fn create_script(
             description: request.description,
             source: request.source,
             delivery_grant: request.delivery_grant,
+            captured_sources_grant: request.captured_sources_grant.unwrap_or_default(),
             authoring_session_id: None,
         },
         OPERATOR_SURFACE,
@@ -5407,6 +5509,7 @@ pub async fn update_script(
             description: request.description,
             source: request.source,
             delivery_grant: request.delivery_grant,
+            captured_sources_grant: request.captured_sources_grant,
             authoring_session_id: None,
         },
         OPERATOR_SURFACE,
@@ -5592,12 +5695,45 @@ async fn durable_failed_agent_call_handover(
         .unwrap_or_else(|| reconstruction_failed_handover(failed_call, terminal_error))
 }
 
+/// Re-resolve this observable store-read grant from the persisted authority
+/// root before every launch, so a replay cannot acquire fresh read authority.
+async fn captured_sources_grant_for_run(
+    state: &AppState,
+    record: &WorkflowRunRecord,
+) -> Result<bool, ApiError> {
+    if let Some(version_id) = record.script_version_id {
+        let Some(version) = state
+            .storage
+            .get_workflow_script_version(version_id)
+            .await
+            .map_err(internal)?
+        else {
+            return Ok(false);
+        };
+        return Ok(state
+            .storage
+            .get_workflow_script(version.script_id)
+            .await
+            .map_err(internal)?
+            .is_some_and(|script| script.captured_sources_grant));
+    }
+
+    let Some(id) = record.script_id else {
+        return Ok(false);
+    };
+    Ok(resolve_workflow_by_id(state, id, None)
+        .await
+        .map_err(internal)?
+        .is_some_and(|workflow| workflow.captured_sources_grant))
+}
+
 async fn launch_existing_run(
     state: AppState,
     record: WorkflowRunRecord,
     source: String,
     delivery_grant: Option<Value>,
 ) -> Result<WorkflowRun, ApiError> {
+    let captured_sources_grant = captured_sources_grant_for_run(&state, &record).await?;
     let space_id = record.space_id;
     let started = run_wire(record.clone())?;
     let _ = state.broadcast.send(ServerEvent::WorkflowRunStarted {
@@ -5715,6 +5851,7 @@ async fn launch_existing_run(
     let capabilities = ScriptCapabilities {
         delivery: delivery_grant.is_some(),
         composition: record.parent_run_id.is_none(),
+        captured_sources: captured_sources_grant,
     };
     std::thread::Builder::new()
         .name(format!("workflow-{}", record.id))
@@ -6375,10 +6512,11 @@ mod tests {
     use super::*;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
-        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewWorkflowScript,
-        NewWorkspaceAttachment, ObservationStore, OrientationCardStore, ProviderRoundStore,
-        SessionStore, SpaceStore, SqliteStorage, Storage, TaskDefinitionStore, ThreadState,
-        ThreadStore, ToolCallStore, TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
+        AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
+        NewSourceObservation, NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin,
+        ObservationStore, OrientationCardStore, ProviderRoundStore, SessionStore, SpaceStore,
+        SqliteStorage, Storage, TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore,
+        TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
 
@@ -6782,6 +6920,7 @@ mod tests {
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} }; return {};"#.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -7015,6 +7154,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('research-sweep', {});".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -7140,6 +7280,7 @@ mod tests {
                 description: "Authored shadow".into(),
                 source: "return { source: 'authored' };".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -7176,6 +7317,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('teardown-audit', {});".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -7400,6 +7542,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: None,
                 elements: None,
                 variables: None,
@@ -7478,6 +7622,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -7602,6 +7748,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -7680,10 +7828,432 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn captured_sources_query_journals_the_run_scoped_store_read() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let worker = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: "worker".into(),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("worker entry");
+        let prior = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/prior".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "a".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: None,
+            })
+            .await
+            .expect("record prior source");
+        let recorded = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/first".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "a".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: Some(worker.id.to_string()),
+            })
+            .await
+            .expect("record source");
+        assert_eq!(
+            recorded.id, prior.id,
+            "the body deduplicates to prior evidence"
+        );
+        let other_run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: Some("return null".into()),
+                source_hash: source_hash("return null"),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("other run");
+        let other_worker = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: other_run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: "other worker".into(),
+                request: serde_json::json!({}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("other worker entry");
+        storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/other-run".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "c".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: Some(other_worker.id.to_string()),
+            })
+            .await
+            .expect("record other-run source");
+        let query = state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 1,
+                kind: "captured_sources".into(),
+                args_hash: journal_args_hash(&serde_json::json!({"action": "captured_sources"})),
+                request: serde_json::json!({"action": "captured_sources"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("query intent");
+        let reading = complete_captured_sources(&state, run.id, space.id, query.id)
+            .await
+            .expect("complete query");
+        assert_eq!(
+            reading,
+            serde_json::json!({"sources": [{"url": "https://example.test/first", "observation_id": recorded.id}]})
+        );
+        let independent = storage
+            .list_source_captures_by_scopes(space.id, vec![worker.id.to_string()])
+            .await
+            .expect("independent store read");
+        assert_eq!(
+            independent
+                .iter()
+                .map(|source| source.observation_id)
+                .collect::<Vec<_>>(),
+            vec![recorded.id]
+        );
+
+        storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/later".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: "b".repeat(64),
+                body_bytes: 5,
+                media_type: "text/plain".into(),
+                capture_scope: Some(worker.id.to_string()),
+            })
+            .await
+            .expect("record later source");
+        let replay = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = tokio::spawn(run_host_commands(
+            state.clone(),
+            run.id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget::default(),
+            replay,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        tx.send(HostCommand::Record {
+            kind: "log".into(),
+            message: "consume the recorded worker slot".into(),
+        })
+        .expect("send replay worker slot");
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::CapturedSources { reply })
+            .expect("send replayed captured-sources query");
+        let replayed = receive
+            .await
+            .expect("receive replayed captured-sources query")
+            .expect("replayed captured-sources query");
+        drop(tx);
+        host.await.expect("host loop");
+        assert_eq!(replayed, reading, "replay must use the journalled reading");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn launch_resolves_captured_sources_from_the_persisted_authority_root() {
+        let (state, storage) = workflow_test_state();
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = "return typeof capturedSources;";
+        let (script, version) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "saved-sweep".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+                captured_sources_grant: true,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("saved script");
+        storage
+            .update_workflow_script(script.id, None, None, Some(true), None)
+            .await
+            .expect("grant captured sources to saved script");
+
+        let saved = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: Some(version.id),
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: None,
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("saved run");
+        assert!(
+            captured_sources_grant_for_run(&state, &saved)
+                .await
+                .expect("resolve saved grant")
+        );
+        launch_existing_run(state.clone(), saved.clone(), source.into(), None)
+            .await
+            .expect("launch saved run");
+        wait_for_terminal(&state, saved.id).await;
+        assert_eq!(
+            storage
+                .get_workflow_run(saved.id)
+                .await
+                .expect("saved run query")
+                .expect("saved run")
+                .final_output,
+            Some(Value::String("function".into()))
+        );
+
+        let (_, ungranted_version) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "saved-ungranted-sweep".into(),
+                description: String::new(),
+                source: source.into(),
+                delivery_grant: None,
+                captured_sources_grant: false,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("ungranted saved script");
+        let ungranted = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: Some(ungranted_version.id),
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: None,
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("ungranted saved run");
+        assert!(
+            !captured_sources_grant_for_run(&state, &ungranted)
+                .await
+                .expect("resolve ungranted saved-script grant"),
+            "a saved script without the grant must retain its persisted denial"
+        );
+        launch_existing_run(state.clone(), ungranted.clone(), source.into(), None)
+            .await
+            .expect("launch ungranted saved run");
+        wait_for_terminal(&state, ungranted.id).await;
+        assert_eq!(
+            storage
+                .get_workflow_run(ungranted.id)
+                .await
+                .expect("ungranted saved run query")
+                .expect("ungranted saved run")
+                .final_output,
+            Some(Value::String("undefined".into()))
+        );
+
+        let carried = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: Some(crate::synthetic_id::synthetic_id(
+                    CARRIED_WORKFLOW_ID_DOMAIN,
+                    space.id,
+                    "skill/research-sweep",
+                )),
+                inline_workflow_name: Some("research-sweep".into()),
+                inline_workflow_version: Some(1),
+                carrying_skill: Some("research".into()),
+                task: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("carried run");
+        assert!(
+            !captured_sources_grant_for_run(&state, &carried)
+                .await
+                .expect("resolve carried grant"),
+            "a counterfeit research carrier must retain its advertised denial"
+        );
+        launch_existing_run(state.clone(), carried.clone(), source.into(), None)
+            .await
+            .expect("launch ungranted carried run");
+        wait_for_terminal(&state, carried.id).await;
+        assert_eq!(
+            storage
+                .get_workflow_run(carried.id)
+                .await
+                .expect("ungranted carried run query")
+                .expect("ungranted carried run")
+                .final_output,
+            Some(Value::String("undefined".into()))
+        );
+
+        let builtin = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: Some(research_sweep_id(space.id)),
+                inline_workflow_name: Some("research-sweep".into()),
+                inline_workflow_version: Some(1),
+                carrying_skill: Some("research".into()),
+                task: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("built-in run");
+        assert!(
+            captured_sources_grant_for_run(&state, &builtin)
+                .await
+                .expect("resolve shipped research grant")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
         let _swage_home = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
+        let deduplicated = storage
+            .record_observation(NewSourceObservation {
+                space_id: space.id,
+                origin: ObservationOrigin {
+                    url: Some("https://example.test/landed".into()),
+                    local_path: None,
+                },
+                retrieved_at: chrono::Utc::now(),
+                body_sha256: source_hash(RESEARCH_SWEEP_QUOTE),
+                body_bytes: RESEARCH_SWEEP_QUOTE.len() as u64,
+                media_type: "text/plain".into(),
+                capture_scope: None,
+            })
+            .await
+            .expect("seed deduplicated source");
         let provider = Arc::new(ResearchSweepRecordingProvider {
             requests: std::sync::Mutex::new(Vec::new()),
             observation_id: std::sync::Mutex::new(None),
@@ -7763,6 +8333,7 @@ mod tests {
             .await
             .expect("persisted observations");
         assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].id, deduplicated.id);
         assert_eq!(
             observations[0].origin.url.as_deref(),
             Some("https://example.test/landed")
@@ -7916,6 +8487,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: Some(vec!["current-work".into()]),
             variables: Some(std::collections::BTreeMap::from([(
@@ -8530,7 +9103,7 @@ mod tests {
                 }
             } else if text.contains("Source: https://example.test/failed") {
                 scripted_text_output(
-                    r#"{"url":"https://example.test/failed","recorded":false,"observation_id":null,"note":"unreachable"}"#,
+                    r#"{"url":"https://example.test/failed","recorded":true,"observation_id":"00000000-0000-0000-0000-000000000001","note":"unreachable"}"#,
                 )
             } else if text.contains("Organise them into the space's knowledge base.") {
                 match tool_result("orient-landed") {
@@ -9188,6 +9761,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -9301,6 +9876,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -9500,6 +10077,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: None,
                 elements: None,
                 variables: None,
@@ -9575,6 +10154,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(token.clone()),
                 elements: None,
                 variables: None,
@@ -9631,6 +10212,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(token.clone()),
                 elements: None,
                 variables: None,
@@ -9898,7 +10481,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn schema_exhaustion_returns_null_and_replays_without_a_new_agent_call() {
+    async fn identified_schema_exhaustion_returns_its_failure_envelope_and_replays_without_a_new_agent_call()
+     {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -9919,7 +10503,8 @@ mod tests {
         );
         let source = r#"return await agent("return a JSON object", {
             model: "pinned", fallbackModel: "fallback",
-            schema: {type: "object", required: ["answer"]}, maxAttempts: 2
+            schema: {type: "object", required: ["answer"]}, maxAttempts: 2,
+            identity: true, label: "schema leg", phase: "fan-in"
         });"#;
         let Json(started) = start_inline_run(
             State(state.clone()),
@@ -9940,7 +10525,34 @@ mod tests {
             .expect("run")
             .expect("present");
         assert_eq!(completed.state, "completed");
-        assert_eq!(completed.final_output, Some(Value::Null));
+        assert_eq!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value.get("label")),
+            Some(&Value::String("schema leg".into()))
+        );
+        assert_eq!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value.get("phase")),
+            Some(&Value::String("fan-in".into()))
+        );
+        assert_eq!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value.get("output")),
+            Some(&Value::Null)
+        );
+        assert!(
+            completed
+                .final_output
+                .as_ref()
+                .and_then(|value| value["failure"]["message"].as_str())
+                .is_some_and(|message| message.starts_with("SchemaExhaustedError: agent turn "))
+        );
         let journal = storage
             .list_workflow_journal(started.id)
             .await
@@ -9986,7 +10598,7 @@ mod tests {
             .expect("run")
             .expect("present");
         assert_eq!(replayed.state, "completed");
-        assert_eq!(replayed.final_output, Some(Value::Null));
+        assert_eq!(replayed.final_output, completed.final_output);
         let replayed_journal = storage
             .list_workflow_journal(started.id)
             .await
@@ -10029,6 +10641,7 @@ mod tests {
                 description: String::new(),
                 source: "return await agent('attempt sibling read', { maxAttempts: 1 });".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -10148,6 +10761,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -10271,6 +10885,7 @@ mod tests {
                 description: String::new(),
                 source: "return await agent('nested bounded work');".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -10282,6 +10897,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow('inner-bounded', {});".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -10451,6 +11067,8 @@ mod tests {
             })),
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -11803,6 +12421,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(AgentSessionRef {
                     session_id: foreign_session.id,
                     thread_id: Uuid::new_v4(),
@@ -11859,6 +12479,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: Some(AgentSessionRef {
                     session_id: Uuid::new_v4(),
                     thread_id: Uuid::new_v4(),
@@ -13545,6 +14167,8 @@ mod tests {
             schema: None,
             max_attempts: 3,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13603,6 +14227,8 @@ mod tests {
             }),
             max_attempts: 3,
             label: None,
+            phase: None,
+            identity: None,
             elements: None,
             variables: None,
             assembly: None,
@@ -13811,6 +14437,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13892,6 +14520,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -13980,6 +14610,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14150,6 +14782,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14290,6 +14924,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14421,6 +15057,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14504,6 +15142,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14755,6 +15395,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -14993,6 +15635,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -15123,6 +15767,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: false,
                 authoring_session_id: None,
             })
             .await
@@ -15813,6 +16458,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -15924,6 +16571,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: Some("recorded failure".into()),
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
@@ -16089,6 +16738,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -16706,6 +17356,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -16830,6 +17481,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -16919,6 +17571,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17043,6 +17696,7 @@ mod tests {
                 description: String::new(),
                 source: source.into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17198,6 +17852,7 @@ mod tests {
                 delivery_grant: Some(
                     serde_json::json!([{"kind":"webhook","url":format!("http://{address}/post")}]),
                 ),
+                captured_sources_grant: false,
                 authoring_session_id: None,
             })
             .await
@@ -17245,6 +17900,7 @@ mod tests {
                 description: String::new(),
                 source: "await parallel([()=>{throw new Error('branch failed')}]); return {spent:budget.spent(),remaining:budget.remaining()};".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17306,6 +17962,7 @@ mod tests {
                 description: String::new(),
                 source: "return { doubled: args.value * 2 };".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17318,6 +17975,7 @@ mod tests {
                 source: "const child = await workflow(\"child\", { value: 21 }); return child;"
                     .into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17384,6 +18042,7 @@ mod tests {
                 description: String::new(),
                 source: "return 1;".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17396,6 +18055,7 @@ mod tests {
                 // In a child run `workflow` must be absent entirely.
                 source: "return typeof workflow;".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17407,6 +18067,7 @@ mod tests {
                 description: String::new(),
                 source: "return await workflow(\"child\");".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await
@@ -17904,6 +18565,8 @@ mod tests {
                 schema: None,
                 max_attempts: 1,
                 label: None,
+                phase: None,
+                identity: None,
                 session: None,
                 elements: None,
                 variables: None,
@@ -18279,6 +18942,8 @@ mod tests {
             schema: None,
             max_attempts: 1,
             label: None,
+            phase: None,
+            identity: None,
             session: None,
             elements: None,
             variables: None,
