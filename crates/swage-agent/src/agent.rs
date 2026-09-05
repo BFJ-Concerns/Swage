@@ -821,6 +821,11 @@ impl Agent {
                     ).await;
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
+                    let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                        turn_id: execution.turn_id,
+                        round,
+                        outcome: ProviderRoundOutcome::Interrupted,
+                    });
                     return Err(AgentError::Cancelled);
                 }
                 chunk = stream.next() => {
