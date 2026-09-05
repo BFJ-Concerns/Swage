@@ -27,10 +27,10 @@ pub use model::{
     PageTemplate, PageTemplateModule, PendingChannelOrigin, Schedule, ScheduleCreator,
     ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
     ScheduleStatus, SecretRecord, Session, SessionPolicy, SessionVariable, SkipReason,
-    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    SourceCapture, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch,
+    ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
