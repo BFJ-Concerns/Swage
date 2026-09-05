@@ -327,6 +327,7 @@ mod tests {
                 description: "Produce an operator report.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
+                captured_sources_grant: Default::default(),
                 authoring_session_id: None,
             })
             .await

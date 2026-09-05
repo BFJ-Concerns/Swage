@@ -362,7 +362,7 @@ pub async fn operator_search(
 
     if matches_kind(kind_filter, "delivery") {
         for delivery in state.storage.list_delivery_records().await? {
-            if !matches_session(session_filter, delivery.session_id) {
+            if !matches_optional_session(session_filter, delivery.session_id) {
                 continue;
             }
             let excerpt = Some(delivery.content.clone());
@@ -375,8 +375,10 @@ pub async fn operator_search(
                 results.push(OperatorSearchResult {
                     kind: "delivery".into(),
                     id: delivery.id.to_string(),
-                    session_id: Some(delivery.session_id),
-                    space_id: session_spaces.get(&delivery.session_id).copied(),
+                    session_id: delivery.session_id,
+                    space_id: delivery
+                        .session_id
+                        .and_then(|session_id| session_spaces.get(&session_id).copied()),
                     title: "delivery record".into(),
                     excerpt,
                     occurred_at: delivery.delivered_at,
