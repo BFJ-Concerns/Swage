@@ -1268,6 +1268,14 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
+    async fn try_cancel_parked_workflow_run(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+        _: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         unimplemented!()
     }

@@ -570,6 +570,60 @@ impl WorkflowStore for SqliteStorage {
         })
         .await
     }
+    async fn try_cancel_parked_workflow_run(
+        &self,
+        id: Uuid,
+        account: serde_json::Value,
+        journal_error: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let account = serde_json::to_string(&account)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let journal_error = journal_error.map(str::to_string);
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let run_id = id.to_string();
+            let claimed = tx.execute(
+                "UPDATE workflow_runs \
+                 SET state='cancelled', terminal_account_json=?2, final_output_json=NULL, \
+                     handover_json=NULL, error_message=NULL, wake_at=NULL, completed_at=?3 \
+                 WHERE id=?1 AND state='parked'",
+                params![run_id, account, now],
+            )? > 0;
+            if !claimed {
+                tx.commit()?;
+                return Ok(false);
+            }
+            if let Some(error) = journal_error {
+                let entry_ids = {
+                    let mut statement = tx.prepare(
+                        "SELECT id FROM workflow_journal \
+                         WHERE run_id=?1 AND status='started' ORDER BY seq ASC",
+                    )?;
+                    statement
+                        .query_map([&run_id], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+                let mut completed_order: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(completed_order), 0) FROM workflow_journal WHERE run_id=?1",
+                    [&run_id],
+                    |row| row.get(0),
+                )?;
+                for entry_id in entry_ids {
+                    completed_order += 1;
+                    tx.execute(
+                        "UPDATE workflow_journal \
+                         SET status='failed', error_message=?2, completed_order=?3, completed_at=?4 \
+                         WHERE id=?1",
+                        params![entry_id, error, completed_order, now],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
         self.with_conn(|conn| { let count=conn.execute("UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'", [])?; Ok(count as u64) }).await
     }

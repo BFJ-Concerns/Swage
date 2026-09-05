@@ -1064,6 +1064,15 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         account: serde_json::Value,
     ) -> Result<(), StorageError>;
+    /// Atomically cancel a parked run, attach its account, and settle any
+    /// journal entries the cancellation caught in flight. `false` means a
+    /// waker or another canceller moved the run first.
+    async fn try_cancel_parked_workflow_run(
+        &self,
+        id: Uuid,
+        account: serde_json::Value,
+        journal_error: Option<&str>,
+    ) -> Result<bool, StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
@@ -2560,6 +2569,14 @@ mod tests {
             _: Uuid,
             _: serde_json::Value,
         ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn try_cancel_parked_workflow_run(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+            _: Option<&str>,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {

@@ -2277,8 +2277,15 @@ async fn account_for_run_end(
             }
         }
     }
+    Some(terminal_account_from_journal(&journal, ending))
+}
+
+fn terminal_account_from_journal(
+    journal: &[WorkflowJournalRecord],
+    ending: WorkflowRunEnding,
+) -> WorkflowRunTerminalAccount {
     let settlement = run_end_settlement_detail(&ending);
-    let placements = provisioned_placements(&journal);
+    let placements = provisioned_placements(journal);
     let mut workers = WorkflowWorkerPartition::default();
     let mut recovered = Vec::new();
     for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
@@ -2340,12 +2347,12 @@ async fn account_for_run_end(
             reason: partial_reason(&ending),
             results: recovered,
         });
-    Some(WorkflowRunTerminalAccount {
+    WorkflowRunTerminalAccount {
         ending,
         workers,
         partial_results,
         settled_at: chrono::Utc::now(),
-    })
+    }
 }
 
 /// Why the run's completed work is partial rather than a result.
@@ -6024,6 +6031,55 @@ pub async fn get_run(
     }))
 }
 
+#[cfg(test)]
+mod parked_cancel_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("parked cancellation test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause_once(run_id: Uuid) {
+        let pause = pauses()
+            .lock()
+            .expect("parked cancellation test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("parked cancellation test hook remains open")
+                .forget();
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 pub struct WorkflowRunListQuery {
     task: Option<String>,
@@ -6064,29 +6120,42 @@ pub async fn cancel_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+    #[cfg(test)]
+    parked_cancel_test_hook::pause_once(id).await;
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
-        let account =
-            account_for_run_end(state.storage.as_ref(), id, WorkflowRunEnding::Cancelled).await;
+        let journal = state
+            .storage
+            .list_workflow_journal(id)
+            .await
+            .map_err(internal)?;
+        let ending = refine_ending(WorkflowRunEnding::Cancelled, &journal);
+        let journal_error =
+            matches!(ending, WorkflowRunEnding::Cancelled).then_some(CANCELLED_JOURNAL_SETTLEMENT);
+        let account = terminal_account_from_journal(&journal, ending);
+        let placements = retained_placements(&account);
+        if !placements.is_empty() {
+            state.worktree_host.retain(id, &placements).await;
+        }
+        let account = serde_json::to_value(account).expect("terminal account serialises to JSON");
+        let claimed = state
+            .storage
+            .try_cancel_parked_workflow_run(id, account, journal_error)
+            .await
+            .map_err(internal)?;
+        if !claimed {
+            return Err(ApiError::conflict(format!(
+                "workflow run {id} is no longer parked; not cancelling"
+            )));
+        }
+        if placements.is_empty() {
+            state.worktree_host.release(id).await;
+        }
         let budget = budget_wire(&run.budget);
         if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
             tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
         }
-        // The account lands before the state moves: a reader that sees the
-        // run cancelled sees the account of how, never a run briefly ended
-        // with nothing to say for itself.
-        let account = account.ok_or_else(|| {
-            internal("could not read the journal to record the run's terminal account")
-        })?;
-        record_terminal_account(state.storage.as_ref(), &state.worktree_host, id, account)
-            .await
-            .map_err(internal)?;
-        state
-            .storage
-            .update_workflow_run_state(id, "cancelled", None, None, None)
-            .await
-            .map_err(internal)?;
         let cancelled = state
             .storage
             .get_workflow_run(id)
@@ -7986,6 +8055,60 @@ mod tests {
         calls: AtomicUsize,
         pending_calls: usize,
         pending_call_started: Arc<Notify>,
+    }
+
+    struct ReleasableProvider {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ReleasableProvider {
+        fn model_id(&self) -> &str {
+            "releasable-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            let first = futures::stream::once(async move {
+                started.notify_one();
+                release.notified().await;
+                swage_core::StreamChunk::Delta {
+                    content: "finished after wake".into(),
+                }
+            });
+            Box::pin(futures::StreamExt::chain(
+                first,
+                futures::stream::iter([
+                    swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    }),
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ]),
+            ))
+        }
     }
 
     #[async_trait::async_trait]
@@ -11630,6 +11753,108 @@ mod tests {
                 .filter(|entry| entry.kind == "terminal_budget")
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parked_cancellation_losing_to_a_wake_keeps_the_resumed_runs_account() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"
+            await awaitEvent({ kinds: ["operator.continue"] });
+            return await agent("finish after wake", { agent: "default", maxAttempts: 1 });
+        "#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let provider_started = Arc::new(Notify::new());
+        let provider_release = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ReleasableProvider {
+                started: Arc::clone(&provider_started),
+                release: Arc::clone(&provider_release),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch awaiting run");
+        wait_for_run_state(&storage, run.id, "parked").await;
+        wait_for_workflow_thread_exit(run.id).await;
+        wait_for_active_workflow_run_release(&state, run.id).await;
+
+        let cancellation_pause = parked_cancel_test_hook::install(run.id);
+        let cancellation_state = state.clone();
+        let cancellation =
+            tokio::spawn(async move { cancel_run(State(cancellation_state), Path(run.id)).await });
+        cancellation_pause
+            .entered
+            .acquire()
+            .await
+            .expect("cancellation pause remains open")
+            .forget();
+
+        let Json(posted) = post_operator_run_event(
+            State(state.clone()),
+            Path(run.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.continue".into(),
+                payload: serde_json::json!({"approved": true}),
+            }),
+        )
+        .await
+        .expect("wake the parked run");
+        assert!(posted.wake_provisioned);
+        provider_started.notified().await;
+
+        cancellation_pause.release.add_permits(1);
+        let cancellation = cancellation.await.expect("cancellation task");
+        provider_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let resumed = storage
+                    .get_workflow_run(run.id)
+                    .await
+                    .expect("resumed run")
+                    .expect("resumed run remains present");
+                if resumed.state == "completed" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("resumed run completes");
+
+        let account = terminal_account_of(&storage, run.id).await;
+        assert_eq!(account.ending, WorkflowRunEnding::Returned);
+        assert!(
+            cancellation.is_err_and(|error| error.code() == ErrorCode::Conflict),
+            "the stale parked cancellation must lose to the resumed generation"
         );
     }
 
