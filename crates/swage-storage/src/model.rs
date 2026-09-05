@@ -268,7 +268,9 @@ pub struct ChannelLink {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryRecord {
     pub id: Uuid,
-    pub session_id: Uuid,
+    /// The session that produced a delivery. Absent when a schedule never
+    /// reached a session and records why it made no delivery.
+    pub session_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
     pub target: serde_json::Value,
@@ -1836,7 +1838,7 @@ pub struct NewChannelLink {
 /// Input for recording a durable outbound delivery.
 #[derive(Debug, Clone)]
 pub struct NewDeliveryRecord {
-    pub session_id: Uuid,
+    pub session_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
     pub target: serde_json::Value,
