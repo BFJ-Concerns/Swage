@@ -797,6 +797,17 @@ impl WorkflowStore for SqliteStorage {
         .await
     }
 
+    async fn close_open_workflow_run_holds(&self, run_id: Uuid) -> Result<u64, StorageError> {
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_run_holds SET state = 'closed' WHERE run_id = ?1 AND state = 'open'",
+                [run_id.to_string()],
+            )?;
+            Ok(changed as u64)
+        })
+        .await
+    }
+
     async fn answer_workflow_run_hold(
         &self,
         id: Uuid,

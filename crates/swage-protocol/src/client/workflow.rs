@@ -161,6 +161,7 @@ pub struct WorkflowRunHold {
 pub enum WorkflowRunHoldState {
     Open,
     Answered,
+    Closed,
 }
 
 /// One refused answer, kept so the run record shows what was tried.

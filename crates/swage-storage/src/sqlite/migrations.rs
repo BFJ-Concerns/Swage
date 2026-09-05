@@ -353,7 +353,7 @@ const CREATE_WORKFLOW_RUN_HOLDS: &str = "
         seq               INTEGER NOT NULL,
         content           TEXT NOT NULL,
         verdicts_json     TEXT NOT NULL,
-        state             TEXT NOT NULL CHECK (state IN ('open', 'answered')),
+        state             TEXT NOT NULL CHECK (state IN ('open', 'answered', 'closed')),
         verdict           TEXT,
         answer_surface    TEXT,
         answer_agent_id   TEXT,

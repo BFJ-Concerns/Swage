@@ -6436,7 +6436,8 @@
       "WorkflowRunHoldState": {
         "enum": [
           "open",
-          "answered"
+          "answered",
+          "closed"
         ],
         "type": "string"
       },

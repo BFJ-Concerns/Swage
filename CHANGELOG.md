@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
+- Completing a workflow race now closes its unselected decision holds, stopping their watchers and removing them from the answer queue.
 
 ### Added
 
