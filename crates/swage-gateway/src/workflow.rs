@@ -18473,18 +18473,15 @@ mod tests {
     async fn failed_run_surfaces_its_completed_worker_as_a_partial_result() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
-        let (state, _provider) = scripted_state(
-            &storage,
-            vec![vec![swage_core::StreamChunk::Error {
-                message: "survey provider refused the work".into(),
-            }]],
-        );
+        let (state, _provider) =
+            scripted_state(&storage, vec![scripted_text_output("survey findings")]);
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     await agent("survey the ground", {agent: "default", label: "survey"});
+                    throw new Error("the run failed after the survey");
                 "#
                 .into(),
                 args: Value::Null,
@@ -18499,22 +18496,10 @@ mod tests {
         let WorkflowRunEnding::Threw { error } = &account.ending else {
             panic!("unexpected ending: {:?}", account.ending);
         };
-        assert!(
-            error.contains("survey provider refused the work"),
-            "{error}"
-        );
-        assert!(account.workers.done.is_empty());
-        assert_eq!(account.workers.failed.len(), 1);
-        assert_eq!(account.workers.failed[0].label.as_deref(), Some("survey"));
-        let Some(WorkflowWorkerTermination::Failed { error }) =
-            &account.workers.failed[0].termination
-        else {
-            panic!("failed worker must retain its recorded failure");
-        };
-        assert!(
-            error.contains("survey provider refused the work"),
-            "{error}"
-        );
+        assert!(error.contains("the run failed after the survey"), "{error}");
+        assert_eq!(account.workers.done.len(), 1);
+        assert_eq!(account.workers.done[0].label.as_deref(), Some("survey"));
+        assert!(account.workers.failed.is_empty());
         let partial = account
             .partial_results
             .expect("a run that never returned offers its completed work");
@@ -18523,7 +18508,12 @@ mod tests {
             "{}",
             partial.reason
         );
-        assert!(partial.results.is_empty());
+        assert_eq!(partial.results.len(), 1);
+        assert_eq!(partial.results[0].label.as_deref(), Some("survey"));
+        assert_eq!(
+            partial.results[0].output,
+            Value::String("survey findings".into())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -18574,12 +18564,20 @@ mod tests {
             "{error}"
         );
         assert_eq!(account.workers.done.len(), 3);
-        assert!(
-            account
-                .partial_results
-                .expect("wind-down leaves recoverable work")
-                .reason
-                .contains("wound down")
+        let partial = account
+            .partial_results
+            .expect("wind-down leaves recoverable work");
+        assert!(partial.reason.contains("wound down"));
+        assert_eq!(partial.results.len(), 3);
+        let mut outputs = partial
+            .results
+            .into_iter()
+            .map(|result| result.output.as_str().expect("text result").to_string())
+            .collect::<Vec<_>>();
+        outputs.sort();
+        assert_eq!(
+            outputs,
+            ["first segment", "second segment", "third segment"]
         );
     }
 
