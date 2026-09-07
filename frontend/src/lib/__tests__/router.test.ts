@@ -48,6 +48,18 @@ describe("parseRoute", () => {
     });
   });
 
+  it("maps '/workflow-runs/:id' to that run's own surface", () => {
+    expect(parseRoute("/workflow-runs/run-42")).toEqual({
+      path: "/workflow-runs/run-42",
+      conversationId: null,
+      workflowRunId: "run-42",
+      settingsTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
+      notFound: false,
+    });
+  });
+
   it("maps an unrecognised path to the root route", () => {
     expect(parseRoute("/other/path")).toEqual({
       path: "/",
