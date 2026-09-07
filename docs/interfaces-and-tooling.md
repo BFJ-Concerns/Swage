@@ -232,12 +232,21 @@ local-storage target alongside any explicit targets.
 
 ### No-delivery records
 
-A schedule run that does not execute still produces a run record with a
-reason. Two reasons exist: **gate** (the gate model decided no work was
-needed) and **overlap** (a previous run was still executing when this run
-came due). Skipped runs carry state `skipped` and the skip reason on the
-run row, so the run history is the complete account of what happened at
-each tick.
+When a schedule run produces no output delivery, the gateway records a
+no-delivery entry so the run history accounts for every tick. Three
+outcomes produce this record:
+
+- **Gate skip** — the gate model decided no work was needed. The run is
+  marked `skipped` with skip reason `gate`.
+- **Overlap skip** — a previous run was still executing when this run came
+  due. The run is marked `skipped` with skip reason `overlap`.
+- **Failure before delivery** — the run failed before delivery was
+  attempted. The run is marked `failed` with an error message describing
+  the failure.
+
+A run that fails after delivery has already been attempted does not
+receive a no-delivery record — the delivery records themselves account
+for it.
 
 ## Device registration
 
