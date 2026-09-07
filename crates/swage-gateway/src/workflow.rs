@@ -678,6 +678,16 @@ fn journal_wire(
             })
             .ok()
     });
+    let liveness = entry
+        .terminal_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("liveness"))
+        .cloned()
+        .map(serde_json::from_value::<swage_workflow::WorkerLiveness>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(workflow_worker_liveness_wire)
+        .transpose()?;
     let agent_call = if entry.kind == "agent_call" {
         let agent_result = result.as_ref().and_then(|result| match result {
             WorkflowJournalResult::AgentCall {
@@ -759,6 +769,7 @@ fn journal_wire(
                 .or(agent_result
                     .and_then(|(_, _, turn_id, _, _)| *turn_id)
                     .or(resolved.and_then(|resolution| resolution.turn_id))),
+            liveness,
             served_model: stored_result
                 .and_then(|result| result.get("served_model"))
                 .and_then(Value::as_str)
@@ -799,6 +810,23 @@ fn journal_wire(
         effect,
         started_at: entry.started_at,
         completed_at: entry.completed_at,
+    })
+}
+
+fn workflow_worker_liveness_wire(
+    liveness: swage_workflow::WorkerLiveness,
+) -> Result<swage_protocol::client::workflow::WorkflowWorkerLiveness, String> {
+    Ok(swage_protocol::client::workflow::WorkflowWorkerLiveness {
+        started_at: liveness
+            .started_at
+            .parse()
+            .map_err(|error| format!("invalid workflow worker start timestamp: {error}"))?,
+        first_evidence_at: liveness
+            .first_evidence_at
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|error| format!("invalid workflow worker evidence timestamp: {error}"))?,
     })
 }
 
@@ -945,6 +973,7 @@ mod journal_result_contract_tests {
             args_hash: String::new(),
             request: Value::Null,
             result: Some(serde_json::json!({"kind": "log", "fired": true})),
+            terminal_metadata: None,
             error_message: None,
             dispatch: None,
             dispatch_attempts: None,
@@ -2431,6 +2460,43 @@ fn fallback_is_eligible(
     )
 }
 
+async fn record_workflow_worker_evidence(state: &AppState, entry_id: Uuid, event: &ServerEvent) {
+    if matches!(
+        event,
+        ServerEvent::Token { .. } | ServerEvent::ToolStart { .. }
+    ) && let Some(liveness) = state
+        .active_workflow_workers
+        .lock()
+        .await
+        .get_mut(&entry_id)
+        && liveness.first_evidence_at.is_none()
+    {
+        liveness.first_evidence_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+}
+
+async fn persist_workflow_worker_liveness(
+    state: &AppState,
+    entry_id: Uuid,
+) -> Result<(), StorageError> {
+    let liveness = state
+        .active_workflow_workers
+        .lock()
+        .await
+        .get(&entry_id)
+        .cloned();
+    if let Some(liveness) = liveness {
+        state
+            .storage
+            .set_workflow_journal_terminal_metadata(
+                entry_id,
+                serde_json::json!({ "liveness": liveness }),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_workflow_agent_turn(
     state: &AppState,
@@ -2492,7 +2558,10 @@ async fn execute_workflow_agent_turn(
                 }
                 break result;
             }
-            Some(event) = events_rx.recv() => events.push(event),
+            Some(event) = events_rx.recv() => {
+                record_workflow_worker_evidence(state, journal_entry_id, &event).await;
+                events.push(event);
+            }
             () = cancellation.cancelled() => {
                 call_cancellation.cancel();
                 if let Err(error) = processing.await {
@@ -2536,9 +2605,13 @@ async fn execute_workflow_agent_turn(
     while let Ok(Some(event)) =
         tokio::time::timeout(std::time::Duration::from_millis(50), events_rx.recv()).await
     {
+        record_workflow_worker_evidence(state, journal_entry_id, &event).await;
         events.push(event);
     }
-    events.extend(std::iter::from_fn(|| events_rx.try_recv().ok()));
+    while let Ok(event) = events_rx.try_recv() {
+        record_workflow_worker_evidence(state, journal_entry_id, &event).await;
+        events.push(event);
+    }
     Ok(WorkflowTurnAttempt {
         outcome,
         events,
@@ -6080,6 +6153,13 @@ async fn complete_agent_entry(
     cancellation: CancellationToken,
     route_admission: &RouteAdmission,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    state.active_workflow_workers.lock().await.insert(
+        entry_id,
+        swage_workflow::WorkerLiveness {
+            started_at: chrono::Utc::now().to_rfc3339(),
+            first_evidence_at: None,
+        },
+    );
     let worktree_seq = resolved_working_directory
         .as_ref()
         .and_then(|placement| placement.worktree_seq);
@@ -6098,12 +6178,18 @@ async fn complete_agent_entry(
     .await
     {
         Ok(mut result) => {
+            if let Err(error) = persist_workflow_worker_liveness(state, entry_id).await {
+                state.active_workflow_workers.lock().await.remove(&entry_id);
+                return Err(WorkflowHostError::Message(error.to_string()));
+            }
             if let Some(worktree_seq) = worktree_seq {
-                let completion = state
-                    .worktree_host
-                    .finish(run_id, worktree_seq)
-                    .await
-                    .map_err(WorkflowHostError::Message)?;
+                let completion = match state.worktree_host.finish(run_id, worktree_seq).await {
+                    Ok(completion) => completion,
+                    Err(error) => {
+                        state.active_workflow_workers.lock().await.remove(&entry_id);
+                        return Err(WorkflowHostError::Message(error));
+                    }
+                };
                 result.worktree = Some(swage_workflow::WorktreeCompletion {
                     base_commit: completion.base_commit,
                     tip_commit: completion.tip_commit,
@@ -6111,26 +6197,41 @@ async fn complete_agent_entry(
                     removed: completion.removed,
                 });
             }
-            state
+            let completion = state
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::to_value(&result).expect("agent result serialises"),
                 )
-                .await
-                .map_err(|error| error.to_string())?;
+                .await;
+            state.active_workflow_workers.lock().await.remove(&entry_id);
+            completion.map_err(|error| error.to_string())?;
             Ok(result)
         }
         // A failure the script observes (and may catch in parallel/pipeline)
         // must settle durably too, or replay treats the entry as live work
         // and re-executes the call — which may then succeed and change the
-        // resumed path. Cancellation is settled for every in-flight entry at
-        // the owning run boundary after the host loop drains.
+        // resumed path. Settling cancellation here also preserves the
+        // worker's terminal metadata before the live overlay is removed.
         Err(error) => {
-            if !error.to_string().starts_with("WorkflowCancelledError") {
+            let cancelled = error.to_string() == "WorkflowCancelledError";
+            let error_message = if cancelled {
+                "WorkflowCancelledError: run cancelled".to_string()
+            } else {
+                error.to_string()
+            };
+            if let Err(metadata_error) = persist_workflow_worker_liveness(state, entry_id).await {
+                tracing::warn!(
+                    journal_entry_id = %entry_id,
+                    %metadata_error,
+                    "could not persist failed workflow worker liveness"
+                );
+            }
+            if !cancelled {
                 let _ = state
-                    .fail_workflow_journal_entry(entry_id, &error.to_string())
+                    .fail_workflow_journal_entry(entry_id, &error_message)
                     .await;
             }
+            state.active_workflow_workers.lock().await.remove(&entry_id);
             Err(error)
         }
     }
@@ -7680,6 +7781,42 @@ pub async fn start_saved_run(
     ))
 }
 
+async fn reconcile_workflow_worker_liveness(
+    state: &AppState,
+    run_id: Uuid,
+    entries: &mut [WorkflowJournalRecord],
+    live_workers: &std::collections::HashMap<Uuid, swage_workflow::WorkerLiveness>,
+) -> Result<(), StorageError> {
+    let lacks_live_or_durable_liveness = |entry: &WorkflowJournalRecord| {
+        entry.kind == "agent_call"
+            && entry.status == "started"
+            && entry
+                .terminal_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("liveness"))
+                .is_none()
+            && !live_workers.contains_key(&entry.id)
+    };
+    if !entries.iter().any(lacks_live_or_durable_liveness) {
+        return Ok(());
+    }
+
+    let refreshed = state.storage.list_workflow_journal(run_id).await?;
+    let refreshed = refreshed
+        .into_iter()
+        .map(|entry| (entry.id, entry))
+        .collect::<std::collections::HashMap<_, _>>();
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| lacks_live_or_durable_liveness(entry))
+    {
+        if let Some(refreshed) = refreshed.get(&entry.id) {
+            *entry = refreshed.clone();
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -7690,7 +7827,7 @@ pub async fn get_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    let entries = state
+    let mut entries = state
         .storage
         .list_workflow_journal(id)
         .await
@@ -7736,6 +7873,12 @@ pub async fn get_run(
     // then by round: a call interrupted and re-dispatched would otherwise
     // surface only the attempt that finished, hiding the rounds the
     // interrupted one actually made.
+    #[cfg(test)]
+    workflow_run_detail_test_hook::pause_once(id).await;
+    let live_workers = state.active_workflow_workers.lock().await.clone();
+    reconcile_workflow_worker_liveness(&state, id, &mut entries, &live_workers)
+        .await
+        .map_err(internal)?;
     let mut journal = Vec::with_capacity(entries.len());
     for entry in entries {
         let rounds = match entry.kind == "agent_call" {
@@ -7761,11 +7904,68 @@ pub async fn get_run(
         };
         journal.push(journal_wire(entry, rounds).map_err(internal)?);
     }
+    for entry in &mut journal {
+        if let Some(liveness) = live_workers.get(&entry.id)
+            && let Some(agent_call) = entry.agent_call.as_mut()
+        {
+            agent_call.liveness =
+                Some(workflow_worker_liveness_wire(liveness.clone()).map_err(internal)?);
+        }
+    }
     Ok(Json(WorkflowRunDetailResponse {
         run: run_wire(run)?,
         journal,
         wake_metrics,
     }))
+}
+
+#[cfg(test)]
+mod workflow_run_detail_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("workflow run detail test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause_once(run_id: Uuid) {
+        let pause = pauses()
+            .lock()
+            .expect("workflow run detail test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("workflow run detail test hook remains open")
+                .forget();
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -8030,6 +8230,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use futures::StreamExt;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
@@ -10520,6 +10721,64 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    struct ParkedFirstDeltaProvider {
+        parked: std::sync::Mutex<Option<oneshot::Sender<chrono::DateTime<chrono::Utc>>>>,
+        release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    struct PendingWithoutEvidenceProvider {
+        pending: Arc<Notify>,
+    }
+
+    impl ParkedFirstDeltaProvider {
+        fn new() -> (
+            Self,
+            oneshot::Receiver<chrono::DateTime<chrono::Utc>>,
+            oneshot::Sender<()>,
+        ) {
+            let (parked_tx, parked_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    parked: std::sync::Mutex::new(Some(parked_tx)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                },
+                parked_rx,
+                release_tx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for PendingWithoutEvidenceProvider {
+        fn model_id(&self) -> &str {
+            "pending-without-evidence"
+        }
+
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            self.pending.notify_one();
+            Box::pin(futures::stream::pending())
+        }
+    }
+
     const RESEARCH_SWEEP_QUOTE: &str = "The landed source supports the purpose.";
 
     /// Matches responses to stage prompts so concurrent gather calls cannot
@@ -10685,6 +10944,71 @@ mod tests {
                 Some(output) => Box::pin(futures::stream::iter(output)),
                 None => Box::pin(futures::stream::pending()),
             }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ParkedFirstDeltaProvider {
+        fn model_id(&self) -> &str {
+            "parked-first-delta"
+        }
+
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let prompt = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !prompt.contains("parked worker") {
+                return Box::pin(futures::stream::iter(scripted_text_output("evidence")));
+            }
+            let parked = self.parked.lock().expect("parked sender").take();
+            let release = self
+                .release
+                .lock()
+                .expect("release receiver")
+                .take()
+                .expect("one parked call");
+            Box::pin(
+                futures::stream::once(async move {
+                    parked
+                        .expect("first parked call")
+                        .send(chrono::Utc::now())
+                        .expect("park signal");
+                    release.await.expect("release parked worker");
+                    swage_core::StreamChunk::Delta {
+                        content: "evidence".into(),
+                    }
+                })
+                .chain(futures::stream::iter(vec![
+                    swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    }),
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ])),
+            )
         }
     }
 
@@ -23491,6 +23815,432 @@ protocol = "openai"
             vec![Some("pinned-wire"), Some("pinned-wire")],
             "the continuation must not run its declared fallback"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_run_shows_worker_liveness_before_first_evidence_and_after_settlement() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (provider, parked, release) = ParkedFirstDeltaProvider::new();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = crate::server::build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test gateway");
+        let address = listener.local_addr().expect("test gateway address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test gateway");
+        });
+        let dispatch_window_opened_at = chrono::Utc::now();
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source:
+                    "return await Promise.all([agent('parked worker'), agent('streaming worker')]);"
+                        .into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: None,
+                    max_total_tokens: None,
+                    reserved_closing_tokens: None,
+                    max_concurrent_agent_calls: Some(2),
+                    per_route: Default::default(),
+                }),
+            }),
+        )
+        .await
+        .expect("start run");
+        let provider_dispatch_at = tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("worker reaches parked provider boundary")
+            .expect("provider park signal");
+
+        let client = reqwest::Client::new();
+        let run_url = format!("http://{address}/api/workflow-runs/{}", started.id);
+        let live = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let detail = client
+                    .get(&run_url)
+                    .send()
+                    .await
+                    .expect("request live detail")
+                    .error_for_status()
+                    .expect("live detail succeeds")
+                    .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+                    .await
+                    .expect("live detail deserialises");
+                let parked = detail
+                    .journal
+                    .iter()
+                    .find(|entry| entry.request["prompt"] == "parked worker")
+                    .and_then(|entry| entry.agent_call.as_ref())
+                    .and_then(|call| call.liveness.as_ref());
+                let streaming = detail
+                    .journal
+                    .iter()
+                    .find(|entry| entry.request["prompt"] == "streaming worker")
+                    .and_then(|entry| entry.agent_call.as_ref())
+                    .and_then(|call| call.liveness.as_ref());
+                if parked.is_some_and(|stamp| stamp.first_evidence_at.is_none())
+                    && streaming.is_some_and(|stamp| stamp.first_evidence_at.is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            live.is_ok(),
+            "live API exposes distinct worker evidence states"
+        );
+
+        release.send(()).expect("release parked worker");
+        wait_for_terminal(&state, started.id).await;
+        let settled = client
+            .get(&run_url)
+            .send()
+            .await
+            .expect("request settled detail")
+            .error_for_status()
+            .expect("settled detail succeeds")
+            .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+            .await
+            .expect("settled detail deserialises");
+        let liveness = settled
+            .journal
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .agent_call
+                    .as_ref()
+                    .and_then(|call| call.liveness.as_ref())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(liveness.len(), 2, "both calls persist liveness");
+        assert!(
+            liveness
+                .iter()
+                .all(|stamp| stamp.first_evidence_at.is_some())
+        );
+        let parked_liveness = settled
+            .journal
+            .iter()
+            .find(|entry| entry.request["prompt"] == "parked worker")
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("parked worker liveness");
+        assert!(
+            dispatch_window_opened_at <= parked_liveness.started_at
+                && parked_liveness.started_at <= provider_dispatch_at,
+            "started_at is captured between requesting and entering provider dispatch"
+        );
+        assert!(
+            provider_dispatch_at <= parked_liveness.first_evidence_at.expect("first evidence"),
+            "dispatch precedes the first provider evidence"
+        );
+        assert!(
+            state.active_workflow_workers.lock().await.is_empty(),
+            "settled success evicts every live overlay"
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("settled journal");
+        for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
+            assert!(
+                stored_worker_liveness(&storage, entry.id)
+                    .await
+                    .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+                "settled success stores its evidence stamps independently of the live overlay"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_run_keeps_liveness_across_live_to_durable_handoff() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (provider, parked, release) = ParkedFirstDeltaProvider::new();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('parked worker');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("worker reaches parked provider boundary")
+            .expect("provider park signal");
+
+        let pause = workflow_run_detail_test_hook::install(started.id);
+        let detail_task = tokio::spawn(get_run(State(state.clone()), Path(started.id)));
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("workflow run detail test hook remains open")
+            .forget();
+        release.send(()).expect("release parked worker");
+        wait_for_terminal(&state, started.id).await;
+        assert!(
+            state.active_workflow_workers.lock().await.is_empty(),
+            "worker settles and evicts its live overlay while run detail is paused"
+        );
+        pause.release.add_permits(1);
+
+        let Json(detail) = detail_task
+            .await
+            .expect("join run detail request")
+            .expect("run detail succeeds");
+        let call = detail
+            .journal
+            .iter()
+            .find_map(|entry| entry.agent_call.as_ref())
+            .expect("agent call detail");
+        assert!(
+            call.liveness
+                .as_ref()
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "run detail uses durable liveness after the live overlay is evicted"
+        );
+    }
+
+    async fn stored_worker_liveness(
+        storage: &SqliteStorage,
+        entry_id: Uuid,
+    ) -> Option<swage_workflow::WorkerLiveness> {
+        let metadata = storage
+            .with_conn(move |connection| {
+                connection.query_row(
+                    "SELECT terminal_metadata_json FROM workflow_journal WHERE id = ?1",
+                    [entry_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .await
+            .expect("read durable terminal metadata")?;
+        let metadata: Value = serde_json::from_str(&metadata).expect("terminal metadata JSON");
+        serde_json::from_value(metadata.get("liveness")?.clone())
+            .expect("stored worker liveness shape")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_worker_persists_liveness_after_live_overlay_is_evicted() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ScriptedRecordingProvider {
+                outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
+                    swage_core::StreamChunk::Error {
+                        message: "provider failed".into(),
+                    },
+                ]])),
+                requests: std::sync::Mutex::new(vec![]),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('failing worker', { maxAttempts: 1 });".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start failing run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("failed journal");
+        let failed = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed.status, "failed");
+        let stored_liveness = stored_worker_liveness(&storage, failed.id)
+            .await
+            .expect("failed call stores dispatch liveness");
+        assert_eq!(
+            stored_liveness.first_evidence_at, None,
+            "a provider failure before output has no evidence stamp"
+        );
+        assert!(
+            !state
+                .active_workflow_workers
+                .lock()
+                .await
+                .contains_key(&failed.id),
+            "failed call evicts its live overlay"
+        );
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("failed run detail");
+        let detail_liveness = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == failed.id)
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("failed run detail projects durable dispatch liveness");
+        assert_eq!(detail_liveness.first_evidence_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_start_is_worker_evidence_before_any_text() {
+        let (state, storage, _, space_id) = fallback_test_state_with_tools(
+            vec![
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "echo-1".into(),
+                        name: "echo".into(),
+                        arguments: serde_json::json!({"text": "work"}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![swage_core::StreamChunk::Error {
+                    message: "failed before text".into(),
+                }],
+            ],
+            vec![
+                Arc::new(crate::test_support::NamedTool::new("echo")) as Arc<dyn crate::tool::Tool>
+            ],
+        )
+        .await;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"return await agent("tool-only worker", { tools: ["echo"], maxAttempts: 1 });"#
+                    .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start tool-only run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("tool-only journal");
+        let failed = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("tool-only agent call");
+        assert_eq!(failed.status, "failed");
+        assert!(
+            stored_worker_liveness(&storage, failed.id)
+                .await
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "ToolStart stamps evidence before any text is emitted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_worker_persists_liveness_after_live_overlay_is_evicted() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let pending = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PendingWithoutEvidenceProvider {
+                pending: Arc::clone(&pending),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('cancelled worker');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start cancellable run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), pending.notified())
+            .await
+            .expect("worker reaches pending stream");
+        cancel_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("request cancellation");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("cancelled journal");
+        let cancelled = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("cancelled agent call");
+        assert_eq!(cancelled.status, "failed");
+        let stored_liveness = stored_worker_liveness(&storage, cancelled.id)
+            .await
+            .expect("cancelled call stores dispatch liveness");
+        assert_eq!(
+            stored_liveness.first_evidence_at, None,
+            "a worker cancelled before output has no evidence stamp"
+        );
+        assert!(
+            !state
+                .active_workflow_workers
+                .lock()
+                .await
+                .contains_key(&cancelled.id),
+            "cancelled call evicts its live overlay"
+        );
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("cancelled run detail");
+        let detail_liveness = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == cancelled.id)
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("cancelled run detail projects durable dispatch liveness");
+        assert_eq!(detail_liveness.first_evidence_at, None);
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {

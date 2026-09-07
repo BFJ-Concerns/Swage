@@ -174,7 +174,7 @@ const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
     carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json";
-const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
+const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
 fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRecord> {
@@ -204,8 +204,9 @@ fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRe
 
 fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecord> {
     let result: Option<String> = row.get(8)?;
-    let key: Option<String> = row.get(11)?;
-    let completed: Option<String> = row.get(14)?;
+    let terminal_metadata: Option<String> = row.get(9)?;
+    let key: Option<String> = row.get(12)?;
+    let completed: Option<String> = row.get(15)?;
     Ok(WorkflowJournalRecord {
         id: uuid(row.get(0)?)?,
         run_id: uuid(row.get(1)?)?,
@@ -231,15 +232,25 @@ fn journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowJournalRecor
                     Box::new(error),
                 )
             })?,
-        error_message: row.get(9)?,
-        effect_kind: row.get(10)?,
+        terminal_metadata: terminal_metadata
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        error_message: row.get(10)?,
+        effect_kind: row.get(11)?,
         idempotency_key: key.map(uuid).transpose()?,
-        target_kind: row.get(12)?,
-        started_at: time(row.get(13)?)?,
+        target_kind: row.get(13)?,
+        started_at: time(row.get(14)?)?,
         completed_at: completed.map(time).transpose()?,
-        dispatch: json_column(row, 15)?,
-        dispatch_attempts: json_column(row, 16)?,
-        termination: json_column(row, 17)?,
+        dispatch: json_column(row, 16)?,
+        dispatch_attempts: json_column(row, 17)?,
+        termination: json_column(row, 18)?,
     })
 }
 
@@ -718,6 +729,27 @@ impl WorkflowStore for SqliteStorage {
             serde_json::to_string(&result).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let now = Utc::now();
         self.with_conn(move |conn| { let tx=conn.unchecked_transaction()?; let run_id:String=tx.query_row("SELECT run_id FROM workflow_journal WHERE id=?1",[id.to_string()],|row|row.get(0))?; let order:i64=tx.query_row("SELECT COALESCE(MAX(completed_order),0)+1 FROM workflow_journal WHERE run_id=?1",[run_id],|row|row.get(0))?; tx.execute("UPDATE workflow_journal SET status='completed', result_json=?2, completed_order=?3, completed_at=?4 WHERE id=?1",params![id.to_string(),result,order,now.to_rfc3339()])?; tx.commit()?; conn.query_row(&format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id=?1"),[id.to_string()],journal_row) }).await
+    }
+
+    async fn set_workflow_journal_terminal_metadata(
+        &self,
+        id: Uuid,
+        metadata: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError> {
+        let metadata = serde_json::to_string(&metadata)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        self.with_conn(move |connection| {
+            connection.execute(
+                "UPDATE workflow_journal SET terminal_metadata_json = ?2 WHERE id = ?1",
+                params![id.to_string(), metadata],
+            )?;
+            connection.query_row(
+                &format!("SELECT {JOURNAL_COLUMNS} FROM workflow_journal WHERE id = ?1"),
+                [id.to_string()],
+                journal_row,
+            )
+        })
+        .await
     }
 
     async fn fail_workflow_journal_entry(

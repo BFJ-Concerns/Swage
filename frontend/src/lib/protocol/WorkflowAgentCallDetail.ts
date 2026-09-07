@@ -2,10 +2,11 @@
 import type { WorkflowAgentCallDispatch } from "./WorkflowAgentCallDispatch";
 import type { WorkflowCallUsage } from "./WorkflowCallUsage";
 import type { WorkflowProviderRound } from "./WorkflowProviderRound";
+import type { WorkflowWorkerLiveness } from "./WorkflowWorkerLiveness";
 import type { WorkflowWorkerTermination } from "./WorkflowWorkerTermination";
 import type { WorkflowWorktreeCompletion } from "./WorkflowWorktreeCompletion";
 
-export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null,
+export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null, liveness: WorkflowWorkerLiveness | null,
 /**
  * The resolved state of the isolated worktree after the worker settled.
  */

@@ -493,6 +493,7 @@ pub struct WorkflowAgentCallDetail {
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
+    pub liveness: Option<WorkflowWorkerLiveness>,
     /// The resolved state of the isolated worktree after the worker settled.
     pub worktree: Option<WorkflowWorktreeCompletion>,
     pub served_model: Option<String>,
@@ -511,6 +512,13 @@ pub struct WorkflowAgentCallDetail {
     /// as a call that made no provider request. The run detail always
     /// carries them.
     pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
+}
+
+/// Earliest liveness evidence for one workflow worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorkerLiveness {
+    pub started_at: DateTime<Utc>,
+    pub first_evidence_at: Option<DateTime<Utc>>,
 }
 
 /// The final Git state of an isolated worker worktree.
