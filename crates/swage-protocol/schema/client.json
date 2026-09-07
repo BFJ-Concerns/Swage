@@ -5506,6 +5506,16 @@
             }
           ]
         },
+        "liveness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorkerLiveness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "provider_rounds": {
           "description": "The provider rounds this call's turn ran, oldest first. `None` where\nthe projection does not carry them — the live entry event, which is\nsent as the entry settles — so an absent round record is never read\nas a call that made no provider request. The run detail always\ncarries them.",
           "type": [
@@ -7559,6 +7569,26 @@
       "required": [
         "journal_entry_id",
         "seq"
+      ]
+    },
+    "WorkflowWorkerLiveness": {
+      "description": "Earliest liveness evidence for one workflow worker.",
+      "type": "object",
+      "properties": {
+        "first_evidence_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "started_at"
       ]
     },
     "WorkflowWorkerPartition": {

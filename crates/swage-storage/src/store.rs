@@ -1174,6 +1174,13 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         result: serde_json::Value,
     ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Persists outcome-independent metadata before an entry's terminal
+    /// status is committed.
+    async fn set_workflow_journal_terminal_metadata(
+        &self,
+        id: Uuid,
+        metadata: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
     /// Settles an entry as `failed`, preserving the failure's own message so
     /// replay returns the recorded error instead of re-executing the call.
     async fn fail_workflow_journal_entry(
@@ -2733,6 +2740,13 @@ mod tests {
             unimplemented!()
         }
         async fn complete_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn set_workflow_journal_terminal_metadata(
             &self,
             _: Uuid,
             _: serde_json::Value,
