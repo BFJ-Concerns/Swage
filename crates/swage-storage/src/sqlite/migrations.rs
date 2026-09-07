@@ -91,6 +91,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
         ("059_page_templates", CREATE_PAGE_TEMPLATE_TABLES),
         ("060_workflow_run_holds", CREATE_WORKFLOW_RUN_HOLDS),
+        ("061_worker_call_record", CREATE_WORKER_CALL_RECORD),
     ]
 }
 
@@ -166,6 +167,22 @@ CREATE INDEX IF NOT EXISTS idx_page_template_modules_template
     ON page_template_modules(template_id);
 ALTER TABLE pages ADD COLUMN forked_from_template_id TEXT REFERENCES page_templates(id) ON DELETE SET NULL;
 ALTER TABLE pages ADD COLUMN forked_at TEXT;
+";
+
+const CREATE_WORKER_CALL_RECORD: &str = "
+    ALTER TABLE workflow_journal ADD COLUMN dispatch_json TEXT;
+    ALTER TABLE workflow_journal ADD COLUMN dispatch_attempts_json TEXT;
+    ALTER TABLE workflow_journal ADD COLUMN termination_json TEXT;
+    CREATE TABLE IF NOT EXISTS provider_rounds (
+        id TEXT NOT NULL PRIMARY KEY,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        round INTEGER NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        outcome_json TEXT NOT NULL,
+        UNIQUE (turn_id, round)
+    );
+    CREATE INDEX IF NOT EXISTS idx_provider_rounds_turn ON provider_rounds(turn_id, round);
 ";
 
 /// Delegated-child usage aggregated onto the delegating turn: a billing
