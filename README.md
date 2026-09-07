@@ -231,14 +231,16 @@ first:
   repository as a workspace, and trusting it so its guidance reaches agents.
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
   how a run survives a restart, how its token budget is spent (including
-  per-route partitions), and what each call's detail record contains.
+  per-route partitions), what each call's detail record contains, and the
+  terminal account that records how a run ended, where its workers stood,
+  and what work survived.
 - [Agents and permissions](docs/agents-and-permissions.md) — agent
   definitions, operator guidance (`AGENTS.md`), effort resolution, what a
   tool call is allowed to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
   turn context inspector, image attachments, pages, delivery targets, the
-  API error contract, the wire contract and its projections, and the
-  verification gate.
+  API error contract, the wire contract and its projections, the
+  verification gate, and the gateway's built-in tool inventory.
 
 Every failed API response carries a `{"code","message"}` body whose code
 vocabulary is defined in the protocol crate. The manifested client-surface

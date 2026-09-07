@@ -1,5 +1,5 @@
 ---
-description: Run lifecycle, journal/replay, budget partitions (including per-route), run detail (dispatch, provider rounds, usage, liveness, worktree completion, termination), parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
+description: Run lifecycle, journal/replay, budget partitions (including per-route), run detail (dispatch, provider rounds, usage, liveness, worktree completion, termination), terminal account (ending, worker partition, partial results, retention), parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
 ---
 
 # Workflow engine
@@ -662,9 +662,11 @@ facts and the record keeps them apart.
 | `outstanding` | The worker is still working. |
 | `settled` | The worker ran to its own end. |
 | `failed { message }` | The worker's own work failed. |
-| `cut_short { cause }` | The run ended while this worker was still working. |
+| `cut_short { cause, detail }` | The run ended while this worker was still working. `detail` (optional) carries the settling error written over the worker when the terminal account has one to preserve. |
+| `unsettled` | Nothing ever recorded an outcome — the run's end left no process alive to settle this worker. |
 
-`WorkflowCutShortCause` values: `run_cancelled`.
+`WorkflowCutShortCause` values: `run_cancelled`, `run_returned`,
+`run_failed`, `run_wound_down`.
 
 ### Liveness
 
@@ -693,6 +695,108 @@ journal result:
 The worktree completion is resolved after the worker settles: the host
 calls `worktree_host.finish()` to read the final Git state, then records
 it in the journal result.
+
+## Terminal account
+
+When a run ends, the gateway assembles a `WorkflowRunTerminalAccount` —
+a single record of what ended it, where every worker stood, and what
+work survived. It is absent while the run is still going and present
+from the moment the run reaches a terminal state.
+
+Primary source: `crates/swage-protocol/src/client/workflow.rs`
+(`WorkflowRunTerminalAccount` and its children);
+`crates/swage-gateway/src/workflow.rs` (`terminal_account_from_journal`,
+`record_terminal_account`, `retained_placements`).
+
+### Ending
+
+`WorkflowRunEnding` is a tagged enum. Every ending path names itself, so
+no reader infers a run's end from silence or the absence of a result:
+
+| Variant | Meaning |
+|---|---|
+| `returned` | The script returned its result. |
+| `threw { error }` | The script threw, or the engine failed the run. |
+| `cancelled` | An operator or a parent run cancelled it. |
+| `wound_down { error }` | The working token allowance ran out and the run ended under wind-down. |
+| `interrupted_without_resume { reason }` | The gateway died with the run in flight and the run could not be resumed. `reason` says why the resume was refused. |
+
+### Worker partition
+
+`WorkflowWorkerPartition` sorts every worker the run dispatched into
+exactly one list:
+
+| List | Standing |
+|---|---|
+| `done` | The worker settled successfully. |
+| `failed` | The worker's own work failed. |
+| `cut_short` | The run's ending stopped the worker while it was still working. |
+| `unsettled` | Nothing ever recorded an outcome — the run's end left no process alive to settle it. |
+
+Each `WorkflowWorkerAccount` entry carries:
+
+| Field | Type | Notes |
+|---|---|---|
+| `journal_entry_id` | `Uuid` | The journal entry for this worker's call. |
+| `seq` | `u64` | Journal sequence number. |
+| `label` | `Option<String>` | The call's label, when one was given. |
+| `agent_definition_id` | `Option<String>` | The agent definition used. |
+| `placement` | `Option<String>` | The directory the worker ran in — kept on disk when the run did not return, so its work is still there. |
+| `worktree` | `Option<WorkflowWorktreeCompletion>` | The final Git state recorded when an isolated worker settled. |
+| `termination` | `Option<WorkflowWorkerTermination>` | How the worker stopped. Absent for a worker that settled on its own account. |
+
+### Partial results
+
+`WorkflowPartialResults` is present exactly when the run ended without
+its script returning. It surfaces the completed workers' output as
+recoverable work — never the run's result — with a `reason` saying what
+stopped the run from producing one.
+
+Each `WorkflowPartialResult` carries:
+
+| Field | Type | Notes |
+|---|---|---|
+| `journal_entry_id` | `Uuid` | The journal entry for this worker. |
+| `seq` | `u64` | Journal sequence number. |
+| `label` | `Option<String>` | The call's label. |
+| `output` | `Value` | The completed worker's output. |
+| `placement` | `Option<String>` | Where the work was done, still on disk. |
+
+### Where the account is read
+
+Three surfaces expose the terminal account:
+
+1. **Run detail response** — `WorkflowRunDetailResponse` carries the
+   `WorkflowRun`, which includes `terminal_account`. Returned by
+   `GET /api/workflow-runs/{id}` (`server.rs:125`).
+2. **Run view** — the frontend route `/workflow-runs/{id}` renders
+   `WorkflowRunView.svelte`, which reads `run.terminal_account` and
+   displays the ending, worker partition, and partial results in one
+   coherent view alongside the journal.
+3. **`workflow_run_account` tool** — a gateway tool
+   (`crates/swage-gateway/src/tool/workflow_run_account.rs`) that reads
+   the terminal account for one run. Scoped to the caller's session
+   space: a run in another space reads as absent. Returns
+   `{ run_id, script_name, state, ended: true, account }` when the run
+   has ended, or `{ ended: false, note }` when it has not.
+
+### Worker directory retention
+
+When a run ends without returning, the directories its account names are
+retained: the gateway claims them from the worktree host before
+recording the account, so from the moment a reader can find them nothing
+takes them away — not this gateway's shutdown, not the next one's
+startup sweep.
+
+A run that returned reclaims its workers' directories with the rest of
+its scaffolding. The `retained_placements` function returns an empty
+list for a `returned` ending and every named placement otherwise.
+
+A stale cancellation — a parked cancellation that loses to a resumed
+run — withdraws only its own retention claim. When the resumed run
+returned, the stale cancellation's withdrawal restores the normal
+reclaim path; when the resumed run failed, the winner's retention claim
+is preserved.
 
 ## Carried workflows
 
