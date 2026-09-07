@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
+description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
 ---
 
 # Interfaces and tooling
@@ -268,6 +268,18 @@ A schedule run that does not execute still produces a run record. The
 Skipped runs carry state `skipped` and `skip_reason` on the run row. The
 channel gateway records a no-delivery entry (`record_no_delivery`) with
 target `{"kind": "no_delivery"}` when delivery cannot proceed.
+
+## Device registration
+
+Remote devices register through `POST /api/devices`
+(`RegisterDeviceRequest` in `swage-protocol::device`). The `kind` field
+defaults to `"attached_device"` and names the device type.
+
+`remote_registration_kind` (`device.rs:156`) parses and validates the
+kind at the registration boundary. A `kind` of `"local"` is refused with
+a `ValidationError`: a local device has no remote producer to register.
+The same refusal applies to recovery imports that carry a local kind, so
+the constraint holds at every entry point into the remote-device registry.
 
 ## Wire error contract
 
