@@ -172,6 +172,7 @@ describe("turn context inspector trigger", () => {
       compaction_applied: [],
       warnings: [],
       errors: [],
+      declared_omissions: [],
       effective_tool_permissions: undefined,
       provider_visible: undefined,
       duration: { secs: 0, nanos: 1 },

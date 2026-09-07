@@ -205,8 +205,15 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
         stream_requests: Mutex::new(vec![]),
     };
     assert!(
-        exceeds_threshold_with_model(std::slice::from_ref(&non_text), &threshold, &provider, None,)
-            .await,
+        exceeds_threshold_with_model(
+            std::slice::from_ref(&non_text),
+            &threshold,
+            &provider,
+            None,
+            false,
+        )
+        .await
+        .exceeds,
         "non-text payload bypasses the byte screen and uses native count"
     );
     assert!(
@@ -215,8 +222,10 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
             &threshold,
             &provider,
             None,
+            false,
         )
-        .await,
+        .await
+        .exceeds,
         "native count at the exact limit must not compact"
     );
     assert!(
@@ -225,8 +234,10 @@ async fn non_text_and_tool_payloads_use_native_counting_while_exact_limit_and_er
             &threshold,
             &provider,
             None,
+            false,
         )
-        .await,
+        .await
+        .exceeds,
         "a provider count failure keeps the non-exceeding estimate"
     );
     assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
