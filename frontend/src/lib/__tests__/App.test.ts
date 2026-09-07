@@ -231,4 +231,19 @@ describe("ambient channel control path", () => {
     expect(document.body.textContent).not.toContain("History of conv-1");
     expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
   });
+
+  it("routes a workflow run URL into the run view and requests that run", async () => {
+    window.history.replaceState({}, "", "/workflow-runs/run-route");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ run: { id: "run-route", state: "running" }, journal: [] }), {
+        status: 200,
+      }),
+    );
+    component = mount(App, { target: document.body });
+
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledOnce();
+    });
+    expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-route");
+  });
 });

@@ -8,4 +8,9 @@ import type { WorkflowCutShortCause } from "./WorkflowCutShortCause";
  * working. It is not a failure of the worker, and the terminal run account
  * partitions on the same cause — this is where that cause is named.
  */
-export type WorkflowWorkerTermination = { "termination": "outstanding" } | { "termination": "settled" } | { "termination": "failed", message: string, } | { "termination": "cut_short", cause: WorkflowCutShortCause, };
+export type WorkflowWorkerTermination = { "termination": "outstanding" } | { "termination": "settled" } | { "termination": "failed", message: string, } | { "termination": "cut_short", cause: WorkflowCutShortCause,
+/**
+ * The settling error written over the worker, where the terminal
+ * account has one to preserve.
+ */
+detail: string | null, } | { "termination": "unsettled" };

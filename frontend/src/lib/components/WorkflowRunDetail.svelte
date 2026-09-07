@@ -10,7 +10,6 @@
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
-  import { fetchWorkflowRun } from "../api/workflow-runs";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
   import type { WorkflowAgentCallDetail } from "../protocol/WorkflowAgentCallDetail";
   import type { WorkflowCallUsage } from "../protocol/WorkflowCallUsage";
@@ -18,33 +17,12 @@
   import type { WorkflowProviderRound } from "../protocol/WorkflowProviderRound";
 
   interface Props {
-    runId: string;
+    detail: WorkflowRunDetailResponse | null;
+    loadState: "loading" | "loaded" | "absent" | "error";
+    errorMessage: string;
   }
 
-  let { runId }: Props = $props();
-
-  let detail = $state<WorkflowRunDetailResponse | null>(null);
-  let loadState = $state<"loading" | "loaded" | "absent" | "error">("loading");
-  let errorMessage = $state("");
-
-  $effect(() => {
-    // Pin the request to the run that started it, so a response arriving
-    // after the user moved on is dropped rather than rendered against the
-    // wrong run.
-    const requestedRunId = runId;
-    loadState = "loading";
-    fetchWorkflowRun(requestedRunId)
-      .then((loaded) => {
-        if (requestedRunId !== runId) return;
-        detail = loaded;
-        loadState = loaded === null ? "absent" : "loaded";
-      })
-      .catch((error: unknown) => {
-        if (requestedRunId !== runId) return;
-        errorMessage = error instanceof Error ? error.message : String(error);
-        loadState = "error";
-      });
-  });
+  let { detail, loadState, errorMessage }: Props = $props();
 
   const agentCalls = $derived(
     (detail?.journal ?? []).filter((entry) => entry.agent_call !== null),
@@ -73,6 +51,8 @@
         return termination.cause === "run_cancelled"
           ? "Cut short — the run was cancelled"
           : "Cut short";
+      case "unsettled":
+        return "Never settled";
     }
   }
 

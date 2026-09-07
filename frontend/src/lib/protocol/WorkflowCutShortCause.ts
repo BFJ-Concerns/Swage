@@ -3,4 +3,4 @@
 /**
  * The run-end circumstance that cut a worker short.
  */
-export type WorkflowCutShortCause = "run_cancelled";
+export type WorkflowCutShortCause = "run_cancelled" | "run_returned" | "run_failed" | "run_wound_down";
