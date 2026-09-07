@@ -92,9 +92,10 @@ All notable changes to Swage are documented in this file.
 - Remote-device registration now refuses a Local target consistently, including pairing and recovery imports that have no local producer.
 - Workflow-script updates now retain source-header descriptions, expose their whole delivery grant in configuration history, and return 404 for an absent script.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
+- Immediate tool-approval rejections now settle reliably instead of timing out when they arrive as the prompt is shown.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.
-- A native compaction-threshold breach now remains actionable when a later count is unavailable.
+- Compaction preserves a native threshold breach when a later count is unavailable while retaining estimate fallback for providers without native counting.
 - Context compaction now counts tokens with the selected completion model.
 - Tool-schema guidance now describes every `allOf` branch as required together.
 - Workflow metadata headers now accept valid unquoted keys that begin with `$`.

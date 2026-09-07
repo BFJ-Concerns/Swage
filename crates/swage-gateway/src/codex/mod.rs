@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::{path::Path, sync::Arc, time::Instant};
 
 use serde_json::{Value, json};
+use swage_agent::event::SchemaValidationError;
 use swage_agent::{
     AgentConfig, AgentError, AgentEvent, OutboundMessage, extraction::extract_json_values,
 };
@@ -207,10 +208,12 @@ pub async fn run_turn(
         {
             tracing::warn!(%thread_id, error = %storage_error, "failed to return Codex thread to idle");
         }
-        let _ = event_tx.send(AgentEvent::Error {
-            message: error.to_string(),
-            provider_failure: matches!(error, AgentError::ProviderFailed(_)),
-        });
+        if !matches!(error, AgentError::OutputSchemaFailed { .. }) {
+            let _ = event_tx.send(AgentEvent::Error {
+                message: error.to_string(),
+                provider_failure: matches!(error, AgentError::ProviderFailed(_)),
+            });
+        }
     }
     result
 }
@@ -312,159 +315,228 @@ async fn run_turn_inner(
         };
 
     let sandbox_policy = sandbox_policy(&request.permissions, &request.agent_config.allowed_paths);
-    let mut provider_request = json!({
-        "threadId": codex_thread_id,
-        "input": [{"type":"text", "text":request.user_message}],
-        "sandboxPolicy": sandbox_policy,
-        "approvalPolicy": "on-request",
-        "cwd": request.agent_config.working_directory,
-        "outputSchema": request.agent_config.output_schema,
-    });
-    add_codex_effort(&mut provider_request, request.effort.as_ref());
-    let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
-        turn_id: request.turn_id,
-        round: 1,
-        request: json!({"method":"turn/start","params":provider_request.clone()}),
-    });
-    let turn_response = client
-        .request("turn/start", provider_request)
-        .await
-        .map_err(provider_error)?;
-    let codex_turn_id = turn_response
-        .pointer("/turn/id")
-        .or_else(|| turn_response.get("turnId"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string);
-
+    let validator = request
+        .agent_config
+        .output_schema
+        .as_ref()
+        .map(swage_core::json_schema_validator)
+        .transpose()
+        .map_err(|error| AgentError::InvalidConfig(format!("invalid output schema: {error}")))?;
+    let mut structured_output = None;
     let mut response_text = String::new();
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
     let mut tool_count = 0u32;
-    let mut active_items = HashMap::<String, Value>::new();
-    let mut tool_tasks = JoinSet::new();
-    loop {
-        tokio::select! {
-            // Drain buffered requests and notifications before reporting
-            // transport closure: the server may deliver a turn's terminal
-            // notification and close in the same instant, and that outcome
-            // must win over the close.
-            biased;
-            () = request.cancellation.cancelled() => {
-                if let Some(turn_id) = codex_turn_id.as_deref() {
-                    let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
+    for attempt in 0..=request.agent_config.max_output_retries {
+        response_text.clear();
+        let mut attempt_input_tokens = 0u32;
+        let mut attempt_output_tokens = 0u32;
+        // A retry corrects the shape of the previous answer. The user request
+        // and every tool call it already made stay in the retained thread, so
+        // resubmitting it here would repeat its side effects.
+        let input = if attempt == 0 {
+            request.user_message.clone()
+        } else {
+            "Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema.".to_string()
+        };
+        let mut provider_request = json!({
+            "threadId": codex_thread_id,
+            "input": [{"type":"text", "text":input}],
+            "sandboxPolicy": sandbox_policy,
+            "approvalPolicy": "on-request",
+            "cwd": request.agent_config.working_directory,
+            "outputSchema": request.agent_config.output_schema,
+        });
+        add_codex_effort(&mut provider_request, request.effort.as_ref());
+        let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
+            turn_id: request.turn_id,
+            round: attempt as usize + 1,
+            request: json!({"method":"turn/start","params":provider_request.clone()}),
+        });
+        let turn_response = client
+            .request("turn/start", provider_request)
+            .await
+            .map_err(provider_error)?;
+        let codex_turn_id = turn_response
+            .pointer("/turn/id")
+            .or_else(|| turn_response.get("turnId"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let mut active_items = HashMap::<String, Value>::new();
+        let mut tool_tasks = JoinSet::new();
+        loop {
+            tokio::select! {
+                // Drain buffered requests and notifications before reporting
+                // transport closure: the server may deliver a turn's terminal
+                // notification and close in the same instant, and that outcome
+                // must win over the close.
+                biased;
+                () = request.cancellation.cancelled() => {
+                    if let Some(turn_id) = codex_turn_id.as_deref() {
+                        let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
+                    }
+                    state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
+                    state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
+                    return Err(AgentError::Cancelled);
                 }
-                state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
-                state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
-                return Err(AgentError::Cancelled);
-            }
-            incoming = server_requests.recv() => {
-                let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )))?;
-                if incoming.method == "item/tool/call" {
-                    tool_count += 1;
-                    let tool_state = state.clone();
-                    let tool_client = client.clone();
-                    let tool_request = request.clone();
-                    let position = tool_count;
-                    tool_tasks.spawn(async move {
-                        handle_tool_call(&tool_state, &tool_client, &tool_request, incoming, position).await;
-                    });
-                } else {
-                    handle_approval(&state, &client, &request, incoming, &active_items).await;
+                incoming = server_requests.recv() => {
+                    let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                        "Codex App Server transport closed mid-turn".to_string(),
+                    )))?;
+                    if incoming.method == "item/tool/call" {
+                        tool_count += 1;
+                        let tool_state = state.clone();
+                        let tool_client = client.clone();
+                        let tool_request = request.clone();
+                        let position = tool_count;
+                        let provider_round =
+                            i32::try_from(attempt.saturating_add(1)).unwrap_or(i32::MAX);
+                        tool_tasks.spawn(async move {
+                            handle_tool_call(
+                                &tool_state,
+                                &tool_client,
+                                &tool_request,
+                                incoming,
+                                position,
+                                provider_round,
+                            )
+                            .await;
+                        });
+                    } else {
+                        handle_approval(&state, &client, &request, incoming, &active_items).await;
+                    }
                 }
-            }
-            incoming = notifications.recv() => {
-                let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )))?;
-                match incoming.method.as_str() {
-                    "item/started" | "item/updated" => {
-                        let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
-                        if let Some(id) = item.get("id").and_then(Value::as_str) {
-                            active_items.insert(id.to_string(), item);
+                incoming = notifications.recv() => {
+                    let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                        "Codex App Server transport closed mid-turn".to_string(),
+                    )))?;
+                    match incoming.method.as_str() {
+                        "item/started" | "item/updated" => {
+                            let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
+                            if let Some(id) = item.get("id").and_then(Value::as_str) {
+                                active_items.insert(id.to_string(), item);
+                            }
                         }
-                    }
-                    "item/agentMessage/delta" => {
-                        if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
-                            response_text.push_str(delta);
-                            let _ = request.event_tx.send(AgentEvent::Token { content: delta.to_string() });
+                        "item/agentMessage/delta" => {
+                            if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
+                                response_text.push_str(delta);
+                                let _ = request.event_tx.send(AgentEvent::Token { content: delta.to_string() });
+                            }
                         }
-                    }
-                    "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                        if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
-                            let _ = request.event_tx.send(AgentEvent::ProviderReasoningCaptured {
-                                turn_id: request.turn_id,
-                                round: 0,
-                                content: delta.to_string(),
-                                details: None,
-                            });
+                        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                            if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
+                                let _ = request.event_tx.send(AgentEvent::ProviderReasoningCaptured {
+                                    turn_id: request.turn_id,
+                                    round: attempt as usize + 1,
+                                    content: delta.to_string(),
+                                    details: None,
+                                });
+                            }
                         }
-                    }
-                    "item/completed" => {
-                        let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
-                        if item.get("type").and_then(Value::as_str) == Some("agentMessage")
-                            && response_text.is_empty()
-                            && let Some(text) = item.get("text").and_then(Value::as_str)
-                        {
-                            response_text = text.to_string();
-                            let _ = request.event_tx.send(AgentEvent::Token { content: text.to_string() });
+                        "item/completed" => {
+                            let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
+                            if item.get("type").and_then(Value::as_str) == Some("agentMessage")
+                                && response_text.is_empty()
+                                && let Some(text) = item.get("text").and_then(Value::as_str)
+                            {
+                                response_text = text.to_string();
+                                let _ = request.event_tx.send(AgentEvent::Token { content: text.to_string() });
+                            }
+                            let _ = record_audit(&state.storage, request.session_id, request.turn_id, "codex_item", item.get("type").and_then(Value::as_str).unwrap_or("item"), json!({
+                                "codex_thread_id":codex_thread_id,
+                                "codex_turn_id":codex_turn_id,
+                                "item":item,
+                            })).await;
                         }
-                        let _ = record_audit(&state.storage, request.session_id, request.turn_id, "codex_item", item.get("type").and_then(Value::as_str).unwrap_or("item"), json!({
-                            "codex_thread_id":codex_thread_id,
-                            "codex_turn_id":codex_turn_id,
-                            "item":item,
-                        })).await;
-                    }
-                    "thread/tokenUsage/updated" => {
-                        let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
-                        input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(input_tokens);
-                        output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(output_tokens);
-                    }
-                    "turn/completed" => {
-                        let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
-                        if status != "completed" {
-                            let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
-                            return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
+                        "thread/tokenUsage/updated" => {
+                            let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
+                            attempt_input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(attempt_input_tokens);
+                            attempt_output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(attempt_output_tokens);
                         }
-                        break;
+                        "turn/completed" => {
+                            let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
+                            if status != "completed" {
+                                let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
+                                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
+                            }
+                            break;
+                        }
+                        _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                     }
-                    _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                 }
-            }
-            () = client.closed() => {
-                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                    "Codex App Server transport closed mid-turn".to_string(),
-                )));
+                () = client.closed() => {
+                    return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                        "Codex App Server transport closed mid-turn".to_string(),
+                    )));
+                }
             }
         }
-    }
 
-    while let Some(result) = tool_tasks.join_next().await {
-        if let Err(error) = result {
-            tracing::warn!(%error, "Codex dynamic-tool dispatch task panicked");
-        }
-    }
-
-    let structured_output = match request.agent_config.output_schema.as_ref() {
-        Some(schema) => {
-            let validator = swage_core::json_schema_validator(schema).map_err(|error| {
-                AgentError::InvalidConfig(format!("invalid output schema: {error}"))
-            })?;
-            let candidates = extract_json_values(&response_text);
-            if candidates.is_empty() {
-                return Err(AgentError::InvalidConfig(
-                    "Codex structured output was not JSON".into(),
-                ));
+        while let Some(result) = tool_tasks.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "Codex dynamic-tool dispatch task panicked");
             }
-            candidates
-                .into_iter()
-                .rfind(|value| validator.validate(value).is_ok())
-                .map(Some)
-                .ok_or(AgentError::OutputSchemaFailed { attempts: 1 })?
         }
-        None => None,
-    };
+
+        input_tokens = input_tokens.saturating_add(attempt_input_tokens);
+        output_tokens = output_tokens.saturating_add(attempt_output_tokens);
+
+        let Some(validator) = validator.as_ref() else {
+            break;
+        };
+        if let Some(value) = extract_json_values(&response_text)
+            .into_iter()
+            .rfind(|value| validator.validate(value).is_ok())
+        {
+            structured_output = Some(value);
+            break;
+        }
+        if attempt == request.agent_config.max_output_retries {
+            let errors = vec![SchemaValidationError {
+                path: String::new(),
+                message: "Codex output did not match the required JSON schema".into(),
+            }];
+            state
+                .storage
+                .update_response(request.turn_id, &response_text)
+                .await?;
+            state
+                .storage
+                .update_tokens(
+                    request.turn_id,
+                    i64::from(input_tokens),
+                    i64::from(output_tokens),
+                )
+                .await?;
+            state
+                .storage
+                .append_message(AppendMessage {
+                    thread_id: request.thread_id,
+                    attachments: Vec::new(),
+                    turn_id: Some(request.turn_id),
+                    role: Role::Assistant,
+                    content: response_text.clone(),
+                    agent_id: request.agent_id.clone(),
+                })
+                .await?;
+            let attempts = attempt + 1;
+            let _ = request.event_tx.send(AgentEvent::OutputSchemaFailed {
+                turn_id: request.turn_id,
+                attempts,
+                errors,
+            });
+            return Err(AgentError::OutputSchemaFailed { attempts });
+        }
+        let _ = request.event_tx.send(AgentEvent::OutputSchemaRetry {
+            turn_id: request.turn_id,
+            attempt: attempt + 1,
+            max_retries: request.agent_config.max_output_retries,
+            errors: vec![SchemaValidationError {
+                path: String::new(),
+                message: "Codex output did not match the required JSON schema".into(),
+            }],
+        });
+    }
     state
         .storage
         .update_response(request.turn_id, &response_text)
@@ -581,6 +653,7 @@ async fn handle_tool_call(
     request: &CodexTurnRequest,
     incoming: swage_codex::ServerRequest,
     position: u32,
+    provider_round: i32,
 ) {
     let tool = incoming
         .params
@@ -660,7 +733,7 @@ async fn handle_tool_call(
             duration_ms: Some(duration_ms),
             truncated: false,
             total_bytes: None,
-            provider_round: 0,
+            provider_round,
             position: i32::try_from(position.saturating_sub(1)).unwrap_or(i32::MAX),
             parent_call_id: None,
             display_summary,
@@ -892,7 +965,15 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
-        run_scripted_turn_inner(scenario, dispatcher, permissions, effort, false, None).await
+        run_scripted_turn_inner(
+            scenario,
+            dispatcher,
+            permissions,
+            effort,
+            false,
+            AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+        )
+        .await
     }
 
     async fn run_scripted_turn_with_audit_failure(
@@ -906,13 +987,35 @@ mod tests {
         Arc<crate::turn::tests::MockStorage>,
         Vec<AgentEvent>,
     ) {
+        run_scripted_turn_with_config(
+            scenario,
+            dispatcher,
+            permissions,
+            fail_audit_writes,
+            AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+        )
+        .await
+    }
+
+    async fn run_scripted_turn_with_config(
+        scenario: Value,
+        dispatcher: ToolDispatcher,
+        permissions: PermissionConfig,
+        fail_audit_writes: bool,
+        agent_config: AgentConfig,
+    ) -> (
+        Result<OutboundMessage, AgentError>,
+        Vec<Value>,
+        Arc<crate::turn::tests::MockStorage>,
+        Vec<AgentEvent>,
+    ) {
         run_scripted_turn_inner(
             scenario,
             dispatcher,
             permissions,
             None,
             fail_audit_writes,
-            None,
+            agent_config,
         )
         .await
     }
@@ -921,13 +1024,14 @@ mod tests {
         scenario: Value,
         schema: Value,
     ) -> Result<OutboundMessage, AgentError> {
-        run_scripted_turn_inner(
+        run_scripted_turn_with_config(
             scenario,
             ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
             permissions(&[], &[]),
-            None,
             false,
-            Some(schema),
+            AgentConfig::new("gateway")
+                .with_workspace("/work", vec!["/work".into()])
+                .with_output_schema(schema, 0),
         )
         .await
         .0
@@ -939,7 +1043,7 @@ mod tests {
         permissions: PermissionConfig,
         effort: Option<ResolvedEffort>,
         fail_audit_writes: bool,
-        output_schema: Option<Value>,
+        agent_config: AgentConfig,
     ) -> (
         Result<OutboundMessage, AgentError>,
         Vec<Value>,
@@ -989,11 +1093,6 @@ mod tests {
             .await
         });
         let (event_tx, mut events) = mpsc::unbounded_channel();
-        let mut agent_config =
-            AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]);
-        if let Some(schema) = output_schema {
-            agent_config = agent_config.with_output_schema(schema, 0);
-        }
         let request = CodexTurnRequest {
             session_id,
             thread_id: thread.id,
@@ -1198,6 +1297,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_schema_exhaustion_retries_to_the_configured_bound_and_fails_the_turn() {
+        let invalid_turn = |turn_id: &str| {
+            vec![
+                json!({"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":turn_id}}}),
+                json!({"jsonrpc":"2.0","method":"item/reasoning/textDelta","params":{"delta":"reasoning"}}),
+                json!({"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}}),
+                json!({"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":turn_id,"status":"completed"}}}),
+            ]
+        };
+        let scenario = json!({"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {"receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"scripted turn"}]}},"send":invalid_turn("first")},
+            {"receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema."}]}},"send":invalid_turn("second")}
+        ]});
+        let config = AgentConfig::new("gateway")
+            .with_workspace("/work", vec!["/work".into()])
+            .with_output_schema(json!({"type":"object","required":["result"]}), 1);
+        let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+        let (result, _, storage, events) = run_scripted_turn_with_config(
+            scenario,
+            dispatcher,
+            permissions(&[], &[]),
+            false,
+            config,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentError::OutputSchemaFailed { attempts: 2 })
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::ProviderRequestPrepared { request, .. }
+                        if request["method"] == "turn/start"
+                ))
+                .count(),
+            2,
+            "the initial request plus one configured retry must reach Codex"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::OutputSchemaRetry {
+                attempt: 1,
+                max_retries: 1,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::OutputSchemaFailed {
+                attempts: 2,
+                errors,
+                ..
+            } if errors.len() == 1
+        )));
+        let turns = storage.db.lock().await.turns.clone();
+        let turn = turns
+            .values()
+            .next()
+            .expect("schema-exhausted turn is retained");
+        assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(turn.assistant_response.as_deref(), Some("not json"));
+        assert_eq!(turn.structured_output, None);
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ProviderReasoningCaptured { round, .. } => Some(*round),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "reasoning must remain attributed to the provider turn that emitted it"
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_schema_retry_accumulates_usage_from_each_attempt() {
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"scripted turn"}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"first"}}},
+                    {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":10,"outputTokens":3}}}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"first","status":"completed"}}}
+                ]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema."}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"second"}}},
+                    {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":20,"outputTokens":4}}}},
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":r#"{"result":true}"#}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"second","status":"completed"}}}
+                ]
+            }
+        ]});
+        let config = AgentConfig::new("gateway")
+            .with_workspace("/work", vec!["/work".into()])
+            .with_output_schema(json!({"type":"object","required":["result"]}), 1);
+
+        let (result, _, storage, _) = run_scripted_turn_with_config(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+            false,
+            config,
+        )
+        .await;
+
+        let output = result.expect("a valid retry completes the turn");
+        assert_eq!(output.response, r#"{"result":true}"#);
+        assert_eq!(output.structured_output, Some(json!({"result": true})));
+        assert_eq!((output.input_tokens, output.output_tokens), (30, 7));
+        let turn = storage
+            .db
+            .lock()
+            .await
+            .turns
+            .get(&output.turn_id)
+            .cloned()
+            .expect("completed turn is retained");
+        assert_eq!((turn.input_tokens, turn.output_tokens), (Some(30), Some(7)));
+    }
+
+    #[tokio::test]
     async fn scripted_mid_turn_server_death_fails_the_turn() {
         let scenario = json!({"steps":[
             {
@@ -1306,6 +1544,73 @@ mod tests {
         let output = result.expect("scripted tool turn succeeds");
         assert_eq!(output.response, "done");
         assert_eq!(output.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn scripted_schema_retry_records_tool_calls_in_their_provider_round() {
+        let dispatcher =
+            ToolDispatcher::allow_all([Arc::new(NamedTool::echoing("file_read")) as Arc<dyn Tool>]);
+        let tool_request = |id: &str, call_id: &str| json!({"jsonrpc":"2.0","id":id,"method":"item/tool/call","params":{"tool":"file_read","callId":call_id,"arguments":{"path":"probe.txt"}}});
+        let tool_response = |id: &str| json!({"jsonrpc":"2.0","id":id,"result":{"success":true,"contentItems":[{"type":"inputText","text":"{\"path\":\"probe.txt\"}"}]}});
+        let scenario = json!({"keepOpen":true,"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"scripted turn"}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"first"}}},
+                    tool_request("tool-first", "call-first")
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":tool_response("tool-first"),
+                "send":[
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"not json"}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"first","status":"completed"}}}
+                ]
+            },
+            {
+                "receive":{"method":"turn/start","params":{"input":[{"type":"text","text":"Your previous response did not match the required output schema. Respond again with only valid JSON that matches the output schema."}]}},
+                "send":[
+                    {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"second"}}},
+                    tool_request("tool-second", "call-second")
+                ]
+            },
+            {
+                "receiveExact":true,
+                "receive":tool_response("tool-second"),
+                "send":[
+                    {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":r#"{"result":true}"#}},
+                    {"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"id":"second","status":"completed"}}}
+                ]
+            }
+        ]});
+        let config = AgentConfig::new("gateway")
+            .with_workspace("/work", vec!["/work".into()])
+            .with_output_schema(json!({"type":"object","required":["result"]}), 1);
+
+        let (result, _, storage, _) = run_scripted_turn_with_config(
+            scenario,
+            dispatcher,
+            permissions(&["file_read"], &[]),
+            false,
+            config,
+        )
+        .await;
+
+        result.expect("a valid retry completes the turn");
+        let calls = storage.db.lock().await.tool_calls.clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.call_id.as_str(), call.provider_round))
+                .collect::<Vec<_>>(),
+            vec![("call-first", 1), ("call-second", 2)]
+        );
     }
 
     #[tokio::test]

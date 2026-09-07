@@ -3048,6 +3048,7 @@ async fn run_host_commands_inner(
                     };
                     let hash = request_hash;
                     let existing = replay.get(current_seq as usize);
+                    let failed_replay = existing.is_some_and(|entry| entry.status == "failed");
                     let (journal_entry_id, result) = if let Some(entry) = existing {
                         let journal_entry_id = entry.id;
                         if entry.args_hash != hash {
@@ -3154,7 +3155,11 @@ async fn run_host_commands_inner(
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
                         result.map_err(|error| {
-                            classify_agent_call_failure(error, failed_call_ref.host_reference())
+                            classify_agent_call_failure(
+                                error,
+                                failed_call_ref.host_reference(),
+                                failed_replay,
+                            )
                         })
                     } else {
                         result
@@ -4278,13 +4283,16 @@ async fn complete_agent_entry(
 fn classify_agent_call_failure(
     error: WorkflowHostError,
     host_reference: String,
+    decode_replayed_schema_marker: bool,
 ) -> WorkflowHostError {
     match error {
         WorkflowHostError::SchemaExhausted { message, .. } => WorkflowHostError::SchemaExhausted {
             host_reference: Some(host_reference),
             message,
         },
-        WorkflowHostError::Message(message) if message.starts_with("SchemaExhaustedError:") => {
+        WorkflowHostError::Message(message)
+            if decode_replayed_schema_marker && message.starts_with("SchemaExhaustedError:") =>
+        {
             WorkflowHostError::SchemaExhausted {
                 host_reference: Some(host_reference),
                 message,
@@ -6101,6 +6109,21 @@ mod tests {
         WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
+
+    #[test]
+    fn schema_exhaustion_marker_is_decoded_only_for_replayed_failures() {
+        let marker =
+            WorkflowHostError::Message("SchemaExhaustedError: recorded schema failure".to_string());
+
+        let live = classify_agent_call_failure(marker.clone(), "live-call".into(), false);
+        assert!(matches!(live, WorkflowHostError::AgentCall { .. }));
+
+        let replayed = classify_agent_call_failure(marker, "replayed-call".into(), true);
+        assert!(matches!(
+            replayed,
+            WorkflowHostError::SchemaExhausted { .. }
+        ));
+    }
 
     /// The research sweep as the shipped research skill carries it.
     fn research_sweep_source() -> &'static str {
