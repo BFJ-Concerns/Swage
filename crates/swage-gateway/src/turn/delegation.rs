@@ -206,31 +206,6 @@ pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &s
     Uuid::from_bytes(digest[..16].try_into().expect("SHA-256 prefix"))
 }
 
-/// Add the host-resolved child directory to the completion the dispatcher
-/// receives. The delegate request retains its verbatim requested `cwd`; this
-/// is the separately recorded outcome of host-side placement.
-async fn record_delegation_working_directory(
-    state: &AppState,
-    result: &mut swage_storage::AgentMessage,
-    placement: Option<&ResolvedWorkerDirectory>,
-) -> Result<(), AgentError> {
-    let Some(placement) = placement else {
-        return Ok(());
-    };
-    let Some(payload) = result.payload.as_object_mut() else {
-        return Ok(());
-    };
-    payload.insert(
-        "working_directory".into(),
-        serde_json::Value::String(placement.path.to_string_lossy().into_owned()),
-    );
-    state
-        .storage
-        .update_agent_message_payload(result.id, result.payload.clone())
-        .await?;
-    Ok(())
-}
-
 struct GatewayDelegatedContextAssembler {
     state: AppState,
     space: swage_storage::Space,
@@ -905,7 +880,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         match completion_mode {
             DelegateCompletionMode::Wait => {
                 let child_cancel_token = cancel_token.child_token();
-                let mut result_msg = match executor
+                let result_msg = match executor
                     .execute_delegation(
                         &delegate_msg,
                         Some(sender_turn_id),
@@ -917,6 +892,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                         child_cancel_token,
                         None,
                         existing_child,
+                        placement
+                            .as_ref()
+                            .map(|placement| placement.path.to_string_lossy().into_owned()),
                     )
                     .await
                 {
@@ -933,22 +911,6 @@ impl DelegationHandler for GatewayDelegationHandler {
                         return Err(error);
                     }
                 };
-                if let Err(error) = record_delegation_working_directory(
-                    &self.state,
-                    &mut result_msg,
-                    placement.as_ref(),
-                )
-                .await
-                {
-                    tracing::warn!(
-                        delegate_message_id = %delegate_msg.id,
-                        error = ?error,
-                        "failed to record delegated working directory"
-                    );
-                    // The child turn has already completed successfully.
-                    // Keep its result deliverable when the supplementary
-                    // audit annotation cannot be persisted.
-                }
                 shutdown_sandbox_guard(
                     &target_sandbox_guard,
                     "failed to shut down delegated sandbox",
@@ -1004,7 +966,6 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
                 let detached_router = router.clone();
                 let worktree_host = Arc::clone(&self.state.worktree_host);
-                let state = self.state.clone();
                 let placement = placement.clone();
                 let retain_worktree = child.is_some();
 
@@ -1021,6 +982,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                             child_cancel_token,
                             Some(started_tx),
                             existing_child,
+                            placement
+                                .as_ref()
+                                .map(|placement| placement.path.to_string_lossy().into_owned()),
                         )
                         .await;
 
@@ -1034,23 +998,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         // execute_delegation has persisted the Result as Pending.
                         // The parent's next turn owns its delivery: Step 7 appends
                         // it to the parent thread before claiming it Delivered.
-                        Ok(mut result_msg) => {
-                            if let Err(error) = record_delegation_working_directory(
-                                &state,
-                                &mut result_msg,
-                                placement.as_ref(),
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    delegate_message_id = %delegate_message_id,
-                                    error = ?error,
-                                    "failed to record detached delegation working directory"
-                                );
-                                // Recording the supplementary directory must
-                                // not turn a completed child turn into a
-                                // failed delegation result.
-                            }
+                        Ok(result_msg) => {
                             if result_msg.payload.get("error").is_none()
                                 && !retain_worktree
                                 && let Some(owner_id) = worktree_owner_id

@@ -95,6 +95,14 @@
             },
             "type": "array"
           },
+          "declared_omissions": {
+            "default": [],
+            "description": "Baseline elements the assembly script renounced by name, with the\nreason it gave. An element absent from the assembled context and\nabsent from this list is a floor breach, not a choice.",
+            "items": {
+              "$ref": "#/components/schemas/DeclaredOmission"
+            },
+            "type": "array"
+          },
           "duration": {
             "$ref": "#/components/schemas/Duration"
           },
@@ -1221,6 +1229,24 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      },
+      "DeclaredOmission": {
+        "description": "One baseline element the assembly deliberately left out of the context.",
+        "properties": {
+          "element": {
+            "description": "The omitted element's name, as it appears in the elements projection.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "The reason the assembly gave for leaving it out.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "element",
+          "reason"
         ],
         "type": "object"
       },

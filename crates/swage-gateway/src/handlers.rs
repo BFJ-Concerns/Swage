@@ -1713,6 +1713,7 @@ async fn execute_external_delegate_message(
             tokio_util::sync::CancellationToken::new(),
             None,
             None,
+            None,
         )
         .await;
 

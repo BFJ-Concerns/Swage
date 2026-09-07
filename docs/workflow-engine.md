@@ -125,10 +125,16 @@ composition disabled — bounding nesting to one level.
 
 ### Utilities
 
-`parallel(thunks)` runs thunks concurrently (failing thunks collapse to `null`
-rather than aborting the batch). `pipeline(items, ...stages)` chains stages
-per item with no cross-item barrier — a failing item stops at its failing
-stage while others continue.
+`parallel(thunks)` runs thunks concurrently; a thunk whose worker fails
+collapses to `null` rather than aborting the batch. `pipeline(items,
+...stages)` chains stages per item with no cross-item barrier — an item whose
+worker fails stops at its failing stage while others continue.
+
+Author errors are the exception to that swallowing. An unknown or invalid
+agent option, a schema that does not compile, an unresolvable `workflow()`
+reference, and non-JSON `workflow()` arguments are all raised before the call
+spawns anything; inside `parallel` or `pipeline` they propagate out and fail
+the run, so a broken call is never reported as a failed worker slot.
 
 ## Journal and replay
 
