@@ -8,6 +8,7 @@
   import SpaceSelector from "./SpaceSelector.svelte";
   import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
+  import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
   import type { DisplayPreferences } from "../display-preferences";
   import type { Route } from "../router";
   import type { DesktopRuntimeInfo } from "../runtime";
@@ -87,6 +88,7 @@
       selectedAgentId = "";
     }
   });
+  const workflowRunId = $derived(route?.workflowRunId ?? null);
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
@@ -101,6 +103,13 @@
     onNavigate?.(activeConversation?.id ? `/conversations/${activeConversation.id}` : "/");
   }
 
+  function selectSurface(next: Surface): void {
+    if (workflowRunId) {
+      onNavigate?.("/");
+    }
+    onSelectSurface(next);
+  }
+
   function openCurrentSpaceWorkspaces(): void {
     if (!currentSpace) return;
     onNavigate?.(`/settings/space/${encodeURIComponent(currentSpace.slug)}/workspaces`);
@@ -111,9 +120,9 @@
   <header class="topbar">
     <SpaceSelector {spaceStore} {onSpaceChange} />
     <nav aria-label="Surface">
-      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => onSelectSurface("conversation")}>Conversations</button>
-      <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => onSelectSurface("pages")}>Pages</button>
-      <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => onSelectSurface("operator")}>Operator</button>
+      <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => selectSurface("conversation")}>Conversations</button>
+      <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => selectSurface("pages")}>Pages</button>
+      <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => selectSurface("operator")}>Operator</button>
       <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
     {#if desktopRuntime}<span>{desktopRuntime.managedGateway ? "MANAGED" : "REMOTE"}</span>{/if}
@@ -121,7 +130,9 @@
   </header>
 {/if}
 
-{#if settingsMode}
+{#if workflowRunId}
+  <main class="workflow-run"><WorkflowRunDetail runId={workflowRunId} /></main>
+{:else if settingsMode}
   <!-- The settings window chrome lives here; the pages own their content only. -->
   <div class="settings-window">
     <header class="settings-chrome">
