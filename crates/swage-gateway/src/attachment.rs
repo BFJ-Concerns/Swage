@@ -215,7 +215,7 @@ fn classify_attachment_kind(
             Ok(AttachmentKind::Document)
         }
         "image/png" | "image/jpeg" => {
-            if !capabilities.vision {
+            if !capabilities.vision() {
                 return Err(GatewayError::ValidationError(
                     "vision ingestion is unavailable for the configured provider".into(),
                 ));
