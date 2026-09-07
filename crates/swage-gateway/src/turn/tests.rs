@@ -4958,6 +4958,61 @@ async fn failed_codex_attempt_recording_releases_the_prepared_turn() {
 }
 
 #[tokio::test]
+async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
+    let _guard = SwageHomeGuard::isolate();
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_workflow_attempt_writes();
+    let (state, session_id) = make_state_with_config_and_storage(
+        Vec::new(),
+        swage_config::ResolvedConfig::default(),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("refuse before provider execution"),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition::default(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect_err("a failed attempt record must refuse the ordinary provider turn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record agent call attempt")
+    );
+    let turn = storage
+        .list_turns_by_thread(
+            storage
+                .list_by_session(session_id)
+                .await
+                .expect("list session threads")[0]
+                .id,
+        )
+        .await
+        .expect("list prepared turn")
+        .pop()
+        .expect("prepared turn exists");
+    assert_eq!(turn.state, TurnState::Failed);
+    assert!(
+        state.active_turns.lock().await.is_empty(),
+        "a refused ordinary provider turn must not remain active"
+    );
+}
+
+#[tokio::test]
 async fn full_turn_stores_messages_and_completes() {
     let chunks = vec![
         StreamChunk::Delta {
