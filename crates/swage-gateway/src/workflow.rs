@@ -3115,6 +3115,22 @@ async fn run_host_commands_inner(
                         continue;
                     }
                 }
+                // A requested placement consumes one sequence slot before the
+                // agent call. Probe the following slot without provisioning so
+                // fresh author errors are reported before any journal intent
+                // or worktree work, while an already journalled call replays
+                // from its own recorded row.
+                let agent_call_seq = seq.load(Ordering::SeqCst)
+                    + u64::from(request.isolation.is_some() || request.cwd.is_some());
+                let request_hash = journal_args_hash(
+                    &serde_json::to_value(&request).expect("agent request serialises"),
+                );
+                if recorded_call(&replay, agent_call_seq, "agent_call", &request_hash).is_none()
+                    && let Err(error) = validate_agent_call(&request)
+                {
+                    let _ = reply.send(Err(WorkflowHostError::Message(error)));
+                    continue;
+                }
                 let resolved_working_directory = match resolve_agent_placement_command(
                     &state,
                     run_id,
@@ -3545,6 +3561,7 @@ async fn run_host_commands_inner(
                     };
                     let hash = request_hash;
                     let existing = replay.get(current_seq as usize);
+                    let failed_replay = existing.is_some_and(|entry| entry.status == "failed");
                     let (journal_entry_id, result) = if let Some(entry) = existing {
                         let journal_entry_id = entry.id;
                         if entry.args_hash != hash {
@@ -3651,7 +3668,11 @@ async fn run_host_commands_inner(
                             .await
                             .insert(failed_call_ref.host_reference(), failed_call_ref);
                         result.map_err(|error| {
-                            classify_agent_call_failure(error, failed_call_ref.host_reference())
+                            classify_agent_call_failure(
+                                error,
+                                failed_call_ref.host_reference(),
+                                failed_replay,
+                            )
                         })
                     } else {
                         result
@@ -3725,10 +3746,28 @@ async fn run_host_commands_inner(
                 cancellation,
                 reply,
             } => {
-                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let request_json =
                     serde_json::to_value(&request).expect("workflow request serialises");
                 let hash = journal_args_hash(&request_json);
+                // A fresh call resolves its target before it reserves a
+                // sequence number: an unresolvable reference journals no row,
+                // and a consumed slot with no row would shift every later
+                // command out of its recorded position on replay.
+                let resolved =
+                    if recorded_call(&replay, seq.load(Ordering::SeqCst), "workflow_call", &hash)
+                        .is_some()
+                    {
+                        None
+                    } else {
+                        match resolve_composed_workflow(&state, run_id, space_id, &request).await {
+                            Ok(script) => Some(script),
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        }
+                    };
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let existing = replay.get(current_seq as usize).cloned();
                 let state = state.clone();
                 in_flight.fetch_add(1, Ordering::SeqCst);
@@ -3767,36 +3806,46 @@ async fn run_host_commands_inner(
                                 current_seq,
                                 request,
                                 cancellation,
+                                None,
                             )
                             .await
                         }
                         None => {
-                            match state
-                                .create_workflow_journal_intent(NewWorkflowJournalIntent {
-                                    run_id,
-                                    seq: current_seq,
-                                    kind: "workflow_call".into(),
-                                    args_hash: hash,
-                                    request: request_json,
-                                    effect_kind: None,
-                                    idempotency_key: None,
-                                    target_kind: None,
-                                })
-                                .await
-                            {
-                                Ok(intent) => {
-                                    complete_workflow_call_entry(
-                                        &state,
-                                        run_id,
-                                        space_id,
-                                        intent.id,
-                                        current_seq,
-                                        request,
-                                        cancellation,
-                                    )
-                                    .await
+                            match resolved {
+                                // Only a call whose own row is recorded at this
+                                // slot skips resolution, so an empty slot always
+                                // carries its freshly resolved script.
+                                None => Err("NondeterministicReplayError".into()),
+                                Some(script) => {
+                                    match state
+                                        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                            run_id,
+                                            seq: current_seq,
+                                            kind: "workflow_call".into(),
+                                            args_hash: hash,
+                                            request: request_json,
+                                            effect_kind: None,
+                                            idempotency_key: None,
+                                            target_kind: None,
+                                        })
+                                        .await
+                                    {
+                                        Ok(intent) => {
+                                            complete_workflow_call_entry(
+                                                &state,
+                                                run_id,
+                                                space_id,
+                                                intent.id,
+                                                current_seq,
+                                                request,
+                                                cancellation,
+                                                Some(script),
+                                            )
+                                            .await
+                                        }
+                                        Err(error) => Err(error.to_string()),
+                                    }
                                 }
-                                Err(error) => Err(error.to_string()),
                             }
                         }
                     };
@@ -5029,13 +5078,16 @@ async fn complete_agent_entry(
 fn classify_agent_call_failure(
     error: WorkflowHostError,
     host_reference: String,
+    decode_replayed_schema_marker: bool,
 ) -> WorkflowHostError {
     match error {
         WorkflowHostError::SchemaExhausted { message, .. } => WorkflowHostError::SchemaExhausted {
             host_reference: Some(host_reference),
             message,
         },
-        WorkflowHostError::Message(message) if message.starts_with("SchemaExhaustedError:") => {
+        WorkflowHostError::Message(message)
+            if decode_replayed_schema_marker && message.starts_with("SchemaExhaustedError:") =>
+        {
             WorkflowHostError::SchemaExhausted {
                 host_reference: Some(host_reference),
                 message,
@@ -5419,6 +5471,7 @@ async fn complete_workflow_call_entry(
     parent_seq: u64,
     request: WorkflowCallRequest,
     cancellation: CancellationToken,
+    resolved_script: Option<EffectiveWorkflow>,
 ) -> Result<Value, String> {
     let parent = state
         .storage
@@ -5482,19 +5535,10 @@ async fn complete_workflow_call_entry(
             _ => child,
         },
         None => {
-            let agent_id = parent
-                .as_ref()
-                .and_then(|run| run.dispatch_bound_agent_ids.last())
-                .map(String::as_str);
-            let skills = discover_skills_for_space(state, space_id, agent_id).await?;
-            let script = resolve_workflow_by_name(state, space_id, &request.name, &skills)
-                .await?
-                .ok_or_else(|| {
-                    format!(
-                        "WorkflowCompositionError: workflow script {:?} was not found",
-                        request.name
-                    )
-                })?;
+            let script = match resolved_script {
+                Some(script) => script,
+                None => resolve_composed_workflow(state, parent_run_id, space_id, &request).await?,
+            };
             let inline_identity = script.inline_identity();
             let parent_budget = parent
                 .as_ref()
@@ -5715,6 +5759,59 @@ fn validate_workflow_arguments(schema: Option<&Value>, args: &Value) -> Result<(
             "workflow arguments violate the declared schema at {field}: {error}"
         ))
     })
+}
+
+/// The journal row that governs a call at `seq`, if this call has one.
+///
+/// A rejected author error journals nothing and consumes no sequence number,
+/// so the row sitting at a call's slot may belong to a later command. Only a
+/// row of the call's own kind and arguments replays it; anything else means
+/// the call is fresh and must be validated again.
+fn recorded_call<'a>(
+    replay: &'a [WorkflowJournalRecord],
+    seq: u64,
+    kind: &str,
+    args_hash: &str,
+) -> Option<&'a WorkflowJournalRecord> {
+    replay
+        .get(seq as usize)
+        .filter(|entry| entry.kind == kind && entry.args_hash == args_hash)
+}
+
+fn validate_agent_call(request: &AgentCallRequest) -> Result<(), String> {
+    let Some(schema) = request.schema.as_ref() else {
+        return Ok(());
+    };
+    jsonschema::validator_for(schema)
+        .map(|_| ())
+        .map_err(|error| format!("InvalidAgentSchemaError: agent schema is invalid: {error}"))
+}
+
+async fn resolve_composed_workflow(
+    state: &AppState,
+    parent_run_id: Uuid,
+    space_id: Uuid,
+    request: &WorkflowCallRequest,
+) -> Result<EffectiveWorkflow, String> {
+    let parent = state
+        .storage
+        .get_workflow_run(parent_run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let agent_id = parent
+        .as_ref()
+        .and_then(|run| run.dispatch_bound_agent_ids.last())
+        .map(String::as_str);
+    let skills = discover_skills_for_space(state, space_id, agent_id).await?;
+    let script = resolve_workflow_by_name(state, space_id, &request.name, &skills)
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "WorkflowReferenceError: workflow script {:?} was not found",
+                request.name
+            )
+        })?;
+    Ok(script)
 }
 
 fn run_state(state: &str) -> Result<WorkflowRunState, ApiError> {
@@ -6857,6 +6954,21 @@ mod tests {
     };
     use swage_workflow::AgentSessionRef;
 
+    #[test]
+    fn schema_exhaustion_marker_is_decoded_only_for_replayed_failures() {
+        let marker =
+            WorkflowHostError::Message("SchemaExhaustedError: recorded schema failure".to_string());
+
+        let live = classify_agent_call_failure(marker.clone(), "live-call".into(), false);
+        assert!(matches!(live, WorkflowHostError::AgentCall { .. }));
+
+        let replayed = classify_agent_call_failure(marker, "replayed-call".into(), true);
+        assert!(matches!(
+            replayed,
+            WorkflowHostError::SchemaExhausted { .. }
+        ));
+    }
+
     /// The research sweep as the shipped research skill carries it.
     fn research_sweep_source() -> &'static str {
         crate::shipped_skills::workflow_files("research")
@@ -7689,6 +7801,131 @@ mod tests {
         assert_eq!(resumed.source.as_deref(), Some(recorded_source));
         assert_eq!(resumed.source_hash, source_hash(recorded_source));
         assert_eq!(resumed.carrying_skill.as_deref(), Some("operator-proof"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resumed_pre_change_agent_call_replays_before_schema_validation() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"return await agent("reuse recorded result", { schema: { type: 7 } });"#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
+                engine_version: "pre-change".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let request = AgentCallRequest {
+            worker: None,
+            prompt: "reuse recorded result".into(),
+            agent: None,
+            task: None,
+            tools: None,
+            skills: None,
+            model: None,
+            fallback_model: None,
+            effort: None,
+            timeout_ms: None,
+            cwd: None,
+            isolation: None,
+            schema: Some(serde_json::json!({"type": 7})),
+            max_attempts: 3,
+            label: None,
+            phase: None,
+            identity: None,
+            session: None,
+            elements: None,
+            variables: None,
+            assembly: None,
+        };
+        let request_json = serde_json::to_value(&request).expect("agent request");
+        let recorded = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&request_json),
+                request: request_json,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("recorded agent call");
+        storage
+            .complete_workflow_journal_entry(
+                recorded.id,
+                serde_json::to_value(AgentCallResult {
+                    output: Value::String("recorded before validation existed".into()),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    working_directory: None,
+                    session_id: None,
+                    thread_id: None,
+                    turn_id: None,
+                    served_model: None,
+                    worktree: None,
+                })
+                .expect("recorded result"),
+            )
+            .await
+            .expect("complete recorded call");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt run");
+
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let Json(resumed) = resume_run(State(state.clone()), Path(run.id))
+            .await
+            .expect("resume pre-change run");
+        wait_for_terminal(&state, resumed.id).await;
+        let resumed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("resumed run");
+        assert_eq!(
+            resumed.state, "completed",
+            "run error: {:?}",
+            resumed.error_message
+        );
+        assert_eq!(
+            resumed.final_output,
+            Some(Value::String("recorded before validation existed".into()))
+        );
+        assert!(
+            provider.requests.lock().expect("requests").is_empty(),
+            "a replayed journal result must not spawn a provider request"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -19074,6 +19311,332 @@ mod tests {
             .expect("child run recorded");
         assert_eq!(child.state, "completed");
         assert_eq!(child.parent_run_id, Some(started.id));
+
+        // A recorded call is replayed as recorded rather than revalidated as
+        // a fresh call. This is the compatibility path for journals written
+        // before pre-spawn validation existed.
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("resume");
+        wait_for_terminal(&state, started.id).await;
+        let replayed = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("replay journal");
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|entry| entry.kind == "workflow_call")
+                .count(),
+            1,
+            "replay reuses the journalled child call instead of creating another"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_author_errors_fail_before_agent_or_workflow_intents() {
+        for (source, forbidden_kind, expected_error) in [
+            (
+                r#"await agent("bad schema", { schema: { type: 7 } });"#,
+                "agent_call",
+                "agent schema is invalid",
+            ),
+            (
+                r#"await workflow("missing workflow", {});"#,
+                "workflow_call",
+                "workflow script \"missing workflow\" was not found",
+            ),
+        ] {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let space = storage.get_or_create_default().await.expect("space");
+            let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+            let state = AppState::new(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            );
+            let (script, _) = storage
+                .create_workflow_script(NewWorkflowScript {
+                    space_id: space.id,
+                    name: format!("pre-spawn {forbidden_kind}"),
+                    description: String::new(),
+                    source: source.into(),
+                    delivery_grant: None,
+                    captured_sources_grant: false,
+                    authoring_session_id: None,
+                })
+                .await
+                .expect("script");
+            let Json(started) = start_saved_run(
+                State(state.clone()),
+                Path(script.id),
+                Json(StartWorkflowRunRequest {
+                    args: Value::Null,
+                    budget: None,
+                }),
+            )
+            .await
+            .expect("start");
+            wait_for_terminal(&state, started.id).await;
+
+            let run = storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present");
+            assert_eq!(run.state, "failed");
+            assert!(
+                run.error_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(expected_error)),
+                "expected {expected_error} in {:?}",
+                run.error_message
+            );
+            let journal = storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal");
+            assert!(
+                !journal.iter().any(|entry| entry.kind == forbidden_kind),
+                "{forbidden_kind} must not be journalled for a rejected call: {journal:#?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_caught_missing_workflow_keeps_positional_replay_dense() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "child".into(),
+                description: String::new(),
+                source: "return { doubled: args.value * 2 };".into(),
+                delivery_grant: None,
+                captured_sources_grant: false,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("child script");
+        let (parent, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "parent".into(),
+                description: String::new(),
+                source: r#"try {
+                    await workflow("missing workflow", {});
+                } catch (error) {
+                    log(`caught ${error.name}`);
+                }
+                return await workflow("child", { value: 21 });"#
+                    .into(),
+                delivery_grant: None,
+                captured_sources_grant: false,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("parent script");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(parent.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed");
+        assert_eq!(run.final_output, Some(serde_json::json!({"doubled": 42})));
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert!(
+            journal.iter().any(|entry| entry.kind == "log"
+                && entry
+                    .request
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("WorkflowReferenceError"))),
+            "the script must catch the named reference error: {journal:#?}"
+        );
+        // A rejected call journals no row, so it must consume no sequence
+        // number either: replay rebuilds a compact vector and indexes it by
+        // position, and a gap would shift every later row out of place.
+        for (index, entry) in journal
+            .iter()
+            .filter(|entry| is_positional_journal_entry(entry))
+            .enumerate()
+        {
+            assert_eq!(
+                entry.seq, index as u64,
+                "journalled commands must stay positionally dense: {journal:#?}"
+            );
+        }
+
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate restart");
+        let _ = resume_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("resume");
+        wait_for_terminal(&state, started.id).await;
+        let resumed = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(resumed.state, "completed");
+        assert_eq!(
+            resumed.final_output,
+            Some(serde_json::json!({"doubled": 42})),
+            "the retried missing reference must not displace the recorded child call"
+        );
+        let replayed = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("replay journal");
+        assert_eq!(
+            replayed
+                .iter()
+                .filter(|entry| entry.kind == "workflow_call")
+                .count(),
+            1,
+            "replay reuses the journalled child call instead of creating another"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_placed_agent_schema_fails_before_worktree_provisioning() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("repo");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("seed");
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["add", "seed"])
+                .status()
+                .expect("stage seed")
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["commit", "-m", "seed"])
+                .status()
+                .expect("commit seed")
+                .success()
+        );
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+        .with_worktree_root(fixture.path().join("worker-worktrees"));
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).expect("serialise cwd");
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                space_id: space.id,
+                name: "invalid placed schema".into(),
+                description: String::new(),
+                source: format!(
+                    r#"await agent("bad schema", {{ cwd: {cwd}, isolation: "worktree", schema: {{ type: 7 }} }});"#
+                ),
+                delivery_grant: None,
+                captured_sources_grant: false,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("script");
+
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        assert!(
+            run.error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("agent schema is invalid")),
+            "expected schema error in {:?}",
+            run.error_message
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert!(
+            !journal.iter().any(|entry| entry.kind == "worker_placement"),
+            "invalid call must not journal placement: {journal:#?}"
+        );
+        assert!(
+            state.worktree_host.list_owner(started.id).await.is_empty(),
+            "invalid call must not provision a worktree"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -19539,7 +20102,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn declared_fallback_does_not_retry_agent_construction_errors() {
+    async fn declared_fallback_does_not_retry_a_call_rejected_before_dispatch() {
         let (state, storage, provider, space_id) =
             fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
         let source = r#"return await agent("answer", {
@@ -19568,14 +20131,14 @@ mod tests {
         assert!(
             run.error_message
                 .as_deref()
-                .is_some_and(|error| error.contains("agent construction failed")),
-            "the primary construction error must survive unchanged: {:?}",
+                .is_some_and(|error| error.contains("agent schema is invalid")),
+            "the rejection must name the defect it found: {:?}",
             run.error_message
         );
         assert_eq!(
             provider.requests.lock().expect("requests").len(),
             0,
-            "a construction failure must not issue a fallback provider request"
+            "a call that never dispatched must not issue a fallback provider request"
         );
     }
 

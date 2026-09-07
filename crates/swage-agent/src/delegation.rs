@@ -196,6 +196,7 @@ impl DelegationExecutor {
         cancel_token: tokio_util::sync::CancellationToken,
         started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
         existing_child: Option<DelegatedChildContinuation>,
+        working_directory: Option<String>,
     ) -> Result<AgentMessage, AgentError> {
         let target_agent_id = &delegate_msg.recipient_agent_id;
 
@@ -569,6 +570,9 @@ impl DelegationExecutor {
                 if let Some(ref structured) = outbound.structured_output {
                     result_payload["structured_output"] = structured.clone();
                 }
+                if let Some(working_directory) = &working_directory {
+                    result_payload["working_directory"] = working_directory.clone().into();
+                }
 
                 let result_msg = self
                     .router
@@ -578,9 +582,12 @@ impl DelegationExecutor {
                 Ok(result_msg)
             }
             Err(e) => {
-                let failure_payload = serde_json::json!({
+                let mut failure_payload = serde_json::json!({
                     "error": e.to_string(),
                 });
+                if let Some(working_directory) = &working_directory {
+                    failure_payload["working_directory"] = working_directory.clone().into();
+                }
 
                 let result_msg = self
                     .router
@@ -850,6 +857,7 @@ mod tests {
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,
+                None,
             )
             .await
             .expect_err("invalid output schema should reject agent construction");
@@ -935,6 +943,7 @@ mod tests {
                 None,
                 serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
                 tokio_util::sync::CancellationToken::new(),
+                None,
                 None,
                 None,
             )

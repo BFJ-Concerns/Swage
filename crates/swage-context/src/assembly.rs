@@ -79,11 +79,9 @@ fn default_assembly_inner(
     let mut sorted: Vec<&dyn ContextElement> = elements.iter().map(|e| e.as_ref()).collect();
     sorted.sort_by_key(|element| Reverse(element.priority()));
 
-    // The default assembly keeps memory tool-accessible rather than prepending
-    // it to the prompt. Custom assemblies can opt in by removing this filter.
     let active: Vec<&dyn ContextElement> = sorted
         .into_iter()
-        .filter(|e| e.name() != "memory")
+        .filter(|e| default_assembly_carries(e.name()))
         .collect();
 
     // Accumulate content and per-element reports in priority order.
@@ -201,6 +199,7 @@ fn default_assembly_inner(
         compaction_applied,
         warnings: Vec::new(),
         errors: Vec::new(),
+        declared_omissions: Vec::new(),
         effective_tool_permissions: None,
         tool_scope: None,
         provider_visible: None,
@@ -224,6 +223,17 @@ fn default_assembly_inner(
 ///
 /// Returns `Some("name1, name2")` when skills are present, `None` otherwise.
 /// The parenthesised level/token annotations are stripped; only the bare names remain.
+/// Whether the default assembly carries this element's content into the
+/// assembled context.
+///
+/// Memory stays tool-accessible rather than prepended to the prompt; named
+/// assemblies can opt in by adding it themselves. This is the single
+/// statement of the default assembly's disposition — the baseline floor a
+/// named assembly is held to reads it rather than restating the list.
+pub(crate) fn default_assembly_carries(name: &str) -> bool {
+    name != "memory"
+}
+
 pub(crate) fn safe_metadata_preview(name: &str, source: &str) -> Option<String> {
     (name == "skills")
         .then(|| extract_skill_names_preview(source))
