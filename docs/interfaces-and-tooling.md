@@ -461,7 +461,7 @@ another space reads as absent rather than forbidden.
 
 **Scheduling** — `schedule` and `wake_me_later`.
 
-**Session and memory** — `session_values`, `agent_memory`, `observe_context`,
+**Session and memory** — `session_values`, `agent_memory`, `tool_result_read`,
 `task_definition`, and `memory`. Of these, `memory` is one of the two
 sandbox-eligible tools.
 

@@ -1067,7 +1067,7 @@ two sandbox-eligible tools.
 | `session_values` | `session_variable.rs` |
 | `agent_memory` | `agent_memory.rs` |
 | `memory` | `memory.rs` — sandbox-eligible |
-| `observe_context` | `tool_result_read.rs` |
+| `tool_result_read` | `tool_result_read.rs` |
 | `task_definition` | `task_definition.rs` |
 
 ### Delegation
