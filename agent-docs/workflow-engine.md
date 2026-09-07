@@ -1,5 +1,5 @@
 ---
-description: Run lifecycle, journal/replay, budget partitions, parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
+description: Run lifecycle, journal/replay, budget partitions (including per-route), run detail (dispatch, provider rounds, usage, liveness, worktree completion, termination), parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
 ---
 
 # Workflow engine
@@ -67,6 +67,14 @@ these intrinsics: `Eval`, `Json`, `Promise`, `MapSet`, `RegExpCompiler`,
 `NondeterministicCallError`. `Date`, `setTimeout`, `fetch`, `process` are
 absent.
 
+### Meta header
+
+A script may open with `export const meta = { ... };` to declare portable
+metadata. Fields: `name` (string), `description` (string), `task` (string —
+opaque identity grouping runs of the same task), `argumentSchema` (JSON Schema
+governing the workflow's arguments). The header is parsed at save time and
+never exposed to the caged runtime.
+
 ### Defaults header
 
 A script may open with `export const defaults = { ... };` before its body. These
@@ -77,8 +85,8 @@ override, but `undefined` at the call site falls back to the default.
 
 | Function | Returns | Notes |
 |---|---|---|
-| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. |
-| `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. |
+| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. Options include `identity` (boolean — preserves the call's identity through fan-in), `phase` (string — groups the call in the journal), and `assembly` (string — selects the context assembly strategy). |
+| `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. Accepts the same options as `agent()`. |
 | `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
 | `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
 | `staleness(worker)` | `Promise<StalenessReading>` | Returns `{stale, idleMs, thresholdMs, route}` from a journalled reading. |
@@ -91,7 +99,7 @@ override, but `undefined` at the call site falls back to the default.
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
 | `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
 | `pipeline(items, ...stages)` | `Promise<Array>` | Per-item stage chain; a failed worker collapses that item to `null` at the failing stage. A pre-spawn author error propagates and fails the run. |
-| `budgetSnapshot()` | `Promise<Value>` | Journalled budget reading. Returns `{spent, remaining, working_remaining, closing_remaining, winding_down}`. |
+| `budgetSnapshot()` | `Promise<Value>` | Journalled budget reading. Returns `{spent, remaining, working_remaining, closing_remaining, winding_down, per_route, usage_unavailable_calls}`. Per-route balances appear when `per_route` budgets are configured. |
 | `budget.spent()` | `number` | Synchronous, not journalled — NOT safe for branching (replay sees end-state values). |
 | `budget.remaining()` | `number \| undefined` | Synchronous, not journalled — NOT safe for branching. |
 | `log(message)` | — | Records via `host.record("log", ...)`. `console.log/warn/error` alias this. |
@@ -154,6 +162,27 @@ Call `close()` on the success path so the journal records intent. Run-ending
 return, throw, and cancellation also close every worker still open. Parking is
 not a run-ending path: a parked run retains its workers for replay and resume.
 
+### Identified fan-in
+
+Setting `identity: true` on an `agent()` or `agentStart()` call opts it
+into an envelope that preserves the call's identity through fan-in. When
+a call with `identity: true` exhausts its schema validation attempts, it
+returns a failure envelope carrying the call's `label` and `phase` rather
+than collapsing to `null`. Inside `parallel()` and `pipeline()`, the
+envelope is preserved so the script can distinguish which leg failed and
+why.
+
+### Pre-spawn author errors
+
+Certain call options are validated before dispatch. An unknown or invalid
+agent option (`InvalidAgentOptionError`), an invalid prompt
+(`InvalidAgentPromptError`), a schema that does not compile
+(`InvalidAgentSchemaError`), an unresolvable `workflow()` reference
+(`WorkflowReferenceError`), and non-JSON `workflow()` arguments
+(`WorkflowArgumentsError`) are all raised before the call spawns anything.
+Inside `parallel()` or `pipeline()` a pre-spawn author error propagates
+out and fails the run — it is never swallowed as a `null` worker slot.
+
 ### Composition bounds
 
 `ScriptCapabilities { delivery: bool, composition: bool }`. Child runs
@@ -200,6 +229,7 @@ entry's hash. A mismatch produces `NondeterministicReplayError`.
 |---|---|
 | `completed` | Return the recorded result without re-executing. Concurrent calls wait for completion-order release. |
 | `failed` | Return the recorded error without re-executing. |
+| `cut_short` | The run's own end stopped this entry's work (distinct from `failed`, which is the work's own failure). Treated as a terminal record on replay. |
 | `started` | The original run crashed between intent and settlement. Re-execute the work and settle the existing entry. |
 
 ### Completion-order preservation
@@ -241,9 +271,40 @@ recovery strategy depends on `EffectKind`:
 | Field | Type | Purpose |
 |---|---|---|
 | `max_agent_calls` | `Option<u32>` | Hard cap on agent call count (excluding budget-refused calls). |
-| `max_total_tokens` | `Option<u64>` | Total token ceiling across all agent calls. |
+| `per_route` | `BTreeMap<String, WorkflowRouteBudget>` | Per-provider-entry token ledgers. A model resolves to the provider entry named by its catalogue configuration; calls on one entry never consume another entry's allowance. |
+| `max_total_tokens` | `Option<u64>` | Fallback token ceiling for provider routes without a `per_route` entry. |
 | `reserved_closing_tokens` | `Option<u64>` | Tokens held back from ordinary work for calls after wind-down. Part of, not in addition to, `max_total_tokens`. |
 | `max_concurrent_agent_calls` | `Option<u32>` | Concurrency semaphore size (default 4). |
+
+### Per-route budgets
+
+Each entry in `per_route` names a provider entry and carries its own
+`WorkflowRouteBudget`:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `max_total_tokens` | `Option<u64>` | Token ceiling for calls resolved to this provider entry. |
+| `reserved_closing_tokens` | `Option<u64>` | Closing reserve for this route. Requires `max_total_tokens` on the same entry and cannot exceed it. |
+
+Every agent call is admitted against the ledger governing its resolved
+provider route. When a route has a `per_route` entry, calls on that route —
+including declared fallbacks that resolve to it — are admitted against
+that entry's ceiling. Routes without a `per_route` entry fall back to the
+top-level `max_total_tokens`.
+
+When usage is unavailable for a call (the provider reported no token counts),
+the closing is charged only to the route the call resolved to. Route
+exhaustion refuses new calls on that route with `BudgetExceededError`
+without affecting other routes.
+
+`budgetSnapshot()` returns per-route balances in a `per_route` map when
+per-route budgets are configured. Each entry reports `{spent, remaining,
+closing_remaining, usage_unavailable_calls}`. The terminal budget record
+written at run completion carries the same per-route shape.
+
+Validation at `start_run`: every `per_route` key must name a provider entry
+in the space's configuration; `reserved_closing_tokens` on a route requires
+`max_total_tokens` on the same route and cannot exceed it.
 
 ### Two partitions
 
@@ -515,6 +576,111 @@ evaluations. It is incremented in the host-command loop (deterministic
 boundary) and decremented in the spawned task on completion. The park
 guard reads this counter — the journal can lag a dispatch, so it must not
 be the guard.
+
+## Run detail
+
+The run detail (`WorkflowRunDetailResponse`) carries the run record, the
+full journal, and wake metrics. Each `agent_call` journal entry carries a
+`WorkflowAgentCallDetail` with the fields below.
+
+### Dispatch record
+
+`WorkflowAgentCallDispatch` is written before any provider work begins, so
+a worker that dies mid-run still leaves evidence of the call it was serving.
+
+| Field | Type | Notes |
+|---|---|---|
+| `prompt` | `String` | The prompt the call was dispatched with. |
+| `agent_definition_id` | `Option<String>` | The agent definition used. |
+| `requested_model` | `Option<String>` | The model the call named, before the turn resolved it. |
+| `requested_effort` | `Option<Effort>` | The effort the call named, before the turn resolved it. |
+| `placement` | `Option<WorkflowWorkerPlacementRecord>` | Where the worker runs (`path`, `can_write`), once provisioned. |
+| `grants` | `Option<Vec<String>>` | Call-scoped tool grants after intersection with the dispatching context's authority. `None` means the call narrowed nothing. |
+| `attempts` | `Vec<WorkflowAgentCallResolution>` | Every attempt the call ran, oldest first. Each records the resolved `model`, `effort`, `session_id`, `thread_id`, and `turn_id`. A call interrupted and re-dispatched by replay has more than one attempt. Empty until the first turn resolves. |
+
+The dispatch record is absent only for calls journalled before this field
+existed.
+
+### Provider rounds
+
+`provider_rounds` on the call detail is the sequence of provider request
+rounds this call's turn ran, oldest first. Each `WorkflowProviderRound`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `attempt` | `u32` | Which attempt of the call ran this round, counting from 1. |
+| `round` | `u32` | The round within this attempt. |
+| `started_at` | `DateTime<Utc>` | When the request went to the provider. |
+| `completed_at` | `Option<DateTime<Utc>>` | When the response arrived, or when interruption became final. `None` for outstanding rounds. |
+| `outcome` | `WorkflowProviderRoundOutcome` | What came back. |
+
+`WorkflowProviderRoundOutcome` variants:
+
+| Variant | Meaning |
+|---|---|
+| `outstanding` | The request is in flight — no response has arrived. |
+| `responded { tool_calls }` | A response arrived; `tool_calls` is the number of tool calls (zero when the model answered). |
+| `failed { message }` | The provider request failed. |
+| `interrupted` | The request went out but nothing can answer it any more — the attempt stopped. Distinct from `outstanding`. The round's end time is when that became true. |
+
+`provider_rounds` is `None` on the live entry event (sent as the entry
+settles); the run detail always carries them. An absent round record is
+never read as a call that made no provider request.
+
+### Usage
+
+`WorkflowCallUsage` is a tagged enum on the `availability` field:
+
+| Variant | Fields | Meaning |
+|---|---|---|
+| `known` | `input_tokens`, `output_tokens` | The provider reported token counts. |
+| `unavailable` | `reason` | Usage is not known. |
+
+`WorkflowUsageUnavailableReason` values: `provider_reported_no_usage` (the
+turn completed but the provider reported no counts), `not_settled` (the call
+never settled). A call whose provider reported no usage is not a call that
+spent nothing — the two are different facts and the record keeps them apart.
+
+### Termination
+
+`WorkflowWorkerTermination` is a tagged enum on the `termination` field:
+
+| Variant | Meaning |
+|---|---|
+| `outstanding` | The worker is still working. |
+| `settled` | The worker ran to its own end. |
+| `failed { message }` | The worker's own work failed. |
+| `cut_short { cause }` | The run ended while this worker was still working. |
+
+`WorkflowCutShortCause` values: `run_cancelled`.
+
+### Liveness
+
+`WorkflowWorkerLiveness` on the call detail:
+
+| Field | Type | Notes |
+|---|---|---|
+| `started_at` | `DateTime<Utc>` | When the worker's dispatch window opened — captured between requesting and entering provider dispatch. |
+| `first_evidence_at` | `Option<DateTime<Utc>>` | When the first provider evidence arrived. `None` if the worker settled without producing any evidence (e.g. refused at admission or cut short before a response). |
+
+Liveness stamps are persisted at settlement and appear on the live run
+surface during execution.
+
+### Worktree completion
+
+`WorkflowWorktreeCompletion` on the call detail and the `agent_call`
+journal result:
+
+| Field | Type | Notes |
+|---|---|---|
+| `base_commit` | `String` | The commit the isolated worktree was cut from. |
+| `tip_commit` | `String` | The commit at the worktree's HEAD when the worker settled. |
+| `changed` | `bool` | Whether the worktree has commits beyond `base_commit`. |
+| `removed` | `bool` | Whether the worktree was cleaned up after settlement. |
+
+The worktree completion is resolved after the worker settles: the host
+calls `worktree_host.finish()` to read the final Git state, then records
+it in the journal result.
 
 ## Carried workflows
 
