@@ -242,9 +242,8 @@ describe("ambient channel control path", () => {
     component = mount(App, { target: document.body });
 
     await vi.waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-route", {
-        method: "GET",
-      });
+      expect(fetch).toHaveBeenCalledOnce();
     });
+    expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-route");
   });
 });

@@ -55,6 +55,34 @@ pub struct AgentSessionRef {
     pub thread_id: Uuid,
 }
 
+/// Everything a held worker fixes when the script opens it. A turn sent to
+/// the worker carries these unchanged: a worker's model, effort, placement,
+/// and requested grants are settled at creation, and wanting different ones
+/// means opening a different worker.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct HeldWorkerOpen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<WorkerIsolation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
 /// A journal-stable workflow child dispatch request. This is host-journal
 /// state, not a client wire type.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,6 +126,11 @@ pub struct AgentCallRequest {
     pub identity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionRef>,
+    /// The held worker this turn belongs to, when the call came from `send()`.
+    /// The host checks the worker is one this run opened and has not closed,
+    /// so the journal names which turns belong to which worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elements: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,6 +391,42 @@ pub trait WorkflowHost: Send + Sync {
         Err("RunEventError: this host does not support run events".into())
     }
 
+    /// Open a held worker: a party the script can send successive turns to.
+    /// Journalled, so replay finds the same worker rather than opening a
+    /// second one. Resolves to `{worker_id}`.
+    async fn open_held_worker(
+        &self,
+        _worker: HeldWorkerOpen,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("HeldWorkerError: this host does not support held workers".into())
+    }
+
+    /// Close a held worker. Journalled and idempotent in effect: a worker the
+    /// run never closes is closed by the run's own ending, so no held worker
+    /// outlives its run. Resolves to `{worker_id, closed_by}`.
+    async fn close_held_worker(
+        &self,
+        _worker_id: Uuid,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("HeldWorkerError: this host does not support held workers".into())
+    }
+
+    /// A journalled staleness reading for a held worker: how long it has sat
+    /// idle, the threshold of the provider route its model draws on, and
+    /// whether the gap has outlived that threshold. Recorded, because idle
+    /// time is wall-clock and a live run and its replay must see the same
+    /// answer. A route declaring no threshold reports `stale: null` — the
+    /// reading says it does not know rather than guessing.
+    async fn held_worker_staleness(
+        &self,
+        _worker_id: Uuid,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        Err("HeldWorkerError: this host does not support held workers".into())
+    }
+
     /// A journalled budget reading. Alongside total `spent` and `remaining`,
     /// split budgets expose `working_remaining`, `closing_remaining`, and
     /// `winding_down`, recorded so replay sees what the live run saw.
@@ -393,6 +462,7 @@ mod task_request_tests {
             phase: None,
             identity: None,
             session: None,
+            worker: None,
             elements: None,
             variables: None,
             assembly: None,
@@ -526,6 +596,7 @@ mod tests {
             phase: None,
             identity: None,
             session: None,
+            worker: None,
             elements: None,
             variables: None,
             assembly: None,

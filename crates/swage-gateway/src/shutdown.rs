@@ -107,13 +107,7 @@ pub async fn recover_orphaned_turns(
                     // correlation state to resume the parent turn or expose a
                     // recoverable suspended state after a gateway restart.
                     // ---
-                    if !matches!(
-                        turn.state,
-                        TurnState::Pending
-                            | TurnState::Processing
-                            | TurnState::AwaitingApproval
-                            | TurnState::Delegating
-                    ) {
+                    if turn.state.is_terminal() {
                         continue;
                     }
                     if !recovered_turn_ids.insert(turn.id) {

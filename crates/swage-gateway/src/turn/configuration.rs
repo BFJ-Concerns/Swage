@@ -11,6 +11,11 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 pub(crate) const DISPATCH_BOUND_METADATA_KEY: &str = "dispatch_bound_agent_ids";
 pub(crate) const DISPATCH_BOUND_TASK_METADATA_KEY: &str = "dispatch_bound_task_definition_ids";
 pub(crate) const WORKFLOW_CALL_TOOLS_METADATA_KEY: &str = "workflow_call_tools";
+/// Children this session has delegated to under a caller-chosen name, so a
+/// later delegate call naming one comes back to it instead of opening a new
+/// child. Keyed by name; each entry records the child's agent, session, and
+/// thread.
+pub(crate) const DELEGATED_CHILDREN_METADATA_KEY: &str = "delegated_children";
 pub(crate) const WORKER_PLACEMENT_CWD_METADATA_KEY: &str = "worker_placement_cwd";
 pub(crate) const WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: &str = "worker_placement_can_write";
 pub(crate) const WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: &str =
