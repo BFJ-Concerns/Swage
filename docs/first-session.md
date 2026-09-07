@@ -1,12 +1,15 @@
 ---
-description: End-to-end walkthrough of a first session — opening a space, attaching a repository as a workspace, and trusting it so its guidance reaches agents
+description: End-to-end walkthrough of a first session — opening a space, optionally attaching and trusting a workspace, and starting a conversation with a chosen agent
 ---
 
 # First session
 
 The [README](../README.md) covers building, starting, and configuring the
 gateway. Once it is running with at least one provider configured, the web
-UI is where the first session begins.
+UI is where the first session begins. A first session needs only an opened
+space — attaching a workspace and trusting it are optional steps that give
+agents file access and project guidance, but a conversation can start
+without either.
 
 ## Open a space
 
@@ -64,11 +67,29 @@ Trust is reversible. **Revoke trust** returns the workspace to
 without removing the attachment itself. **Detach** removes the workspace from the
 space entirely.
 
+## Start a conversation
+
+The message input area at the bottom of the space includes an agent picker
+alongside the text field. The picker is available whenever there is no
+active conversation in the opened space. It lists the space's effective
+agent definitions — the shipped default (**Swage default**) plus any
+operator-authored definitions visible to the space. Select an agent, type a
+message, and submit: the gateway creates the conversation bound to that
+agent definition and navigates to it immediately.
+
+If only the shipped default is available (a fresh install with no
+operator-authored definitions), the picker has one entry and the choice is
+automatic.
+
+[Agents and permissions](agents-and-permissions.md#what-agents-are-available)
+covers what the registry contains and how space-scoped definitions shadow
+global ones.
+
 ## What to do next
 
-With a trusted workspace attached, open a conversation from the space's
-main surface and start a turn. The agent will have access to the
-workspace's files and will follow whatever guidance its `AGENTS.md`
-provides. The [README's sandbox section](../README.md#the-first-turn-may-ask-about-sandboxing)
+With a conversation open, start a turn. If a trusted workspace is
+attached, the agent will have access to the workspace's files and will
+follow whatever guidance its `AGENTS.md` provides.
+The [README's sandbox section](../README.md#the-first-turn-may-ask-about-sandboxing)
 covers what happens on the first tool call if bubblewrap is not yet
 installed.
