@@ -151,7 +151,7 @@ pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> 
     parts
 }
 
-/// Refuse a submission whose attachments the configured provider cannot
+/// Refuse a submission whose attachments the selected provider cannot
 /// consume. The check runs before anything is persisted: a part the model
 /// would never see must fail the turn, not ride along silently.
 pub(crate) fn check_attachment_support(
@@ -166,15 +166,62 @@ pub(crate) fn check_attachment_support(
                         "an image attachment needs a non-empty url".into(),
                     ));
                 }
-                if !capabilities.vision {
+                if !capabilities.vision() {
                     return Err(GatewayError::ValidationError(
-                        "the configured provider does not accept image attachments".into(),
+                        "the selected provider does not accept image attachments".into(),
+                    ));
+                }
+                if !capabilities.accepts_image_reference(url) {
+                    return Err(GatewayError::ValidationError(
+                        "the selected provider cannot resolve this image reference: attach the \
+                         image inline as a base64 data URL"
+                            .into(),
                     ));
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Resolve the request's effective model and admit its attachments against
+/// that model's provider protocol. Every entry point uses this seam before it
+/// persists a turn, so the admission decision cannot drift from execution.
+pub(crate) fn resolve_turn_model_and_attachments(
+    state: &AppState,
+    config: swage_config::ResolvedConfig,
+    requested_model: Option<&str>,
+    session_selected_model: Option<&str>,
+    session_id: Uuid,
+    attachments: &[MessageAttachment],
+) -> Result<(swage_config::ResolvedConfig, &'static str, Option<String>), GatewayError> {
+    let selected_model_id = requested_model.or(session_selected_model);
+    if let Some(requested_model) = requested_model {
+        resolve_requested_turn_model(&config, requested_model)?;
+    }
+    ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
+    let effective_model_source = match requested_model {
+        Some(_) => "request",
+        None if session_selected_model
+            .filter(|model_id| !model_id.trim().is_empty())
+            .is_some_and(|model_id| {
+                resolve_model_catalogue_entry(&config.models, model_id).is_some()
+            }) =>
+        {
+            "conversation"
+        }
+        None => "configured_default",
+    };
+    let config = effective_session_config(config, selected_model_id);
+    let workflow_capabilities =
+        crate::capabilities::WorkflowCapabilities::for_protocol(config.default_provider_protocol());
+    check_attachment_support(&workflow_capabilities, attachments)?;
+
+    Ok((
+        config,
+        effective_model_source,
+        selected_model_id.map(str::to_owned),
+    ))
 }
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
@@ -1132,9 +1179,6 @@ async fn process_turn_with_composition_and_focus(
         text: content,
         attachments,
     } = input;
-    // An attachment the provider cannot consume fails the turn before any
-    // record is written — a part the model never sees must not ride along.
-    check_attachment_support(&state.workflow_capabilities, &attachments)?;
 
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -1296,28 +1340,14 @@ async fn process_turn_with_composition_and_focus(
         None => (config, false),
     };
 
-    let selected_model_id = requested_model
-        .as_deref()
-        .or(session.selected_model_id.as_deref());
-    if let Some(requested_model) = requested_model.as_deref() {
-        resolve_requested_turn_model(&config, requested_model)?;
-    }
-    ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
-    let effective_model_source = match requested_model.as_deref() {
-        Some(_) => "request",
-        None if session
-            .selected_model_id
-            .as_deref()
-            .filter(|model_id| !model_id.trim().is_empty())
-            .is_some_and(|model_id| {
-                resolve_model_catalogue_entry(&config.models, model_id).is_some()
-            }) =>
-        {
-            "conversation"
-        }
-        None => "configured_default",
-    };
-    let config = effective_session_config(config, selected_model_id);
+    let (config, effective_model_source, selected_model_id) = resolve_turn_model_and_attachments(
+        state,
+        config,
+        requested_model.as_deref(),
+        session.selected_model_id.as_deref(),
+        session_id,
+        &attachments,
+    )?;
 
     // Skill discovery, space memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.
@@ -1856,8 +1886,11 @@ async fn process_turn_with_composition_and_focus(
             .map_err(|error| {
                 GatewayError::ConfigError(format!("session effort is invalid: {error}"))
             })?
-            .or_else(
-                || match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+            .or_else(|| {
+                match selected_model_id
+                    .as_deref()
+                    .filter(|model_id| !model_id.trim().is_empty())
+                {
                     Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
                         .and_then(|(_, model)| model.default_effort),
                     None => config
@@ -1865,8 +1898,8 @@ async fn process_turn_with_composition_and_focus(
                         .entries
                         .get(&config.models.default)
                         .and_then(|model| model.default_effort),
-                },
-            ),
+                }
+            }),
     };
     let model_name = config.default_model_id().to_string();
     let agent_handle = if is_codex_turn {
