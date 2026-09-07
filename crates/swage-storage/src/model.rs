@@ -2210,6 +2210,7 @@ pub struct WorkflowJournalRecord {
     pub args_hash: String,
     pub request: serde_json::Value,
     pub result: Option<serde_json::Value>,
+    pub terminal_metadata: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub effect_kind: Option<String>,
     pub idempotency_key: Option<Uuid>,
