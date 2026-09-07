@@ -343,7 +343,6 @@ pub enum WorkflowJournalResult {
         input_tokens: u64,
         output_tokens: u64,
         working_directory: Option<String>,
-        liveness: Option<WorkflowWorkerLiveness>,
         served_model: Option<String>,
         session_id: Option<Uuid>,
         thread_id: Option<Uuid>,

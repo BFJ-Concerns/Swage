@@ -5572,16 +5572,6 @@
                 "const": "agent_call",
                 "type": "string"
               },
-              "liveness": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/WorkflowWorkerLiveness"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
               "output": true,
               "output_tokens": {
                 "format": "uint64",

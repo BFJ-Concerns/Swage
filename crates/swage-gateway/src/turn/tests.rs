@@ -1360,6 +1360,13 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
         unimplemented!()
     }
+    async fn set_workflow_journal_terminal_metadata(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
     async fn list_workflow_journal(
         &self,
         _: Uuid,

@@ -126,15 +126,14 @@ pub struct AgentCallResult {
     pub thread_id: Option<Uuid>,
     #[serde(default)]
     pub turn_id: Option<Uuid>,
-    #[serde(default)]
-    pub liveness: Option<WorkerLiveness>,
     pub worktree: Option<WorktreeCompletion>,
 }
 
 /// The first two observable moments in a workflow worker's lifetime.
 ///
-/// This is host state persisted in the journal result, rather than a client
-/// contract: the gateway projects it into the client wire surface.
+/// This is host state persisted as outcome-independent journal metadata,
+/// rather than a client contract: the gateway projects it into the client
+/// wire surface.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerLiveness {
     pub started_at: String,

@@ -523,6 +523,29 @@ fn journal_wire(
             })
             .ok()
     });
+    let stored_liveness = entry
+        .terminal_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("liveness"))
+        .cloned()
+        .map(serde_json::from_value::<swage_workflow::WorkerLiveness>)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let liveness = match stored_liveness {
+        Some(liveness) => Some(swage_protocol::client::workflow::WorkflowWorkerLiveness {
+            started_at: liveness
+                .started_at
+                .parse()
+                .map_err(|error| format!("invalid workflow worker start timestamp: {error}"))?,
+            first_evidence_at: liveness
+                .first_evidence_at
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|error| format!("invalid workflow worker evidence timestamp: {error}"))?,
+        }),
+        None => None,
+    };
     let agent_call = (entry.kind == "agent_call").then(|| {
         let result = result.as_ref();
         WorkflowAgentCallDetail {
@@ -551,10 +574,7 @@ fn journal_wire(
                 WorkflowJournalResult::AgentCall { output_tokens, .. } => Some(*output_tokens),
                 _ => None,
             }),
-            liveness: result.and_then(|result| match result {
-                WorkflowJournalResult::AgentCall { liveness, .. } => liveness.clone(),
-                _ => None,
-            }),
+            liveness,
             worktree: result.and_then(|result| match result {
                 WorkflowJournalResult::AgentCall { worktree, .. } => worktree.clone(),
                 _ => None,
@@ -710,6 +730,7 @@ mod journal_result_contract_tests {
             args_hash: String::new(),
             request: Value::Null,
             result: Some(serde_json::json!({"kind": "log", "fired": true})),
+            terminal_metadata: None,
             error_message: None,
             effect_kind: None,
             idempotency_key: None,
@@ -1534,6 +1555,28 @@ async fn record_workflow_worker_evidence(state: &AppState, entry_id: Uuid, event
     }
 }
 
+async fn persist_workflow_worker_liveness(
+    state: &AppState,
+    entry_id: Uuid,
+) -> Result<(), StorageError> {
+    let liveness = state
+        .active_workflow_workers
+        .lock()
+        .await
+        .get(&entry_id)
+        .cloned();
+    if let Some(liveness) = liveness {
+        state
+            .storage
+            .set_workflow_journal_terminal_metadata(
+                entry_id,
+                serde_json::json!({ "liveness": liveness }),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_workflow_agent_turn(
     state: &AppState,
@@ -2100,7 +2143,6 @@ async fn run_ephemeral_agent_call(
         input_tokens: turn.input_tokens.unwrap_or(0).max(0) as u64,
         output_tokens: turn.output_tokens.unwrap_or(0).max(0) as u64,
         working_directory: resolved_working_directory.map(|placement| placement.path),
-        liveness: None,
         served_model,
         session_id: Some(session_id),
         thread_id: Some(thread_id),
@@ -4171,18 +4213,12 @@ async fn complete_agent_entry(
     .await
     {
         Ok(mut result) => {
-            result.liveness = state
-                .active_workflow_workers
-                .lock()
-                .await
-                .get(&entry_id)
-                .cloned();
+            if let Err(error) = persist_workflow_worker_liveness(state, entry_id).await {
+                state.active_workflow_workers.lock().await.remove(&entry_id);
+                return Err(WorkflowHostError::Message(error.to_string()));
+            }
             if let Some(worktree_seq) = worktree_seq {
-                let completion = match state
-                    .worktree_host
-                    .finish(run_id, worktree_seq)
-                    .await
-                {
+                let completion = match state.worktree_host.finish(run_id, worktree_seq).await {
                     Ok(completion) => completion,
                     Err(error) => {
                         state.active_workflow_workers.lock().await.remove(&entry_id);
@@ -4209,15 +4245,20 @@ async fn complete_agent_entry(
         // A failure the script observes (and may catch in parallel/pipeline)
         // must settle durably too, or replay treats the entry as live work
         // and re-executes the call — which may then succeed and change the
-        // resumed path. Cancellation is settled for every in-flight entry at
-        // the owning run boundary after the host loop drains.
+        // resumed path. Settling cancellation here also preserves the
+        // worker's terminal metadata before the live overlay is removed.
         Err(error) => {
-            state.active_workflow_workers.lock().await.remove(&entry_id);
-            if !error.to_string().starts_with("WorkflowCancelledError") {
-                let _ = state
-                    .fail_workflow_journal_entry(entry_id, &error.to_string())
-                    .await;
+            if let Err(metadata_error) = persist_workflow_worker_liveness(state, entry_id).await {
+                tracing::warn!(
+                    journal_entry_id = %entry_id,
+                    %metadata_error,
+                    "could not persist failed workflow worker liveness"
+                );
             }
+            let _ = state
+                .fail_workflow_journal_entry(entry_id, &error.to_string())
+                .await;
+            state.active_workflow_workers.lock().await.remove(&entry_id);
             Err(error)
         }
     }
@@ -13272,7 +13313,6 @@ mod tests {
                     output: Value::String("restated".into()),
                     input_tokens: 1,
                     output_tokens: 1,
-                    liveness: None,
                     working_directory: None,
                     served_model: None,
                     session_id: Some(session.id),
@@ -14231,7 +14271,6 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
-                    liveness: None,
                     working_directory: None,
                     served_model: None,
                     session_id: None,
@@ -14481,7 +14520,6 @@ mod tests {
                     output: Value::String("completed work".into()),
                     input_tokens: 1,
                     output_tokens: 1,
-                    liveness: None,
                     working_directory: None,
                     served_model: None,
                     session_id: None,

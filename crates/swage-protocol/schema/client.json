@@ -5888,16 +5888,6 @@
               "type": "string",
               "const": "agent_call"
             },
-            "liveness": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/WorkflowWorkerLiveness"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "output": true,
             "output_tokens": {
               "type": "integer",
