@@ -1342,10 +1342,15 @@ pub async fn submit_turn(
     .await
     .map_err(ApiError::from)?;
 
-    if let Some(model) = req.model.as_deref() {
-        crate::turn::resolve_requested_turn_model(&state.active_config(), model)
-            .map_err(ApiError::from)?;
-    }
+    crate::turn::resolve_turn_model_and_attachments(
+        &state,
+        state.active_config(),
+        req.model.as_deref(),
+        session.selected_model_id.as_deref(),
+        session.id,
+        &req.attachments,
+    )
+    .map_err(ApiError::from)?;
     if state
         .active_turns
         .lock()
