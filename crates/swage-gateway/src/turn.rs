@@ -21,6 +21,7 @@ use swage_core::{
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
+use swage_protocol::client::workflow::{WorkflowAgentCallResolution, WorkflowProviderRoundOutcome};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -150,7 +151,7 @@ pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> 
     parts
 }
 
-/// Refuse a submission whose attachments the configured provider cannot
+/// Refuse a submission whose attachments the selected provider cannot
 /// consume. The check runs before anything is persisted: a part the model
 /// would never see must fail the turn, not ride along silently.
 pub(crate) fn check_attachment_support(
@@ -165,15 +166,62 @@ pub(crate) fn check_attachment_support(
                         "an image attachment needs a non-empty url".into(),
                     ));
                 }
-                if !capabilities.vision {
+                if !capabilities.vision() {
                     return Err(GatewayError::ValidationError(
-                        "the configured provider does not accept image attachments".into(),
+                        "the selected provider does not accept image attachments".into(),
+                    ));
+                }
+                if !capabilities.accepts_image_reference(url) {
+                    return Err(GatewayError::ValidationError(
+                        "the selected provider cannot resolve this image reference: attach the \
+                         image inline as a base64 data URL"
+                            .into(),
                     ));
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Resolve the request's effective model and admit its attachments against
+/// that model's provider protocol. Every entry point uses this seam before it
+/// persists a turn, so the admission decision cannot drift from execution.
+pub(crate) fn resolve_turn_model_and_attachments(
+    state: &AppState,
+    config: swage_config::ResolvedConfig,
+    requested_model: Option<&str>,
+    session_selected_model: Option<&str>,
+    session_id: Uuid,
+    attachments: &[MessageAttachment],
+) -> Result<(swage_config::ResolvedConfig, &'static str, Option<String>), GatewayError> {
+    let selected_model_id = requested_model.or(session_selected_model);
+    if let Some(requested_model) = requested_model {
+        resolve_requested_turn_model(&config, requested_model)?;
+    }
+    ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
+    let effective_model_source = match requested_model {
+        Some(_) => "request",
+        None if session_selected_model
+            .filter(|model_id| !model_id.trim().is_empty())
+            .is_some_and(|model_id| {
+                resolve_model_catalogue_entry(&config.models, model_id).is_some()
+            }) =>
+        {
+            "conversation"
+        }
+        None => "configured_default",
+    };
+    let config = effective_session_config(config, selected_model_id);
+    let workflow_capabilities =
+        crate::capabilities::WorkflowCapabilities::for_protocol(config.default_provider_protocol());
+    check_attachment_support(&workflow_capabilities, attachments)?;
+
+    Ok((
+        config,
+        effective_model_source,
+        selected_model_id.map(str::to_owned),
+    ))
 }
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
@@ -392,6 +440,94 @@ pub(crate) fn effort_capability_for_model(
             provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
         })
         .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// Open the record for a provider request that has just gone out.
+///
+/// The row's start time with no settlement is what tells an outstanding
+/// provider request from a tool loop that is making progress, so it is
+/// written when the request leaves rather than when the round ends.
+/// Reconstructive record (record_durability.rs): losing it degrades the
+/// trail's account of the round without falsifying the turn, so the gap is
+/// named rather than swallowed, and a gap that cannot itself be recorded
+/// escalates.
+async fn open_provider_round_record(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    round: usize,
+    record_integrity_lost: &mut Option<String>,
+) {
+    let outcome = match serde_json::to_value(WorkflowProviderRoundOutcome::Outstanding) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round outcome could not be serialised: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = state
+        .storage
+        .open_provider_round(turn_id, round as i64, outcome)
+        .await
+    {
+        tracing::warn!(error = %error, round, "failed to record provider round start");
+        if let Err(audit_error) = record_durability::record_reconstruction_gap(
+            state.storage.as_ref(),
+            Some(session_id),
+            turn_id,
+            "provider_round",
+            &error,
+        )
+        .await
+        {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round record lost and the loss could not be recorded: {audit_error}"
+            ));
+        }
+    }
+}
+
+/// Settle the record for a provider round that has ended, with what came
+/// back. Same reconstructive class and escalation as the opening record.
+async fn settle_provider_round_record(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    round: usize,
+    outcome: WorkflowProviderRoundOutcome,
+    record_integrity_lost: &mut Option<String>,
+) {
+    let outcome = match serde_json::to_value(outcome) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round outcome could not be serialised: {error}"
+            ));
+            return;
+        }
+    };
+    if let Err(error) = state
+        .storage
+        .settle_provider_round(turn_id, round as i64, outcome)
+        .await
+    {
+        tracing::warn!(error = %error, round, "failed to record provider round outcome");
+        if let Err(audit_error) = record_durability::record_reconstruction_gap(
+            state.storage.as_ref(),
+            Some(session_id),
+            turn_id,
+            "provider_round",
+            &error,
+        )
+        .await
+        {
+            record_integrity_lost.get_or_insert(format!(
+                "provider round record lost and the loss could not be recorded: {audit_error}"
+            ));
+        }
+    }
 }
 
 /// Record the resolved effort beside the effective model in the turn's
@@ -715,6 +851,48 @@ async fn record_terminal_state_and_release(
     Ok(())
 }
 
+/// Persist the resolved dispatch before a provider can execute it.
+///
+/// Both provider runtimes share this refusal path so neither can make a call
+/// whose workflow attempt cannot be reconstructed from the durable record.
+async fn record_agent_call_attempt_before_execution(
+    state: &AppState,
+    session_id: Uuid,
+    prepared_turn_id: Uuid,
+    agent_call_scope: Option<Uuid>,
+    resolution: &WorkflowAgentCallResolution,
+    sandbox_guard: &Option<SandboxGuard>,
+) -> Result<(), GatewayError> {
+    let Some(agent_call_scope) = agent_call_scope else {
+        return Ok(());
+    };
+    let result = match serde_json::to_value(resolution) {
+        Ok(resolution) => crate::workflow::record_agent_call_attempt(
+            state.storage.as_ref(),
+            agent_call_scope,
+            resolution,
+        )
+        .await
+        .map_err(|error| {
+            GatewayError::WebSocketError(format!("failed to record agent call attempt: {error}"))
+        }),
+        Err(error) => Err(GatewayError::WebSocketError(format!(
+            "agent call attempt could not be serialised: {error}"
+        ))),
+    };
+    if let Err(error) = result {
+        shutdown_sandbox_guard(
+            sandbox_guard,
+            "failed to shut down sandbox after agent call attempt recording failure",
+        )
+        .await;
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
+            .await?;
+        return Err(error);
+    }
+    Ok(())
+}
+
 async fn record_failed_turn_and_release_on_error<T>(
     state: &AppState,
     session_id: Uuid,
@@ -1001,9 +1179,6 @@ async fn process_turn_with_composition_and_focus(
         text: content,
         attachments,
     } = input;
-    // An attachment the provider cannot consume fails the turn before any
-    // record is written — a part the model never sees must not ride along.
-    check_attachment_support(&state.workflow_capabilities, &attachments)?;
 
     // Step 1: Resolve the space and target thread for this session.
     let mut session = state
@@ -1165,28 +1340,14 @@ async fn process_turn_with_composition_and_focus(
         None => (config, false),
     };
 
-    let selected_model_id = requested_model
-        .as_deref()
-        .or(session.selected_model_id.as_deref());
-    if let Some(requested_model) = requested_model.as_deref() {
-        resolve_requested_turn_model(&config, requested_model)?;
-    }
-    ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
-    let effective_model_source = match requested_model.as_deref() {
-        Some(_) => "request",
-        None if session
-            .selected_model_id
-            .as_deref()
-            .filter(|model_id| !model_id.trim().is_empty())
-            .is_some_and(|model_id| {
-                resolve_model_catalogue_entry(&config.models, model_id).is_some()
-            }) =>
-        {
-            "conversation"
-        }
-        None => "configured_default",
-    };
-    let config = effective_session_config(config, selected_model_id);
+    let (config, effective_model_source, selected_model_id) = resolve_turn_model_and_attachments(
+        state,
+        config,
+        requested_model.as_deref(),
+        session.selected_model_id.as_deref(),
+        session_id,
+        &attachments,
+    )?;
 
     // Skill discovery, space memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.
@@ -1725,8 +1886,11 @@ async fn process_turn_with_composition_and_focus(
             .map_err(|error| {
                 GatewayError::ConfigError(format!("session effort is invalid: {error}"))
             })?
-            .or_else(
-                || match selected_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+            .or_else(|| {
+                match selected_model_id
+                    .as_deref()
+                    .filter(|model_id| !model_id.trim().is_empty())
+                {
                     Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
                         .and_then(|(_, model)| model.default_effort),
                     None => config
@@ -1734,8 +1898,8 @@ async fn process_turn_with_composition_and_focus(
                         .entries
                         .get(&config.models.default)
                         .and_then(|model| model.default_effort),
-                },
-            ),
+                }
+            }),
     };
     let model_name = config.default_model_id().to_string();
     let agent_handle = if is_codex_turn {
@@ -1752,6 +1916,24 @@ async fn process_turn_with_composition_and_focus(
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(&mut report_json, resolved);
         }
+        let resolution = WorkflowAgentCallResolution {
+            model: Some(model_name.clone()),
+            effort: effort
+                .as_ref()
+                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
+            session_id: Some(session_id),
+            thread_id: Some(thread_id),
+            turn_id: Some(prepared_turn_id),
+        };
+        record_agent_call_attempt_before_execution(
+            state,
+            session_id,
+            prepared_turn_id,
+            agent_call_scope,
+            &resolution,
+            &sandbox_guard,
+        )
+        .await?;
         let session_approval_grants = state
             .session_approval_grants
             .lock()
@@ -1838,6 +2020,30 @@ async fn process_turn_with_composition_and_focus(
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(&mut report_json, resolved);
         }
+        // The dispatch record names what the call *asked* for; what the
+        // turn actually resolved is only known here, so it is stamped onto
+        // the same journal entry as a second field rather than by rewriting
+        // the dispatch one. Each turn appends its own attempt, so a call
+        // replay re-dispatched keeps the interrupted attempt beside the one
+        // that follows it.
+        let resolution = WorkflowAgentCallResolution {
+            model: Some(model_name.clone()),
+            effort: effort
+                .as_ref()
+                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
+            session_id: Some(session_id),
+            thread_id: Some(thread_id),
+            turn_id: Some(prepared_turn_id),
+        };
+        record_agent_call_attempt_before_execution(
+            state,
+            session_id,
+            prepared_turn_id,
+            agent_call_scope,
+            &resolution,
+            &sandbox_guard,
+        )
+        .await?;
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -1957,6 +2163,14 @@ async fn process_turn_with_composition_and_focus(
                 round,
                 request,
             } => {
+                open_provider_round_record(
+                    state,
+                    session_id,
+                    snapshot_turn_id,
+                    round,
+                    &mut record_integrity_lost,
+                )
+                .await;
                 apply_provider_snapshot_event(
                     state,
                     &mut report_json,
@@ -1992,6 +2206,32 @@ async fn process_turn_with_composition_and_focus(
                         ));
                     }
                 }
+            }
+            AgentEvent::ProviderRoundSettled {
+                turn_id: round_turn_id,
+                round,
+                outcome,
+            } => {
+                let outcome = match outcome {
+                    swage_agent::ProviderRoundOutcome::Responded { tool_calls } => {
+                        WorkflowProviderRoundOutcome::Responded { tool_calls }
+                    }
+                    swage_agent::ProviderRoundOutcome::Failed { message } => {
+                        WorkflowProviderRoundOutcome::Failed { message }
+                    }
+                    swage_agent::ProviderRoundOutcome::Interrupted => {
+                        WorkflowProviderRoundOutcome::Interrupted
+                    }
+                };
+                settle_provider_round_record(
+                    state,
+                    session_id,
+                    round_turn_id,
+                    round,
+                    outcome,
+                    &mut record_integrity_lost,
+                )
+                .await;
             }
             AgentEvent::ProviderReasoningCaptured {
                 turn_id: snapshot_turn_id,
