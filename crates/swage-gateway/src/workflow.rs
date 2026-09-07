@@ -1884,9 +1884,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::OpenHeldWorker { open, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::OpenHeldWorker { open, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped worker reply".to_string())?
@@ -1898,9 +1896,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::CloseHeldWorker { worker_id, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::CloseHeldWorker { worker_id, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped worker reply".to_string())?
@@ -1912,9 +1908,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::HeldWorkerStaleness { worker_id, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::HeldWorkerStaleness { worker_id, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped worker reply".to_string())?
@@ -17638,6 +17632,33 @@ mod tests {
             .expect("late gate task")
             .expect_err("a command admitted after parking starts must be refused");
         assert!(error.contains("parked"), "unexpected refusal: {error}");
+
+        // Held-worker commands are admitted on the same terms as any other:
+        // a run that has parked answers none of them.
+        let opened = host
+            .open_held_worker(
+                HeldWorkerOpen {
+                    agent: Some("decider".into()),
+                    ..HeldWorkerOpen::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("opening a worker on a parked run must be refused");
+        assert!(opened.contains("parked"), "unexpected refusal: {opened}");
+        let closed = host
+            .close_held_worker(Uuid::new_v4(), CancellationToken::new())
+            .await
+            .expect_err("closing a worker on a parked run must be refused");
+        assert!(closed.contains("parked"), "unexpected refusal: {closed}");
+        let staleness = host
+            .held_worker_staleness(Uuid::new_v4(), CancellationToken::new())
+            .await
+            .expect_err("reading worker staleness on a parked run must be refused");
+        assert!(
+            staleness.contains("parked"),
+            "unexpected refusal: {staleness}"
+        );
         assert_eq!(
             provider.calls.load(Ordering::SeqCst),
             0,
