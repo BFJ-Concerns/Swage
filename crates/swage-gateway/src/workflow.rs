@@ -23854,6 +23854,7 @@ protocol = "openai"
                     max_total_tokens: None,
                     reserved_closing_tokens: None,
                     max_concurrent_agent_calls: Some(2),
+                    per_route: Default::default(),
                 }),
             }),
         )
