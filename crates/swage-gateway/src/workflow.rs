@@ -10051,16 +10051,20 @@ mod tests {
     }
 
     struct ParkedFirstDeltaProvider {
-        parked: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+        parked: std::sync::Mutex<Option<oneshot::Sender<chrono::DateTime<chrono::Utc>>>>,
         release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
     }
 
-    struct EvidenceThenPendingProvider {
+    struct PendingWithoutEvidenceProvider {
         pending: Arc<Notify>,
     }
 
     impl ParkedFirstDeltaProvider {
-        fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
+        fn new() -> (
+            Self,
+            oneshot::Receiver<chrono::DateTime<chrono::Utc>>,
+            oneshot::Sender<()>,
+        ) {
             let (parked_tx, parked_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             (
@@ -10075,9 +10079,9 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl swage_provider::LlmProvider for EvidenceThenPendingProvider {
+    impl swage_provider::LlmProvider for PendingWithoutEvidenceProvider {
         fn model_id(&self) -> &str {
-            "evidence-then-pending"
+            "pending-without-evidence"
         }
 
         async fn complete(
@@ -10099,18 +10103,8 @@ mod tests {
             _: swage_core::CompletionRequest,
         ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
         {
-            let pending = Arc::clone(&self.pending);
-            Box::pin(
-                futures::stream::once(async {
-                    swage_core::StreamChunk::Delta {
-                        content: "evidence".into(),
-                    }
-                })
-                .chain(futures::stream::once(async move {
-                    pending.notify_one();
-                    std::future::pending().await
-                })),
-            )
+            self.pending.notify_one();
+            Box::pin(futures::stream::pending())
         }
     }
 
@@ -10327,7 +10321,7 @@ mod tests {
                 futures::stream::once(async move {
                     parked
                         .expect("first parked call")
-                        .send(())
+                        .send(chrono::Utc::now())
                         .expect("park signal");
                     release.await.expect("release parked worker");
                     swage_core::StreamChunk::Delta {
@@ -21302,6 +21296,7 @@ mod tests {
                 .await
                 .expect("serve test gateway");
         });
+        let dispatch_window_opened_at = chrono::Utc::now();
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(space.id),
@@ -21320,7 +21315,7 @@ mod tests {
         )
         .await
         .expect("start run");
-        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+        let provider_dispatch_at = tokio::time::timeout(std::time::Duration::from_secs(2), parked)
             .await
             .expect("worker reaches parked provider boundary")
             .expect("provider park signal");
@@ -21392,6 +21387,22 @@ mod tests {
             liveness
                 .iter()
                 .all(|stamp| stamp.first_evidence_at.is_some())
+        );
+        let parked_liveness = settled
+            .journal
+            .iter()
+            .find(|entry| entry.request["prompt"] == "parked worker")
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("parked worker liveness");
+        assert!(
+            dispatch_window_opened_at <= parked_liveness.started_at
+                && parked_liveness.started_at <= provider_dispatch_at,
+            "started_at is captured between requesting and entering provider dispatch"
+        );
+        assert!(
+            provider_dispatch_at <= parked_liveness.first_evidence_at.expect("first evidence"),
+            "dispatch precedes the first provider evidence"
         );
         assert!(
             state.active_workflow_workers.lock().await.is_empty(),
@@ -21502,9 +21513,6 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
             Arc::new(ScriptedRecordingProvider {
                 outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
-                    swage_core::StreamChunk::Delta {
-                        content: "evidence".into(),
-                    },
                     swage_core::StreamChunk::Error {
                         message: "provider failed".into(),
                     },
@@ -21537,11 +21545,12 @@ mod tests {
             .find(|entry| entry.kind == "agent_call")
             .expect("failed agent call");
         assert_eq!(failed.status, "failed");
-        assert!(
-            stored_worker_liveness(&storage, failed.id)
-                .await
-                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
-            "failed call stores its evidence stamps"
+        let stored_liveness = stored_worker_liveness(&storage, failed.id)
+            .await
+            .expect("failed call stores dispatch liveness");
+        assert_eq!(
+            stored_liveness.first_evidence_at, None,
+            "a provider failure before output has no evidence stamp"
         );
         assert!(
             !state
@@ -21554,15 +21563,67 @@ mod tests {
         let Json(detail) = get_run(State(state), Path(started.id))
             .await
             .expect("failed run detail");
+        let detail_liveness = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == failed.id)
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("failed run detail projects durable dispatch liveness");
+        assert_eq!(detail_liveness.first_evidence_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_start_is_worker_evidence_before_any_text() {
+        let (state, storage, _, space_id) = fallback_test_state_with_tools(
+            vec![
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "echo-1".into(),
+                        name: "echo".into(),
+                        arguments: serde_json::json!({"text": "work"}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![swage_core::StreamChunk::Error {
+                    message: "failed before text".into(),
+                }],
+            ],
+            vec![
+                Arc::new(crate::test_support::NamedTool::new("echo")) as Arc<dyn crate::tool::Tool>
+            ],
+        )
+        .await;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"return await agent("tool-only worker", { tools: ["echo"], maxAttempts: 1 });"#
+                    .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start tool-only run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("tool-only journal");
+        let failed = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("tool-only agent call");
+        assert_eq!(failed.status, "failed");
         assert!(
-            detail
-                .journal
-                .iter()
-                .find(|entry| entry.id == failed.id)
-                .and_then(|entry| entry.agent_call.as_ref())
-                .and_then(|call| call.liveness.as_ref())
+            stored_worker_liveness(&storage, failed.id)
+                .await
                 .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
-            "failed run detail projects durable evidence stamps"
+            "ToolStart stamps evidence before any text is emitted"
         );
     }
 
@@ -21574,7 +21635,7 @@ mod tests {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(EvidenceThenPendingProvider {
+            Arc::new(PendingWithoutEvidenceProvider {
                 pending: Arc::clone(&pending),
             }),
             swage_config::ResolvedConfig::default(),
@@ -21595,22 +21656,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), pending.notified())
             .await
             .expect("worker reaches pending stream");
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if state
-                    .active_workflow_workers
-                    .lock()
-                    .await
-                    .values()
-                    .any(|stamp| stamp.first_evidence_at.is_some())
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("worker evidence is observed before cancellation");
         cancel_run(State(state.clone()), Path(started.id))
             .await
             .expect("request cancellation");
@@ -21625,11 +21670,12 @@ mod tests {
             .find(|entry| entry.kind == "agent_call")
             .expect("cancelled agent call");
         assert_eq!(cancelled.status, "failed");
-        assert!(
-            stored_worker_liveness(&storage, cancelled.id)
-                .await
-                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
-            "cancelled call stores its evidence stamps"
+        let stored_liveness = stored_worker_liveness(&storage, cancelled.id)
+            .await
+            .expect("cancelled call stores dispatch liveness");
+        assert_eq!(
+            stored_liveness.first_evidence_at, None,
+            "a worker cancelled before output has no evidence stamp"
         );
         assert!(
             !state
@@ -21642,16 +21688,14 @@ mod tests {
         let Json(detail) = get_run(State(state), Path(started.id))
             .await
             .expect("cancelled run detail");
-        assert!(
-            detail
-                .journal
-                .iter()
-                .find(|entry| entry.id == cancelled.id)
-                .and_then(|entry| entry.agent_call.as_ref())
-                .and_then(|call| call.liveness.as_ref())
-                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
-            "cancelled run detail projects durable evidence stamps"
-        );
+        let detail_liveness = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == cancelled.id)
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("cancelled run detail projects durable dispatch liveness");
+        assert_eq!(detail_liveness.first_evidence_at, None);
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {
