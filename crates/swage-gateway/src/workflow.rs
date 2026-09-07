@@ -13335,6 +13335,8 @@ mod tests {
         .await
         .expect("start held run");
         wait_for_run_state(&storage, started.id, "parked").await;
+        wait_for_workflow_thread_exit(started.id).await;
+        wait_for_active_workflow_run_release(&state, started.id).await;
 
         let (session, turn_id, base, ws_tx) =
             hold_answering_context(&storage, &state, space.id, "decider").await;
