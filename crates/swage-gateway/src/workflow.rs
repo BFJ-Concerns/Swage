@@ -7656,6 +7656,7 @@ mod tests {
                     turn_id: None,
                     served_model: None,
                     worktree: None,
+                    provider_route: None,
                 })
                 .expect("recorded result"),
             )
