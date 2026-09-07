@@ -1342,13 +1342,15 @@ pub async fn submit_turn(
     .await
     .map_err(ApiError::from)?;
 
-    if let Some(model) = req.model.as_deref() {
-        crate::turn::resolve_requested_turn_model(&state.active_config(), model)
-            .map_err(ApiError::from)?;
-    }
-    crate::turn::check_attachment_support(&state.workflow_capabilities, &req.attachments)
-        .map_err(ApiError::from)?;
-
+    crate::turn::resolve_turn_model_and_attachments(
+        &state,
+        state.active_config(),
+        req.model.as_deref(),
+        session.selected_model_id.as_deref(),
+        session.id,
+        &req.attachments,
+    )
+    .map_err(ApiError::from)?;
     if state
         .active_turns
         .lock()
@@ -2144,7 +2146,7 @@ mod tests {
     use uuid::Uuid;
 
     use swage_provider::LlmProvider;
-    use swage_storage::store::{MessageStore, SessionStore, SpaceStore, Storage};
+    use swage_storage::store::{MessageStore, SessionStore, SpaceStore, Storage, TurnStore};
 
     use super::*;
     use crate::{
@@ -3608,9 +3610,134 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_turns_refuses_an_image_attachment_the_provider_cannot_consume() {
+    async fn post_turns_admits_an_image_for_the_selected_openai_provider() {
         let storage = Arc::new(MockStorage::new());
         let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "google".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::Google,
+                ..Default::default()
+            },
+        );
+        config.providers.entries.insert(
+            "openai".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::OpenAi,
+                ..Default::default()
+            },
+        );
+        config.models.default = "gemini".into();
+        config.models.entries.insert(
+            "gemini".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "google".into(),
+                model_id: "gemini-wire".into(),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "gpt".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "openai".into(),
+                model_id: "gpt-wire".into(),
+                ..Default::default()
+            },
+        );
+        let (router, _storage) = make_router_with_provider_and_config(
+            Arc::new(MockProvider::new(vec![
+                swage_core::StreamChunk::Delta {
+                    content: "a cat".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])) as Arc<dyn LlmProvider>,
+            storage,
+            config,
+        );
+
+        let create = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("create conversation response");
+        let conversation_id = body_json(create).await["id"]
+            .as_str()
+            .expect("conversation id")
+            .to_string();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "message": "what is this?",
+                            "model": "gpt",
+                            "attachments": [{"kind": "image_url", "url": "https://example.test/cat.png"}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("turn response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = body_json(response).await;
+        let turn_id: Uuid = body["turn_id"]
+            .as_str()
+            .expect("turn id")
+            .parse()
+            .expect("turn UUID");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(format!("/api/turns/{turn_id}"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .expect("turn poll response");
+                assert_eq!(response.status(), StatusCode::OK);
+                let turn = body_json(response).await;
+                if turn["state"] == "completed" {
+                    break;
+                }
+                assert_ne!(turn["state"], "failed", "{turn}");
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("selected-provider turn completes");
+    }
+
+    #[tokio::test]
+    async fn post_turns_refuses_a_selected_codex_image_before_persistence() {
+        let storage = Arc::new(MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "openai".into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::OpenAi,
+                ..Default::default()
+            },
+        );
         config.providers.entries.insert(
             "codex".into(),
             swage_config::ProviderEndpointConfig {
@@ -3618,12 +3745,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        config.models.default = "codex".into();
+        config.models.default = "gpt".into();
+        config.models.entries.insert(
+            "gpt".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "openai".into(),
+                model_id: "gpt-wire".into(),
+                ..Default::default()
+            },
+        );
         config.models.entries.insert(
             "codex".into(),
             swage_config::ModelEndpointConfig {
                 provider_id: "codex".into(),
-                model_id: "fake-codex".into(),
+                model_id: "codex-wire".into(),
                 ..Default::default()
             },
         );
@@ -3659,6 +3794,7 @@ mod tests {
                         serde_json::json!({
                             "conversation_id": conversation_id,
                             "message": "what is this?",
+                            "model": "codex",
                             "attachments": [{"kind": "image_url", "url": "https://example.test/cat.png"}]
                         })
                         .to_string(),
@@ -3677,9 +3813,29 @@ mod tests {
                 .is_some_and(|message| message.contains("image")),
             "{body}"
         );
+        let session = storage
+            .get_session(
+                conversation_id
+                    .parse()
+                    .expect("conversation id remains a UUID"),
+            )
+            .await
+            .expect("read conversation")
+            .expect("conversation exists");
+        let thread =
+            swage_storage::store::ThreadStore::list_by_session(storage.as_ref(), session.id)
+                .await
+                .expect("list threads")
+                .into_iter()
+                .next()
+                .expect("root thread");
         assert!(
-            storage.db.lock().await.turns.is_empty(),
-            "a refused attachment must not create a pending turn"
+            storage
+                .list_turns_by_thread(thread.id)
+                .await
+                .expect("list turns")
+                .is_empty(),
+            "a refused attachment must not create a turn record"
         );
     }
 

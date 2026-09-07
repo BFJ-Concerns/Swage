@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -1162,12 +1163,107 @@ pub(crate) struct MockStorage {
     fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    fail_provider_round_writes: AtomicBool,
+    fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
     pause_structured_output_writes: AtomicBool,
     structured_output_write_started: Notify,
     structured_output_write_release: Notify,
     require_result_working_directory: AtomicBool,
     result_created_without_working_directory: AtomicBool,
+}
+
+#[async_trait]
+impl swage_storage::ProviderRoundStore for MockStorage {
+    async fn open_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<swage_storage::ProviderRoundRecord, swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        if let Some(existing) = db
+            .provider_rounds
+            .iter()
+            .find(|record| record.turn_id == turn_id && record.round == round)
+        {
+            return Ok(existing.clone());
+        }
+        let record = swage_storage::ProviderRoundRecord {
+            id: Uuid::new_v4(),
+            turn_id,
+            round,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            outcome,
+        };
+        db.provider_rounds.push(record.clone());
+        Ok(record)
+    }
+
+    async fn settle_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<(), swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        if let Some(record) = db
+            .provider_rounds
+            .iter_mut()
+            .find(|record| record.turn_id == turn_id && record.round == round)
+        {
+            record.completed_at = Some(chrono::Utc::now());
+            record.outcome = outcome;
+        }
+        Ok(())
+    }
+
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        for record in db
+            .provider_rounds
+            .iter_mut()
+            .filter(|record| record.turn_id == turn_id && record.completed_at.is_none())
+        {
+            record.outcome = outcome.clone();
+        }
+        Ok(())
+    }
+
+    async fn list_provider_rounds_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<swage_storage::ProviderRoundRecord>, swage_core::StorageError> {
+        let db = self.db.lock().await;
+        let mut rounds = db
+            .provider_rounds
+            .iter()
+            .filter(|record| record.turn_id == turn_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        rounds.sort_by_key(|record| record.round);
+        Ok(rounds)
+    }
 }
 
 #[async_trait]
@@ -1247,6 +1343,34 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn fail_workflow_journal_entry(
         &self,
         _: Uuid,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn record_workflow_call_dispatch(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn record_workflow_call_attempt(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        if self.fail_workflow_attempt_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected workflow attempt write failure".into(),
+            ));
+        }
+        // The mock keeps no journal, so no attempt precedes this one.
+        Ok(Vec::new())
+    }
+    async fn cut_short_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
         _: &str,
     ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
         unimplemented!()
@@ -1436,6 +1560,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) workspace_attachments: HashMap<Uuid, WorkspaceAttachment>,
     pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
+    pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
 }
 
 impl MockStorage {
@@ -1455,6 +1580,8 @@ impl MockStorage {
             fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            fail_provider_round_writes: AtomicBool::new(false),
+            fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
             pause_structured_output_writes: AtomicBool::new(false),
             structured_output_write_started: Notify::new(),
@@ -1507,6 +1634,11 @@ impl MockStorage {
 
     pub(crate) fn fail_audit_writes(&self) {
         self.fail_audit_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_workflow_attempt_writes(&self) {
+        self.fail_workflow_attempt_writes
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_snapshot_writes(&self) {
@@ -4823,6 +4955,113 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
             .await
             .expect_err("fake App Server should be stopped after the turn")
             .is_cancelled()
+    );
+}
+
+#[tokio::test]
+async fn failed_codex_attempt_recording_releases_the_prepared_turn() {
+    let _guard = SwageHomeGuard::isolate();
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_workflow_attempt_writes();
+    let (state, session_id) =
+        make_state_with_config_and_storage(Vec::new(), codex_turn_config(), Arc::clone(&storage))
+            .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("refuse before provider execution"),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition::default(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect_err("a failed attempt record must refuse the Codex turn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record agent call attempt")
+    );
+    let turn = storage
+        .list_turns_by_thread(
+            storage
+                .list_by_session(session_id)
+                .await
+                .expect("list session threads")[0]
+                .id,
+        )
+        .await
+        .expect("list prepared turn")
+        .pop()
+        .expect("prepared turn exists");
+    assert_eq!(turn.state, TurnState::Failed);
+    assert!(
+        state.active_turns.lock().await.is_empty(),
+        "a refused Codex turn must not remain active"
+    );
+}
+
+#[tokio::test]
+async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
+    let _guard = SwageHomeGuard::isolate();
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_workflow_attempt_writes();
+    let (state, session_id) = make_state_with_config_and_storage(
+        Vec::new(),
+        swage_config::ResolvedConfig::default(),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("refuse before provider execution"),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition::default(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect_err("a failed attempt record must refuse the ordinary provider turn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record agent call attempt")
+    );
+    let turn = storage
+        .list_turns_by_thread(
+            storage
+                .list_by_session(session_id)
+                .await
+                .expect("list session threads")[0]
+                .id,
+        )
+        .await
+        .expect("list prepared turn")
+        .pop()
+        .expect("prepared turn exists");
+    assert_eq!(turn.state, TurnState::Failed);
+    assert!(
+        state.active_turns.lock().await.is_empty(),
+        "a refused ordinary provider turn must not remain active"
     );
 }
 
@@ -13970,19 +14209,17 @@ async fn token_usage_remains_null_when_provider_sends_no_usage() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
 
-    // The agent always persists token counts — zero when the provider
-    // sends no Usage chunk (the old gateway left them NULL, the agent
-    // stores the accumulated total which starts at 0).
+    // No provider round reported usage, so the counts stay unset. A zero
+    // here would be a spend claim the provider never made, and budget
+    // reconstruction would read it as "this turn cost nothing".
     let turn = &turns[0];
     assert_eq!(
-        turn.input_tokens,
-        Some(0),
-        "input_tokens should be zero when no usage reported"
+        turn.input_tokens, None,
+        "input_tokens should stay unset when no usage was reported, not read as zero"
     );
     assert_eq!(
-        turn.output_tokens,
-        Some(0),
-        "output_tokens should be zero when no usage reported"
+        turn.output_tokens, None,
+        "output_tokens should stay unset when no usage was reported, not read as zero"
     );
 }
 
@@ -15459,7 +15696,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    assert!(state.workflow_capabilities.vision);
+    assert!(state.workflow_capabilities.vision());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -15521,7 +15758,7 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
         make_state_with_config_and_storage(vec![], text_only_config(), Arc::clone(&storage)).await;
-    assert!(!state.workflow_capabilities.vision);
+    assert!(!state.workflow_capabilities.vision());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let error = process_turn(
@@ -15554,6 +15791,223 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
         db.turns.is_empty(),
         "no turn record is created for a refused turn"
     );
+}
+
+fn google_vision_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "google".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Google,
+            ..Default::default()
+        },
+    );
+    config.models.default = "gemini".into();
+    config.models.entries.insert(
+        "gemini".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "google".into(),
+            model_id: "gemini-2.5-flash".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+fn mixed_protocol_vision_config(
+    default_protocol: swage_config::Protocol,
+    selected_protocol: swage_config::Protocol,
+) -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "default-provider".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: default_protocol,
+            ..Default::default()
+        },
+    );
+    config.providers.entries.insert(
+        "selected-provider".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: selected_protocol,
+            command: Some("/bin/false".into()),
+            ..Default::default()
+        },
+    );
+    config.models.default = "default-model".into();
+    config.models.entries.insert(
+        "default-model".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "default-provider".into(),
+            model_id: "default-wire-model".into(),
+            ..Default::default()
+        },
+    );
+    config.models.entries.insert(
+        "selected-model".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "selected-provider".into(),
+            model_id: "selected-wire-model".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_openai_model_admits_a_web_image_when_the_default_is_google() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_config_and_storage(
+        vec![
+            StreamChunk::Delta {
+                content: "a cat".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        mixed_protocol_vision_config(
+            swage_config::Protocol::Google,
+            swage_config::Protocol::OpenAi,
+        ),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        Some("selected-model".into()),
+    )
+    .await
+    .expect("the selected OpenAI provider can fetch a web image");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_codex_model_refuses_an_image_when_the_default_is_anthropic() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_config_and_storage(
+        vec![],
+        mixed_protocol_vision_config(
+            swage_config::Protocol::Anthropic,
+            swage_config::Protocol::Codex,
+        ),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        process_turn_with_existing_turn_and_focus_and_model(
+            &state,
+            session_id,
+            None,
+            TurnInput::with_attachments(
+                "What is in this picture?",
+                vec![MessageAttachment::ImageUrl {
+                    url: "https://example.test/cat.png".into(),
+                }],
+            ),
+            mpsc::unbounded_channel().0,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+            None,
+            None,
+            None,
+            None,
+            TurnAttendance::Attended,
+            None,
+            Some("selected-model".into()),
+        ),
+    )
+    .await
+    .expect("attachment admission should settle before provider startup")
+    .expect_err("the selected Codex provider cannot consume an image");
+
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("image")),
+        "{error}"
+    );
+    let db = storage.db.lock().await;
+    assert!(db.messages.is_empty(), "a refused image is not persisted");
+    assert!(db.turns.is_empty(), "a refused turn is not persisted");
+}
+
+/// Gemini fetches nothing: `fileData.fileUri` addresses a resource already
+/// held by the Google File API, so an ordinary web image URL is a reference
+/// the model never resolves. The gate refuses it before anything is written
+/// rather than sending an unusable reference and failing the turn at the
+/// provider. An inline data URL, which the adapter carries as bytes, still
+/// travels.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_url_the_provider_cannot_resolve_is_refused_before_persistence() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], google_vision_config(), Arc::clone(&storage))
+            .await;
+    assert!(
+        state.workflow_capabilities.vision(),
+        "the Google adapter maps image parts"
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("a reference the provider cannot resolve must fail the turn");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("resolve")),
+        "{error}"
+    );
+
+    {
+        let db = storage.db.lock().await;
+        assert!(
+            db.messages.is_empty(),
+            "nothing is persisted for a refused turn"
+        );
+        assert!(
+            db.turns.is_empty(),
+            "no turn record is created for a refused turn"
+        );
+    }
+
+    // The reference the adapter can inline is admitted by the same gate.
+    crate::turn::check_attachment_support(
+        &state.workflow_capabilities,
+        &[MessageAttachment::ImageUrl {
+            url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+        }],
+    )
+    .expect("an inline data URL travels to Gemini as bytes");
 }
 
 /// A stored attachment outside the wire contract is corruption, refused
