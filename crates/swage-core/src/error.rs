@@ -361,6 +361,11 @@ pub struct DelegationRequest {
     pub isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
     /// Named skills selected for this child dispatch.
     pub skills: Option<Vec<String>>,
+    /// The caller's name for this child. Naming a child that this session has
+    /// already delegated to continues with that child — same session, same
+    /// thread, everything it was told before — instead of starting a fresh
+    /// one. An unused name opens a child under it.
+    pub child: Option<String>,
     /// Call-scoped inputs used to compose the child's context.
     pub composition: Box<crate::DispatchContextComposition>,
     /// Whether the parent turn should wait for the child result.

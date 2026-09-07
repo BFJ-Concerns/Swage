@@ -13,7 +13,7 @@ pub use engine::{
 };
 pub use host::{
     AgentCallRequest, AgentCallResult, AgentSessionRef, AwaitEventRequest, EffectPayload,
-    EffectReceipt, GateRequest, HoldRequest, ResolvedWorkerPlacement, RunEventPost,
+    EffectReceipt, GateRequest, HeldWorkerOpen, HoldRequest, ResolvedWorkerPlacement, RunEventPost,
     WorkflowCallRequest, WorkflowHost, WorkflowHostError, WorktreeCompletion,
 };
 pub use model::EffectKind;

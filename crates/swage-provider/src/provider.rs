@@ -493,6 +493,7 @@ mod tests {
             base_url: None,
             command: None,
             state_dir: None,
+            worker_staleness_threshold_ms: None,
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),
@@ -521,6 +522,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:11434/v1".into()),
             command: None,
             state_dir: None,
+            worker_staleness_threshold_ms: None,
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),

@@ -88,6 +88,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
                 id.clone(),
                 ProviderSettings {
                     protocol: try_wire_from_config(provider.protocol.clone())?,
+                    worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
                     api_key_secret_ref: provider.api_key_secret_ref.clone(),
                     api_key_env: provider.api_key_env.clone(),
@@ -172,6 +173,7 @@ pub async fn save_settings(
         providers.insert(
             provider_id,
             swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                 protocol: config_from_wire(provider.protocol)?,
                 api_key_secret_ref: secret_ref.or(provider.api_key_secret_ref),
                 api_key_env: provider.api_key_env,
@@ -525,6 +527,7 @@ fn save_provider_into_endpoint_config(
     provider: SaveProviderSettings,
 ) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
     Ok(swage_config::ProviderEndpointConfig {
+        worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
         protocol: config_from_wire(provider.protocol)?,
         base_url: provider.base_url,
         api_key_secret_ref: provider.api_key_secret_ref,
@@ -555,6 +558,7 @@ fn settings_response_from_saved_config(
                 id.clone(),
                 ProviderSettings {
                     protocol: wire_from_config(provider.protocol.clone()),
+                    worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
                     api_key_secret_ref: provider.api_key_secret_ref.clone(),
                     api_key_env: provider.api_key_env.clone(),
@@ -1333,6 +1337,7 @@ mod tests {
         providers.insert(
             "llama-cpp".to_string(),
             swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: None,
                 protocol: swage_config::Protocol::OpenAi,
                 base_url: Some("http://127.0.0.1:8080/v1".to_string()),
                 api_key_secret_ref: Some("secret:abc".to_string()),
@@ -1404,6 +1409,7 @@ mod tests {
                 "local".to_string(),
                 SaveProviderSettings {
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
+                    worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
                     api_key_secret_ref: None,
                     api_key_env: None,
@@ -1518,6 +1524,104 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn saving_settings_keeps_each_route_staleness_threshold() {
+        let swage_home = SwageHomeGuard::new();
+
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut initial_config = swage_config::ResolvedConfig::default();
+        initial_config.providers.default = "patient".to_string();
+        for (id, threshold) in [("patient", Some(600_000u64)), ("unset", None)] {
+            initial_config.providers.entries.insert(
+                id.to_string(),
+                swage_config::ProviderEndpointConfig {
+                    worker_staleness_threshold_ms: threshold,
+                    protocol: swage_config::Protocol::OpenAi,
+                    base_url: Some("http://127.0.0.1:65535/v1".to_string()),
+                    api_key_secret_ref: None,
+                    api_key_env: None,
+                    command: None,
+                    state_dir: None,
+                },
+            );
+        }
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            initial_config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let loaded = load_settings(&state).await.expect("load settings");
+        assert_eq!(
+            loaded.providers["patient"].worker_staleness_threshold_ms,
+            Some(600_000),
+            "the configured route threshold reaches the settings surface"
+        );
+        assert_eq!(
+            loaded.providers["unset"].worker_staleness_threshold_ms,
+            None
+        );
+
+        let providers = loaded
+            .providers
+            .iter()
+            .map(|(id, provider)| {
+                (
+                    id.clone(),
+                    SaveProviderSettings {
+                        protocol: provider.protocol.clone(),
+                        worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
+                        base_url: provider.base_url.clone(),
+                        api_key_secret_ref: provider.api_key_secret_ref.clone(),
+                        api_key_env: provider.api_key_env.clone(),
+                        api_key: None,
+                        command: provider.command.clone(),
+                        state_dir: provider.state_dir.clone(),
+                    },
+                )
+            })
+            .collect();
+        let request = SaveSettingsRequest {
+            default_provider: "patient".to_string(),
+            providers,
+            default_model: String::new(),
+            models: HashMap::new(),
+            generation_presets: HashMap::new(),
+            tool_runtime: None,
+            tool_permissions: None,
+            hitl: None,
+            sandbox: None,
+            context: None,
+            pricing: None,
+            observability: None,
+            communication: None,
+        };
+        save_settings(&state, request)
+            .await
+            .expect("an unrelated settings save succeeds");
+
+        assert_eq!(
+            state.active_config().providers.entries["patient"].worker_staleness_threshold_ms,
+            Some(600_000),
+            "a settings save must not erase a configured route threshold"
+        );
+        let reloaded =
+            swage_config::load_resolved_config_from(swage_home.path(), "default", "default")
+                .expect("saved settings reload from durable configuration");
+        assert_eq!(
+            reloaded.providers.entries["patient"].worker_staleness_threshold_ms,
+            Some(600_000)
+        );
+        assert_eq!(
+            reloaded.providers.entries["unset"].worker_staleness_threshold_ms,
+            None
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_rebuilds_tool_runtime_without_restart() {
         let swage_home = SwageHomeGuard::new();
 
@@ -1587,6 +1691,7 @@ mod tests {
                 "local".to_string(),
                 SaveProviderSettings {
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
+                    worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
                     api_key_secret_ref: None,
                     api_key_env: None,
@@ -1718,6 +1823,7 @@ mod tests {
                 "local".to_string(),
                 SaveProviderSettings {
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
+                    worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
                     api_key_secret_ref: None,
                     api_key_env: None,
