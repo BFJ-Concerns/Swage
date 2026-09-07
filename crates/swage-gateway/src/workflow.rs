@@ -4397,6 +4397,11 @@ async fn complete_agent_entry(
         // resumed path. Settling cancellation here also preserves the
         // worker's terminal metadata before the live overlay is removed.
         Err(error) => {
+            let error_message = if error.to_string() == "WorkflowCancelledError" {
+                "WorkflowCancelledError: run cancelled".to_string()
+            } else {
+                error.to_string()
+            };
             if let Err(metadata_error) = persist_workflow_worker_liveness(state, entry_id).await {
                 tracing::warn!(
                     journal_entry_id = %entry_id,
@@ -4405,7 +4410,7 @@ async fn complete_agent_entry(
                 );
             }
             let _ = state
-                .fail_workflow_journal_entry(entry_id, &error.to_string())
+                .fail_workflow_journal_entry(entry_id, &error_message)
                 .await;
             state.active_workflow_workers.lock().await.remove(&entry_id);
             Err(error)
