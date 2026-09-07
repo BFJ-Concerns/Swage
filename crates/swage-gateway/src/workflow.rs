@@ -1,7 +1,7 @@
 //! Durable workflow HTTP surface and detached engine supervision.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex as StdMutex,
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
@@ -1259,14 +1259,121 @@ enum HostCommand {
 
 struct ChannelWorkflowHost {
     tx: mpsc::UnboundedSender<HostCommand>,
+    admission: Arc<StdMutex<HostCommandAdmission>>,
     spent_tokens: Arc<AtomicU64>,
     max_total_tokens: Option<u64>,
+}
+
+struct HostCommandAdmission {
+    state: HostCommandAdmissionState,
+    deferred: Vec<HostCommand>,
+}
+
+#[derive(Default)]
+enum HostCommandAdmissionState {
+    #[default]
+    Open,
+    Parking,
+    Parked,
+}
+
+impl Default for HostCommandAdmission {
+    fn default() -> Self {
+        Self {
+            state: HostCommandAdmissionState::Open,
+            deferred: Vec::new(),
+        }
+    }
+}
+
+impl HostCommand {
+    fn reject_parked(self) {
+        let message = "WorkflowCancelledError: workflow run parked";
+        match self {
+            Self::Agent { reply, .. } | Self::DispatchAgent { reply, .. } => {
+                let _ = reply.send(Err(WorkflowHostError::Message(message.into())));
+            }
+            Self::ProvisionWorker { reply, .. } | Self::ResolveWorkerDirectory { reply, .. } => {
+                let _ = reply.send(Err(message.into()));
+            }
+            Self::ListWorkerPlacements { reply }
+            | Self::CapturedSources { reply }
+            | Self::Workflow { reply, .. }
+            | Self::Timer { reply, .. }
+            | Self::PostEvent { reply, .. }
+            | Self::AwaitEvent { reply, .. }
+            | Self::Gate { reply, .. }
+            | Self::Hold { reply, .. }
+            | Self::DeliverEvents { reply, .. }
+            | Self::BudgetSnapshot { reply } => {
+                let _ = reply.send(Err(message.into()));
+            }
+            Self::Deliver { reply, .. } => {
+                let _ = reply.send(Err(message.into()));
+            }
+            Self::ConfirmTimer { reply, .. } => {
+                let _ = reply.send(Err(message.into()));
+            }
+            Self::Record { .. } | Self::AbandonTimer { .. } => {}
+        }
+    }
+}
+
+impl ChannelWorkflowHost {
+    fn send(&self, command: HostCommand) -> Result<(), String> {
+        let mut admission = self.admission.lock().expect("host command admission");
+        match admission.state {
+            HostCommandAdmissionState::Open => self
+                .tx
+                .send(command)
+                .map_err(|_| "workflow host stopped".to_string()),
+            HostCommandAdmissionState::Parking => {
+                admission.deferred.push(command);
+                Ok(())
+            }
+            HostCommandAdmissionState::Parked => {
+                command.reject_parked();
+                Ok(())
+            }
+        }
+    }
+}
+
+fn begin_host_park(
+    admission: &StdMutex<HostCommandAdmission>,
+    commands: &mpsc::UnboundedReceiver<HostCommand>,
+) -> bool {
+    let mut admission = admission.lock().expect("host command admission");
+    if matches!(admission.state, HostCommandAdmissionState::Open) && commands.is_empty() {
+        admission.state = HostCommandAdmissionState::Parking;
+        true
+    } else {
+        false
+    }
+}
+
+fn finish_host_park(admission: &StdMutex<HostCommandAdmission>, parked: bool) -> Vec<HostCommand> {
+    let deferred = {
+        let mut admission = admission.lock().expect("host command admission");
+        admission.state = if parked {
+            HostCommandAdmissionState::Parked
+        } else {
+            HostCommandAdmissionState::Open
+        };
+        std::mem::take(&mut admission.deferred)
+    };
+    if parked {
+        deferred.into_iter().for_each(HostCommand::reject_parked);
+        Vec::new()
+    } else {
+        deferred
+    }
 }
 
 #[async_trait::async_trait]
 impl WorkflowHost for ChannelWorkflowHost {
     fn record(&self, kind: &str, message: String) {
-        let _ = self.tx.send(HostCommand::Record {
+        let _ = self.send(HostCommand::Record {
             kind: kind.into(),
             message,
         });
@@ -1288,14 +1395,12 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, WorkflowHostError> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::Agent {
-                request,
-                resolved_working_directory,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::Agent {
+            request,
+            resolved_working_directory,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped agent reply".to_string())?
@@ -1307,13 +1412,11 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<AgentCallResult, WorkflowHostError> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::DispatchAgent {
-                request,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::DispatchAgent {
+            request,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped agent reply".to_string())?
@@ -1329,24 +1432,20 @@ impl WorkflowHost for ChannelWorkflowHost {
                 return Ok(None);
             };
             let (reply, receive) = oneshot::channel();
-            self.tx
-                .send(HostCommand::ResolveWorkerDirectory {
-                    cwd: cwd.to_string(),
-                    reply,
-                })
-                .map_err(|_| "workflow host stopped".to_string())?;
+            self.send(HostCommand::ResolveWorkerDirectory {
+                cwd: cwd.to_string(),
+                reply,
+            })?;
             return receive
                 .await
                 .map_err(|_| "workflow host dropped placement reply".to_string())?;
         };
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::ProvisionWorker {
-                cwd: request.cwd.clone(),
-                isolation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::ProvisionWorker {
+            cwd: request.cwd.clone(),
+            isolation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped placement reply".to_string())?
@@ -1357,9 +1456,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::ListWorkerPlacements { reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::ListWorkerPlacements { reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped placement-list reply".to_string())?
@@ -1367,9 +1464,7 @@ impl WorkflowHost for ChannelWorkflowHost {
 
     async fn captured_sources(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::CapturedSources { reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::CapturedSources { reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped captured-sources reply".to_string())?
@@ -1381,13 +1476,11 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<EffectReceipt, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::Deliver {
-                payload,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::Deliver {
+            payload,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped delivery reply".to_string())?
@@ -1399,13 +1492,11 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::Workflow {
-                request,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::Workflow {
+            request,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped workflow reply".to_string())?
@@ -1418,28 +1509,24 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::Timer {
-                ms,
-                timer_id,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::Timer {
+            ms,
+            timer_id,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped timer reply".to_string())?
     }
 
     fn abandon_timer(&self, timer_id: u64) {
-        let _ = self.tx.send(HostCommand::AbandonTimer { timer_id });
+        let _ = self.send(HostCommand::AbandonTimer { timer_id });
     }
 
     async fn confirm_timer(&self, timer_id: u64) -> Result<(), String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::ConfirmTimer { timer_id, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::ConfirmTimer { timer_id, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped timer confirmation".to_string())?
@@ -1451,9 +1538,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::PostEvent { event, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::PostEvent { event, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped event reply".to_string())?
@@ -1465,9 +1550,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::AwaitEvent { request, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::AwaitEvent { request, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped awaited-event reply".to_string())?
@@ -1479,13 +1562,11 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::Hold {
-                request,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::Hold {
+            request,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped hold reply".to_string())?
@@ -1497,13 +1578,11 @@ impl WorkflowHost for ChannelWorkflowHost {
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::Gate {
-                request,
-                cancellation,
-                reply,
-            })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::Gate {
+            request,
+            cancellation,
+            reply,
+        })?;
         receive
             .await
             .map_err(|_| "workflow host dropped gate reply".to_string())?
@@ -1515,9 +1594,7 @@ impl WorkflowHost for ChannelWorkflowHost {
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::DeliverEvents { up_to_seq, reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::DeliverEvents { up_to_seq, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped delivery reply".to_string())?
@@ -1525,9 +1602,7 @@ impl WorkflowHost for ChannelWorkflowHost {
 
     async fn budget_snapshot(&self, _cancellation: CancellationToken) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.tx
-            .send(HostCommand::BudgetSnapshot { reply })
-            .map_err(|_| "workflow host stopped".to_string())?;
+        self.send(HostCommand::BudgetSnapshot { reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped budget reply".to_string())?
@@ -2215,6 +2290,7 @@ fn run_host_commands(
         failed_agent_calls,
         park,
         park_threshold_ms,
+        Arc::new(StdMutex::new(HostCommandAdmission::default())),
         commands,
     )
 }
@@ -2235,6 +2311,7 @@ fn run_host_commands_with_budget(
     failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
+    admission: Arc<StdMutex<HostCommandAdmission>>,
     commands: mpsc::UnboundedReceiver<HostCommand>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(run_host_commands_inner(
@@ -2253,6 +2330,7 @@ fn run_host_commands_with_budget(
         failed_agent_calls,
         park,
         park_threshold_ms,
+        admission,
         commands,
     ))
 }
@@ -2563,6 +2641,7 @@ async fn run_host_commands_inner(
     failed_agent_calls: Arc<Mutex<std::collections::HashMap<String, FailedAgentCallRef>>>,
     park: CancellationToken,
     park_threshold_ms: u64,
+    admission: Arc<StdMutex<HostCommandAdmission>>,
     mut commands: mpsc::UnboundedReceiver<HostCommand>,
 ) {
     // Working calls reserve one equal share of the working partition so the
@@ -2650,7 +2729,15 @@ async fn run_host_commands_inner(
     // The terminal handover is assembled only after every accepted agent
     // call has settled and registered its failure reference.
     let mut agent_tasks = tokio::task::JoinSet::new();
-    while let Some(command) = commands.recv().await {
+    let mut deferred_commands = std::collections::VecDeque::new();
+    loop {
+        let command = match deferred_commands.pop_front() {
+            Some(command) => command,
+            None => match commands.recv().await {
+                Some(command) => command,
+                None => break,
+            },
+        };
         let command = match command {
             HostCommand::DispatchAgent {
                 request,
@@ -3462,9 +3549,11 @@ async fn run_host_commands_inner(
                 if effective_ms >= park_threshold_ms
                     && pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
-                    && commands.is_empty()
+                    && begin_host_park(&admission, &commands)
                 {
-                    match state.storage.set_workflow_run_parked(run_id, due).await {
+                    let park_result = state.storage.set_workflow_run_parked(run_id, due).await;
+                    deferred_commands.extend(finish_host_park(&admission, park_result.is_ok()));
+                    match park_result {
                         Ok(()) => {
                             parked_due = Some(due);
                             park.cancel();
@@ -3826,15 +3915,21 @@ async fn run_host_commands_inner(
                 .await;
                 if pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
-                    && commands.is_empty()
                     && !answered_concurrent_hold
+                    && begin_host_park(&admission, &commands)
                 {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
-                    match state
+                    #[cfg(test)]
+                    workflow_park_test_hook::pause(run_id).await;
+                    let park_result = state
                         .storage
                         .park_workflow_run_if_hold_open(run_id, distant, hold.id)
-                        .await
-                    {
+                        .await;
+                    deferred_commands.extend(finish_host_park(
+                        &admission,
+                        matches!(park_result, Ok(true)),
+                    ));
+                    match park_result {
                         Ok(true) => {
                             parked_due = Some(distant);
                             park.cancel();
@@ -6028,6 +6123,7 @@ async fn launch_existing_run(
         replayed_working_credit: 0,
     }));
     let failed_agent_calls = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let host_admission = Arc::new(StdMutex::new(HostCommandAdmission::default()));
     let host_task = tokio::spawn(run_host_commands_with_budget(
         state.clone(),
         record.id,
@@ -6047,10 +6143,12 @@ async fn launch_existing_run(
         Arc::clone(&failed_agent_calls),
         park.clone(),
         PARK_TIMER_THRESHOLD_MS,
+        Arc::clone(&host_admission),
         host_rx,
     ));
     let host: Arc<dyn WorkflowHost> = Arc::new(ChannelWorkflowHost {
         tx: host_tx,
+        admission: host_admission,
         spent_tokens,
         max_total_tokens: run_budget.max_total_tokens,
     });
@@ -6299,6 +6397,55 @@ mod workflow_cleanup_test_hook {
                 .forget();
         }
         pause
+    }
+}
+
+#[cfg(test)]
+mod workflow_park_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("workflow park test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause(run_id: Uuid) {
+        let pause = pauses()
+            .lock()
+            .expect("workflow park test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("workflow park test hook remains open")
+                .forget();
+        }
     }
 }
 
@@ -15011,6 +15158,119 @@ mod tests {
             .expect("hold answer");
         assert_eq!(answer["verdict"], "ship");
         drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_arriving_during_hold_parking_is_not_dispatched() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::from([
+                r#"{"wake":true,"reasoning":"late work was dispatched"}"#,
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
+        let park = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let admission = Arc::new(StdMutex::new(HostCommandAdmission::default()));
+        let spent_tokens = Arc::new(AtomicU64::new(0));
+        let host = Arc::new(ChannelWorkflowHost {
+            tx,
+            admission: Arc::clone(&admission),
+            spent_tokens: Arc::clone(&spent_tokens),
+            max_total_tokens: None,
+        });
+        let task = tokio::spawn(run_host_commands_with_budget(
+            state,
+            run.id,
+            run.space_id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget::default(),
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            spent_tokens,
+            Arc::new(Mutex::new(TokenBudgetState {
+                spent: 0,
+                working_reserved: 0,
+                closing_reserved: 0,
+                closing_limit: None,
+                replayed_working_credit: 0,
+            })),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            park.clone(),
+            PARK_TIMER_THRESHOLD_MS,
+            admission,
+            rx,
+        ));
+
+        host.post_run_event(
+            RunEventPost {
+                kind: "worker.completion".into(),
+                payload: serde_json::json!({"worker": "w1"}),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post an event for the late gate");
+
+        let pause = workflow_park_test_hook::install(run.id);
+        let hold_host = Arc::clone(&host);
+        let hold_task = tokio::spawn(async move {
+            hold_host
+                .raise_hold(
+                    decision_hold("ship it, or hold it?"),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("park hook remains open")
+            .forget();
+
+        let gate_host = Arc::clone(&host);
+        let late_gate = tokio::spawn(async move {
+            gate_host
+                .evaluate_wake_gate(
+                    GateRequest {
+                        criteria: "wake when the worker has settled".into(),
+                        model: None,
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        pause.release.add_permits(1);
+        park.cancelled().await;
+
+        let error = late_gate
+            .await
+            .expect("late gate task")
+            .expect_err("a command admitted after parking starts must be refused");
+        assert!(error.contains("parked"), "unexpected refusal: {error}");
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            0,
+            "late work must never reach the provider"
+        );
+        assert_eq!(
+            storage
+                .get_workflow_run(run.id)
+                .await
+                .expect("read run")
+                .expect("run")
+                .state,
+            "parked"
+        );
+
+        hold_task.abort();
+        drop(host);
         task.await.expect("host loop");
     }
 
