@@ -4171,13 +4171,24 @@ async fn complete_agent_entry(
     .await
     {
         Ok(mut result) => {
-            result.liveness = state.active_workflow_workers.lock().await.remove(&entry_id);
+            result.liveness = state
+                .active_workflow_workers
+                .lock()
+                .await
+                .get(&entry_id)
+                .cloned();
             if let Some(worktree_seq) = worktree_seq {
-                let completion = state
+                let completion = match state
                     .worktree_host
                     .finish(run_id, worktree_seq)
                     .await
-                    .map_err(WorkflowHostError::Message)?;
+                {
+                    Ok(completion) => completion,
+                    Err(error) => {
+                        state.active_workflow_workers.lock().await.remove(&entry_id);
+                        return Err(WorkflowHostError::Message(error));
+                    }
+                };
                 result.worktree = Some(swage_workflow::WorktreeCompletion {
                     base_commit: completion.base_commit,
                     tip_commit: completion.tip_commit,
@@ -4185,13 +4196,14 @@ async fn complete_agent_entry(
                     removed: completion.removed,
                 });
             }
-            state
+            let completion = state
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::to_value(&result).expect("agent result serialises"),
                 )
-                .await
-                .map_err(|error| error.to_string())?;
+                .await;
+            state.active_workflow_workers.lock().await.remove(&entry_id);
+            completion.map_err(|error| error.to_string())?;
             Ok(result)
         }
         // A failure the script observes (and may catch in parallel/pipeline)
