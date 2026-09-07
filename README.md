@@ -235,8 +235,9 @@ first:
   definitions, operator guidance (`AGENTS.md`), effort resolution, what a
   tool call is allowed to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
-  turn context inspector, image attachments, the API error contract, the
-  wire contract and its projections, and the verification gate.
+  turn context inspector, image attachments, pages, delivery targets, the
+  API error contract, the wire contract and its projections, and the
+  verification gate.
 
 Every failed API response carries a `{"code","message"}` body whose code
 vocabulary is defined in the protocol crate. The manifested client-surface
