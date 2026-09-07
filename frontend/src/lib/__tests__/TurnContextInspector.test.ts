@@ -38,6 +38,7 @@ describe("TurnContextInspector", () => {
       compaction_applied: [],
       warnings: [],
       errors: [],
+      declared_omissions: [],
       effective_tool_permissions: undefined,
       provider_visible: undefined,
       duration: { secs: 0, nanos: 2_000_000 },
@@ -58,6 +59,50 @@ describe("TurnContextInspector", () => {
     );
     expect(document.querySelector("th.numeric")?.textContent).toBe(
       "Estimated tokens",
+    );
+  });
+
+  it("names each declared omission and the reason given for it", async () => {
+    vi.mocked(fetchTurnContext).mockResolvedValue({
+      assembly_name: "focus",
+      elements: [
+        {
+          name: "prompts",
+          source: "resolved-instructions",
+          token_count: 40,
+          preview: null,
+          priority: 100,
+          named_assembly: null,
+        },
+      ],
+      total_tokens: 40,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [
+        {
+          element: "working_norms",
+          reason: "the operator instructions carry their own",
+        },
+      ],
+      effective_tool_permissions: undefined,
+      provider_visible: undefined,
+      duration: { secs: 0, nanos: 1_000_000 },
+    });
+
+    component = mount(TurnContextInspector, {
+      target: document.body,
+      props: { turnId: "turn-2", onClose: () => {} },
+    });
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("Declared omissions");
+    });
+    expect(document.body.textContent).toContain("working_norms");
+    expect(document.querySelector(".reason")?.textContent).toBe(
+      "the operator instructions carry their own",
     );
   });
 });

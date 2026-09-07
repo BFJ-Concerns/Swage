@@ -125,7 +125,9 @@ return { reply };
     a definition never widens them.
 
   An unknown option key throws `UnknownAgentOptionError` before any
-  worker spawns; a non-string prompt throws a `TypeError`.
+  worker spawns; a non-string prompt throws `InvalidAgentPromptError`,
+  and a `tools` or `skills` value that is not an array of names throws
+  `InvalidAgentOptionError`.
 - **Return contract:** without `schema`, the worker's final text (a
   string). With `schema`, the validated JSON value, or `null` when
   `maxAttempts` is exhausted without one. With `identity: true`, a
@@ -216,9 +218,13 @@ while (pending.length > 0) {
   );
   ```
 
-  Today every error inside `parallel`/`pipeline` collapses to `null`,
-  including an author error such as an unknown option — so check the
-  run log when a whole fan-out comes back `null`.
+  Inside `parallel`/`pipeline`, a worker that fails collapses to `null`
+  and the other items proceed. An author error — an unknown option, an
+  invalid option value, a schema that does not compile, an unknown composed
+  workflow, non-JSON workflow arguments — does not: it is rejected at the
+  call itself, before any worker starts, and fails the run with the error
+  naming the call. A whole fan-out coming back `null` therefore means the
+  workers failed; check the run journal for their errors.
 
 ### Composing saved workflows
 
