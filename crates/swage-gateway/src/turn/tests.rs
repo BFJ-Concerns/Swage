@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -15857,7 +15858,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    assert!(state.workflow_capabilities.vision);
+    assert!(state.workflow_capabilities.vision());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -15919,7 +15920,7 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
         make_state_with_config_and_storage(vec![], text_only_config(), Arc::clone(&storage)).await;
-    assert!(!state.workflow_capabilities.vision);
+    assert!(!state.workflow_capabilities.vision());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let error = process_turn(
@@ -15952,6 +15953,223 @@ async fn an_image_attachment_is_refused_before_persistence_when_the_provider_lac
         db.turns.is_empty(),
         "no turn record is created for a refused turn"
     );
+}
+
+fn google_vision_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "google".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: swage_config::Protocol::Google,
+            ..Default::default()
+        },
+    );
+    config.models.default = "gemini".into();
+    config.models.entries.insert(
+        "gemini".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "google".into(),
+            model_id: "gemini-2.5-flash".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+fn mixed_protocol_vision_config(
+    default_protocol: swage_config::Protocol,
+    selected_protocol: swage_config::Protocol,
+) -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "default-provider".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: default_protocol,
+            ..Default::default()
+        },
+    );
+    config.providers.entries.insert(
+        "selected-provider".into(),
+        swage_config::ProviderEndpointConfig {
+            protocol: selected_protocol,
+            command: Some("/bin/false".into()),
+            ..Default::default()
+        },
+    );
+    config.models.default = "default-model".into();
+    config.models.entries.insert(
+        "default-model".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "default-provider".into(),
+            model_id: "default-wire-model".into(),
+            ..Default::default()
+        },
+    );
+    config.models.entries.insert(
+        "selected-model".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "selected-provider".into(),
+            model_id: "selected-wire-model".into(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_openai_model_admits_a_web_image_when_the_default_is_google() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_config_and_storage(
+        vec![
+            StreamChunk::Delta {
+                content: "a cat".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        mixed_protocol_vision_config(
+            swage_config::Protocol::Google,
+            swage_config::Protocol::OpenAi,
+        ),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    process_turn_with_existing_turn_and_focus_and_model(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        None,
+        Some("selected-model".into()),
+    )
+    .await
+    .expect("the selected OpenAI provider can fetch a web image");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_codex_model_refuses_an_image_when_the_default_is_anthropic() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_config_and_storage(
+        vec![],
+        mixed_protocol_vision_config(
+            swage_config::Protocol::Anthropic,
+            swage_config::Protocol::Codex,
+        ),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(2),
+        process_turn_with_existing_turn_and_focus_and_model(
+            &state,
+            session_id,
+            None,
+            TurnInput::with_attachments(
+                "What is in this picture?",
+                vec![MessageAttachment::ImageUrl {
+                    url: "https://example.test/cat.png".into(),
+                }],
+            ),
+            mpsc::unbounded_channel().0,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+            None,
+            None,
+            None,
+            None,
+            TurnAttendance::Attended,
+            None,
+            Some("selected-model".into()),
+        ),
+    )
+    .await
+    .expect("attachment admission should settle before provider startup")
+    .expect_err("the selected Codex provider cannot consume an image");
+
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("image")),
+        "{error}"
+    );
+    let db = storage.db.lock().await;
+    assert!(db.messages.is_empty(), "a refused image is not persisted");
+    assert!(db.turns.is_empty(), "a refused turn is not persisted");
+}
+
+/// Gemini fetches nothing: `fileData.fileUri` addresses a resource already
+/// held by the Google File API, so an ordinary web image URL is a reference
+/// the model never resolves. The gate refuses it before anything is written
+/// rather than sending an unusable reference and failing the turn at the
+/// provider. An inline data URL, which the adapter carries as bytes, still
+/// travels.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_url_the_provider_cannot_resolve_is_refused_before_persistence() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], google_vision_config(), Arc::clone(&storage))
+            .await;
+    assert!(
+        state.workflow_capabilities.vision(),
+        "the Google adapter maps image parts"
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let error = process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::with_attachments(
+            "What is in this picture?",
+            vec![MessageAttachment::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        ),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect_err("a reference the provider cannot resolve must fail the turn");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(message) if message.contains("resolve")),
+        "{error}"
+    );
+
+    {
+        let db = storage.db.lock().await;
+        assert!(
+            db.messages.is_empty(),
+            "nothing is persisted for a refused turn"
+        );
+        assert!(
+            db.turns.is_empty(),
+            "no turn record is created for a refused turn"
+        );
+    }
+
+    // The reference the adapter can inline is admitted by the same gate.
+    crate::turn::check_attachment_support(
+        &state.workflow_capabilities,
+        &[MessageAttachment::ImageUrl {
+            url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+        }],
+    )
+    .expect("an inline data URL travels to Gemini as bytes");
 }
 
 /// A stored attachment outside the wire contract is corruption, refused
