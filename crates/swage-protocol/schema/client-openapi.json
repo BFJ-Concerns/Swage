@@ -5190,6 +5190,16 @@
             ],
             "description": "What the call was dispatched with. Absent only for calls journalled\nbefore the dispatch record existed."
           },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerLiveness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "provider_rounds": {
             "description": "The provider rounds this call's turn ran, oldest first. `None` where\nthe projection does not carry them — the live entry event, which is\nsent as the entry settles — so an absent round record is never read\nas a call that made no provider request. The run detail always\ncarries them.",
             "items": {
@@ -7243,6 +7253,26 @@
         "required": [
           "journal_entry_id",
           "seq"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerLiveness": {
+        "description": "Earliest liveness evidence for one workflow worker.",
+        "properties": {
+          "first_evidence_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "started_at"
         ],
         "type": "object"
       },
