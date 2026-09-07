@@ -838,6 +838,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn catalogue_lookup_and_provider_route_resolve_alias_identically() {
+        let models = swage_config::ModelCatalogConfig {
+            default: "canonical".into(),
+            entries: [(
+                "canonical".into(),
+                swage_config::ModelEndpointConfig {
+                    provider_id: "provider-a".into(),
+                    model_id: "vendor-model".into(),
+                    aliases: vec!["short-name".into()],
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let providers = swage_config::ProviderCatalogConfig {
+            default: "provider-a".into(),
+            entries: [(
+                "provider-a".into(),
+                swage_config::ProviderEndpointConfig::default(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let route = swage_config::resolve_provider_route(&models, &providers, Some("short-name"))
+            .expect("alias route");
+        let (model_key, model) =
+            resolve_model_catalogue_entry(&models, "short-name").expect("gateway alias");
+
+        assert_eq!(model_key, route.model_key);
+        assert_eq!(model, route.model);
+        assert_eq!(route.provider_id, "provider-a");
+    }
+
+    #[test]
     fn reserved_workflow_agent_config_does_not_replace_runtime_configuration() {
         let root = tempfile::tempdir().expect("temporary root");
         let space_config = root.path().join("spaces/dispatch/config.toml");
