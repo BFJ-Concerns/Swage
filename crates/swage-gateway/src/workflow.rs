@@ -785,6 +785,34 @@ fn route_budget(budget: &WorkflowBudget, route: &str) -> WorkflowRouteBudget {
         })
 }
 
+fn configured_route_is_exhausted(
+    accounting: &TokenBudgetState,
+    budget: &WorkflowRouteBudget,
+) -> bool {
+    let Some(limit) = budget.max_total_tokens else {
+        return false;
+    };
+    match accounting.closing_limit {
+        Some(closing_limit) => accounting.spent >= closing_limit,
+        None => {
+            accounting.spent >= limit.saturating_sub(budget.reserved_closing_tokens.unwrap_or(0))
+        }
+    }
+}
+
+fn route_was_winding_down_before(
+    journal: &[WorkflowJournalRecord],
+    sequence: u64,
+    route: &str,
+) -> bool {
+    journal.iter().any(|entry| {
+        entry.seq < sequence
+            && entry.kind == "wind_down"
+            && entry.status == "completed"
+            && entry.request.get("provider_route").and_then(Value::as_str) == Some(route)
+    })
+}
+
 fn budget_reading(accounting: &TokenBudgetState, budget: &WorkflowRouteBudget) -> Value {
     let spent = accounting.spent;
     serde_json::json!({
@@ -3177,9 +3205,10 @@ async fn run_host_commands_inner(
                 let request_json =
                     serde_json::to_value(&request).expect("agent request serialises");
                 let request_hash = journal_args_hash(&request_json);
-                // A replayed entry keeps its recorded admission route so the
-                // same ceiling controls whether it may resume. Every call
-                // settles to the provider route captured by the completed turn.
+                // A replayed entry keeps its recorded admission route. A
+                // started call already passed admission; only fresh calls are
+                // judged against current spend. Every call settles to the
+                // provider route captured by the completed turn.
                 let budget_route = match existing_call
                     .and_then(|entry| entry.request.get("provider_route"))
                     .and_then(Value::as_str)
@@ -3336,23 +3365,18 @@ async fn run_host_commands_inner(
                 }
                 if let Some(route_limit) = route_limit.as_ref()
                     && let Some(route) = budget_route.as_deref()
-                    && existing_call.is_none_or(|entry| entry.status == "started")
-                    && let Some(limit) = route_limit.max_total_tokens
                 {
                     let mut accounting = token_budget.lock().await;
                     let ledger = accounting.ledger_mut(route);
-                    let reserve = route_limit.reserved_closing_tokens.unwrap_or(0);
-                    let closing_limit = ledger.closing_limit;
-                    route_call_uses_closing_partition = closing_limit.is_some();
-                    let admission_limit = closing_limit.unwrap_or(limit);
-                    let working_limit = limit.saturating_sub(reserve);
-                    let exhausted = if closing_limit.is_some() {
-                        ledger.spent >= admission_limit
+                    route_call_uses_closing_partition = if existing_call.is_some() {
+                        route_was_winding_down_before(&replay, current_seq, route)
                     } else {
-                        ledger.spent >= working_limit
+                        ledger.closing_limit.is_some()
                     };
-                    if exhausted {
-                        let transition = closing_limit.is_none() && reserve > 0;
+                    if existing_call.is_none() && configured_route_is_exhausted(ledger, route_limit)
+                    {
+                        let reserve = route_limit.reserved_closing_tokens.unwrap_or(0);
+                        let transition = ledger.closing_limit.is_none() && reserve > 0;
                         let transition_spent = ledger.spent;
                         let closing_limit = transition_spent.saturating_add(reserve);
                         drop(accounting);
@@ -19836,6 +19860,91 @@ protocol = "openai"
                 .await
                 .expect("complete entry");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_does_not_readmit_a_started_route_call_after_later_spend() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = empty_journal_run(&storage, space.id).await;
+        let started_request = route_test_request("interrupted earlier call", Some("alpha"));
+        journal_routed_agent_call(&storage, run_id, 0, &started_request, "alpha-route", None).await;
+        let completed_request = route_test_request("later completed call", Some("alpha"));
+        journal_routed_agent_call(
+            &storage,
+            run_id,
+            1,
+            &completed_request,
+            "alpha-route",
+            Some(4),
+        )
+        .await;
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "max_concurrent_agent_calls": 2,
+            "per_route": {"alpha-route": {"max_total_tokens": 4}}
+        }))
+        .expect("budget");
+        let replay = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("replay journal");
+        let accounting = Arc::new(Mutex::new(terminal_budget_accounting_from_journal(
+            &replay, &budget,
+        )));
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output_with_usage("recovered", 1, 0),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            route_test_config("alpha", "alpha-route"),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands_with_budget(
+            state,
+            run_id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            budget,
+            replay,
+            Arc::new(AtomicU32::new(2)),
+            Arc::new(AtomicU64::new(0)),
+            accounting,
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: started_request,
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply,
+        })
+        .expect("resumed command");
+        receive
+            .await
+            .expect("resumed reply")
+            .expect("the already-admitted call re-executes");
+        drop(tx);
+        task.await.expect("host task");
+
+        let replayed = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("replayed journal");
+        assert_eq!(replayed[0].status, "completed");
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
     }
 
     /// Emits a fixed usage reading for every call, so a test can spend a
