@@ -994,85 +994,94 @@ loads alike.
 ## Gateway tools
 
 The gateway ships these built-in tools
-(`crates/swage-gateway/src/tool/`). Each tool's `requires_device_execution`
-flag determines where it runs: `true` means the call executes on a device
-(remote or local); `false` means it runs directly in the gateway process
-and requires gateway-side state.
+(`crates/swage-gateway/src/tool/`). A tool's `requires_device_execution`
+flag (`swage-tool::Tool` trait) determines whether it executes in the
+gateway process or can run through the bubblewrap sandbox: `true` means
+the tool must execute in the gateway process (bypassing the sandbox);
+`false` (the trait default) means it is eligible for sandboxed execution.
+All built-in tools set `true` except `shell` and `memory`, which are the
+two sandbox-eligible tools.
 
 ### Filesystem
 
-| Tool | Execution | Source |
-|---|---|---|
-| `file_read` | device | `file_read.rs` |
-| `file_write` | device | `file_write.rs` |
-| `file_edit` | device | `file_edit.rs` |
-| `file_list` | device | `file_list.rs` |
-| `file_search` | device | `file_search.rs` |
-| `shell` | device | `shell.rs` |
-| `python_execute` | device | `python_execute.rs` |
+| Tool | Source |
+|---|---|
+| `file_read` | `file_read.rs` |
+| `file_write` | `file_write.rs` |
+| `file_edit` | `file_edit.rs` |
+| `file_list` | `file_list.rs` |
+| `file_search` | `file_search.rs` |
+| `shell` | `shell.rs` — sandbox-eligible |
+| `python_execute` | `python_execute.rs` |
 
 ### Browser
 
-| Tool | Execution | Source |
-|---|---|---|
-| `browser_navigate` | device | `browser.rs` |
-| `browser_snapshot` | device | `browser.rs` |
-| `browser_click` | device | `browser.rs` |
-| `browser_type` | device | `browser.rs` |
-| `browser_select` | device | `browser.rs` |
-| `browser_scroll` | device | `browser.rs` |
+| Tool | Source |
+|---|---|
+| `browser_navigate` | `browser.rs` |
+| `browser_snapshot` | `browser.rs` |
+| `browser_click` | `browser.rs` |
+| `browser_type` | `browser.rs` |
+| `browser_select` | `browser.rs` |
+| `browser_scroll` | `browser.rs` |
 
 ### Knowledge base
 
-| Tool | Execution | Source |
-|---|---|---|
-| `knowledge_search` | host | `knowledge.rs` |
-| `knowledge_record` | host | `knowledge.rs` |
-| `knowledge_curate` | host | `knowledge.rs` |
-| `knowledge_cite` | host | `knowledge.rs` |
-| `knowledge_orient` | host | `knowledge.rs` |
-| `knowledge_curate_orientation` | host | `knowledge.rs` |
+| Tool | Source |
+|---|---|
+| `knowledge_search` | `knowledge.rs` |
+| `knowledge_record` | `knowledge.rs` |
+| `knowledge_curate` | `knowledge.rs` |
+| `knowledge_cite` | `knowledge.rs` |
+| `knowledge_orient` | `knowledge.rs` |
+| `knowledge_curate_orientation` | `knowledge.rs` |
 
 ### Workflow
 
-| Tool | Execution | Source |
-|---|---|---|
-| `workflow_run` | host | `workflow_run.rs` |
-| `workflow_list` | host | `workflow_list.rs` |
-| `workflow_save` | host | `workflow_save.rs` |
-| `workflow_run_account` | host | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session space; a run in another space reads as absent. |
+| Tool | Source |
+|---|---|
+| `workflow_run` | `workflow_run.rs` |
+| `workflow_list` | `workflow_list.rs` |
+| `workflow_save` | `workflow_save.rs` |
+| `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session space; a run in another space reads as absent. |
 
 ### Pages and delivery
 
-| Tool | Execution | Source |
-|---|---|---|
-| `page_read` | host | `page.rs` |
-| `page_write` | host | `page.rs` |
-| `run_event_post` | host | `run_event.rs` |
+| Tool | Source |
+|---|---|
+| `page_read` | `page.rs` |
+| `page_write` | `page.rs` |
+| `run_event_post` | `run_event.rs` |
 
 ### Scheduling
 
-| Tool | Execution | Source |
-|---|---|---|
-| `schedule` | host | `schedule.rs` |
-| `wake_me_later` | host | `schedule.rs` |
+| Tool | Source |
+|---|---|
+| `schedule` | `schedule.rs` |
+| `wake_me_later` | `schedule.rs` |
 
 ### Session and memory
 
-| Tool | Execution | Source |
-|---|---|---|
-| `session_values` | device | `session_variable.rs` |
-| `agent_memory` | device | `agent_memory.rs` |
-| `memory` | host | `memory.rs` |
-| `observe_context` | device | `tool_result_read.rs` |
-| `task_definition` | device | `task_definition.rs` |
+| Tool | Source |
+|---|---|
+| `session_values` | `session_variable.rs` |
+| `agent_memory` | `agent_memory.rs` |
+| `memory` | `memory.rs` — sandbox-eligible |
+| `observe_context` | `tool_result_read.rs` |
+| `task_definition` | `task_definition.rs` |
+
+### Delegation
+
+| Tool | Source |
+|---|---|
+| `delegate` | `swage-tool::delegate` — dispatches a child turn to a named agent definition. |
 
 ### External
 
-| Tool | Execution | Source |
-|---|---|---|
-| `url_fetch` | device | `url_fetch.rs` |
-| `web_search` | device | `web_search.rs` |
+| Tool | Source |
+|---|---|
+| `url_fetch` | `url_fetch.rs` |
+| `web_search` | `web_search.rs` |
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
 configuration; their names come from the plugin manifest.
