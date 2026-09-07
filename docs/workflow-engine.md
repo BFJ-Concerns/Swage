@@ -461,8 +461,8 @@ A call's token usage is either known (input and output token counts from the
 provider) or unavailable with a reason. The two cases are distinct: a call
 whose provider reported no usage is not a call that spent nothing. The
 reasons are `provider_reported_no_usage` (the turn completed but the provider
-sent no counts) and `not_settled` (the call never settled, so no usage was
-collected).
+sent no counts) and `call_did_not_settle` (the call never settled, so no
+usage was collected).
 
 ### Termination
 
