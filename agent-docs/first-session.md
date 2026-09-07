@@ -1,12 +1,13 @@
 ---
-description: First-session walkthrough — open a space, attach a workspace, trust it so its AGENTS.md feeds agent context
+description: First-session walkthrough — open a space, optionally attach and trust a workspace, start a conversation with a chosen agent
 ---
 
 # First session
 
-After the gateway is running and a provider is configured (README), the
-first session requires a space, a workspace attachment, and a trust
-decision.
+After the gateway is running and a provider is configured (README), a
+first session needs only an opened space. Attaching a workspace and
+trusting it are optional — they give agents file access and project
+guidance, but a conversation can start without either.
 
 ## Open a space
 
