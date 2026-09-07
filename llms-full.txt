@@ -1537,4 +1537,3 @@ SQLite. Key tables:
 - `workflow_run_events` — run events with `seq`, `kind`,
   `payload_json`, `delivered_wake_seq`, `delivered_at`. Partial index on
   `(run_id, seq) WHERE delivered_at IS NULL` for pending-event queries.
-
