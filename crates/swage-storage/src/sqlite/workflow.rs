@@ -7,7 +7,8 @@ use swage_core::StorageError;
 
 use crate::model::{
     NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, WorkflowJournalRecord, WorkflowRunEventRecord,
+    NewWorkflowRunHoldRejection, NewWorkflowScript, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord,
     WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
     WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
 };
@@ -495,11 +496,17 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<bool, StorageError> {
         let from = from.to_string();
         let to = to.to_string();
+        let now = Utc::now().to_rfc3339();
         self.with_conn(move |conn| {
+            // A terminal target stamps its completion here rather than in a
+            // second write, so a claimed cancellation needs no follow-up to
+            // be a finished run.
             let count = conn.execute(
-                "UPDATE workflow_runs SET state=?3, wake_at=NULL, completed_at=NULL \
+                "UPDATE workflow_runs SET state=?3, wake_at=NULL, \
+                 completed_at=CASE WHEN ?3 IN ('completed', 'failed', 'cancelled') \
+                     THEN ?4 ELSE NULL END \
                  WHERE id=?1 AND state=?2",
-                params![id.to_string(), from, to],
+                params![id.to_string(), from, to, now],
             )?;
             Ok(count > 0)
         })
@@ -835,15 +842,16 @@ impl WorkflowStore for SqliteStorage {
         &self,
         id: Uuid,
         answer: WorkflowRunHoldAnswer,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<WorkflowHoldSettlement, StorageError> {
         let now = Utc::now();
         self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
             // Only an open hold on a run that can still resume settles.
             // A second answerer arriving behind the first changes nothing
             // and is told it lost; so does an answer that arrives after the
             // run went terminal, so cancellation and answer have one winner
             // rather than a verdict attributed to a run that cannot take it.
-            let changed = conn.execute(
+            let changed = tx.execute(
                 "UPDATE workflow_run_holds \
                  SET state = 'answered', verdict = ?2, answer_surface = ?3, answer_agent_id = ?4, \
                      answer_session_id = ?5, answer_turn_id = ?6, answered_at = ?7 \
@@ -862,7 +870,24 @@ impl WorkflowStore for SqliteStorage {
                     now.to_rfc3339()
                 ],
             )?;
-            Ok(changed == 1)
+            if changed != 1 {
+                return Ok(WorkflowHoldSettlement::default());
+            }
+            // The verdict and the run's wake commit together: a parked run
+            // whose decision has been made is due in the same instant it is
+            // answered, so no crash can strand an answered hold on a run
+            // still sleeping on its distant wake time.
+            let woken = tx.execute(
+                "UPDATE workflow_runs SET wake_at=?2 \
+                 WHERE id=(SELECT run_id FROM workflow_run_holds WHERE id=?1) \
+                   AND state='parked'",
+                params![id.to_string(), now.to_rfc3339()],
+            )?;
+            tx.commit()?;
+            Ok(WorkflowHoldSettlement {
+                settled: true,
+                wake_provisioned: woken == 1,
+            })
         })
         .await
     }
@@ -1302,7 +1327,8 @@ mod tests {
                     },
                 )
                 .await
-                .expect("answer the hold"),
+                .expect("answer the hold")
+                .settled,
             "the first answer wins"
         );
         assert!(
@@ -1329,7 +1355,8 @@ mod tests {
                     },
                 )
                 .await
-                .expect("second answer"),
+                .expect("second answer")
+                .settled,
             "a hold takes one verdict, not the last one offered"
         );
         let answered = storage
@@ -1346,6 +1373,101 @@ mod tests {
                 .expect("open holds")
                 .is_empty(),
             "an answered hold leaves the decider's list"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answering_a_parked_run_s_hold_makes_it_due_in_the_same_write() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "hold-wake".into(),
+                slug: "hold-wake".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: Uuid::new_v4().to_string(),
+                args: serde_json::Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+                task: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "hold".into(),
+                args_hash: "hash".into(),
+                request: serde_json::json!({"action": "raise"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("raise intent");
+        let hold = storage
+            .create_workflow_run_hold(NewWorkflowRunHold {
+                run_id: run.id,
+                journal_entry_id: entry.id,
+                content: "Ship the release?".into(),
+                verdicts: vec!["ship".into(), "hold".into()],
+            })
+            .await
+            .expect("open the hold");
+        assert!(
+            storage
+                .park_workflow_run_if_hold_open(
+                    run.id,
+                    Utc::now() + chrono::Duration::days(36500),
+                    hold.id
+                )
+                .await
+                .expect("park on the open hold"),
+            "the run sleeps until its decision is made"
+        );
+
+        let settlement = storage
+            .answer_workflow_run_hold(
+                hold.id,
+                WorkflowRunHoldAnswer {
+                    verdict: "ship".into(),
+                    surface: "agent".into(),
+                    agent_id: Some("decider".into()),
+                    session_id: Some(Uuid::new_v4()),
+                    turn_id: Some(Uuid::new_v4()),
+                },
+            )
+            .await
+            .expect("answer the hold");
+        assert!(settlement.settled);
+        assert!(
+            settlement.wake_provisioned,
+            "settling a parked run's decision is also what makes it due"
+        );
+        let due = storage
+            .list_due_parked_workflow_runs(Utc::now())
+            .await
+            .expect("due runs");
+        assert!(
+            due.iter().any(|owed| owed.id == run.id),
+            "no crash can leave an answered hold on a run still sleeping: the same write owes the relaunch"
         );
     }
 
@@ -1425,7 +1547,8 @@ mod tests {
                     },
                 )
                 .await
-                .expect("late answer"),
+                .expect("late answer")
+                .settled,
             "cancellation and answer have one winner, and cancellation got there first"
         );
         let unanswered = storage

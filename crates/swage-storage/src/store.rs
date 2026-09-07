@@ -20,7 +20,8 @@ use crate::model::{
     PageTemplateModule, PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun,
     ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation,
     Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
-    TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
+    TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord,
     WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
     WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
@@ -1066,6 +1067,12 @@ pub trait WorkflowStore: Send + Sync {
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
     /// (a concurrent cancellation, another waker) and must not proceed.
+    ///
+    /// This is the one claim every run-state transition goes through, so a
+    /// concurrent answer and cancellation have exactly one winner. A
+    /// terminal target settles the run completely: the wake time is cleared
+    /// and the completion stamped in the same write, leaving nothing for a
+    /// loser to finish.
     async fn try_transition_workflow_run_state(
         &self,
         id: Uuid,
@@ -1162,14 +1169,17 @@ pub trait WorkflowStore: Send + Sync {
     /// it. Closed holds remain on the run record but are no longer decisions
     /// an agent can answer.
     async fn close_open_workflow_run_holds(&self, run_id: Uuid) -> Result<u64, StorageError>;
-    /// Settle a hold with an accepted verdict. `false` means it was no
-    /// longer open — another answerer won the race — and the caller must not
-    /// treat its own answer as the decision.
+    /// Settle a hold with an accepted verdict and, when its run is parked on
+    /// that decision, make the run due in the same write.
+    ///
+    /// A settlement that is not the decision leaves both untouched:
+    /// `settled` is `false` when another answerer won the race or the run
+    /// can no longer take a verdict.
     async fn answer_workflow_run_hold(
         &self,
         id: Uuid,
         answer: WorkflowRunHoldAnswer,
-    ) -> Result<bool, StorageError>;
+    ) -> Result<WorkflowHoldSettlement, StorageError>;
     /// Record an answer refused for falling outside the accepted set, but
     /// only while the hold is open and its run can still resume. `None`
     /// means the hold or run settled first. The hold itself is untouched.
@@ -2767,7 +2777,7 @@ mod tests {
             &self,
             _: Uuid,
             _: WorkflowRunHoldAnswer,
-        ) -> Result<bool, StorageError> {
+        ) -> Result<WorkflowHoldSettlement, StorageError> {
             unimplemented!()
         }
         async fn create_workflow_run_hold_rejection(

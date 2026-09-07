@@ -1501,7 +1501,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
         _: swage_storage::WorkflowRunHoldAnswer,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<swage_storage::WorkflowHoldSettlement, StorageError> {
         unimplemented!()
     }
     async fn create_workflow_run_hold_rejection(

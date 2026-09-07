@@ -4827,7 +4827,7 @@ async fn run_host_commands_inner(
                 {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
                     #[cfg(test)]
-                    workflow_park_test_hook::pause(run_id).await;
+                    workflow_pause_test_hook::pause(PAUSE_BEFORE_HOLD_PARK, run_id).await;
                     let park_result = state
                         .storage
                         .park_workflow_run_if_hold_open(run_id, distant, hold.id)
@@ -6090,7 +6090,11 @@ pub(crate) async fn answer_run_hold(
         }
         return Err(ApiError::validation(feedback));
     }
-    let settled = state
+    // The verdict and the parked run's wake are one write: whatever happens
+    // next — this call returning, or the process dying here — the decision
+    // and the run's readiness to act on it are durable together, so a wake
+    // pass alone carries the verdict to the script.
+    let settlement = state
         .storage
         .answer_workflow_run_hold(
             hold.id,
@@ -6104,18 +6108,19 @@ pub(crate) async fn answer_run_hold(
         )
         .await
         .map_err(internal)?;
-    if !settled {
+    if !settlement.settled {
         return Err(ApiError::conflict(format!(
             "hold {} was answered by someone else first",
             hold.id
         )));
     }
-    let wake_provisioned = state
-        .storage
-        .make_parked_workflow_run_due(hold.run_id)
-        .await
-        .map_err(internal)?;
+    #[cfg(test)]
+    workflow_pause_test_hook::pause(PAUSE_AFTER_HOLD_SETTLEMENT, hold.id).await;
+    let wake_provisioned = settlement.wake_provisioned;
     if wake_provisioned {
+        // Relaunching is a claim on the run's state, so a cancellation that
+        // got there first simply refuses this resume: the verdict stands on
+        // the record and nothing runs.
         resume_owed_workflow_runs(state).await;
     }
     let answered = state
@@ -7557,7 +7562,7 @@ mod workflow_cleanup_test_hook {
 }
 
 #[cfg(test)]
-mod workflow_park_test_hook {
+mod workflow_pause_test_hook {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex, OnceLock},
@@ -7571,39 +7576,52 @@ mod workflow_park_test_hook {
         pub(super) release: Semaphore,
     }
 
-    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
-        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+    fn pauses() -> &'static Mutex<HashMap<(&'static str, Uuid), Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<(&'static str, Uuid), Arc<Pause>>>> = OnceLock::new();
         PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+    /// Hold the next pass through `point` for `subject` until the test lets
+    /// it go, so an interleaving a race depends on can be staged rather than
+    /// hoped for.
+    pub(super) fn install(point: &'static str, subject: Uuid) -> Arc<Pause> {
         let pause = Arc::new(Pause {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         });
         pauses()
             .lock()
-            .expect("workflow park test-hook registry")
-            .insert(run_id, Arc::clone(&pause));
+            .expect("workflow pause test-hook registry")
+            .insert((point, subject), Arc::clone(&pause));
         pause
     }
 
-    pub(super) async fn pause(run_id: Uuid) {
+    pub(super) async fn pause(point: &'static str, subject: Uuid) {
         let pause = pauses()
             .lock()
-            .expect("workflow park test-hook registry")
-            .remove(&run_id);
+            .expect("workflow pause test-hook registry")
+            .remove(&(point, subject));
         if let Some(pause) = pause {
             pause.entered.add_permits(1);
             pause
                 .release
                 .acquire()
                 .await
-                .expect("workflow park test hook remains open")
+                .expect("workflow pause test hook remains open")
                 .forget();
         }
     }
 }
+
+/// Between a hold's settlement and the resume it provisions.
+#[cfg(test)]
+const PAUSE_AFTER_HOLD_SETTLEMENT: &str = "hold-settlement";
+/// Between reading a run to cancel and claiming its cancellation.
+#[cfg(test)]
+const PAUSE_BEFORE_CANCELLATION_CLAIM: &str = "cancellation-claim";
+/// Between a hold opening and the durable park it asks for.
+#[cfg(test)]
+const PAUSE_BEFORE_HOLD_PARK: &str = "hold-park";
 
 pub async fn start_inline_run(
     State(state): State<AppState>,
@@ -7827,37 +7845,60 @@ pub async fn cancel_run(
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
-        close_open_held_workers(state.storage.as_ref(), id).await;
-        close_open_held_workers(state.storage.as_ref(), id).await;
-        settle_cancelled_workflow_journal(
-            state.storage.as_ref(),
-            id,
-            WorkflowCutShortCause::RunCancelled,
-        )
-        .await;
-        let budget = budget_wire(&run.budget);
-        if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
-            tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
-        }
-        state
-            .storage
-            .close_open_workflow_run_holds(id)
-            .await
-            .map_err(internal)?;
-        state
-            .storage
-            .update_workflow_run_state(id, "cancelled", None, None, None)
-            .await
-            .map_err(internal)?;
-        let cancelled = state
-            .storage
-            .get_workflow_run(id)
-            .await
-            .map_err(internal)?
-            .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-        return Ok(Json(run_wire(cancelled)?));
+        return Ok(Json(try_cancel_parked_workflow_run(&state, &run).await?));
     }
     Ok(Json(run_wire(run)?))
+}
+
+/// Cancel a run that is parked on a durable wait.
+///
+/// The claim comes first and everything else follows from winning it. An
+/// answer racing this cancellation settles the same run row: whichever of
+/// the two moves the run out of `parked` first is the decision, and the
+/// loser sees the winner's state and stops. Because relaunching a parked run
+/// is that same claim, a won cancellation is proof no answer has launched an
+/// engine — there is no engine left for the tear-down below to miss.
+async fn try_cancel_parked_workflow_run(
+    state: &AppState,
+    run: &WorkflowRunRecord,
+) -> Result<WorkflowRun, ApiError> {
+    #[cfg(test)]
+    workflow_pause_test_hook::pause(PAUSE_BEFORE_CANCELLATION_CLAIM, run.id).await;
+    let id = run.id;
+    let claimed = state
+        .storage
+        .try_transition_workflow_run_state(id, "parked", "cancelled")
+        .await
+        .map_err(internal)?;
+    let settled = state
+        .storage
+        .get_workflow_run(id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+    if !claimed {
+        return Err(ApiError::conflict(format!(
+            "workflow run {id} is no longer parked; it is {} and was not cancelled",
+            settled.state
+        )));
+    }
+    close_open_held_workers(state.storage.as_ref(), id).await;
+    settle_cancelled_workflow_journal(
+        state.storage.as_ref(),
+        id,
+        WorkflowCutShortCause::RunCancelled,
+    )
+    .await;
+    let budget = budget_wire(&run.budget);
+    if let Err(problem) = record_terminal_budget_from_journal(state, id, &budget).await {
+        tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
+    }
+    state
+        .storage
+        .close_open_workflow_run_holds(id)
+        .await
+        .map_err(internal)?;
+    run_wire(settled)
 }
 
 pub async fn resume_run(
@@ -16197,6 +16238,205 @@ mod tests {
         );
     }
 
+    /// A run parked on a decision, with its engine torn down and the
+    /// decision waiting in the answering queue.
+    async fn parked_on_a_hold(state: &AppState, space_id: Uuid, storage: &Arc<SqliteStorage>) -> (WorkflowRun, Uuid) {
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: HOLD_SCRIPT.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(storage, started.id, "parked").await;
+        wait_for_active_workflow_run_release(state, started.id).await;
+        let hold_id = wait_for_open_hold(storage, started.id).await;
+        (started, hold_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_hold_reaches_its_script_after_a_crash_before_the_resume() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (started, hold_id) = parked_on_a_hold(&state, space.id, &storage).await;
+
+        // The answerer dies with the verdict recorded and the relaunch it
+        // would have issued never issued — the crash a wake pass must
+        // recover from on its own.
+        let pause = workflow_pause_test_hook::install(PAUSE_AFTER_HOLD_SETTLEMENT, hold_id);
+        let answering = tokio::spawn({
+            let state = state.clone();
+            async move { answer_open_hold(&state, hold_id).await }
+        });
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("settlement hook remains open")
+            .forget();
+        answering.abort();
+
+        let owed = resume_owed_workflow_runs(&state).await;
+        assert_eq!(owed, 1, "the wake pass owes the answered run its relaunch");
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"verdict": "ship", "by": null})),
+            "an accepted verdict reaches the script even when nothing ran after it was recorded"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (started, hold_id) = parked_on_a_hold(&state, space.id, &storage).await;
+
+        let pause = workflow_pause_test_hook::install(PAUSE_AFTER_HOLD_SETTLEMENT, hold_id);
+        let answering = tokio::spawn({
+            let state = state.clone();
+            async move { answer_open_hold(&state, hold_id).await }
+        });
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("settlement hook remains open")
+            .forget();
+
+        let waiting = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert!(
+            waiting.wake_at.is_some_and(|wake| wake <= chrono::Utc::now()),
+            "the verdict and the run's wake land together: nothing observes an answered hold on a run still sleeping"
+        );
+
+        let Json(cancelled) = cancel_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("the cancellation claims the still-parked run");
+        assert_eq!(cancelled.state, WorkflowRunState::Cancelled);
+
+        pause.release.add_permits(1);
+        answering.await.expect("the answering call finishes");
+
+        assert_eq!(
+            resume_owed_workflow_runs(&state).await,
+            0,
+            "a cancelled run is owed no relaunch"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let settled = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(
+            settled.state, "cancelled",
+            "the loser leaves the winner's state alone"
+        );
+        assert!(
+            state.active_workflow_runs.lock().await.is_empty(),
+            "no engine runs for a run whose cancellation won"
+        );
+        assert!(
+            !workflow_thread_exists(started.id),
+            "the cancelled run has no engine thread"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancellation_that_loses_to_an_answer_leaves_the_resumed_run_alone() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (started, hold_id) = parked_on_a_hold(&state, space.id, &storage).await;
+
+        // The cancellation reads a parked run and is held there while the
+        // answer settles the hold, relaunches the run, and lets it finish.
+        let pause = workflow_pause_test_hook::install(PAUSE_BEFORE_CANCELLATION_CLAIM, started.id);
+        let cancelling = tokio::spawn({
+            let state = state.clone();
+            async move { cancel_run(State(state), Path(started.id)).await }
+        });
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("cancellation hook remains open")
+            .forget();
+
+        answer_open_hold(&state, hold_id).await;
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"verdict": "ship", "by": null}))
+        );
+
+        pause.release.add_permits(1);
+        let refused = cancelling
+            .await
+            .expect("cancellation task")
+            .expect_err("a cancellation that lost the claim settles nothing");
+        assert!(
+            refused.to_string().contains("no longer parked"),
+            "the loser is told the winner's state: {refused}"
+        );
+
+        let settled = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(
+            settled.state, "completed",
+            "a losing cancellation never overwrites the winner's outcome"
+        );
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert!(matches!(
+            detail.holds[0].state,
+            WorkflowRunHoldState::Answered
+        ));
+        assert!(
+            detail
+                .journal
+                .iter()
+                .all(|entry| !matches!(entry.status, WorkflowJournalEntryStatus::CutShort)),
+            "a losing cancellation cuts nothing short of the run it did not claim"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_run_closes_a_decision_it_can_no_longer_receive() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
@@ -17360,7 +17600,7 @@ mod tests {
         .await
         .expect("post an event for the late gate");
 
-        let pause = workflow_park_test_hook::install(run.id);
+        let pause = workflow_pause_test_hook::install(PAUSE_BEFORE_HOLD_PARK, run.id);
         let hold_host = Arc::clone(&host);
         let hold_task = tokio::spawn(async move {
             hold_host

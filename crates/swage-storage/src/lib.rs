@@ -29,7 +29,8 @@ pub use model::{
     ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy,
     SessionVariable, SkipReason, SourceCapture, SourceObservation, Space, SpaceSlug,
     TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState,
-    UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer,
+    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunHoldAnswer,
     WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
     WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
