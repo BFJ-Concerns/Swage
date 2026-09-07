@@ -11,7 +11,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, RunEventPost,
+    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, HeldWorkerOpen, RunEventPost,
     WorkflowCallRequest, WorkflowHost, WorkflowHostError,
 };
 
@@ -692,6 +692,96 @@ impl WorkflowEngine {
                         ctx.globals().set("__workflow", workflow).map_err(|error| error.to_string())?;
                     }
 
+                    let open_worker_host = Arc::clone(&host);
+                    let open_worker_cancellation = host_cancellation.clone();
+                    let open_worker = Function::new(
+                        ctx.clone(),
+                        Async(move |options_json: String| {
+                            let host = Arc::clone(&open_worker_host);
+                            let cancellation = open_worker_cancellation.clone();
+                            async move {
+                                let worker: HeldWorkerOpen = match serde_json::from_str(&options_json) {
+                                    Ok(worker) => worker,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.open_held_worker(worker, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerOpen", open_worker).map_err(|error| error.to_string())?;
+
+                    let close_worker_host = Arc::clone(&host);
+                    let close_worker_cancellation = host_cancellation.clone();
+                    let close_worker = Function::new(
+                        ctx.clone(),
+                        Async(move |worker_id: String| {
+                            let host = Arc::clone(&close_worker_host);
+                            let cancellation = close_worker_cancellation.clone();
+                            async move {
+                                let worker_id = match worker_id.parse::<uuid::Uuid>() {
+                                    Ok(worker_id) => worker_id,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.close_held_worker(worker_id, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerClose", close_worker).map_err(|error| error.to_string())?;
+
+                    let staleness_host = Arc::clone(&host);
+                    let staleness_cancellation = host_cancellation.clone();
+                    let staleness = Function::new(
+                        ctx.clone(),
+                        Async(move |worker_id: String| {
+                            let host = Arc::clone(&staleness_host);
+                            let cancellation = staleness_cancellation.clone();
+                            async move {
+                                let worker_id = match worker_id.parse::<uuid::Uuid>() {
+                                    Ok(worker_id) => worker_id,
+                                    Err(error) => return serde_json::json!({
+                                        "ok": false,
+                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
+                                    }).to_string(),
+                                };
+                                match host.held_worker_staleness(worker_id, cancellation).await {
+                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                    Err(error) => {
+                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
+                                        serde_json::json!({
+                                            "ok": false,
+                                            "error": {"name": name, "message": message}
+                                        }).to_string()
+                                    }
+                                }
+                            }
+                        }),
+                    ).map_err(|error| error.to_string())?;
+                    ctx.globals().set("__workerStaleness", staleness).map_err(|error| error.to_string())?;
+
                     let timer_host = Arc::clone(&host);
                     let timer_cancellation = host_cancellation.clone();
                     let timer = Function::new(
@@ -1011,7 +1101,7 @@ impl WorkflowEngine {
                             const knownOptions = new Set([
                                 "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
                                 "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
-                                "session", "elements", "variables", "assembly",
+                                "session", "worker", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
                                 if (!knownOptions.has(key)) {
@@ -1084,6 +1174,9 @@ impl WorkflowEngine {
                                     ? {}
                                     : { identity: merged.identity }),
                                 session: merged.session ?? null,
+                                ...(merged.worker === undefined || merged.worker === null
+                                    ? {}
+                                    : { worker: String(merged.worker) }),
                                 elements: merged.elements ?? null,
                                 variables: merged.variables ?? null,
                                 assembly: merged.assembly ?? null,
@@ -1164,6 +1257,179 @@ impl WorkflowEngine {
                             // by design; without this the run dies on it.
                             handle.result.catch(() => {});
                             return handle;
+                        };
+                        // A held worker: a party the script returns to, not
+                        // a fresh instance per call. Model, effort, placement
+                        // and requested grants are fixed here, at creation;
+                        // each turn shares everything the worker has already
+                        // seen. Grants are not frozen with them — the turn
+                        // path re-derives effective authority every turn.
+                        const workerCreationOptions = new Set([
+                            "agent", "task", "tools", "skills", "model", "fallbackModel",
+                            "effort", "cwd", "isolation", "label",
+                        ]);
+                        // What a single turn may vary. Everything else about
+                        // a worker was settled when it opened, so a bigger
+                        // model or more effort is a new worker, not a switch.
+                        const workerTurnOptions = new Set([
+                            "schema", "maxAttempts", "timeoutMs", "label",
+                        ]);
+                        const heldWorkerError = (message) => {
+                            const error = new Error(message);
+                            error.name = "HeldWorkerError";
+                            return error;
+                        };
+                        const heldWorkerStates = new Map();
+                        const requireWorker = (worker, caller) => {
+                            if (!worker || typeof worker.workerId !== "string") {
+                                throw heldWorkerError(`${caller} requires a worker from session()`);
+                            }
+                            const state = heldWorkerStates.get(worker.workerId);
+                            if (!state) {
+                                throw heldWorkerError(`${caller} requires a worker from session()`);
+                            }
+                            return state;
+                        };
+                        globalThis.session = async (options = {}) => {
+                            // Script-wide defaults may also contain per-turn
+                            // controls such as maxAttempts. Opening a worker
+                            // consumes only creation defaults; send() applies
+                            // turn controls when there is a turn to govern.
+                            const allDefaults = mergeDefaults({});
+                            const merged = {};
+                            for (const key of workerCreationOptions) {
+                                if (allDefaults[key] !== undefined) merged[key] = allDefaults[key];
+                            }
+                            for (const key of Object.keys(options)) {
+                                if (options[key] !== undefined) merged[key] = options[key];
+                            }
+                            for (const key of Object.keys(merged)) {
+                                if (!workerCreationOptions.has(key)) {
+                                    throw heldWorkerError(
+                                        `unknown session() option '${key}'`
+                                    );
+                                }
+                            }
+                            const open = {
+                                ...(merged.agent === undefined || merged.agent === null
+                                    ? {} : { agent: String(merged.agent) }),
+                                ...(merged.task === undefined || merged.task === null
+                                    ? {} : { task: String(merged.task) }),
+                                ...(merged.tools === undefined || merged.tools === null
+                                    ? {} : { tools: merged.tools.map(String) }),
+                                ...(merged.skills === undefined || merged.skills === null
+                                    ? {} : { skills: merged.skills.map(String) }),
+                                ...(merged.model === undefined || merged.model === null
+                                    ? {} : { model: String(merged.model) }),
+                                ...(merged.fallbackModel === undefined || merged.fallbackModel === null
+                                    ? {} : { fallback_model: String(merged.fallbackModel) }),
+                                ...(merged.effort === undefined || merged.effort === null
+                                    ? {} : { effort: String(merged.effort) }),
+                                ...(merged.cwd === undefined || merged.cwd === null
+                                    ? {} : { cwd: String(merged.cwd) }),
+                                ...(merged.isolation === undefined || merged.isolation === null
+                                    ? {} : { isolation: String(merged.isolation) }),
+                                ...(merged.label === undefined || merged.label === null
+                                    ? {} : { label: String(merged.label) }),
+                            };
+                            const opened = unwrapHostResponse(await __workerOpen(JSON.stringify(open)));
+                            const creation = opened.creation ?? open;
+                            const state = {
+                                creation,
+                                session: null,
+                                turns: 0,
+                                closed: false,
+                                busy: false,
+                            };
+                            heldWorkerStates.set(opened.worker_id, state);
+                            const worker = {
+                                workerId: opened.worker_id,
+                                label: creation.label ?? null,
+                            };
+                            Object.defineProperties(worker, {
+                                creation: {enumerable: true, get: () => state.creation},
+                                session: {enumerable: true, get: () => state.session},
+                                turns: {enumerable: true, get: () => state.turns},
+                                closed: {enumerable: true, get: () => state.closed},
+                                busy: {enumerable: true, get: () => state.busy},
+                            });
+                            return worker;
+                        };
+                        // One turn on a held worker. Turns are sequential: a
+                        // second send while one is in flight is refused rather
+                        // than quietly queued, so the script's own ordering is
+                        // the ordering the journal records.
+                        globalThis.send = async (worker, prompt, options = {}) => {
+                            const state = requireWorker(worker, "send()");
+                            validateAgentPrompt(prompt, "send");
+                            for (const key of Object.keys(options)) {
+                                if (options[key] === undefined) continue;
+                                if (workerCreationOptions.has(key)) {
+                                    throw heldWorkerError(
+                                        `'${key}' is fixed when a worker is created; open a new worker instead of changing it mid-session`
+                                    );
+                                }
+                                if (!workerTurnOptions.has(key)) {
+                                    throw heldWorkerError(`unknown send() option '${key}'`);
+                                }
+                            }
+                            if (state.closed) {
+                                throw heldWorkerError("this worker is closed; open a new one to keep working");
+                            }
+                            if (state.busy) {
+                                throw heldWorkerError("this worker is already taking a turn; a worker's turns are sequential");
+                            }
+                            const { fallback_model: fallbackModel, ...creation } = state.creation;
+                            const request = buildAgentRequest({
+                                ...creation,
+                                fallbackModel,
+                                schema: options.schema,
+                                maxAttempts: options.maxAttempts,
+                                timeoutMs: options.timeoutMs,
+                                label: options.label ?? state.creation.label,
+                                session: state.session,
+                                worker: worker.workerId,
+                            });
+                            if (state.session !== null) {
+                                delete request.model;
+                                delete request.cwd;
+                                delete request.isolation;
+                                delete request.fallback_model;
+                            }
+                            state.busy = true;
+                            try {
+                                const response = unwrapAgentResponse(
+                                    await __agent(prompt, JSON.stringify(request)), request
+                                );
+                                state.session = response.session ?? state.session;
+                                state.turns += 1;
+                                return response.value;
+                            } finally {
+                                state.busy = false;
+                            }
+                        };
+                        globalThis.close = async (worker) => {
+                            const state = requireWorker(worker, "close()");
+                            if (state.closed) return;
+                            if (state.busy) {
+                                throw heldWorkerError("this worker is already taking a turn; close it after the turn settles");
+                            }
+                            unwrapHostResponse(await __workerClose(worker.workerId));
+                            state.closed = true;
+                        };
+                        // What the worker's idle gap actually is, against the
+                        // threshold of the route its model draws on — recorded
+                        // facts, so the script decides warm-continue versus
+                        // fresh re-brief on evidence rather than a guess.
+                        globalThis.staleness = async (worker) => {
+                            requireWorker(worker, "staleness()");
+                            const reading = unwrapHostResponse(await __workerStaleness(worker.workerId));
+                            return {
+                                stale: reading.stale ?? null,
+                                idleMs: reading.idle_ms,
+                                thresholdMs: reading.threshold_ms ?? null,
+                                route: reading.route ?? null,
+                            };
                         };
                         // Race completion watches against a journalled host
                         // timer. Resolves {wake:"completion", handle, value}
@@ -1532,6 +1798,9 @@ mod tests {
         gate_verdict: Value,
         deliveries_up_to: Mutex<Vec<u64>>,
         budget_snapshot: Value,
+        opened_workers: Mutex<Vec<HeldWorkerOpen>>,
+        closed_workers: Mutex<Vec<uuid::Uuid>>,
+        staleness_reading: Value,
         captured_sources: Value,
     }
 
@@ -1558,6 +1827,14 @@ mod tests {
                     "working_remaining": null,
                     "closing_remaining": null,
                     "winding_down": false,
+                }),
+                opened_workers: Mutex::new(Vec::new()),
+                closed_workers: Mutex::new(Vec::new()),
+                staleness_reading: json!({
+                    "stale": false,
+                    "idle_ms": 0,
+                    "threshold_ms": null,
+                    "route": null,
                 }),
                 captured_sources: json!({"sources": []}),
             }
@@ -1714,6 +1991,33 @@ mod tests {
             Ok(self.budget_snapshot.clone())
         }
 
+        async fn open_held_worker(
+            &self,
+            worker: HeldWorkerOpen,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            let mut opened = self.opened_workers.lock().expect("opened");
+            opened.push(worker);
+            Ok(json!({"worker_id": uuid::Uuid::from_u128(opened.len() as u128)}))
+        }
+
+        async fn close_held_worker(
+            &self,
+            worker_id: uuid::Uuid,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            self.closed_workers.lock().expect("closed").push(worker_id);
+            Ok(json!({"worker_id": worker_id, "closed_by": "script"}))
+        }
+
+        async fn held_worker_staleness(
+            &self,
+            _worker_id: uuid::Uuid,
+            _: CancellationToken,
+        ) -> Result<Value, String> {
+            Ok(self.staleness_reading.clone())
+        }
+
         async fn captured_sources(&self, _: CancellationToken) -> Result<Value, String> {
             Ok(self.captured_sources.clone())
         }
@@ -1763,6 +2067,271 @@ mod tests {
                 "errorName": "BudgetWindDownError",
             })
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_turns_carry_the_creation_options_and_the_session() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("first")), Ok(json!("second"))]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({
+                    agent: "reviewer",
+                    model: "strong",
+                    fallbackModel: "steady",
+                    effort: "high",
+                    cwd: "/repo",
+                    isolation: "worktree",
+                });
+                const first = await send(worker, "read the diff");
+                const second = await send(worker, "now judge it", {schema: {type: "string"}});
+                await close(worker);
+                return {
+                    first,
+                    second,
+                    fallback: worker.creation.fallback_model,
+                    turns: worker.turns,
+                    closed: worker.closed,
+                };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("held worker script runs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "first": "first",
+                "second": "second",
+                "fallback": "steady",
+                "turns": 2,
+                "closed": true,
+            })
+        );
+
+        let opened = host.opened_workers.lock().unwrap();
+        assert_eq!(opened.len(), 1, "one worker opened");
+        assert_eq!(opened[0].agent.as_deref(), Some("reviewer"));
+        assert_eq!(opened[0].model.as_deref(), Some("strong"));
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "two turns dispatched");
+        let worker_id = uuid::Uuid::from_u128(1);
+        for request in requests.iter() {
+            assert_eq!(request.agent.as_deref(), Some("reviewer"));
+            assert_eq!(
+                request.worker,
+                Some(worker_id),
+                "every turn names the worker it belongs to"
+            );
+        }
+        assert!(
+            requests[0].session.is_none(),
+            "the first turn opens the session"
+        );
+        assert_eq!(requests[0].model.as_deref(), Some("strong"));
+        assert_eq!(requests[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(requests[0].fallback_model.as_deref(), Some("steady"));
+        assert_eq!(
+            requests[0].isolation,
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree)
+        );
+        assert_eq!(
+            requests[1].session.as_ref().map(|s| s.session_id),
+            Some(uuid::Uuid::from_u128(0xA)),
+            "the second turn continues the first turn's session"
+        );
+        assert_eq!(
+            requests[1].model, None,
+            "the continuation uses the model persisted with its session"
+        );
+        assert_eq!(
+            requests[1].cwd, None,
+            "a continuation inherits the worker's resolved directory"
+        );
+        assert_eq!(
+            requests[1].fallback_model, None,
+            "the creation-time fallback is not re-declared on continuation"
+        );
+        assert_eq!(
+            requests[1].isolation, None,
+            "a continuation does not request a fresh isolated placement"
+        );
+        assert!(
+            requests[1].schema.is_some(),
+            "a per-turn schema reaches the dispatch"
+        );
+        assert_eq!(host.closed_workers.lock().unwrap().as_slice(), &[worker_id]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_refuses_mid_session_escalation_and_use_after_close() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().extend([Ok(json!("ok"))]);
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer", model: "cheap"});
+                await send(worker, "first");
+                let escalation = null;
+                try { await send(worker, "again", {model: "strong"}); }
+                catch (error) { escalation = error.name; }
+                let effort = null;
+                try { await send(worker, "again", {effort: "high"}); }
+                catch (error) { effort = error.name; }
+                await close(worker);
+                let afterClose = null;
+                try { await send(worker, "one more"); }
+                catch (error) { afterClose = error.name; }
+                return {escalation, effort, afterClose};
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("refusal script runs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "escalation": "HeldWorkerError",
+                "effort": "HeldWorkerError",
+                "afterClose": "HeldWorkerError",
+            })
+        );
+        assert_eq!(
+            host.agent_requests.lock().unwrap().len(),
+            1,
+            "a refused turn never reaches the host"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_refuses_a_concurrent_turn_through_an_alias_handle() {
+        let host = Arc::new(SurfaceHost {
+            agent_delay_ms: 50,
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer"});
+                const alias = {...worker};
+                const first = send(worker, "first");
+                await Promise.resolve();
+                let concurrent = null;
+                try { await send(alias, "overlap"); }
+                catch (error) { concurrent = error.name; }
+                await first;
+                await send(alias, "follow-up");
+                await close(alias);
+                let afterClose = null;
+                try { await send(worker, "after close"); }
+                catch (error) { afterClose = error.name; }
+                await close(worker);
+                return {concurrent, afterClose};
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("concurrent refusal is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "concurrent": "HeldWorkerError",
+                "afterClose": "HeldWorkerError",
+            })
+        );
+        assert_eq!(
+            host.agent_requests.lock().unwrap().len(),
+            2,
+            "only the first and sequential follow-up turns reach the host"
+        );
+        assert!(
+            host.agent_requests.lock().unwrap()[1].session.is_some(),
+            "the alias continues the centrally held session"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_staleness_reports_the_recorded_route_reading() {
+        let host = Arc::new(SurfaceHost {
+            staleness_reading: json!({
+                "stale": true,
+                "idle_ms": 900_000,
+                "threshold_ms": 600_000,
+                "route": {"provider_id": "proxy", "endpoint": "relay", "model": "strong"},
+            }),
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const worker = await session({agent: "reviewer", model: "strong"});
+                return await staleness(worker);
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("staleness script runs");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({
+                "stale": true,
+                "idleMs": 900_000,
+                "thresholdMs": 600_000,
+                "route": {"provider_id": "proxy", "endpoint": "relay", "model": "strong"},
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_open_ignores_turn_only_script_defaults() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!("done")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                export const defaults = { agent: "reviewer", maxAttempts: 7 };
+                const worker = await session();
+                const result = await send(worker, "work");
+                await close(worker);
+                return result;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("turn-only defaults do not make session() reject the workflow");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!("done")
+        );
+        assert_eq!(
+            host.opened_workers.lock().unwrap()[0].agent.as_deref(),
+            Some("reviewer")
+        );
+        assert_eq!(host.agent_requests.lock().unwrap()[0].max_attempts, 7);
     }
 
     #[tokio::test(flavor = "current_thread")]

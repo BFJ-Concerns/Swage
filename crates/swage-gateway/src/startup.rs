@@ -1614,6 +1614,7 @@ mod tests {
                     (
                         "primary".to_string(),
                         ProviderEndpointConfig {
+                            worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
                             api_key_env: None,
@@ -1625,6 +1626,7 @@ mod tests {
                     (
                         "secondary".to_string(),
                         ProviderEndpointConfig {
+                            worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
                             api_key_env: None,
@@ -1694,6 +1696,7 @@ mod tests {
                 entries: [(
                     "codex".to_string(),
                     ProviderEndpointConfig {
+                        worker_staleness_threshold_ms: None,
                         protocol: Protocol::Codex,
                         api_key_secret_ref: None,
                         api_key_env: None,
@@ -1802,6 +1805,7 @@ mod tests {
         let captured = Arc::clone(&events.0);
         let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
         let provider = ProviderEndpointConfig {
+            worker_staleness_threshold_ms: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
             api_key_env: Some("SWAGE_LEGACY_PROVIDER_KEY_TEST".into()),
@@ -1848,6 +1852,7 @@ mod tests {
                     (
                         "openai".to_string(),
                         ProviderEndpointConfig {
+                            worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
                             api_key_env: None,
@@ -1859,6 +1864,7 @@ mod tests {
                     (
                         "anthropic".to_string(),
                         ProviderEndpointConfig {
+                            worker_staleness_threshold_ms: None,
                             protocol: Protocol::Anthropic,
                             api_key_secret_ref: None,
                             api_key_env: None,
@@ -2166,6 +2172,7 @@ mod tests {
             .expect("secret should be created");
 
         let provider = swage_config::ProviderEndpointConfig {
+            worker_staleness_threshold_ms: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: Some(secret.reference),
             api_key_env: Some("SHOULD_NOT_BE_READ".into()),
