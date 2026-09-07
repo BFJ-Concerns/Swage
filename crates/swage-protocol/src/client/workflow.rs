@@ -78,8 +78,33 @@ pub struct WorkflowScriptListResponse {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRouteBudget {
+    /// The token ceiling for calls resolved to this provider entry.
+    pub max_total_tokens: Option<u64>,
+    /// Tokens retained for closing calls on this provider entry after the
+    /// workflow has entered wind-down for that route.
+    pub reserved_closing_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRouteBudgetReading {
+    pub spent: u64,
+    pub remaining: Option<u64>,
+    pub closing_remaining: Option<u64>,
+    pub usage_unavailable_calls: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
+    /// Per-provider-entry token ledgers. A model resolves to the provider
+    /// entry named by its catalogue configuration, and calls on one entry
+    /// never consume another entry's allowance.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub per_route: std::collections::BTreeMap<String, WorkflowRouteBudget>,
+    /// Fallback ceiling for a resolved provider route without a `per_route`
+    /// entry.
     pub max_total_tokens: Option<u64>,
     /// Tokens held back from ordinary work for calls made after the run has
     /// observed its wind-down boundary. This allowance is part of, not in
@@ -570,6 +595,7 @@ pub struct WorkflowAgentCallDetail {
     /// The resolved state of the isolated worktree after the worker settled.
     pub worktree: Option<WorkflowWorktreeCompletion>,
     pub served_model: Option<String>,
+    pub provider_route: Option<String>,
     /// What the call spent, or why that is not known. A call the provider
     /// reported no usage for reads as unavailable with a reason, so budget
     /// reconstruction never reads absence as zero spend.
@@ -615,6 +641,7 @@ pub enum WorkflowJournalResult {
         usage: WorkflowCallUsage,
         working_directory: Option<String>,
         served_model: Option<String>,
+        provider_route: Option<String>,
         session_id: Option<Uuid>,
         thread_id: Option<Uuid>,
         turn_id: Option<Uuid>,
@@ -689,12 +716,18 @@ pub enum WorkflowJournalResult {
         working_remaining: Option<u64>,
         closing_remaining: Option<u64>,
         winding_down: bool,
+        #[serde(default)]
+        #[ts(optional, as = "Option<_>")]
+        per_route: std::collections::BTreeMap<String, WorkflowRouteBudgetReading>,
         usage_unavailable_calls: u32,
     },
     TerminalBudget {
         spent: u64,
         remaining: Option<u64>,
         closing_remaining: Option<u64>,
+        #[serde(default)]
+        #[ts(optional, as = "Option<_>")]
+        per_route: std::collections::BTreeMap<String, WorkflowRouteBudgetReading>,
         usage_unavailable_calls: u32,
     },
     CapturedSources {
@@ -706,6 +739,7 @@ pub enum WorkflowJournalResult {
         remaining: u64,
         working_remaining: u64,
         closing_remaining: u64,
+        closing_limit: Option<u64>,
         winding_down: bool,
     },
 }

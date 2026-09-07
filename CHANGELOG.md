@@ -12,6 +12,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail, on the run's own view at `/workflow-runs/{id}`, and through the new `workflow_run_account` tool a lead agent can read; the run view loads one coherent record for its account and journal, and the worker directories such an account names are kept, surviving the gateway's shutdown and the next one's startup sweep.
+- Workflow token budgets enforce independent ceilings and closing reserves for each configured provider route; every call, including a declared fallback, is admitted against its provider route's ledger or the run-wide fallback ledger, while recovery preserves the admission already granted to interrupted calls.
 - Workflow scripts can hold a worker open across successive turns — `session()` fixes its agent, model, effort, placement, and requested grants at creation, `send()` gives it another turn on the context it has already built, `staleness()` reports the recorded idle gap against the provider route's own threshold, and `close()` releases it; a run ending by any path closes the workers it still holds, and changing model or effort mid-session is refused so an escalation is always a fresh dispatch. A delegating agent can likewise name a child and come back to it later, landing the new task on that child's own session with everything it was told and answered before.
 - Every workflow agent call is now recorded with the prompt and resolved options each attempt of it was dispatched under, the provider rounds every attempt ran with start, end, and outcome, and a usage record that reads as unavailable with a reason where the provider reported none. Unknown usage marks budget readings incomplete and closes the token dispatch gate instead of being treated as zero spend. A worker the run's own end cut short is recorded as cut short rather than as its own failure, and a call the run's end interrupted keeps that attempt's rounds beside those of the attempt replay dispatched after it. Run detail preserves structured prompt whitespace and wraps long tokens.
 - Images now reach every selected provider protocol that advertises vision, and an image reference that provider cannot resolve is refused before the turn reaches it.
@@ -83,6 +84,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow calls that name an unknown model now fail at that call instead of silently using the default model.
 - Workflow call author errors now fail before a worker or child workflow starts, and propagate out of parallel and pipeline rather than being reported as a failed worker slot.
 - New-conversation controls now create and navigate immediately.
 - New-conversation agent pickers now show every available definition by name.

@@ -136,6 +136,8 @@ impl ModelCatalogConfig {
 /// allowance a model belongs to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProviderRoute<'a> {
+    /// The catalogue key selected before alias resolution.
+    pub model_key: &'a str,
     pub provider_id: &'a str,
     pub endpoint: &'a ProviderEndpointConfig,
     pub model: &'a ModelEndpointConfig,
@@ -153,17 +155,18 @@ pub fn resolve_provider_route<'a>(
     providers: &'a ProviderCatalogConfig,
     model: Option<&str>,
 ) -> Option<ProviderRoute<'a>> {
-    let model = match model {
-        Some(name) => models.entries.get(name).or_else(|| {
+    let (model_key, model) = match model {
+        Some(name) => models.entries.get_key_value(name).or_else(|| {
             models
                 .entries
-                .values()
-                .find(|entry| entry.aliases.iter().any(|alias| alias == name))
+                .iter()
+                .find(|(_, entry)| entry.aliases.iter().any(|alias| alias == name))
         })?,
-        None => models.default_model()?,
+        None => models.entries.get_key_value(&models.default)?,
     };
     let (provider_id, endpoint) = providers.entries.get_key_value(&model.provider_id)?;
     Some(ProviderRoute {
+        model_key,
         provider_id,
         endpoint,
         model,
