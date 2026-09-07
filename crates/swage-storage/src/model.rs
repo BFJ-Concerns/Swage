@@ -2288,6 +2288,20 @@ pub struct WorkflowRunHoldAnswer {
     pub turn_id: Option<Uuid>,
 }
 
+/// What settling a hold did to it and to its run. The verdict and the
+/// parked run's wake are one write, so an answered hold never sits on a run
+/// still parked on its distant wake time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowHoldSettlement {
+    /// The hold was open on a resumable run and now carries this verdict.
+    /// `false` means another answerer, a cancellation, or the run's own
+    /// completion settled it first.
+    pub settled: bool,
+    /// The run was parked on this decision and is now due, so the next wake
+    /// pass relaunches it.
+    pub wake_provisioned: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowJournalRecord {
     pub id: Uuid,

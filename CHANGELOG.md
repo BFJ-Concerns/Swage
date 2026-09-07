@@ -8,6 +8,7 @@ All notable changes to Swage are documented in this file.
 
 - Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
 - Ending a workflow now closes its unanswered decision holds, stopping their watchers and removing them from the answer queue whether the run completes, fails, or is cancelled; late answers are rejected without adding decision history.
+- Answering a workflow's decision and cancelling the run it waits on now settle against each other: exactly one of them takes effect, the loser reports the state the winner left and starts nothing, an accepted answer and the parked run's readiness to act on it are recorded together so a crash between them cannot strand the verdict, and a cancelled run launches no engine afterwards.
 
 ### Added
 
