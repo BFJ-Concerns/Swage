@@ -849,13 +849,20 @@ impl WorkflowStore for SqliteStorage {
     async fn create_workflow_run_hold_rejection(
         &self,
         rejection: NewWorkflowRunHoldRejection,
-    ) -> Result<WorkflowRunHoldRejectionRecord, StorageError> {
+    ) -> Result<Option<WorkflowRunHoldRejectionRecord>, StorageError> {
         let id = Uuid::new_v4();
         let now = Utc::now();
         self.with_conn(move |conn| {
-            conn.execute(
+            let inserted = conn.execute(
                 "INSERT INTO workflow_run_hold_rejections (id, hold_id, attempted_verdict, feedback, source_surface, source_agent_id, source_session_id, source_turn_id, rejected_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 \
+                 WHERE EXISTS (\
+                     SELECT 1 FROM workflow_run_holds \
+                     JOIN workflow_runs ON workflow_runs.id = workflow_run_holds.run_id \
+                     WHERE workflow_run_holds.id = ?2 \
+                       AND workflow_run_holds.state = 'open' \
+                       AND workflow_runs.state NOT IN ('completed', 'failed', 'cancelled')\
+                 )",
                 params![
                     id.to_string(),
                     rejection.hold_id.to_string(),
@@ -868,6 +875,9 @@ impl WorkflowStore for SqliteStorage {
                     now.to_rfc3339()
                 ],
             )?;
+            if inserted == 0 {
+                return Ok(None);
+            }
             conn.query_row(
                 &format!(
                     "SELECT {RUN_HOLD_REJECTION_COLUMNS} FROM workflow_run_hold_rejections WHERE id = ?1"
@@ -875,6 +885,7 @@ impl WorkflowStore for SqliteStorage {
                 [id.to_string()],
                 run_hold_rejection_row,
             )
+            .map(Some)
         })
         .await
     }
