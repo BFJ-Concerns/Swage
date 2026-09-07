@@ -804,6 +804,48 @@ async fn record_terminal_state_and_release(
     Ok(())
 }
 
+/// Persist the resolved dispatch before a provider can execute it.
+///
+/// Both provider runtimes share this refusal path so neither can make a call
+/// whose workflow attempt cannot be reconstructed from the durable record.
+async fn record_agent_call_attempt_before_execution(
+    state: &AppState,
+    session_id: Uuid,
+    prepared_turn_id: Uuid,
+    agent_call_scope: Option<Uuid>,
+    resolution: &WorkflowAgentCallResolution,
+    sandbox_guard: &Option<SandboxGuard>,
+) -> Result<(), GatewayError> {
+    let Some(agent_call_scope) = agent_call_scope else {
+        return Ok(());
+    };
+    let result = match serde_json::to_value(resolution) {
+        Ok(resolution) => crate::workflow::record_agent_call_attempt(
+            state.storage.as_ref(),
+            agent_call_scope,
+            resolution,
+        )
+        .await
+        .map_err(|error| {
+            GatewayError::WebSocketError(format!("failed to record agent call attempt: {error}"))
+        }),
+        Err(error) => Err(GatewayError::WebSocketError(format!(
+            "agent call attempt could not be serialised: {error}"
+        ))),
+    };
+    if let Err(error) = result {
+        shutdown_sandbox_guard(
+            sandbox_guard,
+            "failed to shut down sandbox after agent call attempt recording failure",
+        )
+        .await;
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
+            .await?;
+        return Err(error);
+    }
+    Ok(())
+}
+
 async fn record_failed_turn_and_release_on_error<T>(
     state: &AppState,
     session_id: Uuid,
@@ -1800,9 +1842,6 @@ async fn process_turn_with_composition_and_focus(
 
     // Step 10: Both runtimes emit AgentEvents into the same projection loop.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    // Set when a record written before the agent starts is lost; folded into
-    // the loop's own integrity flag below (record_durability.rs).
-    let mut record_integrity_lost_before_agent: Option<String> = None;
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
     let requested_effort = match effort_override {
@@ -1844,60 +1883,24 @@ async fn process_turn_with_composition_and_focus(
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(&mut report_json, resolved);
         }
-        if let Some(agent_call_scope) = agent_call_scope {
-            let resolution = WorkflowAgentCallResolution {
-                model: Some(model_name.clone()),
-                effort: effort
-                    .as_ref()
-                    .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
-                session_id: Some(session_id),
-                thread_id: Some(thread_id),
-                turn_id: Some(prepared_turn_id),
-            };
-            let resolution = match serde_json::to_value(&resolution) {
-                Ok(resolution) => resolution,
-                Err(error) => {
-                    shutdown_sandbox_guard(
-                        &sandbox_guard,
-                        "failed to shut down sandbox after agent call attempt serialisation failure",
-                    )
-                    .await;
-                    record_terminal_state_and_release(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        TurnState::Failed,
-                    )
-                    .await?;
-                    return Err(GatewayError::WebSocketError(format!(
-                        "agent call attempt could not be serialised: {error}"
-                    )));
-                }
-            };
-            if let Err(error) = crate::workflow::record_agent_call_attempt(
-                state.storage.as_ref(),
-                agent_call_scope,
-                resolution,
-            )
-            .await
-            {
-                shutdown_sandbox_guard(
-                    &sandbox_guard,
-                    "failed to shut down sandbox after agent call attempt recording failure",
-                )
-                .await;
-                record_terminal_state_and_release(
-                    state,
-                    session_id,
-                    prepared_turn_id,
-                    TurnState::Failed,
-                )
-                .await?;
-                return Err(GatewayError::WebSocketError(format!(
-                    "failed to record agent call attempt: {error}"
-                )));
-            }
-        }
+        let resolution = WorkflowAgentCallResolution {
+            model: Some(model_name.clone()),
+            effort: effort
+                .as_ref()
+                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
+            session_id: Some(session_id),
+            thread_id: Some(thread_id),
+            turn_id: Some(prepared_turn_id),
+        };
+        record_agent_call_attempt_before_execution(
+            state,
+            session_id,
+            prepared_turn_id,
+            agent_call_scope,
+            &resolution,
+            &sandbox_guard,
+        )
+        .await?;
         let session_approval_grants = state
             .session_approval_grants
             .lock()
@@ -1990,50 +1993,24 @@ async fn process_turn_with_composition_and_focus(
         // the dispatch one. Each turn appends its own attempt, so a call
         // replay re-dispatched keeps the interrupted attempt beside the one
         // that follows it.
-        if let Some(agent_call_scope) = agent_call_scope {
-            let resolution = WorkflowAgentCallResolution {
-                model: Some(model_name.clone()),
-                effort: effort
-                    .as_ref()
-                    .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
-                session_id: Some(session_id),
-                thread_id: Some(thread_id),
-                turn_id: Some(prepared_turn_id),
-            };
-            match serde_json::to_value(&resolution) {
-                Ok(resolution) => {
-                    if let Err(error) = crate::workflow::record_agent_call_attempt(
-                        state.storage.as_ref(),
-                        agent_call_scope,
-                        resolution,
-                    )
-                    .await
-                    {
-                        // Reconstructive record (record_durability.rs): the
-                        // call still happened and its dispatch record stands.
-                        tracing::warn!(error = %error, "failed to record agent call attempt");
-                        if let Err(audit_error) = record_durability::record_reconstruction_gap(
-                            state.storage.as_ref(),
-                            Some(session_id),
-                            prepared_turn_id,
-                            "agent_call_attempt",
-                            &error,
-                        )
-                        .await
-                        {
-                            record_integrity_lost_before_agent.get_or_insert(format!(
-                                "agent call attempt lost and the loss could not be recorded: {audit_error}"
-                            ));
-                        }
-                    }
-                }
-                Err(error) => {
-                    record_integrity_lost_before_agent.get_or_insert(format!(
-                        "agent call attempt could not be serialised: {error}"
-                    ));
-                }
-            }
-        }
+        let resolution = WorkflowAgentCallResolution {
+            model: Some(model_name.clone()),
+            effort: effort
+                .as_ref()
+                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
+            session_id: Some(session_id),
+            thread_id: Some(thread_id),
+            turn_id: Some(prepared_turn_id),
+        };
+        record_agent_call_attempt_before_execution(
+            state,
+            session_id,
+            prepared_turn_id,
+            agent_call_scope,
+            &resolution,
+            &sandbox_guard,
+        )
+        .await?;
         let turn_request = TurnRequest {
             execution: swage_agent::context::TurnExecutionContext {
                 session_id,
@@ -2061,7 +2038,7 @@ async fn process_turn_with_composition_and_focus(
     // as a degradation (record_durability.rs). Checked after the agent
     // settles — the turn is then failed loudly rather than left looking
     // auditable.
-    let mut record_integrity_lost: Option<String> = record_integrity_lost_before_agent;
+    let mut record_integrity_lost: Option<String> = None;
 
     // Step 11: Forward AgentEvent → ServerEvent. The loop runs until the
     // agent drops event_tx (channel closes) or the agent task completes.
