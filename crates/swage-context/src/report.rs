@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use swage_core::ChatMessage;
 pub use swage_protocol::client::context::{
-    AssemblyError, AssemblyReport, CompactionRecord, ElementReport, NamedAssemblyReport,
+    AssemblyError, AssemblyReport, CompactionRecord, DeclaredOmission, ElementReport,
+    NamedAssemblyReport,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +161,7 @@ mod tests {
             budget: Some(1000),
             budget_remaining: Some(958),
             compaction_applied: vec![],
+            declared_omissions: Vec::new(),
             warnings: vec![],
             errors: vec![],
             effective_tool_permissions: None,

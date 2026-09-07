@@ -970,8 +970,8 @@ override, but `undefined` at the call site falls back to the default.
 | `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue. Kind: `"completion"`, `"failure"`, or `"escalation"`. |
 | `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
-| `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk error swallowing (failing thunks collapse to `null`). |
-| `pipeline(items, ...stages)` | `Promise<Array>` | Per-item stage chain; failing items collapse to `null` at the failing stage. |
+| `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
+| `pipeline(items, ...stages)` | `Promise<Array>` | Per-item stage chain; a failed worker collapses that item to `null` at the failing stage. A pre-spawn author error propagates and fails the run. |
 | `budgetSnapshot()` | `Promise<Value>` | Journalled budget reading. Returns `{spent, remaining, working_remaining, closing_remaining, winding_down}`. |
 | `budget.spent()` | `number` | Synchronous, not journalled — NOT safe for branching (replay sees end-state values). |
 | `budget.remaining()` | `number \| undefined` | Synchronous, not journalled — NOT safe for branching. |

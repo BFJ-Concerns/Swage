@@ -18,11 +18,11 @@ use crate::model::{
     NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment,
     OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule, PageTemplate,
     PageTemplateModule, PendingChannelOrigin, Schedule, ScheduleRun, ScheduleRunUpdate,
-    SecretRecord, Session, SessionVariable, SourceObservation, Space, SpaceSlug, TaskDefinition,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation, Space, SpaceSlug,
+    TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState,
+    UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer,
+    WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -286,6 +286,13 @@ pub trait ObservationStore: Send + Sync {
         &self,
         space_id: Uuid,
     ) -> Result<Vec<SourceObservation>, StorageError>;
+
+    /// Read capture acts belonging to the supplied workflow worker scopes.
+    async fn list_source_captures_by_scopes(
+        &self,
+        space_id: Uuid,
+        capture_scopes: Vec<String>,
+    ) -> Result<Vec<SourceCapture>, StorageError>;
 
     /// Add the next extraction version for an observation. The store assigns
     /// the version; existing derivations are never touched.
@@ -1024,6 +1031,7 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         description: Option<&str>,
         delivery_grant: Option<serde_json::Value>,
+        captured_sources_grant: Option<bool>,
         authoring_session_id: Option<Uuid>,
     ) -> Result<WorkflowScriptRecord, StorageError>;
     async fn list_workflow_scripts(
@@ -1744,6 +1752,14 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<SourceObservation>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_source_captures_by_scopes(
+            &self,
+            _: Uuid,
+            _: Vec<String>,
+        ) -> Result<Vec<SourceCapture>, StorageError> {
             unimplemented!()
         }
 
@@ -2553,6 +2569,7 @@ mod tests {
             _: Uuid,
             _: Option<&str>,
             _: Option<serde_json::Value>,
+            _: Option<bool>,
             _: Option<Uuid>,
         ) -> Result<WorkflowScriptRecord, StorageError> {
             unimplemented!()

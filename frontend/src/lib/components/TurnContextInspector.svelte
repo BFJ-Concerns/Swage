@@ -1,7 +1,7 @@
 <!--
   Turn context inspector — renders the assembled-context report recorded for
   one turn: which elements built the model's context, at what token cost,
-  with what compaction, warnings, and fallbacks.
+  with what compaction, warnings, declared omissions, and fallbacks.
 
   Read-only by design: the report is the audit record of what already
   happened, fetched on open rather than streamed, so what renders is always
@@ -120,6 +120,20 @@
       </section>
     {/if}
 
+    {#if (report.declared_omissions ?? []).length > 0}
+      <section>
+        <h3>Declared omissions</h3>
+        <ul>
+          {#each report.declared_omissions ?? [] as omission}
+            <li>
+              <strong>{omission.element}</strong>
+              <span class="reason">{omission.reason}</span>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
     {#if report.errors.length > 0}
       <section>
         <h3>Fallbacks</h3>
@@ -198,6 +212,12 @@
   .numeric {
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+
+  .reason {
+    display: block;
+    color: var(--ink-soft);
+    font-size: 0.8em;
   }
 
   .preview {
