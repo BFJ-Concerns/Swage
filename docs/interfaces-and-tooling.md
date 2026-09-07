@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, image attachments and reference admission, pages, delivery targets, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, and route handling
+description: Network binding, the web UI's context inspector, image attachments and reference admission, pages, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, and route handling
 ---
 
 # Interfaces and tooling
@@ -238,6 +238,15 @@ needed) and **overlap** (a previous run was still executing when this run
 came due). Skipped runs carry state `skipped` and the skip reason on the
 run row, so the run history is the complete account of what happened at
 each tick.
+
+## Device registration
+
+Remote devices register through the device API. The `kind` field on a
+registration request names the device type and defaults to
+`attached_device`. Registering a device with kind `local` is refused —
+a local device has no remote producer to register. The same constraint
+applies to recovery imports, so the remote-device registry never holds a
+local entry.
 
 ## API error contract
 
