@@ -18935,6 +18935,15 @@ mod tests {
             output["snapshot"]["per_route"]["beta-route"]["closing_remaining"],
             Value::Null
         );
+        let snapshot = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::Budget)
+            .and_then(|entry| entry.result.as_ref())
+            .expect("budget snapshot journal result");
+        let snapshot = serde_json::to_value(snapshot).expect("snapshot result serialises");
+        assert_eq!(snapshot["per_route"]["alpha-route"]["spent"], 1);
+        assert_eq!(snapshot["per_route"]["beta-route"]["remaining"], 3);
         let wind_down = detail
             .journal
             .iter()
