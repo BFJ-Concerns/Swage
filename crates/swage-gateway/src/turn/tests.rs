@@ -13416,10 +13416,25 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
     );
 
     assert!(
-        output.messages[0]
-            .text_content()
-            .contains("Important space context"),
+        output
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("Important space context")),
         "a named assembly should be able to compose the loaded memory element"
+    );
+    assert!(
+        output
+            .report
+            .elements
+            .iter()
+            .any(|element| element.name == "memory"),
+        "the memory element is attributed to the script that added it"
+    );
+    // The script added only memory, so the baseline the default assembly
+    // would have carried is restored around it and leads the composition.
+    assert!(
+        output.report.elements[0].name == "orientation",
+        "the restored baseline precedes what the script composed"
     );
     assert_eq!(output.report.assembly_name, "memory-aware");
 }
