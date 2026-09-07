@@ -20614,7 +20614,7 @@ protocol = "openai"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-        async fn declared_fallback_does_not_retry_a_call_rejected_before_dispatch() {
+    async fn declared_fallback_does_not_retry_a_call_rejected_before_dispatch() {
         let (state, storage, provider, space_id) =
             fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
         let source = r#"return await agent("answer", {
