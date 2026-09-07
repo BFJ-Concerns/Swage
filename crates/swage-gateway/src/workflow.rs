@@ -6182,11 +6182,9 @@ async fn launch_existing_run(
         });
         // Once the engine has a terminal result, no outstanding decision can
         // affect it. Stop their in-process watchers and remove the remaining
-        // rows from the answering queue before publishing the completed run.
+        // rows from the answering queue before publishing the terminal run.
         cancellation.cancel();
-        if run_state == "completed"
-            && let Err(error) = storage.close_open_workflow_run_holds(run_id).await
-        {
+        if let Err(error) = storage.close_open_workflow_run_holds(run_id).await {
             tracing::warn!(%run_id, %error, "could not close unanswered workflow holds");
         }
         let state_update = storage
@@ -13877,6 +13875,58 @@ mod tests {
         assert!(
             refused.to_string().contains("cancelled"),
             "the tool says why: {refused}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_run_closes_a_decision_it_can_no_longer_receive() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            hold({ content: "Ship the release?", verdicts: ["ship", "hold"] });
+            await wait({ timerMs: 10 });
+            throw new Error("the workflow cannot continue");
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start failing run");
+        let failed = wait_for_run_state(&storage, started.id, "failed").await;
+        assert_eq!(failed.state, "failed");
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert!(matches!(detail.run.state, WorkflowRunState::Failed));
+        assert_eq!(detail.holds.len(), 1);
+        assert!(matches!(
+            detail.holds[0].state,
+            WorkflowRunHoldState::Closed
+        ));
+        assert!(detail.holds[0].verdict.is_none());
+        assert_eq!(detail.hold_metrics.holds_open, 0);
+        assert!(
+            storage
+                .list_open_workflow_run_holds(space.id)
+                .await
+                .expect("list open holds")
+                .is_empty(),
+            "failed runs offer no unanswerable decision"
         );
     }
 
