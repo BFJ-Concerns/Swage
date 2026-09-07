@@ -3177,10 +3177,9 @@ async fn run_host_commands_inner(
                 let request_json =
                     serde_json::to_value(&request).expect("agent request serialises");
                 let request_hash = journal_args_hash(&request_json);
-                // A replayed entry keeps its recorded admission route, so
-                // moving the model to another provider between runs cannot
-                // charge resumed work to a different ceiling. Fresh calls
-                // settle to the provider route captured by the completed turn.
+                // A replayed entry keeps its recorded admission route so the
+                // same ceiling controls whether it may resume. Every call
+                // settles to the provider route captured by the completed turn.
                 let budget_route = match existing_call
                     .and_then(|entry| entry.request.get("provider_route"))
                     .and_then(Value::as_str)
@@ -3552,7 +3551,6 @@ async fn run_host_commands_inner(
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
-                let route_token_ledger = route_limit.as_ref().and_then(|_| budget_route.clone());
                 let configured_route_budgets = budget.per_route.clone();
                 let call_uses_closing_partition = winding_down;
                 let semaphore = Arc::clone(&semaphore);
@@ -3711,16 +3709,12 @@ async fn run_host_commands_inner(
                                 accounting.working_reserved.saturating_sub(call_reservation);
                         }
                     }
-                    let settled_route = if started_replay {
-                        route_token_ledger
-                    } else {
-                        result
-                            .as_ref()
-                            .ok()
-                            .and_then(|result| result.provider_route.as_ref())
-                            .filter(|route| configured_route_budgets.contains_key(*route))
-                            .cloned()
-                    };
+                    let settled_route = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|result| result.provider_route.as_ref())
+                        .filter(|route| configured_route_budgets.contains_key(*route))
+                        .cloned();
                     if let Some(route) = settled_route {
                         let ledger = accounting.ledger_mut(&route);
                         ledger.spent = ledger.spent.saturating_add(actual);
@@ -19873,7 +19867,7 @@ protocol = "openai"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_resumed_call_spends_the_route_its_journal_recorded() {
+    async fn a_resumed_call_spends_the_route_that_serves_after_a_config_change() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let run_id = empty_journal_run(&storage, space.id).await;
@@ -19930,21 +19924,9 @@ protocol = "openai"
             .await
             .expect("resumed reply")
             .expect("resumed result");
-        let (fresh_reply, fresh_receive) = oneshot::channel();
-        tx.send(HostCommand::Agent {
-            request: route_test_request("first call of the resumed run", None),
-            resolved_working_directory: None,
-            cancellation: CancellationToken::new(),
-            reply: fresh_reply,
-        })
-        .expect("fresh command");
-        fresh_receive.await.expect("fresh reply").expect(
-            "the resumed call spent the route its journal recorded, leaving the \
-             route its model resolves to now untouched",
-        );
         let (exhausted_reply, exhausted_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
-            request: route_test_request("beyond the ceiling", None),
+            request: route_test_request("beyond the serving route ceiling", None),
             resolved_working_directory: None,
             cancellation: CancellationToken::new(),
             reply: exhausted_reply,
@@ -19954,12 +19936,108 @@ protocol = "openai"
             exhausted_receive
                 .await
                 .expect("exhausted reply")
-                .expect_err("the current route is spent to its ceiling")
+                .expect_err("the route that served the resumed call is spent to its ceiling")
                 .to_string(),
             "BudgetExceededError: token limit reached"
         );
         drop(tx);
         task.await.expect("host task");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resumed_fallback_call_spends_the_route_that_served_it() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = empty_journal_run(&storage, space.id).await;
+        let mut resumed_request = route_test_request("interrupted call", Some("pinned"));
+        resumed_request.fallback_model = Some("fallback".into());
+        journal_routed_agent_call(&storage, run_id, 0, &resumed_request, "primary-route", None)
+            .await;
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "max_concurrent_agent_calls": 1,
+            "per_route": {
+                "primary-route": {"max_total_tokens": 8},
+                "fallback-route": {"max_total_tokens": 2}
+            }
+        }))
+        .expect("budget");
+        let replay = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("replay journal");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                vec![swage_core::StreamChunk::Error {
+                    message: "primary refused".into(),
+                }],
+                scripted_text_output_with_usage("fallback answer", 2, 0),
+                scripted_text_output_with_usage("must not run", 1, 0),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            fallback_test_config(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run_host_commands(
+            state,
+            run_id,
+            space.id,
+            vec![],
+            vec![],
+            None,
+            None,
+            budget,
+            replay,
+            Arc::new(AtomicU32::new(1)),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            CancellationToken::new(),
+            PARK_TIMER_THRESHOLD_MS,
+            rx,
+        ));
+
+        let (resumed_reply, resumed_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: resumed_request,
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply: resumed_reply,
+        })
+        .expect("resumed command");
+        resumed_receive
+            .await
+            .expect("resumed reply")
+            .expect("fallback serves the resumed call");
+
+        let (next_reply, next_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: route_test_request("beyond the fallback ceiling", Some("fallback")),
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply: next_reply,
+        })
+        .expect("next command");
+        assert_eq!(
+            next_receive
+                .await
+                .expect("next reply")
+                .expect_err("the serving route is spent to its ceiling")
+                .to_string(),
+            "BudgetExceededError: token limit reached"
+        );
+        drop(tx);
+        task.await.expect("host task");
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            2,
+            "the refused call must not reach the provider"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
