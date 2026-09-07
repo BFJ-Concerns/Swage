@@ -45,7 +45,18 @@ const RETAINED_PLACEMENTS_MARKER: &str = ".retained-placements";
 pub struct WorktreeHost {
     config: WorktreeConfig,
     inner: Mutex<HashMap<(Uuid, u64), ProvisionedWorktree>>,
-    retained: Mutex<HashSet<PathBuf>>,
+    retained: Mutex<HashMap<PathBuf, HashSet<Uuid>>>,
+}
+
+/// One caller's contribution to a run's retained-placement marker.
+///
+/// Several generations can briefly claim the same run while a parked-state
+/// transition races. Withdrawing one claim must therefore remove only that
+/// claimant's interest, leaving the marker and in-memory retention in place
+/// for whichever generation actually ended the run.
+pub struct RetainedPlacementClaim {
+    claimant_id: Uuid,
+    paths: Vec<PathBuf>,
 }
 
 impl WorktreeHost {
@@ -53,7 +64,7 @@ impl WorktreeHost {
         Self {
             config,
             inner: Mutex::new(HashMap::new()),
-            retained: Mutex::new(HashSet::new()),
+            retained: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,22 +76,18 @@ impl WorktreeHost {
     /// claim is durable — a marker beside the worker directories — because
     /// the process that wrote the account is rarely the process a reader
     /// comes back to.
-    pub async fn retain(&self, owner_id: Uuid, paths: &[String]) {
+    pub async fn retain(&self, owner_id: Uuid, paths: &[String]) -> Option<RetainedPlacementClaim> {
         if paths.is_empty() {
-            return;
+            return None;
         }
         let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-        self.retained.lock().await.extend(paths.iter().cloned());
+        let claimant_id = Uuid::new_v4();
+        let mut retained = self.retained.lock().await;
         let mut claims = HashMap::<PathBuf, HashSet<PathBuf>>::new();
-        for path in paths {
-            let owner_root = path
-                .strip_prefix(&self.config.root)
-                .ok()
-                .and_then(|relative| relative.components().next())
-                .map(|owner| self.config.root.join(owner.as_os_str()))
-                .unwrap_or_else(|| self.config.root.join(owner_id.to_string()));
+        for path in &paths {
+            let owner_root = self.owner_root_for(owner_id, path);
             if path.starts_with(&owner_root) {
-                claims.entry(owner_root).or_default().insert(path);
+                claims.entry(owner_root).or_default().insert(path.clone());
             }
         }
         for (owner_root, claimed) in claims {
@@ -88,20 +95,43 @@ impl WorktreeHost {
                 continue;
             }
             let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
-            let mut recorded = read_retained_placements(&marker).await;
-            recorded.extend(claimed);
-            let mut lines = recorded
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect::<Vec<_>>();
-            lines.sort();
-            if let Err(error) = tokio::fs::write(&marker, lines.join("\n") + "\n").await {
-                tracing::warn!(
-                    path = %marker.display(),
-                    %error,
-                    "could not claim the run's retained placements on disk; they survive only until this gateway stops"
-                );
+            for path in read_retained_placements(&marker).await {
+                retained.entry(path).or_default().insert(Uuid::nil());
             }
+            for path in claimed {
+                retained.entry(path).or_default().insert(claimant_id);
+            }
+            write_retained_placements(
+                &marker,
+                retained.keys().filter(|path| path.starts_with(&owner_root)),
+            )
+            .await;
+        }
+        Some(RetainedPlacementClaim { claimant_id, paths })
+    }
+
+    /// Withdraw one proposed claim without disturbing a winning generation's
+    /// claim for the same placements.
+    pub async fn withdraw(&self, owner_id: Uuid, claim: RetainedPlacementClaim) {
+        let mut retained = self.retained.lock().await;
+        let mut owner_roots = HashSet::new();
+        for path in claim.paths {
+            let owner_root = self.owner_root_for(owner_id, &path);
+            owner_roots.insert(owner_root);
+            if let Some(claimants) = retained.get_mut(&path) {
+                claimants.remove(&claim.claimant_id);
+                if claimants.is_empty() {
+                    retained.remove(&path);
+                }
+            }
+        }
+        for owner_root in owner_roots {
+            let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
+            write_retained_placements(
+                &marker,
+                retained.keys().filter(|path| path.starts_with(&owner_root)),
+            )
+            .await;
         }
     }
 
@@ -113,7 +143,7 @@ impl WorktreeHost {
         self.retained
             .lock()
             .await
-            .retain(|path| !claimed.contains(path));
+            .retain(|path, _| !claimed.contains(path));
         match tokio::fs::remove_file(&marker).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -123,6 +153,14 @@ impl WorktreeHost {
                 "could not release the run's retained placement claims"
             ),
         }
+    }
+
+    fn owner_root_for(&self, owner_id: Uuid, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.config.root)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .map(|owner| self.config.root.join(owner.as_os_str()))
+            .unwrap_or_else(|| self.config.root.join(owner_id.to_string()))
     }
 
     pub async fn provision(
@@ -304,7 +342,12 @@ impl WorktreeHost {
             // process both leaves it alone and honours it in its own cleanup.
             let retained =
                 read_retained_placements(&owner_path.join(RETAINED_PLACEMENTS_MARKER)).await;
-            self.retained.lock().await.extend(retained.iter().cloned());
+            self.retained.lock().await.extend(
+                retained
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, HashSet::from([Uuid::nil()]))),
+            );
             let mut retained_paths = claims.retained_paths.clone();
             retained_paths.extend(retained);
             let mut workers = match tokio::fs::read_dir(&owner_path).await {
@@ -401,7 +444,9 @@ impl WorktreeHost {
             let mut inner = self.inner.lock().await;
             let keys = inner
                 .iter()
-                .filter(|((id, _), worktree)| *id == owner_id && !retained.contains(&worktree.path))
+                .filter(|((id, _), worktree)| {
+                    *id == owner_id && !retained.contains_key(&worktree.path)
+                })
                 .map(|(key, _)| *key)
                 .collect::<Vec<_>>();
             keys.into_iter()
@@ -444,6 +489,27 @@ async fn read_retained_placements(marker: &Path) -> HashSet<PathBuf> {
             tracing::warn!(path = %marker.display(), %error, "cannot read retained placement claims");
             HashSet::new()
         }
+    }
+}
+
+async fn write_retained_placements<'a>(marker: &Path, paths: impl Iterator<Item = &'a PathBuf>) {
+    let mut lines = paths
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    lines.sort();
+    let result = if lines.is_empty() {
+        tokio::fs::remove_file(marker).await
+    } else {
+        tokio::fs::write(marker, lines.join("\n") + "\n").await
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if lines.is_empty() && error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            path = %marker.display(),
+            %error,
+            "could not update the run's retained placement claims on disk"
+        ),
     }
 }
 

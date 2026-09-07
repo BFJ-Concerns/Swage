@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
+- A stale cancellation that loses to a resumed workflow run now withdraws only its own worktree-retention claim, so the winning run's recoverable work remains available.
 
 ### Added
 

@@ -2794,13 +2794,17 @@ async fn record_terminal_account(
     account: WorkflowRunTerminalAccount,
 ) -> Result<(), swage_core::StorageError> {
     let placements = retained_placements(&account);
-    if !placements.is_empty() {
-        worktree_host.retain(run_id, &placements).await;
-    }
+    let claim = worktree_host.retain(run_id, &placements).await;
     let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
-    storage
+    if let Err(error) = storage
         .set_workflow_run_terminal_account(run_id, account)
-        .await?;
+        .await
+    {
+        if let Some(claim) = claim {
+            worktree_host.withdraw(run_id, claim).await;
+        }
+        return Err(error);
+    }
     if placements.is_empty() {
         worktree_host.release(run_id).await;
     }
@@ -6830,9 +6834,7 @@ pub async fn cancel_run(
             .map(|termination| serde_json::to_value(termination).expect("termination serialises"));
         let account = terminal_account_from_journal(&journal, ending, cut_short);
         let placements = retained_placements(&account);
-        if !placements.is_empty() {
-            state.worktree_host.retain(id, &placements).await;
-        }
+        let claim = state.worktree_host.retain(id, &placements).await;
         #[cfg(test)]
         workflow_cleanup_test_hook::pause_at(
             id,
@@ -6846,7 +6848,9 @@ pub async fn cancel_run(
             .await
             .map_err(internal)?;
         if !claimed {
-            state.worktree_host.release(id).await;
+            if let Some(claim) = claim {
+                state.worktree_host.withdraw(id, claim).await;
+            }
             let run = state
                 .storage
                 .get_workflow_run(id)
@@ -13439,6 +13443,154 @@ mod tests {
         assert_eq!(
             terminal_account_of(&storage, run.id).await.ending,
             WorkflowRunEnding::Returned
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_parked_cancellation_preserves_a_failed_winner_retention_claim() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("run git setup")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("write seed");
+        for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("commit seed")
+                    .success()
+            );
+        }
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let worktree_root = fixture.path().join("worker-worktrees");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PlacementWritingProvider::default()),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(PlacementWriteTool::default()) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        )
+        .with_worktree_root(worktree_root.clone());
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).expect("serialise cwd");
+        let source = format!(
+            r#"
+                await agent("write retained marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+                await awaitEvent({{ kinds: ["operator.continue"] }});
+                throw new Error("failed after wake");
+            "#
+        );
+        let Json(run) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start placed waiting run");
+        wait_for_run_state(&storage, run.id, "parked").await;
+        wait_for_workflow_thread_exit(run.id).await;
+        wait_for_active_workflow_run_release(&state, run.id).await;
+        let placement = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("parked run journal")
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("parked run records its isolated worker placement");
+        let retained_marker = worktree_root
+            .join(run.id.to_string())
+            .join(".retained-placements");
+        assert!(placement.join("retained-marker").exists());
+
+        let cancellation_start = parked_cancel_test_hook::install(run.id);
+        let cancellation_retained = workflow_cleanup_test_hook::install_at(
+            run.id,
+            workflow_cleanup_test_hook::Point::ParkedCancellationRetained,
+        );
+        let cancellation_state = state.clone();
+        let cancellation =
+            tokio::spawn(async move { cancel_run(State(cancellation_state), Path(run.id)).await });
+        cancellation_start
+            .entered
+            .acquire()
+            .await
+            .expect("cancellation start pause remains open")
+            .forget();
+
+        let Json(posted) = Box::pin(post_operator_run_event(
+            State(state.clone()),
+            Path(run.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.continue".into(),
+                payload: serde_json::json!({"approved": true}),
+            }),
+        ))
+        .await
+        .expect("wake the parked run");
+        assert!(posted.wake_provisioned);
+        wait_for_run_state(&storage, run.id, "failed").await;
+        assert!(retained_marker.exists());
+
+        cancellation_start.release.add_permits(1);
+        cancellation_retained
+            .entered
+            .acquire()
+            .await
+            .expect("retention pause remains open")
+            .forget();
+        cancellation_retained.release.add_permits(1);
+        let cancellation = cancellation.await.expect("cancellation task");
+        assert!(
+            cancellation.is_err_and(|error| error.code() == ErrorCode::Conflict),
+            "the stale parked cancellation must lose to the failed resumed generation"
+        );
+
+        let account = terminal_account_of(&storage, run.id).await;
+        assert!(matches!(account.ending, WorkflowRunEnding::Threw { .. }));
+        assert_eq!(account.workers.done.len(), 1);
+        assert!(
+            account.workers.done[0]
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.changed),
+            "the retained worker must carry its changed worktree account"
+        );
+        assert!(
+            placement.exists(),
+            "the winning account's worktree survives"
+        );
+        assert!(
+            retained_marker.exists(),
+            "the winning account's durable retention marker survives"
         );
     }
 
