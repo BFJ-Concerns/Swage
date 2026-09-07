@@ -5516,6 +5516,12 @@
             "$ref": "#/$defs/WorkflowProviderRound"
           }
         },
+        "provider_route": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "served_model": {
           "type": [
             "string",
@@ -5726,12 +5732,21 @@
           "minimum": 0
         },
         "max_total_tokens": {
+          "description": "Fallback ceiling for a resolved provider route without a `per_route`\nentry.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "per_route": {
+          "description": "Per-provider-entry token ledgers. A model resolves to the provider\nentry named by its catalogue configuration, and calls on one entry\nnever consume another entry's allowance.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkflowRouteBudget"
+          },
+          "default": {}
         },
         "reserved_closing_tokens": {
           "description": "Tokens held back from ordinary work for calls made after the run has\nobserved its wind-down boundary. This allowance is part of, not in\naddition to, `max_total_tokens`.",
@@ -6160,6 +6175,12 @@
               "const": "agent_call"
             },
             "output": true,
+            "provider_route": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "served_model": {
               "type": [
                 "string",
@@ -6538,6 +6559,13 @@
               "type": "string",
               "const": "budget"
             },
+            "per_route": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/WorkflowRouteBudgetReading"
+              },
+              "default": {}
+            },
             "remaining": {
               "type": [
                 "integer",
@@ -6589,6 +6617,13 @@
             "kind": {
               "type": "string",
               "const": "terminal_budget"
+            },
+            "per_route": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/WorkflowRouteBudgetReading"
+              },
+              "default": {}
             },
             "remaining": {
               "type": [
@@ -6663,6 +6698,14 @@
         {
           "type": "object",
           "properties": {
+            "closing_limit": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0
+            },
             "closing_remaining": {
               "type": "integer",
               "format": "uint64",
@@ -6802,6 +6845,64 @@
             "outcome"
           ]
         }
+      ]
+    },
+    "WorkflowRouteBudget": {
+      "type": "object",
+      "properties": {
+        "max_total_tokens": {
+          "description": "The token ceiling for calls resolved to this provider entry.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reserved_closing_tokens": {
+          "description": "Tokens retained for closing calls on this provider entry after the\nworkflow has entered wind-down for that route.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "WorkflowRouteBudgetReading": {
+      "type": "object",
+      "properties": {
+        "closing_remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "spent": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "usage_unavailable_calls": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "spent",
+        "usage_unavailable_calls"
       ]
     },
     "WorkflowRun": {

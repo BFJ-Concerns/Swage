@@ -9,7 +9,7 @@ export type WorkflowAgentCallDetail = { agent_definition_id: string | null, sess
 /**
  * The resolved state of the isolated worktree after the worker settled.
  */
-worktree: WorkflowWorktreeCompletion | null, served_model: string | null,
+worktree: WorkflowWorktreeCompletion | null, served_model: string | null, provider_route: string | null,
 /**
  * What the call spent, or why that is not known. A call the provider
  * reported no usage for reads as unavailable with a reason, so budget

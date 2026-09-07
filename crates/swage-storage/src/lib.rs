@@ -30,9 +30,9 @@ pub use model::{
     SessionVariable, SkipReason, SourceCapture, SourceObservation, Space, SpaceSlug,
     TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState,
     UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunHoldAnswer,
-    WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
-    WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
+    WorkflowRunRecord, WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
