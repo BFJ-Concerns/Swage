@@ -20433,6 +20433,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_terminal_account_write_failure_prevents_terminal_visibility() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER reject_terminal_account
+                     BEFORE UPDATE OF terminal_account_json ON workflow_runs
+                     WHEN NEW.terminal_account_json IS NOT NULL
+                     BEGIN SELECT RAISE(FAIL, 'injected terminal account failure'); END;",
+                )
+            })
+            .await
+            .expect("install terminal account failure trigger");
+        let (state, _provider) = scripted_state(&storage, vec![]);
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { settled: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let record = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(record.state, "interrupted");
+        assert!(record.terminal_account.is_none());
+        assert!(
+            record
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("injected terminal account failure")),
+            "{:?}",
+            record.error_message
+        );
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.state, WorkflowRunState::Interrupted);
+        assert!(detail.run.terminal_account.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn failed_run_surfaces_its_completed_worker_as_a_partial_result() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
