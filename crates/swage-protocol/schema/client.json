@@ -6246,6 +6246,13 @@
               "type": "string",
               "const": "budget"
             },
+            "per_route": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/WorkflowRouteBudgetReading"
+              },
+              "default": {}
+            },
             "remaining": {
               "type": [
                 "integer",

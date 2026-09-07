@@ -430,6 +430,9 @@ pub enum WorkflowJournalResult {
         working_remaining: Option<u64>,
         closing_remaining: Option<u64>,
         winding_down: bool,
+        #[serde(default)]
+        #[ts(optional, as = "Option<_>")]
+        per_route: std::collections::BTreeMap<String, WorkflowRouteBudgetReading>,
     },
     TerminalBudget {
         spent: u64,

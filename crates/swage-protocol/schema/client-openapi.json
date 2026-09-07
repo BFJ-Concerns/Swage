@@ -5930,6 +5930,13 @@
                 "const": "budget",
                 "type": "string"
               },
+              "per_route": {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/WorkflowRouteBudgetReading"
+                },
+                "default": {},
+                "type": "object"
+              },
               "remaining": {
                 "format": "uint64",
                 "minimum": 0,
