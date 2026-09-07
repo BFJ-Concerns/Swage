@@ -116,9 +116,11 @@ The built-in adapters declare:
 
 | Adapter | Capability |
 |---|---|
-| Anthropic | Levels: `low`, `medium`, `high`, `max`; `can_disable: true` |
+| Anthropic | Levels: `low`, `medium`, `high`, `max`; `can_disable: true` (Claude models only; non-Claude models return `None`) |
 | Chat Completions (OpenAI) | Levels: `minimal`, `low`, `medium`, `high`, `xhigh`; `can_disable: true` (reasoning models only; non-reasoning models return `None`) |
 | Responses (OpenAI) | Same as Chat Completions |
+| Google | Budget: Gemini 2.5 Flash `1`–`24576` tokens, Flash Lite `512`–`24576` tokens; `can_disable: true`. Non-Flash Google models return `None`. |
+| Codex | Levels: `low`, `medium`, `high`, `xhigh`; `can_disable: false` (GPT-5.x models only; others return `None`) |
 
 A catalogue entry's `capabilities.effort` overrides the adapter's
 declaration for that model.
@@ -515,6 +517,20 @@ for how trusted workspace guidance layers into the instruction chain
 (global `AGENTS.md` → workspace `AGENTS.md` → agent-definition
 instructions).
 
+## Start a conversation with a chosen agent
+
+The message input area includes an agent picker that lists the space's
+effective agent definitions — the shipped default (`"gateway"`, display
+name **Swage default**) plus any operator-authored definitions visible to
+the space. Selecting an agent and submitting the first message creates a
+conversation bound to that definition and navigates to it immediately.
+
+The picker queries `GET /api/spaces/{spaceId}/agent-definitions`. The
+`agent_id` field of `CreateConversationRequest` carries the selection;
+omitting it uses the default. See
+[Agents and permissions — Effective agent registry](agents-and-permissions.md#effective-agent-registry)
+for what the registry contains and how definitions shadow.
+
 ## Revoke trust and detach
 
 **Revoke trust** returns the workspace to `untrusted · read` — its
@@ -590,42 +606,48 @@ carrying a URL (https or `data:` inline).
 
 ### Intake check
 
-`check_attachment_support` (`turn.rs:154`) runs before anything is persisted.
+`check_attachment_support` (`turn.rs:158`) runs before anything is persisted.
 For each attachment:
 
-- An `image_url` with an empty URL is rejected as a `ValidationError`.
-- An `image_url` when the configured provider's `WorkflowCapabilities.vision`
-  is `false` is rejected as a `ValidationError`.
+1. An `image_url` with an empty URL is rejected as a `ValidationError`.
+2. An `image_url` when the configured provider's `WorkflowCapabilities.vision()`
+   is `false` is rejected as a `ValidationError`.
+3. An `image_url` whose URL the provider cannot resolve — checked by
+   `WorkflowCapabilities::accepts_image_reference` — is rejected as a
+   `ValidationError` with a message advising a base64 `data:` URL instead.
+
+Step 3 is the per-reference gate: vision support alone does not admit every
+URL form. The check runs before the turn is persisted, so an unusable
+reference never reaches the database or the provider.
 
 ### Which protocols claim vision
 
-`WorkflowCapabilities::for_protocol` (`capabilities.rs:30`) sets `vision`
-per protocol:
+`WorkflowCapabilities::for_protocol` (`capabilities.rs:51`) sets the
+`images` field per protocol. `vision()` returns `true` when `images` is
+`Some`. The `images` value also determines which URL forms the intake gate
+accepts:
 
-| Protocol | `vision` | Reason |
-|---|---|---|
-| `OpenAi` | `true` | The Chat Completions adapter maps `ContentPart::ImageUrl` |
-| `OpenRouter` | `true` | Same adapter (OpenAI-shaped envelope) |
-| `OpenAiResponses` | `false` | Adapter converts text parts only |
-| `Anthropic` | `false` | Adapter converts text parts only |
-| `Google` | `false` | Adapter converts text parts only |
-| `Codex` | `false` | App Server integration; assembled text only |
+| Protocol | Vision | Image references | Wire shape |
+|---|---|---|---|
+| `OpenAi` (Chat Completions) | Yes | `AnyUrl` — any `https` or `data:` URL | Typed content-part array: `{"type":"image_url","image_url":{"url":"…"}}` |
+| `OpenRouter` | Yes | `AnyUrl` | Same Chat Completions adapter |
+| `OpenAiResponses` (Responses) | Yes | `AnyUrl` | `{"type":"input_image","image_url":"…"}` |
+| `Anthropic` | Yes | `AnyUrl` | `{"type":"image","source":{"type":"url","url":"…"}}` for URLs; `{"type":"image","source":{"type":"base64","media_type":"…","data":"…"}}` for `data:` URLs |
+| `Google` | Yes | `InlineOrHostedFile` — `data:` URLs (carried as `inlineData`) and Google File API URIs (`https://generativelanguage.googleapis.com/…`, carried as `fileData.fileUri`); arbitrary web URLs are refused at intake | `inlineData` blob or `fileData` reference |
+| `Codex` | No | — | App Server integration; assembled text only |
 
 Vision is claimed only where the adapter's message conversion maps
 `ContentPart::ImageUrl` to the wire body. The capability is resolved once at
 startup from the default provider's protocol and stored in
 `AppState.workflow_capabilities`.
 
-### Wire shape
-
-When image parts are present, the OpenAI adapter (`openai.rs`) emits a JSON
-array of typed content parts (`[{"type":"text","text":"…"},
-{"type":"image_url","image_url":{"url":"…"}}]`). Text-only messages keep
-the plain string form, preserving wire compatibility.
+### Storage
 
 Stored messages carry attachments as opaque JSON in the `attachments`
 column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 `MessageView` returned by the API includes the `attachments` array.
+Text-only messages keep the plain string form on the wire; messages with
+image parts use the provider-specific typed content array.
 
 ## Provider credentials
 
@@ -717,6 +739,73 @@ Registration is idempotent: an existing active record for either token is
 re-pointed at the current path. Registration precedes sign-in, so the file
 need not exist yet. Both tokens resolve, audit, and redact through the
 governed system.
+
+## Pages
+
+Pages are agent-run work surfaces inside a space, assembled from ordered
+module instances. Each page belongs to one space and carries its own module
+list, annotations, and provenance.
+
+### Templates
+
+A page template is a reusable shape for a space: a named list of module
+rows in a fixed order. Templates are created through
+`POST /api/spaces/{space_id}/page-templates` (`CreatePageTemplateRequest`
+in `swage-protocol::client::page`). Each module input carries an optional
+`kind` (defaults to `"document"`) and a `source` string.
+
+Creating a page with `template_id` set forks the template's modules into
+the new page as its own from birth. The template is recorded as the fork's
+origin (`forked_from_template_id` and `forked_at` on `PageResponse`) but
+is never projected into the page — later template changes do not propagate.
+
+### Annotations
+
+Annotations are notes hung on individual modules of a page, anchored at
+module grain — there is no per-page or intra-module positioning.
+`CreatePageAnnotationRequest` takes `module_id`, `body`, and optional
+`tags`. `UpdatePageAnnotationRequest` replaces body and tags together; the
+displaced text survives in the page's provenance trail.
+
+Deleting an annotation returns `DeletePageAnnotationResponse { deleted:
+true }`. The delete is permanent — there is no soft-delete or archive.
+
+### Work-surface reconnect
+
+When a WebSocket connection to a page's work surface drops and reconnects,
+the frontend refetches the page state to pick up any writes that landed
+while disconnected.
+
+## Delivery targets
+
+A run's output can be routed to one or more destinations through
+`DeliveryRoutingRequest` (`swage-protocol::client::delivery`). The four
+target kinds:
+
+| Kind | Fields | Destination |
+|---|---|---|
+| `channel` | `integration`, `account`, `conversation` | An external channel (Telegram, dev DM/thread) |
+| `local_storage` | — | The gateway's local store, as a log record |
+| `page` | `page_id` | A page in the run's own space |
+| `webhook` | `url` | An HTTP endpoint |
+
+`store_local_output` on the routing request adds a `local_storage` target
+alongside any explicit targets, so the output is always retained locally
+when set.
+
+### Schedule no-delivery records
+
+A schedule run that does not execute still produces a run record. The
+`SkipReason` enum (`swage-protocol::client::schedule`) names why:
+
+| Reason | Meaning |
+|---|---|
+| `gate` | The gate model decided no work was needed |
+| `overlap` | A previous run was still executing when this run came due |
+
+Skipped runs carry state `skipped` and `skip_reason` on the run row. The
+channel gateway records a no-delivery entry (`record_no_delivery`) with
+target `{"kind": "no_delivery"}` when delivery cannot proceed.
 
 ## Wire error contract
 
@@ -964,6 +1053,10 @@ override, but `undefined` at the call site falls back to the default.
 |---|---|---|
 | `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. |
+| `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
+| `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
+| `staleness(worker)` | `Promise<StalenessReading>` | Returns `{stale, idleMs, thresholdMs, route}` from a journalled reading. |
+| `close(worker)` | `Promise<void>` | Closes a held worker. Repeated calls with the same JS worker object are no-ops. |
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
@@ -980,13 +1073,60 @@ override, but `undefined` at the call site falls back to the default.
 
 ### Agent model fallback
 
-`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. The
-host uses it only when the requested model is unavailable or the provider
-refuses or fails it before any output; schema exhaustion and failures after output do
-not fall back. A completed `agent_call` result records `served_model`, the
-catalogue model that actually served the call. Continuation calls ignore
-`fallbackModel` and never make a fallback attempt; they use the worker's
-persisted model selection, including a fallback selected at creation.
+`agent()`, `agentStart()`, and `session()` accept `fallbackModel`, a catalogue
+model id. For a held worker it is a creation-only option, fixed with the rest of
+the worker's execution envelope. The host uses it only when the requested model
+is unavailable or the provider refuses or fails it before any output; schema
+exhaustion and failures after output do not fall back. A completed `agent_call`
+result records `served_model`, the catalogue model that actually served the
+call. Continuation calls ignore `fallbackModel` and never make a fallback
+attempt; they use the worker's persisted model selection, including a fallback
+selected at creation.
+
+### Held workers
+
+Use a held worker when successive tasks need the same worker's accumulated
+conversation:
+
+```js
+const reviewer = await session({
+  agent: "reviewer",
+  skills: ["source-checking"],
+  model: "careful",
+});
+
+await send(reviewer, "Inspect the evidence.");
+const reading = await staleness(reviewer);
+if (reading.stale !== true) {
+  await send(reviewer, "Now assess the conclusion.", { maxAttempts: 2 });
+}
+await close(reviewer);
+```
+
+`session()` fixes `agent`, `task`, `tools`, `skills`, `model`, `effort`,
+`cwd`, and `isolation` at creation. The host resolves an omitted model and
+effort at that point, so later configuration changes do not move the worker to
+a different route. Script defaults contribute only creation fields when
+opening a worker; per-turn defaults such as `maxAttempts` do not make
+`session()` fail.
+
+`send()` accepts only `schema`, `maxAttempts`, `timeoutMs`, and `label` for the
+new turn. A worker takes one turn at a time; a concurrent `send()` is refused
+rather than queued. Each successful turn updates the worker's continuation
+token and returns the turn output. Sending to a closed worker is refused.
+Requested grants are fixed, but effective authority is re-derived at every
+turn.
+
+`staleness()` reports idle time since the last completed turn and compares it
+with `worker_staleness_threshold_ms` on the worker's provider route. Test
+`reading.stale === true` before treating the worker as stale. `null` means the
+route has no threshold and the verdict is unknown; it does not mean fresh.
+The reading is journalled, so replay returns the value on which the original
+script branched.
+
+Call `close()` on the success path so the journal records intent. Run-ending
+return, throw, and cancellation also close every worker still open. Parking is
+not a run-ending path: a parked run retains its workers for replay and resume.
 
 ### Composition bounds
 
@@ -1397,3 +1537,4 @@ SQLite. Key tables:
 - `workflow_run_events` — run events with `seq`, `kind`,
   `payload_json`, `delivered_wake_seq`, `delivered_at`. Partial index on
   `(run_id, seq) WHERE delivered_at IS NULL` for pending-event queries.
+
