@@ -271,7 +271,7 @@ target `{"kind": "no_delivery"}` when delivery cannot proceed.
 
 ## Device registration
 
-Remote devices register through `POST /api/devices`
+Remote devices register through `POST /api/devices/register`
 (`RegisterDeviceRequest` in `swage-protocol::device`). The `kind` field
 defaults to `"attached_device"` and names the device type.
 

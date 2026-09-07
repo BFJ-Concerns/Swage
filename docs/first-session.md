@@ -1,12 +1,15 @@
 ---
-description: End-to-end walkthrough of a first session — opening a space, attaching a repository as a workspace, and trusting it so its guidance reaches agents
+description: End-to-end walkthrough of a first session — opening a space, optionally attaching and trusting a workspace, and starting a conversation with a chosen agent
 ---
 
 # First session
 
 The [README](../README.md) covers building, starting, and configuring the
 gateway. Once it is running with at least one provider configured, the web
-UI is where the first session begins.
+UI is where the first session begins. A first session needs only an opened
+space — attaching a workspace and trusting it are optional steps that give
+agents file access and project guidance, but a conversation can start
+without either.
 
 ## Open a space
 

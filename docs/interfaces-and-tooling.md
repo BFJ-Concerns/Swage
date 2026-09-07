@@ -241,7 +241,7 @@ each tick.
 
 ## Device registration
 
-Remote devices register through the device API. The `kind` field on a
+Remote devices register through `POST /api/devices/register`. The `kind` field on a
 registration request names the device type and defaults to
 `attached_device`. Registering a device with kind `local` is refused —
 a local device has no remote producer to register. The same constraint
