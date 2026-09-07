@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
+description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -451,3 +451,98 @@ connections.
 Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial page
 loads alike.
+
+## Gateway tools
+
+The gateway ships these built-in tools
+(`crates/swage-gateway/src/tool/`). A tool's `requires_device_execution`
+flag (`swage-tool::Tool` trait) determines whether it executes in the
+gateway process or can run through the bubblewrap sandbox: `true` means
+the tool must execute in the gateway process (bypassing the sandbox);
+`false` (the trait default) means it is eligible for sandboxed execution.
+All built-in tools set `true` except `shell` and `memory`, which are the
+two sandbox-eligible tools.
+
+### Filesystem
+
+| Tool | Source |
+|---|---|
+| `file_read` | `file_read.rs` |
+| `file_write` | `file_write.rs` |
+| `file_edit` | `file_edit.rs` |
+| `file_list` | `file_list.rs` |
+| `file_search` | `file_search.rs` |
+| `shell` | `shell.rs` — sandbox-eligible |
+| `python_execute` | `python_execute.rs` |
+
+### Browser
+
+| Tool | Source |
+|---|---|
+| `browser_navigate` | `browser.rs` |
+| `browser_snapshot` | `browser.rs` |
+| `browser_click` | `browser.rs` |
+| `browser_type` | `browser.rs` |
+| `browser_select` | `browser.rs` |
+| `browser_scroll` | `browser.rs` |
+
+### Knowledge base
+
+| Tool | Source |
+|---|---|
+| `knowledge_search` | `knowledge.rs` |
+| `knowledge_record` | `knowledge.rs` |
+| `knowledge_curate` | `knowledge.rs` |
+| `knowledge_cite` | `knowledge.rs` |
+| `knowledge_orient` | `knowledge.rs` |
+| `knowledge_curate_orientation` | `knowledge.rs` |
+
+### Workflow
+
+| Tool | Source |
+|---|---|
+| `workflow_run` | `workflow_run.rs` |
+| `workflow_list` | `workflow_list.rs` |
+| `workflow_save` | `workflow_save.rs` |
+| `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session space; a run in another space reads as absent. |
+
+### Pages and delivery
+
+| Tool | Source |
+|---|---|
+| `page_read` | `page.rs` |
+| `page_write` | `page.rs` |
+| `run_event_post` | `run_event.rs` |
+
+### Scheduling
+
+| Tool | Source |
+|---|---|
+| `schedule` | `schedule.rs` |
+| `wake_me_later` | `schedule.rs` |
+
+### Session and memory
+
+| Tool | Source |
+|---|---|
+| `session_values` | `session_variable.rs` |
+| `agent_memory` | `agent_memory.rs` |
+| `memory` | `memory.rs` — sandbox-eligible |
+| `tool_result_read` | `tool_result_read.rs` |
+| `task_definition` | `task_definition.rs` |
+
+### Delegation
+
+| Tool | Source |
+|---|---|
+| `delegate` | `swage-tool::delegate` — dispatches a child turn to a named agent definition. |
+
+### External
+
+| Tool | Source |
+|---|---|
+| `url_fetch` | `url_fetch.rs` |
+| `web_search` | `web_search.rs` |
+
+Plugin tools (`plugin.rs`) are dynamically registered from operator
+configuration; their names come from the plugin manifest.
