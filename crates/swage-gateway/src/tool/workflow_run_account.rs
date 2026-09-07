@@ -287,6 +287,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_lead_cannot_read_a_terminal_account_outside_the_recorded_contract() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let run_id = run_in(&storage, space.id).await;
+        storage
+            .set_workflow_run_terminal_account(run_id, json!({"ending": "invented"}))
+            .await
+            .expect("record malformed account");
+        let session = storage
+            .create_session(NewSession {
+                space_id: space.id,
+                agent_id: "gateway".into(),
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session");
+        let context = context_for(
+            state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session.id,
+        );
+
+        let error = WorkflowRunAccountTool
+            .execute(json!({"run_id": run_id.to_string()}), &context)
+            .await
+            .expect_err("a malformed account must not reach the lead");
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the recorded contract"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_run_in_another_space_reads_as_absent() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
