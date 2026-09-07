@@ -54,9 +54,13 @@
 
   function describeTermination(worker: WorkflowWorkerAccount): string {
     if (!worker.termination) return "settled on its own account";
-    switch (worker.termination.cause) {
+    switch (worker.termination.termination) {
+      case "outstanding":
+        return "still working";
+      case "settled":
+        return "settled on its own account";
       case "failed":
-        return worker.termination.error;
+        return worker.termination.message;
       case "cut_short":
         return worker.termination.detail ?? "cut short by the run's ending";
       case "unsettled":

@@ -79,7 +79,10 @@ describe("WorkflowRunView", () => {
             agent_definition_id: null,
             placement: "/worktrees/run-1/broken",
             worktree: null,
-            termination: { cause: "failed", error: "the worker exhausted its attempts" },
+            termination: {
+              termination: "failed",
+              message: "the worker exhausted its attempts",
+            },
           },
         ],
         cut_short: [
@@ -90,7 +93,11 @@ describe("WorkflowRunView", () => {
             agent_definition_id: null,
             placement: "/worktrees/run-1/hanging",
             worktree: null,
-            termination: { cause: "cut_short", detail: "the run was cancelled" },
+            termination: {
+              termination: "cut_short",
+              cause: "run_cancelled",
+              detail: "the run was cancelled",
+            },
           },
         ],
         unsettled: [
@@ -101,7 +108,7 @@ describe("WorkflowRunView", () => {
             agent_definition_id: null,
             placement: null,
             worktree: null,
-            termination: { cause: "unsettled" },
+            termination: { termination: "unsettled" },
           },
         ],
       },

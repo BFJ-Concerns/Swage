@@ -84,6 +84,18 @@ describe("parseRoute", () => {
     });
   });
 
+  it("maps '/workflow-runs/:id' to a route with that run ID", () => {
+    expect(parseRoute("/workflow-runs/run-9")).toEqual({
+      path: "/workflow-runs/run-9",
+      conversationId: null,
+      workflowRunId: "run-9",
+      settingsTab: null,
+      settingsSpaceSlug: null,
+      settingsSpaceTab: null,
+      notFound: false,
+    });
+  });
+
   it("maps settings routes to their active tab", () => {
     expect(parseRoute("/settings/generation")).toEqual({
       path: "/settings/generation",

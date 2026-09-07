@@ -58,6 +58,17 @@ pub enum AgentEvent {
         request: serde_json::Value,
     },
 
+    /// A provider request round has ended, with what came back.
+    ///
+    /// Paired with `ProviderRequestPrepared`: the two bracket one request to
+    /// the provider, so a round that never settles is an outstanding request
+    /// rather than a silent gap in the record.
+    ProviderRoundSettled {
+        turn_id: Uuid,
+        round: usize,
+        outcome: ProviderRoundOutcome,
+    },
+
     /// Content-free evidence describing a provider response attempt.
     ProviderResponseCaptured {
         turn_id: Uuid,
@@ -203,6 +214,18 @@ pub enum AgentEvent {
         message: String,
         provider_failure: bool,
     },
+}
+
+/// How one provider request round ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRoundOutcome {
+    /// A response arrived, asking for this many tool calls. Zero means the
+    /// model answered rather than calling tools.
+    Responded { tool_calls: u32 },
+    /// The round ended without a usable response.
+    Failed { message: String },
+    /// The caller stopped the round before a response could arrive.
+    Interrupted,
 }
 
 #[cfg(test)]

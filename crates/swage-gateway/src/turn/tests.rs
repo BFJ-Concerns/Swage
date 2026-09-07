@@ -1163,12 +1163,107 @@ pub(crate) struct MockStorage {
     fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    fail_provider_round_writes: AtomicBool,
+    fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
     pause_structured_output_writes: AtomicBool,
     structured_output_write_started: Notify,
     structured_output_write_release: Notify,
     require_result_working_directory: AtomicBool,
     result_created_without_working_directory: AtomicBool,
+}
+
+#[async_trait]
+impl swage_storage::ProviderRoundStore for MockStorage {
+    async fn open_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<swage_storage::ProviderRoundRecord, swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        if let Some(existing) = db
+            .provider_rounds
+            .iter()
+            .find(|record| record.turn_id == turn_id && record.round == round)
+        {
+            return Ok(existing.clone());
+        }
+        let record = swage_storage::ProviderRoundRecord {
+            id: Uuid::new_v4(),
+            turn_id,
+            round,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            outcome,
+        };
+        db.provider_rounds.push(record.clone());
+        Ok(record)
+    }
+
+    async fn settle_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<(), swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        if let Some(record) = db
+            .provider_rounds
+            .iter_mut()
+            .find(|record| record.turn_id == turn_id && record.round == round)
+        {
+            record.completed_at = Some(chrono::Utc::now());
+            record.outcome = outcome;
+        }
+        Ok(())
+    }
+
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), swage_core::StorageError> {
+        if self.fail_provider_round_writes.load(Ordering::SeqCst) {
+            return Err(swage_core::StorageError::QueryFailed(
+                "provider round write failed".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        for record in db
+            .provider_rounds
+            .iter_mut()
+            .filter(|record| record.turn_id == turn_id && record.completed_at.is_none())
+        {
+            record.outcome = outcome.clone();
+        }
+        Ok(())
+    }
+
+    async fn list_provider_rounds_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<swage_storage::ProviderRoundRecord>, swage_core::StorageError> {
+        let db = self.db.lock().await;
+        let mut rounds = db
+            .provider_rounds
+            .iter()
+            .filter(|record| record.turn_id == turn_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        rounds.sort_by_key(|record| record.round);
+        Ok(rounds)
+    }
 }
 
 #[async_trait]
@@ -1252,6 +1347,34 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
         unimplemented!()
     }
+    async fn record_workflow_call_dispatch(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn record_workflow_call_attempt(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        if self.fail_workflow_attempt_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected workflow attempt write failure".into(),
+            ));
+        }
+        // The mock keeps no journal, so no attempt precedes this one.
+        Ok(Vec::new())
+    }
+    async fn cut_short_workflow_journal_entry(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+        _: &str,
+    ) -> Result<swage_storage::WorkflowJournalRecord, StorageError> {
+        unimplemented!()
+    }
     async fn list_workflow_runs(
         &self,
         _: Uuid,
@@ -1280,6 +1403,7 @@ impl swage_storage::WorkflowStore for MockStorage {
         _: Uuid,
         _: serde_json::Value,
         _: Option<&str>,
+        _: Option<serde_json::Value>,
     ) -> Result<bool, StorageError> {
         unimplemented!()
     }
@@ -1445,6 +1569,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) workspace_attachments: HashMap<Uuid, WorkspaceAttachment>,
     pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
+    pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
 }
 
 impl MockStorage {
@@ -1464,6 +1589,8 @@ impl MockStorage {
             fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            fail_provider_round_writes: AtomicBool::new(false),
+            fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
             pause_structured_output_writes: AtomicBool::new(false),
             structured_output_write_started: Notify::new(),
@@ -1516,6 +1643,11 @@ impl MockStorage {
 
     pub(crate) fn fail_audit_writes(&self) {
         self.fail_audit_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn fail_workflow_attempt_writes(&self) {
+        self.fail_workflow_attempt_writes
+            .store(true, Ordering::SeqCst);
     }
 
     fn fail_snapshot_writes(&self) {
@@ -4832,6 +4964,113 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
             .await
             .expect_err("fake App Server should be stopped after the turn")
             .is_cancelled()
+    );
+}
+
+#[tokio::test]
+async fn failed_codex_attempt_recording_releases_the_prepared_turn() {
+    let _guard = SwageHomeGuard::isolate();
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_workflow_attempt_writes();
+    let (state, session_id) =
+        make_state_with_config_and_storage(Vec::new(), codex_turn_config(), Arc::clone(&storage))
+            .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("refuse before provider execution"),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition::default(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect_err("a failed attempt record must refuse the Codex turn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record agent call attempt")
+    );
+    let turn = storage
+        .list_turns_by_thread(
+            storage
+                .list_by_session(session_id)
+                .await
+                .expect("list session threads")[0]
+                .id,
+        )
+        .await
+        .expect("list prepared turn")
+        .pop()
+        .expect("prepared turn exists");
+    assert_eq!(turn.state, TurnState::Failed);
+    assert!(
+        state.active_turns.lock().await.is_empty(),
+        "a refused Codex turn must not remain active"
+    );
+}
+
+#[tokio::test]
+async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
+    let _guard = SwageHomeGuard::isolate();
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_workflow_attempt_writes();
+    let (state, session_id) = make_state_with_config_and_storage(
+        Vec::new(),
+        swage_config::ResolvedConfig::default(),
+        Arc::clone(&storage),
+    )
+    .await;
+
+    let error = process_turn_with_composition(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("refuse before provider execution"),
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        TurnAttendance::Attended,
+        DispatchContextComposition::default(),
+        Some(Uuid::new_v4()),
+    )
+    .await
+    .expect_err("a failed attempt record must refuse the ordinary provider turn");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record agent call attempt")
+    );
+    let turn = storage
+        .list_turns_by_thread(
+            storage
+                .list_by_session(session_id)
+                .await
+                .expect("list session threads")[0]
+                .id,
+        )
+        .await
+        .expect("list prepared turn")
+        .pop()
+        .expect("prepared turn exists");
+    assert_eq!(turn.state, TurnState::Failed);
+    assert!(
+        state.active_turns.lock().await.is_empty(),
+        "a refused ordinary provider turn must not remain active"
     );
 }
 
@@ -13979,19 +14218,17 @@ async fn token_usage_remains_null_when_provider_sends_no_usage() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
 
-    // The agent always persists token counts — zero when the provider
-    // sends no Usage chunk (the old gateway left them NULL, the agent
-    // stores the accumulated total which starts at 0).
+    // No provider round reported usage, so the counts stay unset. A zero
+    // here would be a spend claim the provider never made, and budget
+    // reconstruction would read it as "this turn cost nothing".
     let turn = &turns[0];
     assert_eq!(
-        turn.input_tokens,
-        Some(0),
-        "input_tokens should be zero when no usage reported"
+        turn.input_tokens, None,
+        "input_tokens should stay unset when no usage was reported, not read as zero"
     );
     assert_eq!(
-        turn.output_tokens,
-        Some(0),
-        "output_tokens should be zero when no usage reported"
+        turn.output_tokens, None,
+        "output_tokens should stay unset when no usage was reported, not read as zero"
     );
 }
 

@@ -192,7 +192,11 @@ mod tests {
                     "label": "hanging",
                     "agent_definition_id": "default",
                     "placement": "/scratch/worktrees/hanging",
-                    "termination": {"cause": "cut_short", "detail": "WorkflowCancelledError: run cancelled"},
+                    "termination": {
+                        "termination": "cut_short",
+                        "cause": "run_cancelled",
+                        "detail": "WorkflowCancelledError: run cancelled"
+                    },
                 }],
                 "unsettled": [],
             },

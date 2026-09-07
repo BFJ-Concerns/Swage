@@ -16,11 +16,12 @@ use crate::model::{
     NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition,
     NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
     NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page,
-    PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin, Schedule,
-    ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceCapture,
-    SourceObservation, Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin,
+    ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SessionVariable, SourceCapture, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
+    WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1080,6 +1081,7 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         account: serde_json::Value,
         journal_error: Option<&str>,
+        journal_termination: Option<serde_json::Value>,
     ) -> Result<bool, StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
     /// Atomically move a run from one expected state to another. `false`
@@ -1179,6 +1181,22 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         error_message: &str,
     ) -> Result<WorkflowJournalRecord, StorageError>;
+    async fn record_workflow_call_dispatch(
+        &self,
+        id: Uuid,
+        dispatch: serde_json::Value,
+    ) -> Result<(), StorageError>;
+    async fn record_workflow_call_attempt(
+        &self,
+        id: Uuid,
+        attempt: serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, StorageError>;
+    async fn cut_short_workflow_journal_entry(
+        &self,
+        id: Uuid,
+        termination: serde_json::Value,
+        error_message: &str,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
     async fn list_workflow_journal(
         &self,
         run_id: Uuid,
@@ -1195,6 +1213,31 @@ pub trait WorkflowStore: Send + Sync {
 /// that need space operations import it separately.
 /// Pages: agent-run tabs on a space assembled from module instances. The
 /// database is authoritative for page content; renderings derive from it.
+#[async_trait]
+pub trait ProviderRoundStore: Send + Sync {
+    async fn open_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<ProviderRoundRecord, StorageError>;
+    async fn settle_provider_round(
+        &self,
+        turn_id: Uuid,
+        round: i64,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError>;
+    async fn list_provider_rounds_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<ProviderRoundRecord>, StorageError>;
+    async fn interrupt_outstanding_provider_rounds(
+        &self,
+        turn_id: Uuid,
+        outcome: serde_json::Value,
+    ) -> Result<(), StorageError>;
+}
+
 #[async_trait]
 pub trait PageStore: Send + Sync {
     async fn create_page(&self, page: NewPage) -> Result<Page, StorageError>;
@@ -1312,6 +1355,7 @@ pub trait Storage:
     + ScheduleStore
     + ChannelQueueStore
     + WorkflowStore
+    + ProviderRoundStore
     + PageStore
     + PageAnnotationStore
     + Send
@@ -1350,6 +1394,7 @@ impl<T> Storage for T where
         + ScheduleStore
         + ChannelQueueStore
         + WorkflowStore
+        + ProviderRoundStore
         + PageStore
         + PageAnnotationStore
         + Send
@@ -2593,6 +2638,7 @@ mod tests {
             _: Uuid,
             _: serde_json::Value,
             _: Option<&str>,
+            _: Option<serde_json::Value>,
         ) -> Result<bool, StorageError> {
             unimplemented!()
         }
@@ -2704,6 +2750,62 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<WorkflowJournalRecord>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn record_workflow_call_dispatch(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn record_workflow_call_attempt(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, StorageError> {
+            unimplemented!()
+        }
+        async fn cut_short_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+            _: &str,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl ProviderRoundStore for StubStorage {
+        async fn open_provider_round(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: serde_json::Value,
+        ) -> Result<ProviderRoundRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn settle_provider_round(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_provider_rounds_by_turn(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ProviderRoundRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn interrupt_outstanding_provider_rounds(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
     }
