@@ -50,6 +50,20 @@ for how trusted workspace guidance layers into the instruction chain
 (global `AGENTS.md` → workspace `AGENTS.md` → agent-definition
 instructions).
 
+## Start a conversation with a chosen agent
+
+The message input area includes an agent picker that lists the space's
+effective agent definitions — the shipped default (`"gateway"`, display
+name **Swage default**) plus any operator-authored definitions visible to
+the space. Selecting an agent and submitting the first message creates a
+conversation bound to that definition and navigates to it immediately.
+
+The picker queries `GET /api/spaces/{spaceId}/agent-definitions`. The
+`agent_id` field of `CreateConversationRequest` carries the selection;
+omitting it uses the default. See
+[Agents and permissions — Effective agent registry](agents-and-permissions.md#effective-agent-registry)
+for what the registry contains and how definitions shadow.
+
 ## Revoke trust and detach
 
 **Revoke trust** returns the workspace to `untrusted · read` — its

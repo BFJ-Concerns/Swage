@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, image attachments, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
+description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
 ---
 
 # Interfaces and tooling
@@ -68,42 +68,48 @@ carrying a URL (https or `data:` inline).
 
 ### Intake check
 
-`check_attachment_support` (`turn.rs:154`) runs before anything is persisted.
+`check_attachment_support` (`turn.rs:158`) runs before anything is persisted.
 For each attachment:
 
-- An `image_url` with an empty URL is rejected as a `ValidationError`.
-- An `image_url` when the configured provider's `WorkflowCapabilities.vision`
-  is `false` is rejected as a `ValidationError`.
+1. An `image_url` with an empty URL is rejected as a `ValidationError`.
+2. An `image_url` when the configured provider's `WorkflowCapabilities.vision()`
+   is `false` is rejected as a `ValidationError`.
+3. An `image_url` whose URL the provider cannot resolve — checked by
+   `WorkflowCapabilities::accepts_image_reference` — is rejected as a
+   `ValidationError` with a message advising a base64 `data:` URL instead.
+
+Step 3 is the per-reference gate: vision support alone does not admit every
+URL form. The check runs before the turn is persisted, so an unusable
+reference never reaches the database or the provider.
 
 ### Which protocols claim vision
 
-`WorkflowCapabilities::for_protocol` (`capabilities.rs:30`) sets `vision`
-per protocol:
+`WorkflowCapabilities::for_protocol` (`capabilities.rs:51`) sets the
+`images` field per protocol. `vision()` returns `true` when `images` is
+`Some`. The `images` value also determines which URL forms the intake gate
+accepts:
 
-| Protocol | `vision` | Reason |
-|---|---|---|
-| `OpenAi` | `true` | The Chat Completions adapter maps `ContentPart::ImageUrl` |
-| `OpenRouter` | `true` | Same adapter (OpenAI-shaped envelope) |
-| `OpenAiResponses` | `false` | Adapter converts text parts only |
-| `Anthropic` | `false` | Adapter converts text parts only |
-| `Google` | `false` | Adapter converts text parts only |
-| `Codex` | `false` | App Server integration; assembled text only |
+| Protocol | Vision | Image references | Wire shape |
+|---|---|---|---|
+| `OpenAi` (Chat Completions) | Yes | `AnyUrl` — any `https` or `data:` URL | Typed content-part array: `{"type":"image_url","image_url":{"url":"…"}}` |
+| `OpenRouter` | Yes | `AnyUrl` | Same Chat Completions adapter |
+| `OpenAiResponses` (Responses) | Yes | `AnyUrl` | `{"type":"input_image","image_url":"…"}` |
+| `Anthropic` | Yes | `AnyUrl` | `{"type":"image","source":{"type":"url","url":"…"}}` for URLs; `{"type":"image","source":{"type":"base64","media_type":"…","data":"…"}}` for `data:` URLs |
+| `Google` | Yes | `InlineOrHostedFile` — `data:` URLs (carried as `inlineData`) and Google File API URIs (`https://generativelanguage.googleapis.com/…`, carried as `fileData.fileUri`); arbitrary web URLs are refused at intake | `inlineData` blob or `fileData` reference |
+| `Codex` | No | — | App Server integration; assembled text only |
 
 Vision is claimed only where the adapter's message conversion maps
 `ContentPart::ImageUrl` to the wire body. The capability is resolved once at
 startup from the default provider's protocol and stored in
 `AppState.workflow_capabilities`.
 
-### Wire shape
-
-When image parts are present, the OpenAI adapter (`openai.rs`) emits a JSON
-array of typed content parts (`[{"type":"text","text":"…"},
-{"type":"image_url","image_url":{"url":"…"}}]`). Text-only messages keep
-the plain string form, preserving wire compatibility.
+### Storage
 
 Stored messages carry attachments as opaque JSON in the `attachments`
 column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 `MessageView` returned by the API includes the `attachments` array.
+Text-only messages keep the plain string form on the wire; messages with
+image parts use the provider-specific typed content array.
 
 ## Provider credentials
 
@@ -195,6 +201,73 @@ Registration is idempotent: an existing active record for either token is
 re-pointed at the current path. Registration precedes sign-in, so the file
 need not exist yet. Both tokens resolve, audit, and redact through the
 governed system.
+
+## Pages
+
+Pages are agent-run work surfaces inside a space, assembled from ordered
+module instances. Each page belongs to one space and carries its own module
+list, annotations, and provenance.
+
+### Templates
+
+A page template is a reusable shape for a space: a named list of module
+rows in a fixed order. Templates are created through
+`POST /api/spaces/{space_id}/page-templates` (`CreatePageTemplateRequest`
+in `swage-protocol::client::page`). Each module input carries an optional
+`kind` (defaults to `"document"`) and a `source` string.
+
+Creating a page with `template_id` set forks the template's modules into
+the new page as its own from birth. The template is recorded as the fork's
+origin (`forked_from_template_id` and `forked_at` on `PageResponse`) but
+is never projected into the page — later template changes do not propagate.
+
+### Annotations
+
+Annotations are notes hung on individual modules of a page, anchored at
+module grain — there is no per-page or intra-module positioning.
+`CreatePageAnnotationRequest` takes `module_id`, `body`, and optional
+`tags`. `UpdatePageAnnotationRequest` replaces body and tags together; the
+displaced text survives in the page's provenance trail.
+
+Deleting an annotation returns `DeletePageAnnotationResponse { deleted:
+true }`. The delete is permanent — there is no soft-delete or archive.
+
+### Work-surface reconnect
+
+When a WebSocket connection to a page's work surface drops and reconnects,
+the frontend refetches the page state to pick up any writes that landed
+while disconnected.
+
+## Delivery targets
+
+A run's output can be routed to one or more destinations through
+`DeliveryRoutingRequest` (`swage-protocol::client::delivery`). The four
+target kinds:
+
+| Kind | Fields | Destination |
+|---|---|---|
+| `channel` | `integration`, `account`, `conversation` | An external channel (Telegram, dev DM/thread) |
+| `local_storage` | — | The gateway's local store, as a log record |
+| `page` | `page_id` | A page in the run's own space |
+| `webhook` | `url` | An HTTP endpoint |
+
+`store_local_output` on the routing request adds a `local_storage` target
+alongside any explicit targets, so the output is always retained locally
+when set.
+
+### Schedule no-delivery records
+
+A schedule run that does not execute still produces a run record. The
+`SkipReason` enum (`swage-protocol::client::schedule`) names why:
+
+| Reason | Meaning |
+|---|---|
+| `gate` | The gate model decided no work was needed |
+| `overlap` | A previous run was still executing when this run came due |
+
+Skipped runs carry state `skipped` and `skip_reason` on the run row. The
+channel gateway records a no-delivery entry (`record_no_delivery`) with
+target `{"kind": "no_delivery"}` when delivery cannot proceed.
 
 ## Wire error contract
 

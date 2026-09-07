@@ -115,9 +115,11 @@ The built-in adapters declare:
 
 | Adapter | Capability |
 |---|---|
-| Anthropic | Levels: `low`, `medium`, `high`, `max`; `can_disable: true` |
+| Anthropic | Levels: `low`, `medium`, `high`, `max`; `can_disable: true` (Claude models only; non-Claude models return `None`) |
 | Chat Completions (OpenAI) | Levels: `minimal`, `low`, `medium`, `high`, `xhigh`; `can_disable: true` (reasoning models only; non-reasoning models return `None`) |
 | Responses (OpenAI) | Same as Chat Completions |
+| Google | Budget: Gemini 2.5 Flash `1`–`24576` tokens, Flash Lite `512`–`24576` tokens; `can_disable: true`. Non-Flash Google models return `None`. |
+| Codex | Levels: `low`, `medium`, `high`, `xhigh`; `can_disable: false` (GPT-5.x models only; others return `None`) |
 
 A catalogue entry's `capabilities.effort` overrides the adapter's
 declaration for that model.
