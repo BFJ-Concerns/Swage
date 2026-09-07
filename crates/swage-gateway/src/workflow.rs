@@ -30,9 +30,9 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
-    EffectRecoveryHost, EngineLimits, GateRequest, QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement,
-    RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine, WorkflowHost,
-    WorkflowHostError, journal_args_hash, recover_started_effect,
+    EffectRecoveryHost, EngineLimits, GateRequest, HeldWorkerOpen, QUICKJS_ENGINE_VERSION,
+    ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
+    WorkflowHost, WorkflowHostError, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -625,6 +625,7 @@ fn journal_wire(
         "terminal_budget" => WorkflowJournalEntryKind::TerminalBudget,
         "captured_sources" => WorkflowJournalEntryKind::CapturedSources,
         "wind_down" => WorkflowJournalEntryKind::WindDown,
+        "worker" => WorkflowJournalEntryKind::Worker,
         other => return Err(format!("unknown workflow entry kind: {other}")),
     };
     // The termination record is the authority on how the entry ended; the
@@ -839,6 +840,13 @@ fn journal_result_from_storage(
             tagged_object("worker_placement_list")?
         }
         WorkflowJournalEntryKind::WorkerPlacement => tagged_object("worker_placement")?,
+        WorkflowJournalEntryKind::Worker if stored.get("creation").is_some() => {
+            tagged_object("worker_open")?
+        }
+        WorkflowJournalEntryKind::Worker if stored.get("closed_by").is_some() => {
+            tagged_object("worker_close")?
+        }
+        WorkflowJournalEntryKind::Worker => tagged_object("worker_staleness")?,
         WorkflowJournalEntryKind::Effect => tagged_object("effect")?,
         WorkflowJournalEntryKind::Log => serde_json::json!({"kind": "log"}),
         WorkflowJournalEntryKind::Phase => serde_json::json!({"kind": "phase"}),
@@ -868,6 +876,9 @@ fn is_journal_result_tag(tag: &str) -> bool {
         "agent_call"
             | "worker_placement"
             | "worker_placement_list"
+            | "worker_open"
+            | "worker_close"
+            | "worker_staleness"
             | "effect"
             | "log"
             | "phase"
@@ -891,6 +902,10 @@ fn journal_result_tag_matches_kind(kind: WorkflowJournalEntryKind, tag: &str) ->
             | (
                 WorkflowJournalEntryKind::WorkerPlacement,
                 "worker_placement" | "worker_placement_list"
+            )
+            | (
+                WorkflowJournalEntryKind::Worker,
+                "worker_open" | "worker_close" | "worker_staleness"
             )
             | (WorkflowJournalEntryKind::Effect, "effect")
             | (WorkflowJournalEntryKind::Log, "log")
@@ -1482,6 +1497,18 @@ enum HostCommand {
     BudgetSnapshot {
         reply: oneshot::Sender<Result<Value, String>>,
     },
+    OpenHeldWorker {
+        open: HeldWorkerOpen,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    CloseHeldWorker {
+        worker_id: Uuid,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
+    HeldWorkerStaleness {
+        worker_id: Uuid,
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
 }
 
 struct ChannelWorkflowHost {
@@ -1741,6 +1768,388 @@ impl WorkflowHost for ChannelWorkflowHost {
             .await
             .map_err(|_| "workflow host dropped budget reply".to_string())?
     }
+
+    async fn open_held_worker(
+        &self,
+        open: HeldWorkerOpen,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::OpenHeldWorker { open, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped worker reply".to_string())?
+    }
+
+    async fn close_held_worker(
+        &self,
+        worker_id: Uuid,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::CloseHeldWorker { worker_id, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped worker reply".to_string())?
+    }
+
+    async fn held_worker_staleness(
+        &self,
+        worker_id: Uuid,
+        _cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let (reply, receive) = oneshot::channel();
+        self.tx
+            .send(HostCommand::HeldWorkerStaleness { worker_id, reply })
+            .map_err(|_| "workflow host stopped".to_string())?;
+        receive
+            .await
+            .map_err(|_| "workflow host dropped worker reply".to_string())?
+    }
+}
+
+/// A worker the script is holding open, including the resolved execution
+/// envelope that every turn must retain.
+struct HeldWorker {
+    open: HeldWorkerOpen,
+    session: Arc<std::sync::Mutex<Option<swage_workflow::AgentSessionRef>>>,
+    selected_model: Arc<std::sync::Mutex<Option<String>>>,
+    last_completed_at: Arc<std::sync::Mutex<chrono::DateTime<chrono::Utc>>>,
+}
+
+#[derive(Clone)]
+struct HeldWorkerTurnState {
+    session: Arc<std::sync::Mutex<Option<swage_workflow::AgentSessionRef>>>,
+    selected_model: Arc<std::sync::Mutex<Option<String>>>,
+    last_completed_at: Arc<std::sync::Mutex<chrono::DateTime<chrono::Utc>>>,
+}
+
+/// Whether a turn may be sent to this worker.
+///
+/// Model, effort, placement and requested grants are settled when a worker is
+/// opened. Wanting a bigger model or more effort partway through is a fresh
+/// dispatch — a new worker with its own context — never a switch under a
+/// conversation the provider has already seen.
+fn check_held_worker_turn(
+    worker: &HeldWorker,
+    worker_id: Uuid,
+    request: &AgentCallRequest,
+) -> Result<(), String> {
+    let fixed = [
+        (
+            "agent",
+            serde_json::json!(request.agent),
+            serde_json::json!(worker.open.agent),
+        ),
+        (
+            "task",
+            serde_json::json!(request.task),
+            serde_json::json!(worker.open.task),
+        ),
+        (
+            "tools",
+            serde_json::json!(request.tools),
+            serde_json::json!(worker.open.tools),
+        ),
+        (
+            "skills",
+            serde_json::json!(request.skills),
+            serde_json::json!(worker.open.skills),
+        ),
+        (
+            "effort",
+            serde_json::json!(request.effort),
+            serde_json::json!(worker.open.effort),
+        ),
+    ];
+    if let Some((field, requested, opened)) = fixed
+        .into_iter()
+        .find(|(_, requested, opened)| requested != opened)
+    {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} fixes {field} at creation ({opened}); received {requested}"
+        ));
+    }
+    if request.session.is_none()
+        && (request.cwd != worker.open.cwd || request.isolation != worker.open.isolation)
+    {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} must start in its creation placement"
+        ));
+    }
+    if request.session.is_none() && request.model != worker.open.model
+        || request.session.is_some()
+            && request.model.is_some()
+            && request.model != worker.open.model
+    {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} fixes model at creation"
+        ));
+    }
+    if (request.session.is_none() && request.fallback_model != worker.open.fallback_model)
+        || (request.session.is_some() && request.fallback_model.is_some())
+        || request.elements.is_some()
+        || request.variables.is_some()
+        || request.assembly.is_some()
+    {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} cannot change fallback model or context composition after creation"
+        ));
+    }
+    let opened_session = worker
+        .session
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    if request.session != opened_session {
+        return Err(format!(
+            "HeldWorkerError: worker {worker_id} must continue with its own session token"
+        ));
+    }
+    Ok(())
+}
+
+async fn resolve_held_worker_open(
+    state: &AppState,
+    space_id: Uuid,
+    mut open: HeldWorkerOpen,
+) -> Result<HeldWorkerOpen, String> {
+    let agent_id = open.agent.as_deref().unwrap_or(BARE_WORKFLOW_AGENT_ID);
+    let space = state
+        .space_store
+        .get(space_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("space {space_id} no longer exists"))?;
+    let mut config = crate::turn::load_session_config(state, &space.slug, agent_id)
+        .map_err(|error| error.to_string())?;
+    if let Some(definition) = crate::service::resolve_effective_agent_definition(
+        state.storage.as_ref(),
+        agent_id,
+        space_id,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    {
+        config = crate::turn::apply_agent_definition(config, &definition.definition);
+    }
+    if let Some(task) = open.task.as_deref() {
+        let definition = crate::service::resolve_task_definition(state.storage.as_ref(), task)
+            .await
+            .map_err(|error| error.to_string())?;
+        config = crate::turn::apply_task_definition(config, &definition)
+            .map_err(|error| error.to_string())?;
+    }
+    // An omitted model is resolved here, so the worker keeps the route it was
+    // opened against even if the configured default moves afterwards. A
+    // configuration that names no default has nothing to pin: the worker then
+    // carries no model selection, exactly as a single call would.
+    let model = match open.model.as_deref() {
+        Some(model) => Some(
+            crate::turn::resolve_requested_turn_model(&config, model)
+                .map_err(|error| error.to_string())?,
+        ),
+        None => Some(config.models.default.clone()).filter(|model| !model.is_empty()),
+    };
+    open.fallback_model = open
+        .fallback_model
+        .as_deref()
+        .map(|model| crate::turn::resolve_requested_turn_model(&config, model))
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    if open.effort.is_none() {
+        open.effort = model
+            .as_ref()
+            .and_then(|model| config.models.entries.get(model))
+            .and_then(|model| model.default_effort);
+    }
+    open.model = model;
+    Ok(open)
+}
+
+fn held_worker_replay_matches(
+    config: &swage_config::ResolvedConfig,
+    requested: &HeldWorkerOpen,
+    recorded: &HeldWorkerOpen,
+) -> bool {
+    let requested_model = requested
+        .model
+        .as_deref()
+        .and_then(|model| crate::turn::resolve_requested_turn_model(config, model).ok());
+    let requested_fallback = requested
+        .fallback_model
+        .as_deref()
+        .and_then(|model| crate::turn::resolve_requested_turn_model(config, model).ok());
+    requested.agent == recorded.agent
+        && requested.task == recorded.task
+        && requested.tools == recorded.tools
+        && requested.skills == recorded.skills
+        && requested.cwd == recorded.cwd
+        && requested.isolation == recorded.isolation
+        && requested.label == recorded.label
+        && requested.fallback_model.is_none() == recorded.fallback_model.is_none()
+        && requested_fallback == recorded.fallback_model
+        && requested
+            .model
+            .as_ref()
+            .is_none_or(|_| requested_model == recorded.model)
+        && requested
+            .effort
+            .as_ref()
+            .is_none_or(|effort| recorded.effort.as_ref() == Some(effort))
+}
+
+/// A worker's identity is the journal entry that opened it, so every later
+/// reference to the worker resolves to a row this run wrote.
+async fn complete_worker_open(
+    state: &AppState,
+    entry_id: Uuid,
+    open: &HeldWorkerOpen,
+) -> Result<Value, String> {
+    let result = serde_json::json!({ "worker_id": entry_id, "creation": open });
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map(|_| result)
+        .map_err(|error| error.to_string())
+}
+
+async fn complete_worker_close(
+    state: &AppState,
+    entry_id: Uuid,
+    worker_id: Uuid,
+    closed_by: &str,
+) -> Result<Value, String> {
+    let result = serde_json::json!({ "worker_id": worker_id, "closed_by": closed_by });
+    state
+        .complete_workflow_journal_entry(entry_id, result.clone())
+        .await
+        .map(|_| result)
+        .map_err(|error| error.to_string())
+}
+
+/// The worker's idle gap and the threshold of the route its model draws on,
+/// as recorded facts. A route declaring no threshold yields `stale: null`: the
+/// gap is still reported, and the script is told the verdict is unknown rather
+/// than handed a guess.
+fn held_worker_staleness_reading(
+    config: &swage_config::ResolvedConfig,
+    worker: &HeldWorker,
+) -> Value {
+    let last_completed_at = *worker
+        .last_completed_at
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let idle_ms = chrono::Utc::now()
+        .signed_duration_since(last_completed_at)
+        .num_milliseconds()
+        .max(0) as u64;
+    let selected_model = worker
+        .selected_model
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let route = swage_config::resolve_provider_route(
+        &config.models,
+        &config.providers,
+        selected_model.as_deref(),
+    );
+    let threshold_ms = route.and_then(|route| route.endpoint.worker_staleness_threshold_ms);
+    serde_json::json!({
+        "stale": threshold_ms.map(|threshold| idle_ms >= threshold),
+        "idle_ms": idle_ms,
+        "threshold_ms": threshold_ms,
+        "route": route.map(|route| route.provider_id),
+    })
+}
+
+/// Close every worker the run still holds open.
+///
+/// Run at every terminal outcome — return, throw, or cancellation — so a
+/// worker outlives its run by no path. A parked run is deliberately not
+/// terminal: it resumes, and its workers are stored sessions that must still
+/// be there when it does.
+async fn close_open_held_workers(storage: &dyn Storage, run_id: Uuid) {
+    let journal = match storage.list_workflow_journal(run_id).await {
+        Ok(journal) => journal,
+        Err(error) => {
+            tracing::warn!(%run_id, %error, "could not read journal to close held workers");
+            return;
+        }
+    };
+    let worker_id_of = |entry: &WorkflowJournalRecord| -> Option<Uuid> {
+        entry
+            .result
+            .as_ref()?
+            .get("worker_id")?
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+    };
+    let closed = journal
+        .iter()
+        .filter(|entry| {
+            entry.kind == "worker"
+                && entry.status == "completed"
+                && entry.request.get("action").and_then(Value::as_str) == Some("close")
+        })
+        .filter_map(worker_id_of)
+        .collect::<std::collections::HashSet<_>>();
+    let open = journal
+        .iter()
+        .filter(|entry| {
+            entry.kind == "worker"
+                && entry.status == "completed"
+                && entry.request.get("action").and_then(Value::as_str) == Some("open")
+        })
+        .filter_map(worker_id_of)
+        .filter(|worker_id| !closed.contains(worker_id))
+        .collect::<Vec<_>>();
+    // The terminal audit record sits at the reserved top of the range, so the
+    // next ordinary sequence is taken from the positional entries alone —
+    // otherwise a closure would be numbered past it and sort before the open
+    // it answers.
+    let first_seq = journal
+        .iter()
+        .filter(|entry| is_positional_journal_entry(entry))
+        .map(|entry| entry.seq)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    for (next_seq, worker_id) in (first_seq..).zip(open) {
+        let request = serde_json::json!({
+            "action": "close", "worker_id": worker_id, "closed_by": "run_end",
+        });
+        let intent = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id,
+                seq: next_seq,
+                kind: "worker".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await;
+        match intent {
+            Ok(intent) => {
+                let result = serde_json::json!({ "worker_id": worker_id, "closed_by": "run_end" });
+                if let Err(error) = storage
+                    .complete_workflow_journal_entry(intent.id, result)
+                    .await
+                {
+                    tracing::warn!(%run_id, %worker_id, %error, "could not record held-worker closure");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%run_id, %worker_id, %error, "could not record held-worker closure");
+            }
+        }
+    }
 }
 
 struct WorkflowTurnAttempt {
@@ -1956,12 +2365,26 @@ async fn run_ephemeral_agent_call(
         // re-derived at this start like any other.
         Some(session_ref) => {
             if let Some(task) = request.task.as_deref() {
-                return Err(format!(
-                    "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
-                )
-                .into());
+                let persisted_task = state
+                    .storage
+                    .get_session(session_ref.session_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .and_then(|session| session.metadata)
+                    .and_then(|metadata| {
+                        metadata
+                            .get("task_definition")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                if request.worker.is_none() || persisted_task.as_deref() != Some(task) {
+                    return Err(format!(
+                        "AgentCallError: task {task:?} cannot be selected on a continued session; select it when creating the worker"
+                    )
+                    .into());
+                }
             }
-            if request.model.is_some() {
+            if request.model.is_some() && request.worker.is_none() {
                 return Err(
                     "AgentCallError: model cannot be selected on a continued session; the worker keeps the model resolved at creation"
                         .into(),
@@ -1998,6 +2421,24 @@ async fn run_ephemeral_agent_call(
                         session_ref.session_id
                     )
                 })?;
+            if let Some(agent) = request.agent.as_deref()
+                && agent != session.agent_id
+            {
+                return Err(format!(
+                    "AgentCallError: continued session belongs to agent {:?}, not {agent:?}",
+                    session.agent_id
+                )
+                .into());
+            }
+            if let Some(model) = request.model.as_deref()
+                && session.selected_model_id.as_deref() != Some(model)
+            {
+                return Err(format!(
+                    "AgentCallError: continued session keeps model {:?}, not {model:?}",
+                    session.selected_model_id
+                )
+                .into());
+            }
             let persisted_skills = session
                 .metadata
                 .as_ref()
@@ -2100,6 +2541,9 @@ async fn run_ephemeral_agent_call(
                     .await
                     .map_err(|error| error.to_string())?;
                 metadata["task_definition"] = Value::String(task.clone());
+            }
+            if let Some(effort) = request.effort {
+                metadata["effort"] = serde_json::json!(effort);
             }
             if let Some(tools) = effective_call_tools.as_ref() {
                 metadata[crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY] = serde_json::json!(tools);
@@ -2898,6 +3342,12 @@ async fn run_host_commands_inner(
     // Wind-down is replay position, not run end-state. A transition later in
     // the journal must not classify earlier started calls as closing work.
     let mut winding_down = false;
+    // Held workers this run has open, by the journal entry id that opened
+    // them. A resumed run rebuilds this table by replaying the script's own
+    // session()/send()/close() calls, so it never needs to survive the
+    // process — which is what keeps a parked run free of resident state.
+    let mut held_workers: std::collections::HashMap<Uuid, HeldWorker> =
+        std::collections::HashMap::new();
     let effect_seq = Arc::new(AtomicU64::new(
         replay
             .iter()
@@ -2968,10 +3418,48 @@ async fn run_host_commands_inner(
     while let Some(command) = commands.recv().await {
         let command = match command {
             HostCommand::DispatchAgent {
-                request,
+                mut request,
                 cancellation,
                 reply,
             } => {
+                // A turn addressed to a held worker is checked against the
+                // table before anything is journalled: the worker must be one
+                // this run opened and has not closed, and the turn must not
+                // ask for a bigger model or more effort than the worker was
+                // opened with. Refusing here rather than in the shim means a
+                // direct agent() call carrying a session token cannot walk
+                // around it.
+                let session_worker = request.session.as_ref().and_then(|session| {
+                    held_workers.iter().find_map(|(worker_id, worker)| {
+                        let held_session = worker
+                            .session
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        (held_session.as_ref() == Some(session)).then_some(*worker_id)
+                    })
+                });
+                if let (Some(explicit), Some(resolved)) = (request.worker, session_worker)
+                    && explicit != resolved
+                {
+                    let _ = reply.send(Err(WorkflowHostError::Message(format!(
+                        "HeldWorkerError: session token belongs to worker {resolved}, not {explicit}"
+                    ))));
+                    continue;
+                }
+                let worker_id = request.worker.or(session_worker);
+                if let Some(worker_id) = worker_id {
+                    let Some(worker) = held_workers.get(&worker_id) else {
+                        let _ = reply.send(Err(WorkflowHostError::Message(format!(
+                            "HeldWorkerError: worker {worker_id} is not an open worker of this run"
+                        ))));
+                        continue;
+                    };
+                    request.worker = Some(worker_id);
+                    if let Err(error) = check_held_worker_turn(worker, worker_id, &request) {
+                        let _ = reply.send(Err(WorkflowHostError::Message(error)));
+                        continue;
+                    }
+                }
                 // A requested placement consumes one sequence slot before the
                 // agent call. Probe the following slot without provisioning so
                 // fresh author errors are reported before any journal intent
@@ -3169,6 +3657,15 @@ async fn run_host_commands_inner(
                 cancellation,
                 reply,
             } => {
+                let held_worker_turn = request.worker.and_then(|worker_id| {
+                    held_workers
+                        .get(&worker_id)
+                        .map(|worker| HeldWorkerTurnState {
+                            session: Arc::clone(&worker.session),
+                            selected_model: Arc::clone(&worker.selected_model),
+                            last_completed_at: Arc::clone(&worker.last_completed_at),
+                        })
+                });
                 let current_seq = seq.load(Ordering::SeqCst);
                 let existing_call = replay.get(current_seq as usize);
                 let mut call_reservation = 0;
@@ -3546,6 +4043,36 @@ async fn run_host_commands_inner(
                     } else {
                         result
                     };
+                    if let Some(worker) = held_worker_turn.as_ref()
+                        && let Ok(completed) = result.as_ref()
+                    {
+                        if let (Some(session_id), Some(thread_id)) =
+                            (completed.session_id, completed.thread_id)
+                        {
+                            *worker
+                                .session
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) =
+                                Some(swage_workflow::AgentSessionRef {
+                                    session_id,
+                                    thread_id,
+                                });
+                        }
+                        if let Some(served_model) = completed.served_model.as_ref() {
+                            *worker
+                                .selected_model
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner()) =
+                                Some(served_model.clone());
+                        }
+                        let completed_at = existing
+                            .and_then(|entry| entry.completed_at)
+                            .unwrap_or_else(chrono::Utc::now);
+                        *worker
+                            .last_completed_at
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = completed_at;
+                    }
                     // A settled call whose usage is unavailable contributes
                     // no tokens to the running total — there are none to
                     // contribute — but it does make the total incomplete, and
@@ -4088,6 +4615,230 @@ async fn run_host_commands_inner(
                                 .await
                             }
                             Err(error) => Err(error.to_string()),
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            HostCommand::OpenHeldWorker { open, reply } => {
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let open = match replay.get(current_seq as usize) {
+                    Some(entry)
+                        if entry.kind == "worker"
+                            && entry.request.get("action").and_then(Value::as_str)
+                                == Some("open") =>
+                    {
+                        let recorded = entry
+                            .request
+                            .get("open")
+                            .cloned()
+                            .ok_or_else(|| {
+                                "recorded worker open has no creation envelope".to_string()
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<HeldWorkerOpen>(value)
+                                    .map_err(|error| error.to_string())
+                            });
+                        match recorded {
+                            Ok(recorded)
+                                if held_worker_replay_matches(
+                                    &state.active_config(),
+                                    &open,
+                                    &recorded,
+                                ) =>
+                            {
+                                recorded
+                            }
+                            Ok(_) => {
+                                let _ = reply.send(Err("NondeterministicReplayError".into()));
+                                continue;
+                            }
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                continue;
+                            }
+                        }
+                    }
+                    _ => match resolve_held_worker_open(&state, space_id, open).await {
+                        Ok(open) => open,
+                        Err(error) => {
+                            let _ = reply.send(Err(format!("HeldWorkerError: {error}")));
+                            continue;
+                        }
+                    },
+                };
+                let request = serde_json::json!({
+                    "action": "open",
+                    "open": serde_json::to_value(&open).expect("held worker open serialises"),
+                });
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "worker" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed worker entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded worker failure".to_string())),
+                    // Started: the original run crashed between intent and
+                    // completion. The worker id is the entry id, so
+                    // re-completing lands the same identity it would have.
+                    Some(entry) => complete_worker_open(&state, entry.id, &open).await,
+                    None => {
+                        match state
+                            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                run_id,
+                                seq: current_seq,
+                                kind: "worker".into(),
+                                args_hash: hash,
+                                request,
+                                effect_kind: None,
+                                idempotency_key: None,
+                                target_kind: None,
+                            })
+                            .await
+                        {
+                            Ok(intent) => complete_worker_open(&state, intent.id, &open).await,
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                };
+                if let Ok(value) = result.as_ref()
+                    && let Some(worker_id) = value
+                        .get("worker_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                {
+                    held_workers.insert(
+                        worker_id,
+                        HeldWorker {
+                            selected_model: Arc::new(std::sync::Mutex::new(open.model.clone())),
+                            open,
+                            session: Arc::new(std::sync::Mutex::new(None)),
+                            last_completed_at: Arc::new(std::sync::Mutex::new(chrono::Utc::now())),
+                        },
+                    );
+                }
+                let _ = reply.send(result);
+            }
+            HostCommand::CloseHeldWorker { worker_id, reply } => {
+                // Closing a worker that was never open, or is already closed,
+                // is a script error and consumes no journal seq — the same
+                // treatment event-kind validation gets, so the verdict is
+                // identical live and on replay.
+                if !held_workers.contains_key(&worker_id) {
+                    let _ = reply.send(Err(format!(
+                        "HeldWorkerError: worker {worker_id} is not an open worker of this run"
+                    )));
+                    continue;
+                }
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({
+                    "action": "close", "worker_id": worker_id, "closed_by": "script",
+                });
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "worker" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed worker entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded worker failure".to_string())),
+                    Some(entry) => {
+                        complete_worker_close(&state, entry.id, worker_id, "script").await
+                    }
+                    None => {
+                        match state
+                            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                run_id,
+                                seq: current_seq,
+                                kind: "worker".into(),
+                                args_hash: hash,
+                                request,
+                                effect_kind: None,
+                                idempotency_key: None,
+                                target_kind: None,
+                            })
+                            .await
+                        {
+                            Ok(intent) => {
+                                complete_worker_close(&state, intent.id, worker_id, "script").await
+                            }
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                };
+                if result.is_ok() {
+                    held_workers.remove(&worker_id);
+                }
+                let _ = reply.send(result);
+            }
+            HostCommand::HeldWorkerStaleness { worker_id, reply } => {
+                let Some(worker) = held_workers.get(&worker_id) else {
+                    let _ = reply.send(Err(format!(
+                        "HeldWorkerError: worker {worker_id} is not an open worker of this run"
+                    )));
+                    continue;
+                };
+                let current_seq = seq.fetch_add(1, Ordering::SeqCst);
+                let request = serde_json::json!({
+                    "action": "staleness", "worker_id": worker_id,
+                });
+                let hash = journal_args_hash(&request);
+                let result = match replay.get(current_seq as usize) {
+                    Some(entry) if entry.kind != "worker" || entry.args_hash != hash => {
+                        Err("NondeterministicReplayError".into())
+                    }
+                    // Replay returns the RECORDED reading. Idle time is
+                    // wall-clock, so a fresh measurement here would differ
+                    // from the one the script branched on live.
+                    Some(entry) if entry.status == "completed" => entry
+                        .result
+                        .clone()
+                        .ok_or_else(|| "completed worker entry has no result".to_string()),
+                    Some(entry) if entry.status == "failed" => Err(entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "recorded worker failure".to_string())),
+                    existing => {
+                        let reading = held_worker_staleness_reading(&state.active_config(), worker);
+                        match existing {
+                            Some(entry) => state
+                                .complete_workflow_journal_entry(entry.id, reading.clone())
+                                .await
+                                .map(|_| reading)
+                                .map_err(|error| error.to_string()),
+                            None => {
+                                match state
+                                    .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                                        run_id,
+                                        seq: current_seq,
+                                        kind: "worker".into(),
+                                        args_hash: hash,
+                                        request,
+                                        effect_kind: None,
+                                        idempotency_key: None,
+                                        target_kind: None,
+                                    })
+                                    .await
+                                {
+                                    Ok(intent) => state
+                                        .complete_workflow_journal_entry(intent.id, reading.clone())
+                                        .await
+                                        .map(|_| reading)
+                                        .map_err(|error| error.to_string()),
+                                    Err(error) => Err(error.to_string()),
+                                }
+                            }
                         }
                     }
                 };
@@ -6024,6 +6775,9 @@ async fn launch_existing_run(
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
             Err(problem) => ("failed", None, Some(problem.to_string())),
         };
+        // Every terminal path reaches here — the park case returned above —
+        // so no outcome leaves a worker held.
+        close_open_held_workers(storage.as_ref(), run_id).await;
         if let Err(problem) = record_terminal_budget(
             &terminal_budget_state_owner,
             run_id,
@@ -6390,6 +7144,8 @@ pub async fn cancel_run(
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
+        close_open_held_workers(state.storage.as_ref(), id).await;
+        close_open_held_workers(state.storage.as_ref(), id).await;
         settle_cancelled_workflow_journal(
             state.storage.as_ref(),
             id,
@@ -7542,6 +8298,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             prompt: "reuse recorded result".into(),
             agent: None,
             task: None,
@@ -7766,6 +8523,7 @@ mod tests {
             &[],
             Uuid::new_v4(),
             AgentCallRequest {
+                worker: None,
                 cwd: None,
                 isolation: None,
                 effort: None,
@@ -7846,6 +8604,7 @@ mod tests {
             None,
         );
         let request = |skills| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -7972,6 +8731,7 @@ mod tests {
 
         let (gather_run_id, journal_entry_id) = journalled_agent_call(&storage, space.id).await;
         let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -8711,6 +9471,7 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            worker: None,
             prompt: "Use the briefing".into(),
             agent: Some("default".into()),
             task: None,
@@ -9985,6 +10746,7 @@ mod tests {
             0,
         );
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -10100,6 +10862,7 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -10301,6 +11064,7 @@ mod tests {
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
+                worker: None,
                 cwd: Some(worker_directory.path().to_string_lossy().into_owned()),
                 isolation: None,
                 effort: None,
@@ -10378,6 +11142,7 @@ mod tests {
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
+                worker: None,
                 cwd: None,
                 isolation: None,
                 effort: None,
@@ -10436,6 +11201,7 @@ mod tests {
         let (replacement_reply, replacement_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
+                worker: None,
                 cwd: Some("/unused-replacement".into()),
                 isolation: Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
                 effort: None,
@@ -10586,6 +11352,769 @@ mod tests {
 
         drop(tx);
         task.await.expect("host loop");
+    }
+
+    /// A run whose script is `source`, with a bounded lead and a provider
+    /// serving `outputs` in order. Returns the storage, the run, and the
+    /// provider so a test can read the journal and the provider's own view.
+    async fn run_held_worker_script(
+        source: &str,
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+    ) -> (
+        Arc<SqliteStorage>,
+        WorkflowRunRecord,
+        Arc<ScriptedRecordingProvider>,
+        crate::test_support::SwageHomeGuard,
+    ) {
+        run_held_worker_script_with_config(source, outputs, swage_config::ResolvedConfig::default())
+            .await
+    }
+
+    /// As `run_held_worker_script`, with every provider turn taking `delay`.
+    async fn run_held_worker_script_with_slow_turns(
+        source: &str,
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+        config: swage_config::ResolvedConfig,
+        delay: std::time::Duration,
+    ) -> (
+        Arc<SqliteStorage>,
+        WorkflowRunRecord,
+        Arc<ScriptedRecordingProvider>,
+        crate::test_support::SwageHomeGuard,
+    ) {
+        run_held_worker_run(source, outputs, config, Some(delay)).await
+    }
+
+    /// A provider whose every turn takes `delay` to answer, so a test can tell
+    /// a reading taken when a turn started from one taken when it settled.
+    struct SlowScriptedProvider {
+        inner: Arc<ScriptedRecordingProvider>,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for SlowScriptedProvider {
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+
+        async fn complete(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            self.inner.complete(request).await
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            self.inner.complete_with_tools(request).await
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let inner = self.inner.stream(request);
+            let delay = self.delay;
+            Box::pin(futures::StreamExt::flatten(futures::stream::once(
+                async move {
+                    tokio::time::sleep(delay).await;
+                    inner
+                },
+            )))
+        }
+    }
+
+    /// As `run_held_worker_script`, with the runtime configuration the run
+    /// starts against — a catalogue the worker's model resolves through.
+    async fn run_held_worker_script_with_config(
+        source: &str,
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+        config: swage_config::ResolvedConfig,
+    ) -> (
+        Arc<SqliteStorage>,
+        WorkflowRunRecord,
+        Arc<ScriptedRecordingProvider>,
+        crate::test_support::SwageHomeGuard,
+    ) {
+        run_held_worker_run(source, outputs, config, None).await
+    }
+
+    async fn run_held_worker_run(
+        source: &str,
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+        config: swage_config::ResolvedConfig,
+        delay: Option<std::time::Duration>,
+    ) -> (
+        Arc<SqliteStorage>,
+        WorkflowRunRecord,
+        Arc<ScriptedRecordingProvider>,
+        crate::test_support::SwageHomeGuard,
+    ) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        for agent in ["lead", "worker"] {
+            let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
+            std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
+            std::fs::write(
+                agent_dir.join("config.toml"),
+                "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
+            )
+            .expect("write agent config");
+        }
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                carrying_skill: None,
+                task: None,
+                dispatch_bound_agent_ids: vec!["lead".into()],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(outputs)),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            match delay {
+                Some(delay) => Arc::new(SlowScriptedProvider {
+                    inner: Arc::clone(&provider),
+                    delay,
+                }) as Arc<dyn swage_provider::LlmProvider>,
+                None => Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            },
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(NamedTool::new("knowledge_search")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch held-worker run");
+        wait_for_terminal(&state, run.id).await;
+        let finished = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run query")
+            .expect("finished run");
+        (storage, finished, provider, swage_home)
+    }
+
+    fn worker_journal_actions(journal: &[WorkflowJournalRecord]) -> Vec<(String, String)> {
+        journal
+            .iter()
+            .filter(|entry| entry.kind == "worker")
+            .map(|entry| {
+                (
+                    entry
+                        .request
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    entry.status.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn held_worker_replay_accepts_the_same_model_aliases_as_opening() {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.entries.insert(
+            "steady".into(),
+            swage_config::ModelEndpointConfig {
+                aliases: vec!["steady-alias".into()],
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            "backup".into(),
+            swage_config::ModelEndpointConfig {
+                aliases: vec!["backup-alias".into()],
+                ..Default::default()
+            },
+        );
+        let requested = HeldWorkerOpen {
+            model: Some("steady-alias".into()),
+            fallback_model: Some("backup-alias".into()),
+            ..HeldWorkerOpen::default()
+        };
+        let recorded = HeldWorkerOpen {
+            model: Some("steady".into()),
+            fallback_model: Some("backup".into()),
+            ..HeldWorkerOpen::default()
+        };
+
+        assert!(held_worker_replay_matches(&config, &requested, &recorded));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_worker_carries_its_first_turn_into_its_second_and_records_its_life() {
+        let source = r#"
+            const worker = await session({agent: "worker", label: "reviewer"});
+            await send(worker, "restate the brief");
+            const reading = await staleness(worker);
+            const second = await send(worker, "now do the work");
+            await close(worker);
+            return {second, reading};
+        "#;
+        let (storage, run, provider, _home) = run_held_worker_script(
+            source,
+            vec![
+                scripted_text_output("restated: gather the sources"),
+                scripted_text_output("the work is done"),
+            ],
+        )
+        .await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let output = run.final_output.as_ref().expect("held-worker output");
+        assert_eq!(output["second"], "the work is done");
+        assert_eq!(output["reading"]["stale"], Value::Null);
+        assert_eq!(output["reading"]["thresholdMs"], Value::Null);
+
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2, "two turns reached the provider");
+        let second_turn = requests[1]
+            .messages
+            .iter()
+            .map(swage_core::ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            second_turn.contains("restate the brief")
+                && second_turn.contains("restated: gather the sources"),
+            "the second turn carries the first turn's exchange: {second_turn}"
+        );
+        drop(requests);
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(
+            worker_journal_actions(&journal),
+            vec![
+                ("open".to_string(), "completed".to_string()),
+                ("staleness".to_string(), "completed".to_string()),
+                ("close".to_string(), "completed".to_string()),
+            ],
+            "creation, the staleness reading, and closure are all recorded facts"
+        );
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+                .count(),
+            2,
+            "each held turn is an ordinary journalled agent call"
+        );
+        let closure = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("close")
+            })
+            .expect("closure entry");
+        assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "script");
+
+        let opened = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
+            .expect("open entry");
+        let worker_id = opened.result.as_ref().unwrap()["worker_id"]
+            .as_str()
+            .expect("worker id");
+        assert!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .all(|entry| entry.request["worker"] == worker_id),
+            "every turn names the worker it belongs to"
+        );
+
+        let original_output = run.final_output.clone();
+        let original_worker_id = opened.id;
+        let original_session_id = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result["session_id"].as_str())
+            .map(str::to_owned)
+            .expect("recorded worker session");
+        let original_staleness = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("staleness")
+            })
+            .and_then(|entry| entry.result.clone())
+            .expect("recorded staleness");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("simulate process interruption");
+        let replay_state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(NamedTool::new("knowledge_search")) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        let _resumed = resume_run(State(replay_state.clone()), Path(run.id))
+            .await
+            .expect("resume held-worker run");
+        wait_for_terminal(&replay_state, run.id).await;
+        let replayed = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("run")
+            .expect("replayed run");
+        assert_eq!(
+            replayed.state, "completed",
+            "replay error: {:?}",
+            replayed.error_message
+        );
+        assert_eq!(replayed.final_output, original_output);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+        let replay_journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let replay_open = replay_journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
+            .expect("replayed open");
+        assert_eq!(replay_open.id, original_worker_id);
+        assert_eq!(
+            replay_journal
+                .iter()
+                .find(|entry| entry.kind == "agent_call")
+                .and_then(|entry| entry.result.as_ref())
+                .and_then(|result| result["session_id"].as_str()),
+            Some(original_session_id.as_str()),
+        );
+        assert_eq!(
+            replay_journal
+                .iter()
+                .find(|entry| {
+                    entry.kind == "worker"
+                        && entry.request.get("action").and_then(Value::as_str) == Some("staleness")
+                })
+                .and_then(|entry| entry.result.as_ref()),
+            Some(&original_staleness),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_throws_closes_the_worker_it_still_holds() {
+        let source = r#"
+            const worker = await session({agent: "worker"});
+            await send(worker, "start something");
+            throw new Error("the script gave up");
+        "#;
+        let (storage, run, _provider, _home) =
+            run_held_worker_script(source, vec![scripted_text_output("started")]).await;
+        assert_eq!(run.state, "failed");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let closure = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("close")
+            })
+            .expect("a run that throws still closes its held worker");
+        assert_eq!(closure.status, "completed");
+        assert_eq!(closure.result.as_ref().unwrap()["closed_by"], "run_end");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_end_closure_is_journalled_between_the_last_turn_and_the_terminal_record() {
+        let source = r#"
+            const worker = await session({agent: "worker"});
+            await send(worker, "start something");
+            throw new Error("the script gave up");
+        "#;
+        let (storage, run, _provider, _home) =
+            run_held_worker_script(source, vec![scripted_text_output("started")]).await;
+        assert_eq!(run.state, "failed");
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert!(
+            journal
+                .iter()
+                .filter(|entry| is_positional_journal_entry(entry))
+                .all(|entry| entry.seq < TERMINAL_BUDGET_SEQUENCE),
+            "no script entry is numbered past the reserved terminal record: {:?}",
+            journal.iter().map(|entry| entry.seq).collect::<Vec<_>>()
+        );
+        let ordered = journal
+            .iter()
+            .map(|entry| {
+                (
+                    entry.kind.as_str(),
+                    entry
+                        .request
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered,
+            vec![
+                ("worker", "open"),
+                ("agent_call", ""),
+                ("worker", "close"),
+                ("terminal_budget", ""),
+            ],
+            "the journal reads in the order the run lived it"
+        );
+    }
+
+    /// A catalogue with one configured default route, so a worker opened
+    /// without naming a model has something to be pinned to.
+    fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::ResolvedConfig {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.providers.default = "local".to_string();
+        config.providers.entries.insert(
+            "local".to_string(),
+            swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: threshold_ms,
+                protocol: swage_config::Protocol::OpenAi,
+                base_url: Some("http://127.0.0.1:65535/v1".to_string()),
+                api_key_secret_ref: None,
+                api_key_env: None,
+                command: None,
+                state_dir: None,
+            },
+        );
+        config.models.default = "steady".to_string();
+        config.models.entries.insert(
+            "steady".to_string(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "local".to_string(),
+                model_id: "steady-wire".to_string(),
+                aliases: vec![],
+                context_window: Some(4096),
+                generation_preset: None,
+                default_effort: Some(swage_protocol::client::settings::Effort::Low),
+                capabilities: swage_config::ModelCapabilitiesConfig {
+                    reasoning_replay: false,
+                    effort: None,
+                },
+            },
+        );
+        config
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_opened_without_a_model_is_pinned_to_the_route_it_opened_against() {
+        let source = r#"
+            const worker = await session({agent: "default"});
+            await send(worker, "first");
+            await send(worker, "second");
+            await close(worker);
+            return worker.creation;
+        "#;
+        let (storage, run, provider, _home) = run_held_worker_script_with_config(
+            source,
+            vec![
+                scripted_text_output("first done"),
+                scripted_text_output("second done"),
+            ],
+            held_worker_route_config(None),
+        )
+        .await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let creation = run.final_output.as_ref().expect("creation envelope");
+        assert_eq!(
+            creation["model"], "steady",
+            "an omitted model is resolved and pinned when the worker opens"
+        );
+        assert_eq!(
+            creation["effort"], "low",
+            "the route's default effort is fixed at creation too"
+        );
+
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        let opened = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
+            .expect("open entry");
+        assert_eq!(
+            opened.request["open"]["model"], "steady",
+            "the recorded creation names the model the worker is held on"
+        );
+
+        let session_id = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result["session_id"].as_str())
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("worker session id");
+        assert_eq!(
+            storage
+                .get_session(session_id)
+                .await
+                .expect("session")
+                .expect("worker session")
+                .selected_model_id
+                .as_deref(),
+            Some("steady"),
+            "the worker's own session persists the model it was opened on, so a \
+             later change of the configured default cannot move its next turn"
+        );
+        assert_eq!(
+            provider
+                .requests
+                .lock()
+                .expect("requests")
+                .iter()
+                .map(|request| request.model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("steady-wire"), Some("steady-wire")],
+            "every turn runs on the pinned route"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_direct_call_on_a_worker_session_cannot_change_what_the_worker_was_opened_with() {
+        let source = r#"
+            const worker = await session({agent: "worker", tools: ["knowledge_search"]});
+            await send(worker, "first");
+            const refusals = {};
+            try {
+                await agent("harder", {
+                    agent: "worker",
+                    session: worker.session,
+                    tools: ["knowledge_search"],
+                    effort: "high",
+                });
+            } catch (error) { refusals.effort = error.message; }
+            try {
+                await agent("elsewhere", {
+                    agent: "worker",
+                    worker: worker.workerId,
+                    tools: [],
+                });
+            } catch (error) { refusals.tools = error.message; }
+            await close(worker);
+            return refusals;
+        "#;
+        let (_storage, run, provider, _home) = run_held_worker_script_with_config(
+            source,
+            vec![scripted_text_output("first done")],
+            held_worker_route_config(None),
+        )
+        .await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let refusals = run.final_output.as_ref().expect("refusals");
+        for field in ["effort", "tools"] {
+            let refusal = refusals[field].as_str().unwrap_or_default();
+            assert!(
+                refusal.contains("HeldWorkerError") && refusal.contains(field),
+                "a direct call carrying only the worker's token still meets the \
+                 worker's creation bounds ({field}): {refusal}"
+            );
+        }
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "neither escape reaches the provider"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_staleness_counts_idle_time_from_the_turn_that_settled() {
+        let turn_duration = std::time::Duration::from_millis(700);
+        let source = r#"
+            const worker = await session({agent: "default"});
+            await send(worker, "take your time");
+            const reading = await staleness(worker);
+            await close(worker);
+            return reading;
+        "#;
+        let (_storage, run, _provider, _home) = run_held_worker_script_with_slow_turns(
+            source,
+            vec![scripted_text_output("done at last")],
+            held_worker_route_config(Some(600_000)),
+            turn_duration,
+        )
+        .await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let reading = run.final_output.as_ref().expect("staleness reading");
+        assert_eq!(reading["thresholdMs"], 600_000);
+        assert_eq!(reading["stale"], false);
+        let idle_ms = reading["idleMs"].as_u64().expect("idle reading");
+        assert!(
+            idle_ms < turn_duration.as_millis() as u64 / 2,
+            "idle time is the gap since the last turn settled, not the time \
+             that turn spent working ({idle_ms}ms after a {}ms turn)",
+            turn_duration.as_millis()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_staleness_uses_the_hot_applied_route_threshold() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let swage_home = crate::test_support::SwageHomeGuard::new();
+        let worker_dir = swage_home.path().join("spaces/default/agents/worker");
+        std::fs::create_dir_all(&worker_dir).expect("create worker config directory");
+        std::fs::write(worker_dir.join("config.toml"), "").expect("write worker config");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            held_worker_route_config(None),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const worker = await session({agent: "worker"});
+                    await wait({timerMs: 1_000});
+                    const reading = await staleness(worker);
+                    await close(worker);
+                    return reading;
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start workflow");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if storage
+                    .list_workflow_journal(started.id)
+                    .await
+                    .expect("journal")
+                    .iter()
+                    .any(|entry| {
+                        entry.kind == "worker"
+                            && entry.request.get("action").and_then(Value::as_str) == Some("open")
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker opens");
+        state.replace_runtime(
+            held_worker_route_config(Some(600_000)),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+        wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        assert_eq!(
+            run.final_output.as_ref().expect("staleness reading")["thresholdMs"],
+            600_000,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_held_worker_turn_cannot_escalate_its_model_even_by_its_own_session_token() {
+        let source = r#"
+            const worker = await session({agent: "worker"});
+            await send(worker, "first");
+            let refusal = null;
+            try {
+                await agent("escalate", {
+                    agent: "worker",
+                    session: worker.session,
+                    model: "strong",
+                });
+            } catch (error) { refusal = error.message; }
+            await close(worker);
+            return refusal;
+        "#;
+        let (storage, run, provider, _home) =
+            run_held_worker_script(source, vec![scripted_text_output("first done")]).await;
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        let refusal = run
+            .final_output
+            .as_ref()
+            .and_then(Value::as_str)
+            .expect("refusal message");
+        assert!(
+            refusal.contains("HeldWorkerError") && refusal.contains("model"),
+            "escalation is refused by the host, not merely by the script surface: {refusal}"
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "the escalating turn never reaches the provider"
+        );
+        let journal = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal");
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|entry| entry.kind == "agent_call" && entry.status == "completed")
+                .count(),
+            1,
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -11285,6 +12814,7 @@ mod tests {
             None,
         );
         let request = || AgentCallRequest {
+            worker: None,
             prompt: "Use the current review contract".into(),
             agent: None,
             task: Some("review".into()),
@@ -12465,6 +13995,7 @@ mod tests {
                 await agent("working segment", {{agent: "default"}});
                 await budgetSnapshot();
                 await agent("closing segment", {{agent: "default"}});
+                const held = await session({{agent: "default"}});
                 return await wait({{ timerMs: {} }});
             "#,
             PARK_TIMER_THRESHOLD_MS + 1
@@ -12563,6 +14094,15 @@ mod tests {
         assert_eq!(terminal.result.as_ref().unwrap()["spent"], 7);
         assert_eq!(terminal.result.as_ref().unwrap()["remaining"], 3);
         assert_eq!(terminal.result.as_ref().unwrap()["closing_remaining"], 2);
+        let held_close = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request["action"] == "close"
+                    && entry.request["closed_by"] == "run_end"
+            })
+            .expect("cancelling a parked run closes its held worker");
+        assert_eq!(held_close.status, "completed");
         assert_eq!(
             journal
                 .iter()
@@ -12645,6 +14185,7 @@ mod tests {
         tx.send(HostCommand::Agent {
             resolved_working_directory: None,
             request: AgentCallRequest {
+                worker: None,
                 cwd: None,
                 isolation: None,
                 effort: None,
@@ -12703,6 +14244,7 @@ mod tests {
             &[],
             fixture_entry_id,
             AgentCallRequest {
+                worker: None,
                 prompt: "continue".into(),
                 agent: None,
                 task: Some("review".into()),
@@ -14391,6 +15933,7 @@ mod tests {
             .await
             .expect("orphaned worker turn");
         let first_request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -14447,6 +15990,7 @@ mod tests {
             .await
             .expect("complete first call");
         let continuation = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -14661,6 +16205,7 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -14744,6 +16289,7 @@ mod tests {
             2,
         );
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -14834,6 +16380,7 @@ mod tests {
         let storage = Arc::clone(&scaffold.storage);
         let run_id = scaffold.run_id;
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -15006,6 +16553,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -15148,6 +16696,7 @@ mod tests {
             .await
             .expect("run");
         let working_request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -15281,6 +16830,7 @@ mod tests {
             true
         );
         let closing_request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -15366,6 +16916,7 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -15619,6 +17170,7 @@ mod tests {
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -15859,6 +17411,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -16682,6 +18235,7 @@ mod tests {
             .await
             .expect("run");
         let request = AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -16795,6 +18349,7 @@ mod tests {
             .await
             .expect("run");
         let request = serde_json::to_value(AgentCallRequest {
+            worker: None,
             cwd: None,
             isolation: None,
             effort: None,
@@ -18732,11 +20287,25 @@ mod tests {
 
     fn fallback_test_config() -> swage_config::ResolvedConfig {
         let mut config = swage_config::ResolvedConfig::default();
+        config.providers.entries.insert(
+            "primary-route".into(),
+            swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: Some(111),
+                ..Default::default()
+            },
+        );
+        config.providers.entries.insert(
+            "fallback-route".into(),
+            swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: Some(222),
+                ..Default::default()
+            },
+        );
         config.models.default = "pinned".into();
         config.models.entries.insert(
             "pinned".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "scripted".into(),
+                provider_id: "primary-route".into(),
                 model_id: "pinned-wire".into(),
                 ..Default::default()
             },
@@ -18744,7 +20313,7 @@ mod tests {
         config.models.entries.insert(
             "fallback".into(),
             swage_config::ModelEndpointConfig {
-                provider_id: "scripted".into(),
+                provider_id: "fallback-route".into(),
                 model_id: "fallback-wire".into(),
                 ..Default::default()
             },
@@ -19132,6 +20701,7 @@ mod tests {
                 phase: None,
                 identity: None,
                 session: None,
+                worker: None,
                 elements: None,
                 variables: None,
                 assembly: None,
@@ -19202,18 +20772,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn held_worker_persists_the_fallback_model_for_continuation() {
+    async fn held_worker_resolves_and_persists_the_fallback_model_for_continuation() {
         let (state, storage, provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "pinned refused".into(),
+            }],
             scripted_text_output("created by fallback"),
             scripted_text_output("continued by fallback"),
         ])
         .await;
         let source = r#"
-            const worker = agentStart("create", {
-                agent: "default", model: "missing", fallbackModel: "fallback"
+            const worker = await session({
+                agent: "default", model: "pinned", fallbackModel: "fallback"
             });
-            await worker.result;
-            return await agent("continue", { agent: "default", session: worker.session });
+            await send(worker, "create");
+            const result = await send(worker, "continue");
+            const reading = await staleness(worker);
+            await close(worker);
+            return {result, creation: worker.creation, reading};
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
@@ -19227,6 +20803,17 @@ mod tests {
         .await
         .expect("start workflow");
         wait_for_terminal(&state, started.id).await;
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
+        assert_eq!(
+            run.final_output.as_ref().expect("worker output")["reading"]["thresholdMs"],
+            222,
+            "staleness follows the fallback route that now serves the worker"
+        );
 
         let journal = storage
             .list_workflow_journal(started.id)
@@ -19237,6 +20824,18 @@ mod tests {
             .filter(|entry| entry.kind == "agent_call")
             .collect::<Vec<_>>();
         assert_eq!(calls.len(), 2);
+        let open = journal
+            .iter()
+            .find(|entry| {
+                entry.kind == "worker"
+                    && entry.request.get("action").and_then(Value::as_str) == Some("open")
+            })
+            .expect("worker open");
+        assert_eq!(
+            open.result.as_ref().expect("open result")["creation"]["fallback_model"],
+            "fallback",
+            "the resolved fallback is part of the worker's recorded creation envelope"
+        );
         assert!(calls.iter().all(|entry| {
             entry
                 .result
@@ -19268,8 +20867,12 @@ mod tests {
                 .iter()
                 .map(|request| request.model.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("fallback-wire"), Some("fallback-wire")],
-            "continuation must use the persisted fallback without retrying the missing primary"
+            vec![
+                Some("pinned-wire"),
+                Some("fallback-wire"),
+                Some("fallback-wire")
+            ],
+            "continuation must use the persisted fallback without retrying the failed primary"
         );
     }
 
@@ -19492,6 +21095,7 @@ mod tests {
 
     fn worker_call_request(prompt: &str) -> AgentCallRequest {
         AgentCallRequest {
+            worker: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,

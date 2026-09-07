@@ -1125,6 +1125,7 @@ mod tests {
                         base_url: None,
                         command: None,
                         state_dir: None,
+                        worker_staleness_threshold_ms: None,
                     },
                 )])),
             }),

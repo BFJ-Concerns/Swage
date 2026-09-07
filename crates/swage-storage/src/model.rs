@@ -31,8 +31,9 @@ pub struct ContextSnapshotRecord {
 /// state the consumer sets without enforcing a state machine. Enforcement is the
 /// responsibility of the agent runtime (swage-agent).
 ///
-/// Lifecycle: Pending (created) → Processing (LLM call started) → terminal
-/// (Completed / Failed / Interrupted).
+/// Lifecycle: Pending (created) → Processing (LLM call started), potentially
+/// suspended in AwaitingApproval or Delegating, then terminal (Completed /
+/// Failed / Interrupted).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnState {
@@ -70,6 +71,16 @@ pub enum TurnState {
     ///   Delegating → Processing     (delegation completed — turn resumes)
     ///   Delegating → Interrupted    (gateway restart recovery)
     Delegating,
+}
+
+impl TurnState {
+    /// Whether no more work may run as part of this turn.
+    pub const fn is_terminal(&self) -> bool {
+        match self {
+            Self::Completed | Self::Failed | Self::Interrupted => true,
+            Self::Pending | Self::Processing | Self::AwaitingApproval | Self::Delegating => false,
+        }
+    }
 }
 
 impl std::fmt::Display for TurnState {
