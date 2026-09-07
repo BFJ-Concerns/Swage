@@ -942,6 +942,73 @@ describe("App", () => {
     expect(document.querySelector(".message-display")).not.toBeNull();
   });
 
+  it("uses the active creation picker for both New controls", async () => {
+    const defaultSpace = makeSpace();
+    const existing = makeConversationSummary({ id: "conv-existing" });
+    const createdFromChannel: ConversationResponse = {
+      id: "conv-channel-new",
+      space_id: defaultSpace.id,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+    const createdFromSidebar: ConversationResponse = {
+      id: "conv-sidebar-new",
+      space_id: defaultSpace.id,
+      created_at: "2026-04-07T12:04:00Z",
+      last_activity: "2026-04-07T12:04:00Z",
+    };
+
+    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([existing]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: existing.id, space_id: defaultSpace.id }),
+    );
+    vi.mocked(conversationsApi.createConversation)
+      .mockResolvedValueOnce(createdFromChannel)
+      .mockResolvedValueOnce(createdFromSidebar);
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([
+      makeAgentDefinition({ id: "gateway", display_name: "Swage default", is_builtin: true }),
+      makeAgentDefinition({ id: "picker-witness", display_name: "Picker witness" }),
+    ]);
+    setPath(`/conversations/${existing.id}`);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    expect(picker).not.toBeNull();
+    flushSync(() => {
+      picker!.value = "picker-witness";
+      picker!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    flushSync(() => (document.querySelector(".new-session") as HTMLButtonElement).click());
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledTimes(1);
+    expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
+      defaultSpace.id,
+      undefined,
+      "picker-witness",
+      undefined,
+    );
+    expect(window.location.pathname).toBe(`/conversations/${createdFromChannel.id}`);
+    expect(document.querySelectorAll(".conversation-item")).toHaveLength(2);
+
+    flushSync(() => (document.querySelector(".new-btn") as HTMLButtonElement).click());
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledTimes(2);
+    expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
+      defaultSpace.id,
+      undefined,
+      "picker-witness",
+      undefined,
+    );
+    expect(window.location.pathname).toBe(`/conversations/${createdFromSidebar.id}`);
+    expect(document.querySelectorAll(".conversation-item")).toHaveLength(3);
+  });
+
   it("connects exactly once when the composer auto-creates a conversation", async () => {
     const defaultSpace = makeSpace();
     const created: ConversationResponse = {
