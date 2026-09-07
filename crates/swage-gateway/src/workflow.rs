@@ -20480,6 +20480,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn failed_run_accounts_for_the_worker_that_actually_failed() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let failure = "the survey provider rejected the request";
+        let (state, _provider) = scripted_state(
+            &storage,
+            vec![vec![swage_core::StreamChunk::Error {
+                message: failure.into(),
+            }]],
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    await agent("survey the ground", {
+                        agent: "default",
+                        label: "failed survey",
+                        maxAttempts: 1,
+                    });
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let account = terminal_account_of(&storage, started.id).await;
+        assert!(matches!(account.ending, WorkflowRunEnding::Threw { .. }));
+        assert!(account.workers.done.is_empty());
+        assert_eq!(account.workers.failed.len(), 1);
+        let failed = &account.workers.failed[0];
+        assert_eq!(failed.label.as_deref(), Some("failed survey"));
+        assert!(
+            matches!(
+                &failed.termination,
+                Some(WorkflowWorkerTermination::Failed { message }) if message.contains(failure)
+            ),
+            "{:?}",
+            failed.termination
+        );
+        assert!(account.workers.cut_short.is_empty());
+        assert!(account.workers.unsettled.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_threw_under_wind_down_names_the_closing_boundary_as_its_ending() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
