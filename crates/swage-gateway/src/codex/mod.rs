@@ -183,6 +183,18 @@ fn add_codex_effort(provider_request: &mut Value, effort: Option<&ResolvedEffort
     }
 }
 
+fn settle_provider_round(
+    request: &CodexTurnRequest,
+    round: usize,
+    outcome: swage_agent::ProviderRoundOutcome,
+) {
+    let _ = request.event_tx.send(AgentEvent::ProviderRoundSettled {
+        turn_id: request.turn_id,
+        round,
+        outcome,
+    });
+}
+
 pub async fn run_turn(
     state: AppState,
     request: CodexTurnRequest,
@@ -267,10 +279,24 @@ async fn run_turn_inner(
                     round: 0,
                     request: json!({"method":"thread/resume","params":resume_request}),
                 });
-                client
-                    .request("thread/resume", resume_request)
-                    .await
-                    .map_err(provider_error)?;
+                match client.request("thread/resume", resume_request).await {
+                    Ok(_) => settle_provider_round(
+                        &request,
+                        0,
+                        swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+                    ),
+                    Err(error) => {
+                        let error = provider_error(error);
+                        settle_provider_round(
+                            &request,
+                            0,
+                            swage_agent::ProviderRoundOutcome::Failed {
+                                message: error.to_string(),
+                            },
+                        );
+                        return Err(error);
+                    }
+                }
                 thread_id
             }
             None => {
@@ -288,10 +314,27 @@ async fn run_turn_inner(
                     round: 0,
                     request: json!({"method":"thread/start","params":start_request}),
                 });
-                let response = client
-                    .request("thread/start", start_request)
-                    .await
-                    .map_err(provider_error)?;
+                let response = match client.request("thread/start", start_request).await {
+                    Ok(response) => {
+                        settle_provider_round(
+                            &request,
+                            0,
+                            swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+                        );
+                        response
+                    }
+                    Err(error) => {
+                        let error = provider_error(error);
+                        settle_provider_round(
+                            &request,
+                            0,
+                            swage_agent::ProviderRoundOutcome::Failed {
+                                message: error.to_string(),
+                            },
+                        );
+                        return Err(error);
+                    }
+                };
                 let thread_id = response
                     .pointer("/thread/id")
                     .or_else(|| response.get("threadId"))
@@ -326,11 +369,13 @@ async fn run_turn_inner(
     let mut response_text = String::new();
     let mut input_tokens = 0u32;
     let mut output_tokens = 0u32;
+    let mut usage_complete = true;
     let mut tool_count = 0u32;
     for attempt in 0..=request.agent_config.max_output_retries {
         response_text.clear();
-        let mut attempt_input_tokens = 0u32;
-        let mut attempt_output_tokens = 0u32;
+        let round = attempt as usize + 1;
+        let mut attempt_usage = None;
+        let mut attempt_tool_count = 0u32;
         // A retry corrects the shape of the previous answer. The user request
         // and every tool call it already made stay in the retained thread, so
         // resubmitting it here would repeat its side effects.
@@ -350,13 +395,23 @@ async fn run_turn_inner(
         add_codex_effort(&mut provider_request, request.effort.as_ref());
         let _ = request.event_tx.send(AgentEvent::ProviderRequestPrepared {
             turn_id: request.turn_id,
-            round: attempt as usize + 1,
+            round,
             request: json!({"method":"turn/start","params":provider_request.clone()}),
         });
-        let turn_response = client
-            .request("turn/start", provider_request)
-            .await
-            .map_err(provider_error)?;
+        let turn_response = match client.request("turn/start", provider_request).await {
+            Ok(response) => response,
+            Err(error) => {
+                let error = provider_error(error);
+                settle_provider_round(
+                    &request,
+                    round,
+                    swage_agent::ProviderRoundOutcome::Failed {
+                        message: error.to_string(),
+                    },
+                );
+                return Err(error);
+            }
+        };
         let codex_turn_id = turn_response
             .pointer("/turn/id")
             .or_else(|| turn_response.get("turnId"))
@@ -377,20 +432,36 @@ async fn run_turn_inner(
                     }
                     state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
                     state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
+                    settle_provider_round(
+                        &request,
+                        round,
+                        swage_agent::ProviderRoundOutcome::Interrupted,
+                    );
                     return Err(AgentError::Cancelled);
                 }
                 incoming = server_requests.recv() => {
-                    let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                        "Codex App Server transport closed mid-turn".to_string(),
-                    )))?;
+                    let incoming = match incoming {
+                        Ok(incoming) => incoming,
+                        Err(_) => {
+                            let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                                "Codex App Server transport closed mid-turn".to_string(),
+                            ));
+                            settle_provider_round(
+                                &request,
+                                round,
+                                swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                            );
+                            return Err(error);
+                        }
+                    };
                     if incoming.method == "item/tool/call" {
                         tool_count += 1;
+                        attempt_tool_count += 1;
                         let tool_state = state.clone();
                         let tool_client = client.clone();
                         let tool_request = request.clone();
                         let position = tool_count;
-                        let provider_round =
-                            i32::try_from(attempt.saturating_add(1)).unwrap_or(i32::MAX);
+                        let provider_round = i32::try_from(round).unwrap_or(i32::MAX);
                         tool_tasks.spawn(async move {
                             handle_tool_call(
                                 &tool_state,
@@ -407,9 +478,20 @@ async fn run_turn_inner(
                     }
                 }
                 incoming = notifications.recv() => {
-                    let incoming = incoming.map_err(|_| AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
-                        "Codex App Server transport closed mid-turn".to_string(),
-                    )))?;
+                    let incoming = match incoming {
+                        Ok(incoming) => incoming,
+                        Err(_) => {
+                            let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                                "Codex App Server transport closed mid-turn".to_string(),
+                            ));
+                            settle_provider_round(
+                                &request,
+                                round,
+                                swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                            );
+                            return Err(error);
+                        }
+                    };
                     match incoming.method.as_str() {
                         "item/started" | "item/updated" => {
                             let item = incoming.params.get("item").cloned().unwrap_or_else(|| incoming.params.clone());
@@ -427,7 +509,7 @@ async fn run_turn_inner(
                             if let Some(delta) = incoming.params.get("delta").and_then(Value::as_str) {
                                 let _ = request.event_tx.send(AgentEvent::ProviderReasoningCaptured {
                                     turn_id: request.turn_id,
-                                    round: attempt as usize + 1,
+                                    round,
                                     content: delta.to_string(),
                                     details: None,
                                 });
@@ -450,24 +532,50 @@ async fn run_turn_inner(
                         }
                         "thread/tokenUsage/updated" => {
                             let last = incoming.params.pointer("/tokenUsage/last").or_else(|| incoming.params.get("last"));
-                            attempt_input_tokens = last.and_then(|v| v.get("inputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(attempt_input_tokens);
-                            attempt_output_tokens = last.and_then(|v| v.get("outputTokens")).and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(attempt_output_tokens);
+                            attempt_usage = last.and_then(|last| {
+                                let input = last
+                                    .get("inputTokens")
+                                    .and_then(Value::as_u64)
+                                    .and_then(|value| u32::try_from(value).ok())?;
+                                let output = last
+                                    .get("outputTokens")
+                                    .and_then(Value::as_u64)
+                                    .and_then(|value| u32::try_from(value).ok())?;
+                                Some((input, output))
+                            }).or(attempt_usage);
                         }
                         "turn/completed" => {
                             let status = incoming.params.pointer("/turn/status").and_then(Value::as_str).unwrap_or("failed");
                             if status != "completed" {
                                 let message = incoming.params.pointer("/turn/error/message").and_then(Value::as_str).unwrap_or("Codex turn failed");
-                                return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string())));
+                                let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(message.to_string()));
+                                settle_provider_round(
+                                    &request,
+                                    round,
+                                    swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                                );
+                                return Err(error);
                             }
+                            settle_provider_round(
+                                &request,
+                                round,
+                                swage_agent::ProviderRoundOutcome::Responded { tool_calls: attempt_tool_count },
+                            );
                             break;
                         }
                         _ => tracing::debug!(method = %incoming.method, "ignoring unsupported Codex notification"),
                     }
                 }
                 () = client.closed() => {
-                    return Err(AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
+                    let error = AgentError::ProviderFailed(swage_core::ProviderError::InvalidResponse(
                         "Codex App Server transport closed mid-turn".to_string(),
-                    )));
+                    ));
+                    settle_provider_round(
+                        &request,
+                        round,
+                        swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                    );
+                    return Err(error);
                 }
             }
         }
@@ -478,8 +586,13 @@ async fn run_turn_inner(
             }
         }
 
-        input_tokens = input_tokens.saturating_add(attempt_input_tokens);
-        output_tokens = output_tokens.saturating_add(attempt_output_tokens);
+        match attempt_usage {
+            Some((attempt_input_tokens, attempt_output_tokens)) => {
+                input_tokens = input_tokens.saturating_add(attempt_input_tokens);
+                output_tokens = output_tokens.saturating_add(attempt_output_tokens);
+            }
+            None => usage_complete = false,
+        }
 
         let Some(validator) = validator.as_ref() else {
             break;
@@ -500,14 +613,16 @@ async fn run_turn_inner(
                 .storage
                 .update_response(request.turn_id, &response_text)
                 .await?;
-            state
-                .storage
-                .update_tokens(
-                    request.turn_id,
-                    i64::from(input_tokens),
-                    i64::from(output_tokens),
-                )
-                .await?;
+            if usage_complete {
+                state
+                    .storage
+                    .update_tokens(
+                        request.turn_id,
+                        i64::from(input_tokens),
+                        i64::from(output_tokens),
+                    )
+                    .await?;
+            }
             state
                 .storage
                 .append_message(AppendMessage {
@@ -541,14 +656,16 @@ async fn run_turn_inner(
         .storage
         .update_response(request.turn_id, &response_text)
         .await?;
-    state
-        .storage
-        .update_tokens(
-            request.turn_id,
-            i64::from(input_tokens),
-            i64::from(output_tokens),
-        )
-        .await?;
+    if usage_complete {
+        state
+            .storage
+            .update_tokens(
+                request.turn_id,
+                i64::from(input_tokens),
+                i64::from(output_tokens),
+            )
+            .await?;
+    }
     state
         .storage
         .append_message(AppendMessage {
@@ -972,6 +1089,7 @@ mod tests {
             effort,
             false,
             AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+            CancellationToken::new(),
         )
         .await
     }
@@ -1016,6 +1134,7 @@ mod tests {
             None,
             fail_audit_writes,
             agent_config,
+            CancellationToken::new(),
         )
         .await
     }
@@ -1044,6 +1163,7 @@ mod tests {
         effort: Option<ResolvedEffort>,
         fail_audit_writes: bool,
         agent_config: AgentConfig,
+        cancellation: CancellationToken,
     ) -> (
         Result<OutboundMessage, AgentError>,
         Vec<Value>,
@@ -1106,7 +1226,7 @@ mod tests {
             permissions,
             dispatcher: Arc::new(dispatcher),
             event_tx,
-            cancellation: CancellationToken::new(),
+            cancellation,
         };
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(3), run_turn(state, request))
@@ -1127,6 +1247,24 @@ mod tests {
             };
         let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
         (result, frames, storage, events)
+    }
+
+    async fn run_cancelled_scripted_turn(
+        scenario: Value,
+    ) -> (Result<OutboundMessage, AgentError>, Vec<AgentEvent>) {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let (result, _, _, events) = run_scripted_turn_inner(
+            scenario,
+            ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
+            permissions(&[], &[]),
+            None,
+            false,
+            AgentConfig::new("gateway").with_workspace("/work", vec!["/work".into()]),
+            cancellation,
+        )
+        .await;
+        (result, events)
     }
 
     fn successful_turn_notifications() -> Vec<Value> {
@@ -1294,6 +1432,84 @@ mod tests {
                 .response,
             "done"
         );
+    }
+
+    #[tokio::test]
+    async fn incomplete_codex_usage_notifications_do_not_persist_known_usage() {
+        for (case, usage_params) in [
+            ("missing last", json!({})),
+            (
+                "partial last",
+                json!({"tokenUsage":{"last":{"inputTokens":4}}}),
+            ),
+            (
+                "unparseable last",
+                json!({"tokenUsage":{"last":{"inputTokens":"four","outputTokens":2}}}),
+            ),
+            (
+                "overflowing last",
+                json!({"tokenUsage":{"last":{"inputTokens":4_294_967_296_u64,"outputTokens":2}}}),
+            ),
+        ] {
+            let notifications = successful_turn_notifications();
+            let scenario = json!({"keepOpen":true,"steps":[
+                {
+                    "receive":{"method":"thread/start"},
+                    "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+                },
+                {
+                    "receive":{"method":"turn/start"},
+                    "send":[
+                        {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
+                        {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":usage_params},
+                        notifications[0].clone(),
+                        notifications[1].clone()
+                    ]
+                }
+            ]});
+            let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
+
+            let (result, _, storage, _) =
+                run_scripted_turn(scenario, dispatcher, permissions(&[], &[])).await;
+            result.unwrap_or_else(|error| panic!("{case} turn failed: {error}"));
+            let db = storage.db.lock().await;
+            let turn = db.turns.values().next().expect("scripted turn");
+            assert_eq!(
+                (turn.input_tokens, turn.output_tokens),
+                (None, None),
+                "{case} must remain unavailable instead of fabricating known usage"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scripted_mid_turn_cancellation_interrupts_the_provider_round() {
+        let scenario = json!({"steps":[
+            {
+                "receive":{"method":"thread/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
+            },
+            {
+                "receive":{"method":"turn/start"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}}]
+            },
+            {
+                "receive":{"method":"turn/interrupt"},
+                "send":[{"jsonrpc":"2.0","id":"$request_id","result":{}}]
+            }
+        ]});
+
+        let (result, events) = run_cancelled_scripted_turn(scenario).await;
+
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ProviderRoundSettled {
+                round: 1,
+                outcome: swage_agent::ProviderRoundOutcome::Interrupted,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -1506,6 +1722,28 @@ mod tests {
                 .count(),
             1,
             "a failed Codex turn must emit exactly one error event"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ProviderRoundSettled {
+                    round: 0,
+                    outcome: swage_agent::ProviderRoundOutcome::Responded { tool_calls: 0 },
+                    ..
+                }
+            )),
+            "the completed thread-start request must settle before the turn fails"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ProviderRoundSettled {
+                    round: 1,
+                    outcome: swage_agent::ProviderRoundOutcome::Failed { .. },
+                    ..
+                }
+            )),
+            "a failed Codex completion must settle its turn request as failed"
         );
     }
 

@@ -26,7 +26,8 @@ export type SpaceSettingsTab = "overview" | "workspaces" | "sessions";
 export interface Route {
   path: string;
   conversationId: string | null;
-  // Set when the URL addresses a single workflow run's own surface.
+  // Set when the URL names a workflow run, so the run's recorded journal
+  // and terminal account can be read back on its own surface.
   workflowRunId: string | null;
   settingsTab: SettingsTab | null;
   settingsSpaceSlug: string | null;
@@ -67,7 +68,7 @@ export interface RouterOptions {
  * Recognised patterns:
  *   /                       → root, no active conversation
  *   /conversations/:id      → load conversation with that ID
- *   /workflow-runs/:id      → that run's own surface
+ *   /workflow-runs/:id      → read back that run's record and terminal account
  *   anything else           → treated as root (unrecognised paths get SPA fallback)
  */
 export function parseRoute(pathname: string): Route {
@@ -83,12 +84,12 @@ export function parseRoute(pathname: string): Route {
       notFound: false,
     };
   }
-  const runMatch = pathname.match(/^\/workflow-runs\/([^/]+)$/);
-  if (runMatch) {
+  const workflowRunMatch = pathname.match(/^\/workflow-runs\/([^/]+)$/);
+  if (workflowRunMatch) {
     return {
       path: pathname,
       conversationId: null,
-      workflowRunId: decodeURIComponent(runMatch[1]),
+      workflowRunId: decodeURIComponent(workflowRunMatch[1]),
       settingsTab: null,
       settingsSpaceSlug: null,
       settingsSpaceTab: null,
