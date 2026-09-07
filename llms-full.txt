@@ -794,19 +794,24 @@ target kinds:
 alongside any explicit targets, so the output is always retained locally
 when set.
 
-### Schedule no-delivery records
+### No-delivery records
 
-A schedule run that does not execute still produces a run record. The
-`SkipReason` enum (`swage-protocol::client::schedule`) names why:
+When a schedule run produces no output delivery, the channel gateway
+records a no-delivery entry (`record_no_delivery`,
+`channel_gateway.rs:777`) with target `{"kind": "no_delivery"}`, status
+`"not_delivered"`, and the reason as the error field. Three outcomes
+produce this record:
 
-| Reason | Meaning |
-|---|---|
-| `gate` | The gate model decided no work was needed |
-| `overlap` | A previous run was still executing when this run came due |
+| Outcome | Run state | Reason recorded |
+|---|---|---|
+| Gate skip | `skipped` (`skip_reason: gate`) | The gate model's message, or "schedule gate decided no work was needed" |
+| Overlap skip | `skipped` (`skip_reason: overlap`) | "schedule run overlapped an in-flight run" |
+| Failure before delivery | `failed` (`error_message` set) | The failure message from the run body |
 
-Skipped runs carry state `skipped` and `skip_reason` on the run row. The
-channel gateway records a no-delivery entry (`record_no_delivery`) with
-target `{"kind": "no_delivery"}` when delivery cannot proceed.
+`SkipReason` (`swage-protocol::client::schedule`) is the enum behind the
+first two. A run that fails after delivery has already been attempted does
+not receive a no-delivery record — `delivery_attempted` on the failure
+controls this (`schedule.rs:1267`).
 
 ## Device registration
 
