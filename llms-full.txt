@@ -471,9 +471,10 @@ Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_pol
 
 # First session
 
-After the gateway is running and a provider is configured (README), the
-first session requires a space, a workspace attachment, and a trust
-decision.
+After the gateway is running and a provider is configured (README), a
+first session needs only an opened space. Attaching a workspace and
+trusting it are optional — they give agents file access and project
+guidance, but a conversation can start without either.
 
 ## Open a space
 
@@ -809,7 +810,7 @@ target `{"kind": "no_delivery"}` when delivery cannot proceed.
 
 ## Device registration
 
-Remote devices register through `POST /api/devices`
+Remote devices register through `POST /api/devices/register`
 (`RegisterDeviceRequest` in `swage-protocol::device`). The `kind` field
 defaults to `"attached_device"` and names the device type.
 
