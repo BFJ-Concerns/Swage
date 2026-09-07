@@ -637,9 +637,10 @@ never read as a call that made no provider request.
 | `unavailable` | `reason` | Usage is not known. |
 
 `WorkflowUsageUnavailableReason` values: `provider_reported_no_usage` (the
-turn completed but the provider reported no counts), `not_settled` (the call
-never settled). A call whose provider reported no usage is not a call that
-spent nothing — the two are different facts and the record keeps them apart.
+turn completed but the provider reported no counts), `call_did_not_settle`
+(the call never settled, so no usage was collected). A call whose provider
+reported no usage is not a call that spent nothing — the two are different
+facts and the record keeps them apart.
 
 ### Termination
 
