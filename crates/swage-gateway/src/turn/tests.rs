@@ -3137,10 +3137,7 @@ impl TurnStore for MockStorage {
         }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
-            if matches!(
-                state,
-                TurnState::Completed | TurnState::Failed | TurnState::Interrupted
-            ) {
+            if state.is_terminal() {
                 turn.completed_at = Some(chrono::Utc::now());
             }
             turn.state = state;
@@ -3164,16 +3161,7 @@ impl TurnStore for MockStorage {
             .await
             .turns
             .values()
-            .filter(|t| {
-                t.agent_id == agent_id
-                    && matches!(
-                        t.state,
-                        TurnState::Pending
-                            | TurnState::Processing
-                            | TurnState::AwaitingApproval
-                            | TurnState::Delegating
-                    )
-            })
+            .filter(|t| t.agent_id == agent_id && !t.state.is_terminal())
             .cloned()
             .collect())
     }
@@ -9748,50 +9736,57 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .into_iter()
         .next()
         .expect("named child thread");
-    let active_turn = storage
-        .create_turn(NewTurn {
-            thread_id: child_thread.id,
-            agent_id: "agent-b".into(),
-            state: TurnState::Processing,
-            user_input: Some("simulated active detached task".into()),
-            parent_turn_id: Some(parent_turn.id),
-        })
-        .await
-        .expect("create active child turn");
-    let concurrent = handler
-        .handle_delegation(
-            "agent-b",
-            "must wait for the active turn",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("scout"),
-            DispatchContextComposition::default(),
-            "delegate-concurrent",
-            "agent-a",
-            parent_turn.id,
-            space.id,
-            CancellationToken::new(),
-            DelegateCompletionMode::Wait,
-        )
-        .await;
-    assert!(
-        concurrent
-            .err()
-            .is_some_and(|error| error.to_string().contains("sequential")),
-        "a named child cannot begin another turn while one is active"
-    );
-    assert_eq!(
-        captured_requests.lock().expect("captured requests").len(),
-        1,
-        "the concurrent continuation is refused before provider dispatch"
-    );
-    storage
-        .update_turn_state(active_turn.id, TurnState::Completed)
-        .await
-        .expect("settle simulated child turn");
+    for active_state in [
+        TurnState::Pending,
+        TurnState::Processing,
+        TurnState::Delegating,
+        TurnState::AwaitingApproval,
+    ] {
+        let active_turn = storage
+            .create_turn(NewTurn {
+                thread_id: child_thread.id,
+                agent_id: "agent-b".into(),
+                state: active_state.clone(),
+                user_input: Some("simulated active detached task".into()),
+                parent_turn_id: Some(parent_turn.id),
+            })
+            .await
+            .expect("create active child turn");
+        let concurrent = handler
+            .handle_delegation(
+                "agent-b",
+                "must wait for the active turn",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("scout"),
+                DispatchContextComposition::default(),
+                "delegate-concurrent",
+                "agent-a",
+                parent_turn.id,
+                space.id,
+                CancellationToken::new(),
+                DelegateCompletionMode::Wait,
+            )
+            .await;
+        assert!(
+            concurrent
+                .err()
+                .is_some_and(|error| error.to_string().contains("sequential")),
+            "a named child cannot begin another turn while {active_state}"
+        );
+        assert_eq!(
+            captured_requests.lock().expect("captured requests").len(),
+            1,
+            "the {active_state} continuation is refused before provider dispatch"
+        );
+        storage
+            .update_turn_state(active_turn.id, TurnState::Completed)
+            .await
+            .expect("settle simulated child turn");
+    }
 
     handler
         .handle_delegation(
