@@ -117,6 +117,17 @@ call. Continuation calls ignore `fallbackModel` and never make a fallback
 attempt; they use the worker's persisted model selection, including a fallback
 selected at creation.
 
+### Structured output extraction
+
+When a call supplies `schema`, the worker's response text is scanned for
+JSON values — bare, inside a Markdown fence, or preceded by prose. Every
+non-overlapping JSON value is validated against the schema in source order;
+the final schema-valid value wins. A model may reason through provisional
+values before delivering its result, so extraction tolerates surrounding
+text and intermediate candidates. When no value passes validation after
+`maxAttempts` retries, the call returns `null` (for `agent()`) or the
+handle's `.result` is `null` (for `agentStart()`).
+
 ### Held workers
 
 Use a held worker when successive tasks need the same worker's accumulated

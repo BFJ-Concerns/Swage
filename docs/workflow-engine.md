@@ -119,15 +119,29 @@ Call `close()` when the work is finished. Swage also closes open workers when
 the run returns, throws, or is cancelled; parking retains them so the run can
 resume. Repeated `close()` calls with the same worker object are harmless.
 
+### Structured output extraction
+
+When a call supplies `schema`, the worker's response is scanned for JSON
+values — bare, inside a Markdown fence, or preceded by prose. Every
+non-overlapping JSON value found in the text is validated against the schema
+in source order, and the final schema-valid value wins. A model may reason
+through provisional values before delivering its result, so the extractor
+tolerates surrounding text and intermediate candidates rather than requiring
+the response to be pure JSON. When no value passes validation after the
+configured retries (`maxAttempts`), the call returns `null` for `agent()`, or
+the handle's `.result` is `null` for `agentStart()`.
+
 ### Model fallback
 
-`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. It
-is used only when the requested model is unavailable or the provider refuses
-or fails it before output; schema exhaustion and failures after output still return the
-established `null` result or throw. The completed call record's `served_model`
-names the model that actually served the call. Continuation calls ignore
-`fallbackModel` and never make a fallback attempt; they use the worker's
-persisted model selection, including a fallback selected at creation.
+`agent()`, `agentStart()`, and `session()` accept `fallbackModel`, a catalogue
+model id. For a held worker it is a creation-only option, fixed with the rest
+of the worker's execution envelope. It is used only when the requested model
+is unavailable or the provider refuses or fails it before output; schema
+exhaustion and failures after output still return the established `null` result
+or throw. The completed call record's `served_model` names the model that
+actually served the call. Continuation calls ignore `fallbackModel` and never
+make a fallback attempt; they use the worker's persisted model selection,
+including a fallback selected at creation.
 
 ### Composition
 
