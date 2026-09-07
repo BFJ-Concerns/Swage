@@ -158,6 +158,16 @@ pub trait DelegationContextAssembler: Send + Sync {
     ) -> Result<DelegatedAssembly, AgentError>;
 }
 
+/// A child this session has delegated to before, and everything it has heard
+/// and said since. Passing one makes the delegation land on that child's own
+/// session and thread instead of a fresh pair, so the child answers with its
+/// earlier work in view.
+pub struct DelegatedChildContinuation {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+    pub history: Vec<ChatMessage>,
+}
+
 pub struct DelegatedAssembly {
     pub messages: Vec<ChatMessage>,
     pub report: serde_json::Value,
@@ -185,6 +195,7 @@ impl DelegationExecutor {
         session_metadata: serde_json::Value,
         cancel_token: tokio_util::sync::CancellationToken,
         started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
+        existing_child: Option<DelegatedChildContinuation>,
         working_directory: Option<String>,
     ) -> Result<AgentMessage, AgentError> {
         let target_agent_id = &delegate_msg.recipient_agent_id;
@@ -196,24 +207,54 @@ impl DelegationExecutor {
         };
         let delegation_output = resolve_delegation_schema(&delegate_msg.payload, &output_config);
 
-        // 2. Create a child session + thread (per-task lifecycle).
-        let session = self
-            .storage
-            .create_session(NewSession {
-                space_id,
-                agent_id: target_agent_id.clone(),
-                metadata: Some(session_metadata),
-                active_workspace_attachment_id: None,
-            })
-            .await?;
-        let thread = ThreadStore::create(
-            self.storage.as_ref(),
-            NewThread {
-                session_id: session.id,
-                agent_id: target_agent_id.clone(),
-            },
-        )
-        .await?;
+        // 2. The child's session and thread: a fresh pair per task, or the
+        //    pair a named child already has. Continuing keeps the child's
+        //    stored metadata as it was — its dispatch bounds and placement
+        //    were settled when it was first opened.
+        let (session, thread) = match existing_child.as_ref() {
+            Some(continuation) => {
+                let session = self
+                    .storage
+                    .get_session(continuation.session_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig(format!(
+                            "delegated child session {} no longer exists",
+                            continuation.session_id
+                        ))
+                    })?;
+                let thread = ThreadStore::get(self.storage.as_ref(), continuation.thread_id)
+                    .await?
+                    .filter(|thread| thread.session_id == session.id)
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig(format!(
+                            "delegated child thread {} does not belong to session {}",
+                            continuation.thread_id, continuation.session_id
+                        ))
+                    })?;
+                (session, thread)
+            }
+            None => {
+                let session = self
+                    .storage
+                    .create_session(NewSession {
+                        space_id,
+                        agent_id: target_agent_id.clone(),
+                        metadata: Some(session_metadata),
+                        active_workspace_attachment_id: None,
+                    })
+                    .await?;
+                let thread = ThreadStore::create(
+                    self.storage.as_ref(),
+                    NewThread {
+                        session_id: session.id,
+                        agent_id: target_agent_id.clone(),
+                    },
+                )
+                .await?;
+                (session, thread)
+            }
+        };
 
         // Annotate the delegate message with the child thread_id so the
         // fallback cancel path (when the active registry has no entry) can
@@ -263,7 +304,11 @@ impl DelegationExecutor {
             })
             .unwrap_or_default();
 
-        let delegated_history = build_delegated_history(&transferred_context, task_description);
+        let mut delegated_history = existing_child
+            .map(|continuation| continuation.history)
+            .unwrap_or_default();
+        let new_delegated_history = build_delegated_history(&transferred_context, task_description);
+        delegated_history.extend(new_delegated_history.iter().cloned());
         let turn = self
             .storage
             .create_turn(NewTurn {
@@ -275,6 +320,34 @@ impl DelegationExecutor {
             })
             .await?;
         let turn_id = turn.id;
+        // The child's own thread records everything this turn was told, so a
+        // later delegation that returns to it rebuilds the original inherited
+        // background as well as both halves of every task exchange.
+        for message in &new_delegated_history {
+            if let Err(error) = self
+                .storage
+                .append_message(swage_storage::model::AppendMessage {
+                    thread_id: thread.id,
+                    attachments: Vec::new(),
+                    turn_id: Some(turn_id),
+                    role: message.role(),
+                    content: message.text_content(),
+                    agent_id: target_agent_id.clone(),
+                })
+                .await
+            {
+                if let Err(update_error) = self
+                    .storage
+                    .update_turn_state(turn_id, TurnState::Failed)
+                    .await
+                {
+                    return Err(AgentError::InvalidConfig(format!(
+                        "failed to record delegated context ({error}) and mark turn {turn_id} failed ({update_error})"
+                    )));
+                }
+                return Err(error.into());
+            }
+        }
         let assembled = match self
             .context_assembler
             .assemble(&session, turn_id, delegated_history)
@@ -416,12 +489,19 @@ impl DelegationExecutor {
         }
 
         // 6. Create Result or failure message — only the payload differs.
-        let send_result = |payload| NewAgentMessage {
+        //    Both name the child that produced them, so the delegating side
+        //    can come back to this child later and the record says which
+        //    child answered.
+        let send_result = |mut payload: serde_json::Value| NewAgentMessage {
             sender_agent_id: delegate_msg.recipient_agent_id.clone(),
             recipient_agent_id: delegate_msg.sender_agent_id.clone(),
             kind: MessageKind::Result,
             correlation_id: Some(delegate_msg.id),
-            payload,
+            payload: {
+                payload["child_session_id"] = serde_json::json!(session.id);
+                payload["child_thread_id"] = serde_json::json!(thread.id);
+                payload
+            },
         };
 
         match result {
@@ -628,6 +708,7 @@ pub trait DelegationHandler: Send + Sync {
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         skills: Option<Vec<String>>,
+        child: Option<&str>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
@@ -776,6 +857,7 @@ mod tests {
                 tokio_util::sync::CancellationToken::new(),
                 None,
                 None,
+                None,
             )
             .await
             .expect_err("invalid output schema should reject agent construction");
@@ -808,5 +890,91 @@ mod tests {
             .expect("list child turns");
         assert_eq!(turns.len(), 1, "expected one child turn");
         assert_eq!(turns[0].state, TurnState::Failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegated_task_record_failure_stops_before_provider_execution() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let space = storage
+            .get_or_create_default()
+            .await
+            .expect("default space");
+        let storage_trait: Arc<dyn Storage> = storage.clone();
+        let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
+        let delegate_message = router
+            .send_message(NewAgentMessage {
+                sender_agent_id: "agent-a".into(),
+                recipient_agent_id: "agent-b".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "Remember this delegated task"}),
+            })
+            .await
+            .expect("create delegate message");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER reject_delegated_task_message \
+                     BEFORE INSERT ON messages BEGIN \
+                     SELECT RAISE(FAIL, 'injected delegated task write failure'); END;",
+                )
+            })
+            .await
+            .expect("install write failure");
+        let executor = DelegationExecutor {
+            storage: storage_trait,
+            provider: Arc::new(NeverCalledProvider),
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: None,
+            delegation_handler: None,
+            router,
+            active_delegations: ActiveDelegations::new(),
+            context_assembler: Arc::new(PassthroughAssembler),
+            snapshot_recorder: None,
+        };
+        let error = executor
+            .execute_delegation(
+                &delegate_message,
+                None,
+                space.id,
+                AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]),
+                swage_config::ContextTransferConfig::default(),
+                None,
+                serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("an unrecorded delegated task must not execute");
+        assert!(
+            error
+                .to_string()
+                .contains("injected delegated task write failure")
+        );
+        let session = storage
+            .list_sessions_by_agent_id("agent-b")
+            .await
+            .expect("sessions")
+            .into_iter()
+            .next()
+            .expect("child session");
+        let thread = storage
+            .list_by_session(session.id)
+            .await
+            .expect("threads")
+            .into_iter()
+            .next()
+            .expect("child thread");
+        let turn = storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .expect("turns")
+            .into_iter()
+            .next()
+            .expect("pre-created child turn");
+        assert_eq!(turn.state, TurnState::Failed);
     }
 }

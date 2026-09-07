@@ -203,10 +203,7 @@ impl TurnStore for SqliteStorage {
 
         // Terminal-state guard is enforced atomically in the SQL WHERE clause
         // below — "first terminal state wins" without a read-then-write race.
-        let is_terminal = matches!(
-            new_state,
-            TurnState::Completed | TurnState::Failed | TurnState::Interrupted
-        );
+        let is_terminal = new_state.is_terminal();
 
         self.with_conn(move |conn| {
             let state_str = new_state.to_string();
