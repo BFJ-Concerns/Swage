@@ -1,5 +1,5 @@
 ---
-description: How Swage runs workflow scripts — lifecycle, journalling, budget management (including per-route), run detail, durable parking, and failure handling
+description: How Swage runs workflow scripts — lifecycle, journalling, budget management (including per-route), run detail, terminal account (how a run ended, worker standings, partial results), durable parking, and failure handling
 ---
 
 # Workflow engine
@@ -486,7 +486,11 @@ A call's termination records how the worker ended:
 - **`settled`** — the worker ran to its own end, successfully or not.
 - **`failed`** — the worker's own work failed, with a message.
 - **`cut_short`** — the run ended while this worker was still working. The
-  cause names the circumstance (currently `run_cancelled`).
+  cause names the circumstance: `run_cancelled`, `run_returned`, `run_failed`,
+  or `run_wound_down`. An optional `detail` field carries the settling error
+  written over the worker, when the terminal account has one to preserve.
+- **`unsettled`** — nothing ever recorded an outcome for this worker — the
+  run's end left no process alive to settle it.
 
 The `cut_short` status also appears on the journal entry itself — the entry
 settles as `cut_short` rather than `failed`, keeping the run's own end
@@ -510,6 +514,69 @@ was cut from), `tip_commit` (HEAD when the worker settled), `changed` (whether
 commits exist beyond the base), and `removed` (whether the worktree was cleaned
 up after settlement). The completion is resolved after the worker settles by
 reading the worktree's state through the worktree host.
+
+## Terminal account
+
+When a run ends, the gateway assembles a terminal account — a single record
+of what ended it, where every worker stood at that moment, and what completed
+work survived. The account is absent while the run is still going; it appears
+the moment the run reaches a terminal state.
+
+### How a run ended
+
+Every ending path names itself, so no reader has to infer a run's end from
+silence or the absence of a result:
+
+- **Returned** — the script returned its result.
+- **Threw** — the script threw an error, or the engine failed the run.
+- **Cancelled** — an operator or a parent run cancelled it.
+- **Wound down** — the working token allowance ran out and the run ended under
+  wind-down rather than on its own terms.
+- **Interrupted without resume** — the gateway died with the run in flight and
+  the run could not be resumed; the reason says why.
+
+### Where every worker stood
+
+The account partitions every worker the run dispatched into exactly one of
+four standings: **done** (settled successfully), **failed** (the worker's own
+work failed), **cut short** (the run's ending stopped the worker while it was
+still working), and **unsettled** (nothing ever recorded an outcome — the
+run's end left no process alive to settle it). Each entry names its directory,
+its label, and — for workers that ran in an isolated worktree — the final Git
+state.
+
+### Partial results
+
+A run that ended without its script returning also carries partial results:
+the completed workers' output, recoverable as work rather than the run's
+result, with a reason saying what stopped the run from producing one. Each
+partial result names the worker, its output, and its directory.
+
+### Reading the account
+
+Three places expose the terminal account:
+
+1. **The run detail** — the `GET /api/workflow-runs/{id}` response carries the
+   account on the run record.
+2. **The run view** — the web UI route `/workflow-runs/{id}` renders the ending,
+   the worker partition, and partial results in one coherent view alongside
+   the journal.
+3. **The `workflow_run_account` tool** — an agent tool that reads the terminal
+   account for one run, scoped to the caller's space. Useful after a run ends
+   without returning, to find what survived and where.
+
+### Worker directory retention
+
+When a run ends without returning, the worker directories its account names
+are retained: the gateway claims them from the worktree host before recording
+the account, so from the moment a reader can find them nothing takes them
+away — not the gateway's shutdown, not the next one's startup sweep. A run
+that returned reclaims its workers' directories normally.
+
+A stale cancellation — a parked cancellation that loses to a resumed run —
+withdraws only its own retention claim. If the resumed run returned, the
+directories go back to the normal reclaim path; if it failed, its own
+retention claim is preserved.
 
 ## Carried workflows
 

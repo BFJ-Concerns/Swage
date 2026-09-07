@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, and client-side route handling
+description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -451,3 +451,89 @@ connections.
 Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial page
 loads alike.
+
+## Gateway tools
+
+The gateway ships these built-in tools
+(`crates/swage-gateway/src/tool/`). Each tool's `requires_device_execution`
+flag determines where it runs: `true` means the call executes on a device
+(remote or local); `false` means it runs directly in the gateway process
+and requires gateway-side state.
+
+### Filesystem
+
+| Tool | Execution | Source |
+|---|---|---|
+| `file_read` | device | `file_read.rs` |
+| `file_write` | device | `file_write.rs` |
+| `file_edit` | device | `file_edit.rs` |
+| `file_list` | device | `file_list.rs` |
+| `file_search` | device | `file_search.rs` |
+| `shell` | device | `shell.rs` |
+| `python_execute` | device | `python_execute.rs` |
+
+### Browser
+
+| Tool | Execution | Source |
+|---|---|---|
+| `browser_navigate` | device | `browser.rs` |
+| `browser_snapshot` | device | `browser.rs` |
+| `browser_click` | device | `browser.rs` |
+| `browser_type` | device | `browser.rs` |
+| `browser_select` | device | `browser.rs` |
+| `browser_scroll` | device | `browser.rs` |
+
+### Knowledge base
+
+| Tool | Execution | Source |
+|---|---|---|
+| `knowledge_search` | host | `knowledge.rs` |
+| `knowledge_record` | host | `knowledge.rs` |
+| `knowledge_curate` | host | `knowledge.rs` |
+| `knowledge_cite` | host | `knowledge.rs` |
+| `knowledge_orient` | host | `knowledge.rs` |
+| `knowledge_curate_orientation` | host | `knowledge.rs` |
+
+### Workflow
+
+| Tool | Execution | Source |
+|---|---|---|
+| `workflow_run` | host | `workflow_run.rs` |
+| `workflow_list` | host | `workflow_list.rs` |
+| `workflow_save` | host | `workflow_save.rs` |
+| `workflow_run_account` | host | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session space; a run in another space reads as absent. |
+
+### Pages and delivery
+
+| Tool | Execution | Source |
+|---|---|---|
+| `page_read` | host | `page.rs` |
+| `page_write` | host | `page.rs` |
+| `run_event_post` | host | `run_event.rs` |
+
+### Scheduling
+
+| Tool | Execution | Source |
+|---|---|---|
+| `schedule` | host | `schedule.rs` |
+| `wake_me_later` | host | `schedule.rs` |
+
+### Session and memory
+
+| Tool | Execution | Source |
+|---|---|---|
+| `session_values` | device | `session_variable.rs` |
+| `agent_memory` | device | `agent_memory.rs` |
+| `memory` | host | `memory.rs` |
+| `observe_context` | device | `tool_result_read.rs` |
+| `task_definition` | device | `task_definition.rs` |
+
+### External
+
+| Tool | Execution | Source |
+|---|---|---|
+| `url_fetch` | device | `url_fetch.rs` |
+| `web_search` | device | `web_search.rs` |
+
+Plugin tools (`plugin.rs`) are dynamically registered from operator
+configuration; their names come from the plugin manifest.
