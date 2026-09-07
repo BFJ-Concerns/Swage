@@ -1170,12 +1170,13 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         answer: WorkflowRunHoldAnswer,
     ) -> Result<bool, StorageError>;
-    /// Record an answer refused for falling outside the accepted set. The
-    /// hold itself is untouched and keeps waiting.
+    /// Record an answer refused for falling outside the accepted set, but
+    /// only while the hold is open and its run can still resume. `None`
+    /// means the hold or run settled first. The hold itself is untouched.
     async fn create_workflow_run_hold_rejection(
         &self,
         rejection: NewWorkflowRunHoldRejection,
-    ) -> Result<WorkflowRunHoldRejectionRecord, StorageError>;
+    ) -> Result<Option<WorkflowRunHoldRejectionRecord>, StorageError>;
     /// A hold's refused answers, oldest first.
     async fn list_workflow_run_hold_rejections(
         &self,
@@ -2729,7 +2730,7 @@ mod tests {
         async fn create_workflow_run_hold_rejection(
             &self,
             _: NewWorkflowRunHoldRejection,
-        ) -> Result<WorkflowRunHoldRejectionRecord, StorageError> {
+        ) -> Result<Option<WorkflowRunHoldRejectionRecord>, StorageError> {
             unimplemented!()
         }
         async fn list_workflow_run_hold_rejections(

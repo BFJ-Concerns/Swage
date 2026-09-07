@@ -4909,13 +4909,19 @@ pub(crate) async fn answer_run_hold(
             hold.verdict.as_deref().unwrap_or("a verdict")
         )));
     }
+    if hold.state != "open" {
+        return Err(ApiError::conflict(format!(
+            "hold {} is already closed",
+            hold.id
+        )));
+    }
     let verdict = request.verdict.trim().to_owned();
     if !hold.verdicts.iter().any(|accepted| accepted == &verdict) {
         let feedback = format!(
             "'{verdict}' is not one of this hold's accepted verdicts ({}). The hold is still open; answer it with one of them.",
             hold.verdicts.join(", ")
         );
-        state
+        let recorded = state
             .storage
             .create_workflow_run_hold_rejection(NewWorkflowRunHoldRejection {
                 hold_id: hold.id,
@@ -4928,6 +4934,12 @@ pub(crate) async fn answer_run_hold(
             })
             .await
             .map_err(internal)?;
+        if recorded.is_none() {
+            return Err(ApiError::conflict(format!(
+                "hold {} is no longer open on a resumable run",
+                hold.id
+            )));
+        }
         return Err(ApiError::validation(feedback));
     }
     let settled = state
@@ -13830,6 +13842,96 @@ mod tests {
         assert_eq!(
             completed.final_output,
             Some(serde_json::json!({"verdict": "hold", "by": "decider"}))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: HOLD_SCRIPT.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        let hold = storage
+            .list_workflow_run_holds(started.id)
+            .await
+            .expect("holds")
+            .into_iter()
+            .next()
+            .expect("open hold");
+
+        storage
+            .update_workflow_run_state(started.id, "running", None, None, None)
+            .await
+            .expect("enter terminalisation window");
+        assert_eq!(
+            storage
+                .close_open_workflow_run_holds(started.id)
+                .await
+                .expect("close hold"),
+            1
+        );
+        assert!(
+            storage
+                .create_workflow_run_hold_rejection(NewWorkflowRunHoldRejection {
+                    hold_id: hold.id,
+                    attempted_verdict: "maybe".into(),
+                    feedback: "not an accepted verdict".into(),
+                    source_surface: "operator".into(),
+                    source_agent_id: None,
+                    source_session_id: None,
+                    source_turn_id: None,
+                })
+                .await
+                .expect("attempt atomic rejection insert")
+                .is_none(),
+            "the storage write must recheck the hold and run state"
+        );
+
+        let error = answer_run_hold(
+            &state,
+            AnswerWorkflowRunHoldRequest {
+                hold_id: hold.id,
+                verdict: "maybe".into(),
+            },
+            None,
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await
+        .expect_err("a closed hold cannot record a rejected answer");
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::Conflict
+        );
+        assert!(
+            storage
+                .list_workflow_run_hold_rejections(hold.id)
+                .await
+                .expect("rejections")
+                .is_empty(),
+            "closed holds cannot gain rejection history"
         );
     }
 

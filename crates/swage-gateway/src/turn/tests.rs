@@ -1384,7 +1384,7 @@ impl swage_storage::WorkflowStore for MockStorage {
     async fn create_workflow_run_hold_rejection(
         &self,
         _: swage_storage::NewWorkflowRunHoldRejection,
-    ) -> Result<swage_storage::WorkflowRunHoldRejectionRecord, StorageError> {
+    ) -> Result<Option<swage_storage::WorkflowRunHoldRejectionRecord>, StorageError> {
         unimplemented!()
     }
     async fn list_workflow_run_hold_rejections(
