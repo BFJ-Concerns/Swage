@@ -419,7 +419,7 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
     state
         .storage
         .create_delivery_record(NewDeliveryRecord {
-            session_id,
+            session_id: Some(session_id),
             run_id: None,
             turn_id: None,
             target: serde_json::to_value(DeliveryTarget::Channel {

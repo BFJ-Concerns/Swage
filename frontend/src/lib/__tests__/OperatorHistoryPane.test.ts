@@ -87,6 +87,7 @@ describe("OperatorHistoryPane", () => {
       compaction_applied: [],
       warnings: [],
       errors: [],
+      declared_omissions: [],
       effective_tool_permissions: undefined,
       provider_visible: { requests: [{ api_key: secretValue }] },
       duration: { secs: 0, nanos: 1 },
