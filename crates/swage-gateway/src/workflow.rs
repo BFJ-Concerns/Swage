@@ -13855,6 +13855,7 @@ mod tests {
         let Json(detail) = get_run(State(state.clone()), Path(started.id))
             .await
             .expect("run detail");
+        assert!(matches!(detail.run.state, WorkflowRunState::Cancelled));
         let hold = &detail.holds[0];
         assert!(
             matches!(hold.state, WorkflowRunHoldState::Closed),
@@ -13862,6 +13863,14 @@ mod tests {
         );
         assert!(hold.verdict.is_none());
         assert_eq!(detail.hold_metrics.holds_open, 0);
+        assert!(
+            storage
+                .list_open_workflow_run_holds(space.id)
+                .await
+                .expect("list actionable holds")
+                .is_empty(),
+            "cancelled runs leave no decision in the answering queue"
+        );
 
         let (_session, _turn_id, base, ws_tx) =
             hold_answering_context(&storage, &state, space.id, "decider").await;
