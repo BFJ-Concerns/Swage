@@ -434,37 +434,40 @@ connection.
 
 ## Gateway tools
 
-The gateway ships a set of built-in tools that agents call during turns. Each
-tool runs in one of two places: on a **device** (the local or remote execution
-host where the session targets), or on the **gateway host** itself for tools
-that need live gateway state.
+The gateway ships a set of built-in tools that agents call during turns. Most
+tools execute directly in the gateway process, bypassing the bubblewrap sandbox
+(`requires_device_execution: true` in the `Tool` trait). Two exceptions —
+`shell` and `memory` — are sandbox-eligible and run through the sandbox when
+one is available.
 
 **Filesystem and shell** — `file_read`, `file_write`, `file_edit`, `file_list`,
-`file_search`, `shell`, and `python_execute` run on the device.
+`file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
+two sandbox-eligible tools.
 
 **Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
-`browser_type`, `browser_select`, and `browser_scroll` run on the device.
+`browser_type`, `browser_select`, and `browser_scroll`.
 
 **Knowledge base** — `knowledge_search`, `knowledge_record`, `knowledge_curate`,
-`knowledge_cite`, `knowledge_orient`, and `knowledge_curate_orientation` run on
-the gateway host.
+`knowledge_cite`, `knowledge_orient`, and `knowledge_curate_orientation`.
 
 **Workflow** — `workflow_run` (start a workflow), `workflow_list` (list saved
 scripts), `workflow_save` (save a script), and `workflow_run_account` (read a
 run's terminal account — see
-[Workflow engine — Terminal account](workflow-engine.md#terminal-account)) run on
-the gateway host. `workflow_run_account` is scoped to the caller's session
-space: a run in another space reads as absent rather than forbidden.
+[Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
+`workflow_run_account` is scoped to the caller's session space: a run in
+another space reads as absent rather than forbidden.
 
-**Pages and delivery** — `page_read`, `page_write`, and `run_event_post` run on
-the gateway host.
+**Pages and delivery** — `page_read`, `page_write`, and `run_event_post`.
 
-**Scheduling** — `schedule` and `wake_me_later` run on the gateway host.
+**Scheduling** — `schedule` and `wake_me_later`.
 
 **Session and memory** — `session_values`, `agent_memory`, `observe_context`,
-and `task_definition` run on the device; `memory` runs on the gateway host.
+`task_definition`, and `memory`. Of these, `memory` is one of the two
+sandbox-eligible tools.
 
-**External** — `url_fetch` and `web_search` run on the device.
+**Delegation** — `delegate` dispatches a child turn to a named agent definition.
+
+**External** — `url_fetch` and `web_search`.
 
 Operators can register additional tools through plugins; plugin tool names come
 from the plugin manifest rather than the gateway's built-in set.
