@@ -7867,6 +7867,10 @@ mod tests {
         release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
     }
 
+    struct EvidenceThenPendingProvider {
+        pending: Arc<Notify>,
+    }
+
     impl ParkedFirstDeltaProvider {
         fn new() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (parked_tx, parked_rx) = oneshot::channel();
@@ -7878,6 +7882,46 @@ mod tests {
                 },
                 parked_rx,
                 release_tx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for EvidenceThenPendingProvider {
+        fn model_id(&self) -> &str {
+            "evidence-then-pending"
+        }
+
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let pending = Arc::clone(&self.pending);
+            Box::pin(
+                futures::stream::once(async {
+                    swage_core::StreamChunk::Delta {
+                        content: "evidence".into(),
+                    }
+                })
+                .chain(futures::stream::once(async move {
+                    pending.notify_one();
+                    std::future::pending().await
+                })),
             )
         }
     }
@@ -17875,7 +17919,203 @@ mod tests {
                 .iter()
                 .all(|stamp| stamp.first_evidence_at.is_some())
         );
+        assert!(
+            state.active_workflow_workers.lock().await.is_empty(),
+            "settled success evicts every live overlay"
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("settled journal");
+        for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
+            assert!(
+                stored_worker_liveness(&storage, entry.id)
+                    .await
+                    .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+                "settled success stores its evidence stamps independently of the live overlay"
+            );
+        }
         server.abort();
+    }
+
+    async fn stored_worker_liveness(
+        storage: &SqliteStorage,
+        entry_id: Uuid,
+    ) -> Option<swage_workflow::WorkerLiveness> {
+        let metadata = storage
+            .with_conn(move |connection| {
+                connection.query_row(
+                    "SELECT terminal_metadata_json FROM workflow_journal WHERE id = ?1",
+                    [entry_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .await
+            .expect("read durable terminal metadata")?;
+        let metadata: Value = serde_json::from_str(&metadata).expect("terminal metadata JSON");
+        serde_json::from_value(metadata.get("liveness")?.clone())
+            .expect("stored worker liveness shape")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_worker_persists_liveness_after_live_overlay_is_evicted() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ScriptedRecordingProvider {
+                outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
+                    swage_core::StreamChunk::Delta {
+                        content: "evidence".into(),
+                    },
+                    swage_core::StreamChunk::Error {
+                        message: "provider failed".into(),
+                    },
+                ]])),
+                requests: std::sync::Mutex::new(vec![]),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('failing worker', { maxAttempts: 1 });".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start failing run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("failed journal");
+        let failed = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed.status, "failed");
+        assert!(
+            stored_worker_liveness(&storage, failed.id)
+                .await
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "failed call stores its evidence stamps"
+        );
+        assert!(
+            !state
+                .active_workflow_workers
+                .lock()
+                .await
+                .contains_key(&failed.id),
+            "failed call evicts its live overlay"
+        );
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("failed run detail");
+        assert!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == failed.id)
+                .and_then(|entry| entry.agent_call.as_ref())
+                .and_then(|call| call.liveness.as_ref())
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "failed run detail projects durable evidence stamps"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_worker_persists_liveness_after_live_overlay_is_evicted() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let pending = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(EvidenceThenPendingProvider {
+                pending: Arc::clone(&pending),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('cancelled worker');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start cancellable run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), pending.notified())
+            .await
+            .expect("worker reaches pending stream");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if state
+                    .active_workflow_workers
+                    .lock()
+                    .await
+                    .values()
+                    .any(|stamp| stamp.first_evidence_at.is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker evidence is observed before cancellation");
+        cancel_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("request cancellation");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("cancelled journal");
+        let cancelled = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("cancelled agent call");
+        assert_eq!(cancelled.status, "failed");
+        assert!(
+            stored_worker_liveness(&storage, cancelled.id)
+                .await
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "cancelled call stores its evidence stamps"
+        );
+        assert!(
+            !state
+                .active_workflow_workers
+                .lock()
+                .await
+                .contains_key(&cancelled.id),
+            "cancelled call evicts its live overlay"
+        );
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("cancelled run detail");
+        assert!(
+            detail
+                .journal
+                .iter()
+                .find(|entry| entry.id == cancelled.id)
+                .and_then(|entry| entry.agent_call.as_ref())
+                .and_then(|call| call.liveness.as_ref())
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "cancelled run detail projects durable evidence stamps"
+        );
     }
 
     async fn wait_for_terminal(state: &AppState, id: Uuid) {
