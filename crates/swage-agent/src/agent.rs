@@ -27,7 +27,7 @@ use crate::approval::{ApprovalChannelRegistrar, PreToolUseOutcome};
 use crate::config::AgentConfig;
 use crate::context::{AgentToolContext, TurnExecutionContext};
 use crate::error::AgentError;
-use crate::event::{AgentEvent, SchemaValidationError};
+use crate::event::{AgentEvent, ProviderRoundOutcome, SchemaValidationError};
 use crate::extraction::extract_json_values;
 use crate::message::{OutboundMessage, TurnRequest};
 
@@ -678,7 +678,7 @@ impl Agent {
                     self.fail_turn_and_idle(turn.id, thread_id).await;
                     let _ = event_tx.send(AgentEvent::Error {
                         message: error.to_string(),
-                        provider_failure: matches!(&error, AgentError::ProviderFailed(_)),
+                        provider_failure: false,
                     });
                     return Err(error);
                 }
@@ -718,6 +718,10 @@ impl Agent {
         let mut accumulated = String::new();
         let mut total_input_tokens: u32 = 0;
         let mut total_output_tokens: u32 = 0;
+        // Whether any provider round reported usage at all. A provider that
+        // reports none leaves the turn's token columns unset rather than at
+        // zero, so a reader can tell "spent nothing" from "cannot say".
+        let mut usage_reported = false;
         let mut total_tool_calls: u32 = 0;
         let mut tool_position: i32 = 0;
         let mut round = 0usize;
@@ -752,6 +756,7 @@ impl Agent {
                     &accumulated,
                     &mut total_input_tokens,
                     &mut total_output_tokens,
+                    &mut usage_reported,
                     true,
                     round,
                 )
@@ -1092,6 +1097,7 @@ impl Agent {
                         &accumulated,
                         &mut total_input_tokens,
                         &mut total_output_tokens,
+                        &mut usage_reported,
                         false,
                         round + attempt as usize,
                     )
@@ -1110,7 +1116,7 @@ impl Agent {
                 self.fail_turn_and_idle(turn.id, thread_id).await;
                 let _ = event_tx.send(AgentEvent::Error {
                     message: e.to_string(),
-                    provider_failure: matches!(&e, AgentError::ProviderFailed(_)),
+                    provider_failure: false,
                 });
                 return Err(e);
             }
@@ -1133,13 +1139,15 @@ impl Agent {
 
         // 11. Update turn: response text, token counts, state → Completed.
         self.storage.update_response(turn.id, &safe_content).await?;
-        self.storage
-            .update_tokens(
-                turn.id,
-                total_input_tokens.into(),
-                total_output_tokens.into(),
-            )
-            .await?;
+        if usage_reported {
+            self.storage
+                .update_tokens(
+                    turn.id,
+                    total_input_tokens.into(),
+                    total_output_tokens.into(),
+                )
+                .await?;
+        }
         self.storage
             .update_turn_state(turn.id, TurnState::Completed)
             .await?;
@@ -1179,6 +1187,7 @@ impl Agent {
         accumulated_prefix: &str,
         total_input_tokens: &mut u32,
         total_output_tokens: &mut u32,
+        usage_reported: &mut bool,
         collect_tool_calls: bool,
         round: usize,
     ) -> Result<StreamRoundOutcome, AgentError> {
@@ -1207,6 +1216,11 @@ impl Agent {
                     ).await;
                     let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
+                    let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                        turn_id: execution.turn_id,
+                        round,
+                        outcome: ProviderRoundOutcome::Interrupted,
+                    });
                     return Err(AgentError::Cancelled);
                 }
                 chunk = stream.next() => {
@@ -1226,6 +1240,7 @@ impl Agent {
                             reasoning.push(ToolReplayReasoning { content, details });
                         }
                         Some(StreamChunk::Usage(usage)) => {
+                            *usage_reported = true;
                             *total_input_tokens += usage.input_tokens;
                             *total_output_tokens += usage.output_tokens;
                         }
@@ -1256,6 +1271,11 @@ impl Agent {
                         }
                         Some(StreamChunk::Error { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
+                            let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                                turn_id: execution.turn_id,
+                                round,
+                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                            });
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: message.clone(),
                                 provider_failure: true,
@@ -1266,6 +1286,11 @@ impl Agent {
                         }
                         Some(StreamChunk::ProviderAnomaly { message }) => {
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
+                            let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                                turn_id: execution.turn_id,
+                                round,
+                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                            });
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: message.clone(),
                                 provider_failure: true,
@@ -1282,6 +1307,14 @@ impl Agent {
                 }
             }
         }
+
+        let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+            turn_id: execution.turn_id,
+            round,
+            outcome: ProviderRoundOutcome::Responded {
+                tool_calls: tool_calls.len() as u32,
+            },
+        });
 
         Ok(StreamRoundOutcome {
             text,
