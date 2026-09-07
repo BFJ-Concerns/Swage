@@ -30,6 +30,7 @@ use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
     model::{NewThread, NewTurn, TurnState},
+    store::{ProviderRoundStore, ThreadStore, TurnStore},
 };
 
 use crate::support::start_live_server;
@@ -384,7 +385,7 @@ async fn stream_cancellation_preserves_partial_response() {
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let (router, addr, _) = start_test_server(provider).await;
+    let (router, addr, storage) = start_test_server(provider).await;
 
     // Create conversation + open WebSocket.
     let (_, body) = http(&router, "POST", "/api/conversations").await;
@@ -433,6 +434,32 @@ async fn stream_cancellation_preserves_partial_response() {
     // The turn should be interrupted.
     let has_interrupted = messages.iter().any(|m| m["turn_state"] == "interrupted");
     assert!(has_interrupted, "turn should be marked interrupted");
+
+    let session_id = conv_id.parse().expect("conversation id");
+    let thread = storage
+        .list_by_session(session_id)
+        .await
+        .expect("conversation threads")
+        .into_iter()
+        .next()
+        .expect("conversation thread");
+    let interrupted_turn = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("conversation turns")
+        .into_iter()
+        .find(|turn| turn.state == TurnState::Interrupted)
+        .expect("interrupted turn");
+    let rounds = storage
+        .list_provider_rounds_by_turn(interrupted_turn.id)
+        .await
+        .expect("provider rounds");
+    assert_eq!(rounds.len(), 1, "the cancelled request opened one round");
+    assert!(
+        rounds[0].completed_at.is_some(),
+        "a cancelled provider request must no longer be outstanding"
+    );
+    assert_eq!(rounds[0].outcome, json!({"outcome": "interrupted"}));
 
     // Partial content should be saved.
     if messages.len() > 1 {
