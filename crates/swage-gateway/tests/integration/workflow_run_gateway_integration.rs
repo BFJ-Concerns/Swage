@@ -103,31 +103,74 @@ impl LlmProvider for ResearchSweepProvider {
             .collect::<Vec<_>>()
             .join("\n");
         self.stage_prompts.lock().unwrap().push(prompt.clone());
+        let tool_result = |call_id: &str| {
+            request
+                .messages
+                .iter()
+                .find_map(|message| {
+                    if message.tool_call_id() == Some(call_id) {
+                        return Some(message.text_content());
+                    }
+                    message.tool_replay().and_then(|parts| {
+                        parts.iter().find_map(|part| match part {
+                            swage_core::ToolReplayPart::ToolResult {
+                                call_id: result_call_id,
+                                content,
+                                ..
+                            } if result_call_id == call_id => Some(content.clone()),
+                            _ => None,
+                        })
+                    })
+                })
+                .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        };
+        let text_output = |content: String| {
+            vec![
+                StreamChunk::Delta { content },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]
+        };
         let landed_id = Uuid::from_u128(1);
         let output = if prompt.contains("You are scoping a research sweep.") {
-            r#"{"sources":[{"url":"https://example.test/landed","why":"primary"},{"url":"https://example.test/failed","why":"comparison"}]}"#.to_owned()
+            text_output(r#"{"sources":[{"url":"https://example.test/landed","why":"primary"},{"url":"https://example.test/failed","why":"comparison"}]}"#.to_owned())
         } else if prompt.contains("Source: https://example.test/landed") {
-            format!(
-                r#"{{"url":"https://example.test/landed","recorded":true,"observation_id":"{landed_id}","note":"recorded"}}"#
-            )
+            match tool_result("record-landed") {
+                Some(result) => text_output(format!(
+                    r#"{{"url":"https://example.test/landed","recorded":true,"observation_id":"{}","note":"recorded"}}"#,
+                    result["observation_id"].as_str().unwrap()
+                )),
+                None => vec![
+                    StreamChunk::ToolUse {
+                        call_id: "record-landed".into(),
+                        name: "knowledge_record".into(),
+                        arguments: json!({
+                            "url": "https://example.test/landed",
+                            "content": "The landed source supports the purpose.",
+                            "extracted_text": "The landed source supports the purpose.",
+                        }),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+            }
         } else if prompt.contains("Source: https://example.test/failed") {
-            r#"{"url":"https://example.test/failed","recorded":false,"observation_id":null,"note":"unreachable"}"#.to_owned()
+            text_output(r#"{"url":"https://example.test/failed","recorded":false,"observation_id":null,"note":"unreachable"}"#.to_owned())
         } else if prompt.contains("Organise them into the space's knowledge base.") {
-            r#"{"orientation_cards":0,"assertions":0,"note":"Nothing further to organise."}"#
-                .to_owned()
-        } else if prompt.contains("Deliver research findings.") {
-            format!(
-                r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{landed_id}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#
+            text_output(
+                r#"{"orientation_cards":0,"assertions":0,"note":"Nothing further to organise."}"#
+                    .to_owned(),
             )
+        } else if prompt.contains("Deliver research findings.") {
+            text_output(format!(
+                r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{landed_id}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#
+            ))
         } else {
             panic!("unexpected research-sweep stage: {prompt}");
         };
-        Box::pin(futures::stream::iter([
-            StreamChunk::Delta { content: output },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ]))
+        Box::pin(futures::stream::iter(output))
     }
 }
 
@@ -244,7 +287,10 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
         Arc::clone(&storage) as Arc<dyn SpaceStore>,
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
+            swage_gateway::tool::knowledge::KnowledgeRecordTool,
+        )
+            as Arc<dyn swage_gateway::tool::Tool>]),
         None,
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

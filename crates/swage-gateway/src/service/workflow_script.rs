@@ -47,6 +47,7 @@ pub struct WorkflowScriptDraft {
     pub description: String,
     pub source: String,
     pub delivery_grant: Option<serde_json::Value>,
+    pub captured_sources_grant: bool,
     /// The conversation authoring the script, when a model is authoring it.
     pub authoring_session_id: Option<Uuid>,
 }
@@ -57,6 +58,7 @@ pub struct WorkflowScriptEdit {
     pub description: Option<String>,
     pub source: Option<String>,
     pub delivery_grant: Option<serde_json::Value>,
+    pub captured_sources_grant: Option<bool>,
     /// Set when a conversation is writing this version. The row records it,
     /// so a script a model rewrote is a model's script from then on however
     /// it began; it is never cleared here, only by an operator re-creating
@@ -92,6 +94,7 @@ pub async fn create_workflow_script(
             description: draft.description,
             source: draft.source,
             delivery_grant: draft.delivery_grant,
+            captured_sources_grant: draft.captured_sources_grant,
             authoring_session_id: draft.authoring_session_id,
         })
         .await
@@ -169,7 +172,10 @@ pub async fn update_workflow_script(
     let prior_version = head_version(state, id).await?;
     let prior = Some(snapshot(&record, prior_version));
 
-    if description.is_some() || edit.delivery_grant.is_some() || edit.authoring_session_id.is_some()
+    if description.is_some()
+        || edit.delivery_grant.is_some()
+        || edit.captured_sources_grant.is_some()
+        || edit.authoring_session_id.is_some()
     {
         state
             .storage
@@ -177,6 +183,7 @@ pub async fn update_workflow_script(
                 id,
                 description,
                 edit.delivery_grant,
+                edit.captured_sources_grant,
                 edit.authoring_session_id,
             )
             .await
@@ -250,6 +257,7 @@ pub async fn save_workflow_script(
                     description: Some(draft.description),
                     source: Some(draft.source),
                     delivery_grant: draft.delivery_grant,
+                    captured_sources_grant: Some(draft.captured_sources_grant),
                     authoring_session_id: draft.authoring_session_id,
                 },
                 source_surface,
@@ -349,6 +357,7 @@ fn snapshot(record: &WorkflowScriptRecord, head_version: u32) -> serde_json::Val
         "description": record.description,
         "head_version": head_version,
         "delivery_grant": &record.delivery_grant,
+        "captured_sources_grant": record.captured_sources_grant,
         "authoring_session_id": record.authoring_session_id,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
@@ -371,6 +380,7 @@ mod tests {
             description: "A saved workflow.".into(),
             source: SOURCE.into(),
             delivery_grant: None,
+            captured_sources_grant: Default::default(),
             authoring_session_id: None,
         }
     }
@@ -448,6 +458,7 @@ mod tests {
                 change.script_id,
                 None,
                 Some(serde_json::json!({"targets": ["webhook"]})),
+                None,
                 None,
             )
             .await
@@ -682,6 +693,7 @@ mod tests {
                 operator.script_id,
                 None,
                 Some(serde_json::json!({"targets": ["webhook"]})),
+                None,
                 None,
             )
             .await

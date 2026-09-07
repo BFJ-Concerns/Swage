@@ -268,7 +268,9 @@ pub struct ChannelLink {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeliveryRecord {
     pub id: Uuid,
-    pub session_id: Uuid,
+    /// The session that produced a delivery. Absent when a schedule never
+    /// reached a session and records why it made no delivery.
+    pub session_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
     pub target: serde_json::Value,
@@ -762,8 +764,8 @@ pub struct SourceObservation {
     pub body_sha256: String,
     pub body_bytes: u64,
     pub media_type: String,
-    /// Retry-safe capture identity: when set, a later capture of the same
-    /// origin under the same scope is this observation, not a new row.
+    /// Scope that created this observation, when it was first recorded.
+    /// Every scoped capture is represented separately by `SourceCapture`.
     pub capture_scope: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -782,11 +784,20 @@ pub struct NewSourceObservation {
     /// Re-recording the same origin under the same scope deduplicates to
     /// the first capture, so retried work cannot fork the evidence. Body
     /// identity still wins: a capture whose bytes match existing evidence
-    /// returns that observation whatever its scope, so a scope binds only
-    /// rows it created — a retry whose first attempt landed on
-    /// body-identical foreign evidence records its changed bytes as a
-    /// distinct observation.
+    /// returns that observation and records the current scope and origin as
+    /// a separate capture act.
     pub capture_scope: Option<String>,
+}
+
+/// One scoped act of capturing source material, even when its body resolves
+/// to an observation that already exists in the knowledge base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCapture {
+    pub observation_id: Uuid,
+    pub space_id: Uuid,
+    pub origin: ObservationOrigin,
+    pub capture_scope: String,
+    pub captured_at: DateTime<Utc>,
 }
 
 /// One versioned text extraction of an observation's raw body.
@@ -1836,7 +1847,7 @@ pub struct NewChannelLink {
 /// Input for recording a durable outbound delivery.
 #[derive(Debug, Clone)]
 pub struct NewDeliveryRecord {
-    pub session_id: Uuid,
+    pub session_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
     pub target: serde_json::Value,
@@ -2024,6 +2035,7 @@ pub struct WorkflowScriptRecord {
     pub name: String,
     pub description: String,
     pub delivery_grant: Option<serde_json::Value>,
+    pub captured_sources_grant: bool,
     /// The conversation that authored this script, when a model authored it
     /// rather than an operator. Its presence is the durable mark that the
     /// script's authority is the authoring session's and no more.
@@ -2056,6 +2068,7 @@ pub struct NewWorkflowScript {
     pub description: String,
     pub source: String,
     pub delivery_grant: Option<serde_json::Value>,
+    pub captured_sources_grant: bool,
     /// Set when a model authored the script; see
     /// [`WorkflowScriptRecord::effective_delivery_grant`].
     pub authoring_session_id: Option<Uuid>,

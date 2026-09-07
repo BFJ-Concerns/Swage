@@ -95,6 +95,14 @@
             },
             "type": "array"
           },
+          "declared_omissions": {
+            "default": [],
+            "description": "Baseline elements the assembly script renounced by name, with the\nreason it gave. An element absent from the assembled context and\nabsent from this list is a floor breach, not a choice.",
+            "items": {
+              "$ref": "#/components/schemas/DeclaredOmission"
+            },
+            "type": "array"
+          },
           "duration": {
             "$ref": "#/components/schemas/Duration"
           },
@@ -1154,6 +1162,13 @@
       },
       "CreateWorkflowScriptRequest": {
         "properties": {
+          "captured_sources_grant": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "delivery_grant": {
             "default": null,
             "description": "Server-side delivery targets granted to this script. Responses expose\nonly whether a grant exists, never its URLs or secret references."
@@ -1214,6 +1229,24 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      },
+      "DeclaredOmission": {
+        "description": "One baseline element the assembly deliberately left out of the context.",
+        "properties": {
+          "element": {
+            "description": "The omitted element's name, as it appears in the elements projection.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "The reason the assembly gave for leaving it out.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "element",
+          "reason"
         ],
         "type": "object"
       },
@@ -1297,6 +1330,23 @@
             },
             "required": [
               "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "page",
+                "type": "string"
+              },
+              "page_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "page_id"
             ],
             "type": "object"
           },
@@ -5033,6 +5083,12 @@
       },
       "UpdateWorkflowScriptRequest": {
         "properties": {
+          "captured_sources_grant": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "delivery_grant": {
             "default": null
           },
@@ -5517,6 +5573,11 @@
             "type": "string"
           },
           {
+            "const": "captured_sources",
+            "description": "A read-only view of source observations captured by this workflow run.",
+            "type": "string"
+          },
+          {
             "const": "wind_down",
             "description": "The working allowance was exhausted. The triggering agent call was\nnot started; replay returns the same wind-down signal at this point.",
             "type": "string"
@@ -5911,6 +5972,20 @@
             "required": [
               "kind",
               "spent"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "captured_sources",
+                "type": "string"
+              },
+              "sources": true
+            },
+            "required": [
+              "kind",
+              "sources"
             ],
             "type": "object"
           },
@@ -6490,6 +6565,10 @@
           "description": {
             "type": "string"
           },
+          "has_captured_sources_grant": {
+            "description": "Whether this script may read the observations captured by this run.",
+            "type": "boolean"
+          },
           "has_delivery_grant": {
             "type": "boolean"
           },
@@ -6521,6 +6600,7 @@
           "description",
           "head_version",
           "has_delivery_grant",
+          "has_captured_sources_grant",
           "argument_contract",
           "created_at",
           "updated_at"

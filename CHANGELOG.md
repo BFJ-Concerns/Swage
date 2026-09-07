@@ -11,6 +11,8 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail, on the run's own view at `/workflow-runs/{id}`, and through the new `workflow_run_account` tool a lead agent can read; the worker directories such an account names are kept, surviving the gateway's shutdown and the next one's startup sweep.
+- Named context assemblies now keep the baseline a session starts with: an element the built-in assembly would have carried is restored when a script leaves it out, unless the script declares the omission and its reason, which the turn's context inspector shows.
+- Workflow fan-in calls can opt into an identified result envelope, preserving each leg's label, phase, successful output, or failure account through parallel and pipeline collapse; malformed identity options fail before dispatch rather than being reported as worker failures.
 - Schema-constrained workers now accept JSON values embedded in prose or Markdown fences and use the final value that fulfils their schema.
 - Workflow run details now report each isolated worker worktree's base and tip commits plus whether it changed or was removed.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
@@ -32,11 +34,15 @@ All notable changes to Swage are documented in this file.
 - The research sweep ships inside a research skill that carries its workflow; its researcher, organiser, and synthesist roles are dispatches inside that workflow rather than agent definitions, so a fresh installation lists only the shipped default agent and no compiled-in workflow catalogue. The workflow listing names each carried workflow's skill in place of the former built-in flag.
 - Knowledge captures made by workflow workers now carry their journalled call's identity, so a sweep interrupted mid-gather resumes without duplicating any source's observation.
 - Research sweeps now author evidence-backed orientation cards during the organising pass and report claims the synthesist withheld for lack of supporting evidence.
+- Research sweeps now derive gathered sources and failures from the knowledge store through a read-only journalled script query.
 - Asynchronous turn callers can provide optional focus instructions for context-compaction summaries, with the instructions retained in the compaction audit record.
 - Operators can inspect recorded configuration changes, assembly decisions, and variant selections in a read-only history pane.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
+- Schedules and workflows can deliver output to a page in their own space.
+- `LocalStorage` remains the log target, retaining output in the local delivery record.
+- Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
 - Agents can now run newly authored workflow source directly without saving or registering it first.
 - Durable named task definitions bundle instructions, an output contract, a model preference, and narrowing permissions for workflow and delegated child dispatches.
@@ -55,7 +61,7 @@ All notable changes to Swage are documented in this file.
 - Fresh installations now include front-loaded orchestration, research sweep, and segment orchestration workflows as immutable built-ins.
 - Settings now lists the effective agent definitions for the selected space, with read-only source and configuration details for each winner.
 - Settings now lists the selected space's available slash commands and resolved skills, with read-only detail for each item.
-- New conversations can now choose from the effective agent definitions available to their space, including the shipped default.
+- New conversations can now choose from the effective agent definitions available to their space, including the shipped default, whether starting from an existing conversation or an empty space.
 - Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
 
 ### Changed
@@ -74,6 +80,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow call author errors now fail before a worker or child workflow starts, and propagate out of parallel and pipeline rather than being reported as a failed worker slot.
 - New-conversation controls now create and navigate immediately.
 - New-conversation agent pickers now show every available definition by name.
 - Live replies now remain with their conversation while the user changes conversations or opens Operator.
@@ -88,9 +95,10 @@ All notable changes to Swage are documented in this file.
 - Remote-device registration now refuses a Local target consistently, including pairing and recovery imports that have no local producer.
 - Workflow-script updates now retain source-header descriptions, expose their whole delivery grant in configuration history, and return 404 for an absent script.
 - Rejected tool approvals now render as failed calls in the conversation transcript.
+- Immediate tool-approval rejections now settle reliably instead of timing out when they arrive as the prompt is shown.
 - Gateway runtime discovery no longer reads a partially written metadata file during startup.
 - Compaction audit records now count every source message replaced by a successful summary.
-- A native compaction-threshold breach now remains actionable when a later count is unavailable.
+- Compaction preserves a native threshold breach when a later count is unavailable while retaining estimate fallback for providers without native counting.
 - Context compaction now counts tokens with the selected completion model.
 - Tool-schema guidance now describes every `allOf` branch as required together.
 - Workflow metadata headers now accept valid unquoted keys that begin with `$`.

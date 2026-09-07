@@ -12,6 +12,7 @@
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
   import MessageInput from "./MessageInput.svelte";
+  import AgentPicker from "./AgentPicker.svelte";
   import type { DisplayPreferences } from "../display-preferences";
   import type { ConnectionStore } from "../stores/connection";
   import type { ConversationStore } from "../stores/conversations";
@@ -30,7 +31,7 @@
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
     selectedAgentId: string;
     onNavigate?: (path: string) => void;
-    onNewConversation?: () => void;
+    onNewConversation?: (agentId?: string) => void;
   }
 
   let {
@@ -95,7 +96,10 @@
         <option value={session.id}>{session.label}</option>
       {/each}
     </select>
-    <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.()}>+ New</button>
+    {#if activeConversation}
+      <AgentPicker definitions={agentDefinitions} bind:selectedAgentId />
+    {/if}
+    <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.(selectedAgentId || undefined)}>+ New</button>
   </header>
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
   <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />

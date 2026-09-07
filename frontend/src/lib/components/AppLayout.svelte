@@ -43,7 +43,7 @@
     onNavigate?: (path: string) => void;
     onSettingsSaved?: () => void | Promise<void>;
     agentDefinitions?: EffectiveAgentDefinitionResponse[];
-    onNewConversation?: () => void;
+    onNewConversation?: (agentId?: string) => void;
   }
 
   let {
@@ -171,7 +171,7 @@
   </main>
 {:else}
   <main class="conversation">
-    <aside><ConversationList store={conversationStore} {onNewConversation} /></aside>
+    <aside><ConversationList store={conversationStore} onNewConversation={() => onNewConversation?.(selectedAgentId || undefined)} /></aside>
     <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
   </main>
 {/if}

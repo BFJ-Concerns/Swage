@@ -985,6 +985,7 @@ describe("context_assembled events", () => {
     compaction_applied: [],
     warnings: [],
     errors: [],
+    declared_omissions: [],
     duration: { secs: 0, nanos: 0 },
   };
 
