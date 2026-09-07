@@ -35,15 +35,8 @@ pub async fn create_placeholder_turn(
 ) -> Result<Uuid, GatewayError> {
     let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
     let existing_turns = state.storage.list_turns_by_thread(thread.id).await?;
-    if existing_turns.iter().any(|turn| {
-        matches!(
-            turn.state,
-            swage_storage::TurnState::Pending
-                | swage_storage::TurnState::Processing
-                | swage_storage::TurnState::AwaitingApproval
-                | swage_storage::TurnState::Delegating
-        )
-    }) || state.active_turns.lock().await.contains_key(&session_id)
+    if existing_turns.iter().any(|turn| !turn.state.is_terminal())
+        || state.active_turns.lock().await.contains_key(&session_id)
     {
         return Err(GatewayError::TurnInProgress { session_id });
     }

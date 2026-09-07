@@ -171,6 +171,17 @@ fn typescript_bindings_are_regenerated() {
     .expect("read generated create-space binding");
     assert!(create_space.contains("description?: string"));
 
+    for type_name in ["ProviderSettings", "SaveProviderSettings"] {
+        let binding = std::fs::read_to_string(
+            repo_root().join(format!("frontend/src/lib/protocol/{type_name}.ts")),
+        )
+        .expect("read generated provider settings binding");
+        assert!(
+            binding.contains("worker_staleness_threshold_ms?: bigint | null"),
+            "{type_name} must admit the null emitted for an unset threshold: {binding}"
+        );
+    }
+
     assert_defaulted_fields_reach_typescript_as_optional();
 }
 
