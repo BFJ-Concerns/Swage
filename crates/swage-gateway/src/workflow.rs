@@ -6504,6 +6504,11 @@ pub async fn cancel_run(
         }
         state
             .storage
+            .close_open_workflow_run_holds(id)
+            .await
+            .map_err(internal)?;
+        state
+            .storage
             .update_workflow_run_state(id, "cancelled", None, None, None)
             .await
             .map_err(internal)?;
@@ -13818,7 +13823,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancelling_a_run_waiting_on_a_hold_ends_the_wait_and_leaves_the_hold_unanswered() {
+    async fn cancelling_a_run_waiting_on_a_hold_closes_the_unanswered_decision() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let state = AppState::new(
@@ -13852,10 +13857,11 @@ mod tests {
             .expect("run detail");
         let hold = &detail.holds[0];
         assert!(
-            matches!(hold.state, WorkflowRunHoldState::Open),
+            matches!(hold.state, WorkflowRunHoldState::Closed),
             "cancellation ends the wait without inventing a verdict"
         );
         assert!(hold.verdict.is_none());
+        assert_eq!(detail.hold_metrics.holds_open, 0);
 
         let (_session, _turn_id, base, ws_tx) =
             hold_answering_context(&storage, &state, space.id, "decider").await;
