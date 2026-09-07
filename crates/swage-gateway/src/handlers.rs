@@ -1368,18 +1368,10 @@ pub async fn submit_turn(
         .list_turns_by_thread(thread.id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    if existing_turns.iter().any(|turn| {
-        matches!(
-            turn.state,
-            // REST submit creates a durable pending placeholder before the
-            // background worker has a chance to register `active_turns`, so
-            // `Pending` must count as in-flight here to close that race.
-            swage_storage::TurnState::Pending
-                | swage_storage::TurnState::Processing
-                | swage_storage::TurnState::AwaitingApproval
-                | swage_storage::TurnState::Delegating
-        )
-    }) {
+    // REST submit creates a durable pending placeholder before the background
+    // worker has a chance to register `active_turns`, so every non-terminal
+    // persisted state must count as in-flight here to close that race.
+    if existing_turns.iter().any(|turn| !turn.state.is_terminal()) {
         return Err(GatewayError::TurnInProgress {
             session_id: req.conversation_id,
         }
@@ -1713,6 +1705,7 @@ async fn execute_external_delegate_message(
             Some(dispatcher_build.dispatcher),
             session_metadata,
             tokio_util::sync::CancellationToken::new(),
+            None,
             None,
             None,
         )
@@ -2318,6 +2311,7 @@ mod tests {
             ))
             .json(&swage_protocol::client::settings::SaveProviderSettings {
                 protocol: swage_protocol::client::settings::ProviderProtocol::Anthropic,
+                worker_staleness_threshold_ms: None,
                 base_url: None,
                 api_key_secret_ref: None,
                 api_key_env: None,

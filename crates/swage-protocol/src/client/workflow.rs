@@ -312,6 +312,10 @@ pub enum WorkflowJournalEntryKind {
     /// The working allowance was exhausted. The triggering agent call was
     /// not started; replay returns the same wind-down signal at this point.
     WindDown,
+    /// A held worker was opened, closed, or read for staleness. The request
+    /// names which of the three; the result carries the worker's identity and,
+    /// for a staleness read, the recorded idle gap and route threshold.
+    Worker,
 }
 
 /// Runtime-managed isolation requested for a dispatched worker.
@@ -553,6 +557,21 @@ pub enum WorkflowJournalResult {
     },
     WorkerPlacementList {
         paths: Vec<String>,
+    },
+    WorkerOpen {
+        worker_id: Uuid,
+        #[ts(type = "unknown")]
+        creation: Value,
+    },
+    WorkerClose {
+        worker_id: Uuid,
+        closed_by: String,
+    },
+    WorkerStaleness {
+        stale: Option<bool>,
+        idle_ms: u64,
+        threshold_ms: Option<u64>,
+        route: Option<String>,
     },
     Effect {
         delivered: bool,
