@@ -16,7 +16,7 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 14] = [
+    const NAMES: [(&str, &str); 19] = [
         ("AgentCallError", "AgentCallError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
@@ -30,6 +30,11 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         ("WaitTimerError", "WaitTimerError"),
         ("RunEventError", "RunEventError"),
         ("BudgetSnapshotError", "BudgetSnapshotError"),
+        ("InvalidAgentOptionError", "InvalidAgentOptionError"),
+        ("InvalidAgentPromptError", "InvalidAgentPromptError"),
+        ("InvalidAgentSchemaError", "InvalidAgentSchemaError"),
+        ("WorkflowReferenceError", "WorkflowReferenceError"),
+        ("WorkflowArgumentsError", "WorkflowArgumentsError"),
         ("KnowledgeStoreError", "KnowledgeStoreError"),
     ];
     NAMES
@@ -43,6 +48,18 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
             })
         })
         .unwrap_or_else(|| (fallback.to_string(), error.to_string()))
+}
+
+fn is_pre_spawn_author_error(error: &str) -> bool {
+    [
+        "InvalidAgentOptionError",
+        "InvalidAgentPromptError",
+        "InvalidAgentSchemaError",
+        "WorkflowReferenceError",
+        "WorkflowArgumentsError",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
 }
 
 /// Hard limits applied by the host to each fresh JavaScript runtime.
@@ -506,7 +523,7 @@ impl WorkflowEngine {
                                     Ok(request) => request,
                                     Err(error) => return serde_json::json!({
                                         "ok": false,
-                                        "error": {"name": "AgentCallError", "message": error.to_string()}
+                                        "error": {"name": "InvalidAgentOptionError", "message": error.to_string(), "pre_spawn": true}
                                     }).to_string(),
                                 };
                                 let mut request = request;
@@ -584,6 +601,7 @@ impl WorkflowEngine {
                                                 "message": message,
                                                 "host_reference": host_reference,
                                                 "agent_call_admitted": true,
+                                                "pre_spawn": is_pre_spawn_author_error(&error),
                                             }
                                         }).to_string()
                                     }
@@ -652,7 +670,7 @@ impl WorkflowEngine {
                                         Ok(args) => args,
                                         Err(error) => return serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": "WorkflowCompositionError", "message": error.to_string()}
+                                            "error": {"name": "WorkflowArgumentsError", "message": error.to_string(), "pre_spawn": true}
                                         }).to_string(),
                                     };
                                     match host
@@ -664,7 +682,7 @@ impl WorkflowEngine {
                                             let (name, message) = named_host_error(&error, "WorkflowCompositionError");
                                             serde_json::json!({
                                                 "ok": false,
-                                                "error": {"name": name, "message": message}
+                                                "error": {"name": name, "message": message, "pre_spawn": is_pre_spawn_author_error(&error)}
                                             }).to_string()
                                         }
                                     }
@@ -912,6 +930,9 @@ impl WorkflowEngine {
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (response.error.pre_spawn === true) {
+                                    Object.defineProperty(error, "__swagePreSpawnAuthorError", { value: true });
+                                }
                                 throw error;
                             }
                             return response.value;
@@ -930,6 +951,9 @@ impl WorkflowEngine {
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (response.error.pre_spawn === true) {
+                                    Object.defineProperty(error, "__swagePreSpawnAuthorError", { value: true });
+                                }
                                 if (typeof response.error.host_reference === "string") {
                                     Object.defineProperty(error, "__swageAgentCallReference", {
                                         value: response.error.host_reference,
@@ -957,6 +981,24 @@ impl WorkflowEngine {
                         // unset; only *defined* call-site values override, so a
                         // conditional spread leaving `model: undefined` still
                         // falls back to the default it was meant to.
+                        const isJsonValue = (candidate, seen = new Set()) => {
+                            if (candidate === null) return true;
+                            switch (typeof candidate) {
+                                case "boolean":
+                                case "string": return true;
+                                case "number": return Number.isFinite(candidate);
+                                case "object":
+                                    if (seen.has(candidate)) return false;
+                                    seen.add(candidate);
+                                    const valid = Array.isArray(candidate)
+                                        ? candidate.every((value) => isJsonValue(value, seen))
+                                        : Object.getPrototypeOf(candidate) === Object.prototype
+                                            && Object.values(candidate).every((value) => isJsonValue(value, seen));
+                                    seen.delete(candidate);
+                                    return valid;
+                                default: return false;
+                            }
+                        };
                         const mergeDefaults = (options) => {
                             const merged = { ...__defaults };
                             for (const key of Object.keys(options)) {
@@ -982,6 +1024,19 @@ impl WorkflowEngine {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
                                 throw error;
+                            }
+                            // Name-list options are coerced per element below,
+                            // so a non-array would otherwise fail as a bare
+                            // TypeError — unrecognisable to fan-out as the
+                            // author error it is.
+                            for (const key of ["tools", "skills"]) {
+                                const value = merged[key];
+                                if (value === undefined || value === null) continue;
+                                if (!Array.isArray(value)) {
+                                    const error = new Error(`opts.${key} must be an array of names`);
+                                    error.name = "InvalidAgentOptionError";
+                                    throw error;
+                                }
                             }
                             for (const [key, type] of [["phase", "string"], ["identity", "boolean"]]) {
                                 const value = merged[key];
@@ -1034,15 +1089,36 @@ impl WorkflowEngine {
                                 assembly: merged.assembly ?? null,
                             };
                         };
+                        const agentRequestJson = (request, caller) => {
+                            if (!isJsonValue(request)) {
+                                const error = new TypeError(`${caller}() options must be JSON values`);
+                                error.name = "InvalidAgentOptionError";
+                                throw error;
+                            }
+                            return JSON.stringify(request);
+                        };
+                        const validateAgentOptions = (options, caller) => {
+                            if (options === null || typeof options !== "object" || Array.isArray(options)) {
+                                const error = new TypeError(`${caller}() options must be an object`);
+                                error.name = "InvalidAgentOptionError";
+                                throw error;
+                            }
+                        };
                         const validateAgentPrompt = (prompt, caller) => {
                             if (typeof prompt !== "string") {
-                                throw new TypeError(`${caller} prompt must be a string`);
+                                const error = new TypeError(`${caller} prompt must be a string`);
+                                error.name = "InvalidAgentPromptError";
+                                throw error;
                             }
                         };
                         globalThis.agent = async (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agent");
+                            validateAgentOptions(options, "agent");
                             const request = buildAgentRequest(options);
-                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)), request);
+                            const response = unwrapAgentResponse(
+                                await __agent(prompt, agentRequestJson(request, "agent")),
+                                request,
+                            );
                             return response.value;
                         };
                         globalThis.workerPlacements = async () => {
@@ -1064,14 +1140,16 @@ impl WorkflowEngine {
                         // one session.
                         globalThis.agentStart = (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agentStart");
+                            validateAgentOptions(options, "agentStart");
                             const request = buildAgentRequest(options);
+                            const requestJson = agentRequestJson(request, "agentStart");
                             const handle = {
                                 label: request.label,
                                 done: false,
                                 session: request.session ?? null,
                                 workingDirectory: null,
                             };
-                            handle.result = __agent(prompt, JSON.stringify(request))
+                            handle.result = __agent(prompt, requestJson)
                                 .then((json) => {
                                     const response = unwrapAgentResponse(json, request);
                                     handle.done = true;
@@ -1131,8 +1209,17 @@ impl WorkflowEngine {
                             return wake;
                         };
                         if (typeof __workflow !== "undefined") {
+                            const workflowArgumentsJson = (args) => {
+                                const value = args ?? null;
+                                if (!isJsonValue(value)) {
+                                    const error = new TypeError("workflow() arguments must be JSON values");
+                                    error.name = "WorkflowArgumentsError";
+                                    throw error;
+                                }
+                                return JSON.stringify(value);
+                            };
                             globalThis.workflow = async (name, args = null) =>
-                                unwrapHostResponse(await __workflow(String(name), JSON.stringify(args ?? null)));
+                                unwrapHostResponse(await __workflow(String(name), workflowArgumentsJson(args)));
                         }
                         if (typeof __deliver !== "undefined") {
                             globalThis.deliver = async (payload, options = {}) => unwrapHostResponse(
@@ -1162,10 +1249,14 @@ impl WorkflowEngine {
                             })));
                         globalThis.deliverEvents = async (upToSeq) =>
                             unwrapHostResponse(await __deliverEvents(upToSeq));
-                        const isPreSpawnAuthorError = (error) => new Set([
+                        const isPreSpawnAuthorError = (error) => error.__swagePreSpawnAuthorError === true || new Set([
                             "UnknownAgentOptionError",
                             "AgentRequiredError",
                             "InvalidAgentOptionError",
+                            "InvalidAgentPromptError",
+                            "InvalidAgentSchemaError",
+                            "WorkflowReferenceError",
+                            "WorkflowArgumentsError",
                         ]).has(error.name);
                         const isIdentifiedFailure = (value) => identifiedAgentEnvelopes.has(value)
                             && value.failure !== null;
@@ -1908,6 +1999,211 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_invalid_option_values_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { maxAttempts: "many" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("invalid option rejection is catchable");
+
+        let error = serde_json::from_str::<Value>(&output).expect("error output");
+        assert_eq!(error["name"], "InvalidAgentOptionError");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "invalid option must name its decoding failure: {error}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_non_json_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { schema: () => "not JSON" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("non-JSON agent option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "InvalidAgentOptionError",
+                "message": "agent() options must be JSON values",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_start_rejects_non_json_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    const handle = agentStart("inspect the unit", { schema: () => "not JSON" });
+                    await handle.result;
+                    return null;
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("non-JSON agentStart option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "InvalidAgentOptionError",
+                "message": "agentStart() options must be JSON values",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_json_workflow_arguments_fail_before_the_host_call() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await workflow("child", () => "not JSON");
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities {
+                    composition: true,
+                    ..ScriptCapabilities::default()
+                },
+            )
+            .await
+            .expect("non-JSON rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "WorkflowArgumentsError",
+                "message": "workflow() arguments must be JSON values",
+            })
+        );
+        assert!(host.workflow_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_and_pipeline_propagate_pre_spawn_author_errors() {
+        for source in [
+            r#"await parallel([() => agent("bad", { maxAttemps: 1 })]);"#,
+            r#"await pipeline(["one"], () => agent("bad", { maxAttemps: 1 }));"#,
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("author error must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unknown agent() option 'maxAttemps'"),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_name_list_options_propagate_through_fan_out() {
+        for (source, option) in [
+            (
+                r#"await parallel([() => agent("bad", { tools: "web_search" })]);"#,
+                "tools",
+            ),
+            (
+                r#"await pipeline(["one"], () => agent("bad", { skills: "testing" }));"#,
+                "skills",
+            ),
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("author error must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("opts.{option} must be an array of names")),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_object_agent_options_propagate_through_fan_out() {
+        for source in [
+            r#"await parallel([() => agent("bad", null)]);"#,
+            r#"await pipeline(["one"], () => agent("bad", null));"#,
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("non-object options must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent() options must be an object"),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn agent_call_dispatches_with_recognised_options() {
         let host = Arc::new(SurfaceHost::new());
         WorkflowEngine::new(EngineLimits::default())
@@ -2231,7 +2527,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({
-                "name": "TypeError",
+                "name": "InvalidAgentPromptError",
                 "message": "agent prompt must be a string",
             }),
             "host received invalid prompts: {:?}",
@@ -2264,7 +2560,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({
-                "name": "TypeError",
+                "name": "InvalidAgentPromptError",
                 "message": "agentStart prompt must be a string",
             })
         );

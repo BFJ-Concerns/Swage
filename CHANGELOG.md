@@ -79,6 +79,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow call author errors now fail before a worker or child workflow starts, and propagate out of parallel and pipeline rather than being reported as a failed worker slot.
 - New-conversation controls now create and navigate immediately.
 - New-conversation agent pickers now show every available definition by name.
 - Live replies now remain with their conversation while the user changes conversations or opens Operator.
