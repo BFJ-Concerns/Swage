@@ -3284,10 +3284,7 @@ impl TurnStore for MockStorage {
         }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
-            if matches!(
-                state,
-                TurnState::Completed | TurnState::Failed | TurnState::Interrupted
-            ) {
+            if state.is_terminal() {
                 turn.completed_at = Some(chrono::Utc::now());
             }
             turn.state = state;
@@ -3311,16 +3308,7 @@ impl TurnStore for MockStorage {
             .await
             .turns
             .values()
-            .filter(|t| {
-                t.agent_id == agent_id
-                    && matches!(
-                        t.state,
-                        TurnState::Pending
-                            | TurnState::Processing
-                            | TurnState::AwaitingApproval
-                            | TurnState::Delegating
-                    )
-            })
+            .filter(|t| t.agent_id == agent_id && !t.state.is_terminal())
             .cloned()
             .collect())
     }
@@ -8314,6 +8302,9 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
 
 #[tokio::test]
 async fn approval_resumption_keeps_structured_tool_messages() {
+    // Another test's space context element would otherwise reach this turn
+    // through the process-wide swage home, adding a sixth message.
+    let _home = crate::test_support::SwageHomeGuard::isolate();
     let round_1 = vec![
         StreamChunk::ToolUse {
             call_id: "c1".into(),
@@ -8494,6 +8485,7 @@ async fn assert_delegation_fails_before_child_creation(
             "agent-b",
             "This must not start",
             task_definition_id,
+            None,
             None,
             None,
             None,
@@ -9804,6 +9796,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             Some(attachment.to_string_lossy().into_owned()),
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             "read-only-placement-delegate",
             "gateway",
@@ -9860,6 +9853,359 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
     assert!(
         !attachment.join("blocked.txt").exists(),
         "delegated read-only placement must reject the sandboxed write"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before() {
+    let _swage_home = SwageHomeGuard::isolate();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let space = storage
+        .get_or_create_default()
+        .await
+        .expect("default space");
+    let session = storage
+        .create_session(NewSession {
+            space_id: space.id,
+            agent_id: "agent-a".into(),
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .expect("create parent session");
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "agent-a".into(),
+        },
+    )
+    .await
+    .expect("create parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: root_thread.id,
+            agent_id: "agent-a".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate twice to the same child".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("create parent turn");
+    for agent_id in ["agent-a", "agent-b", "agent-c"] {
+        storage
+            .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                id: agent_id.into(),
+                space_id: Some(space.id),
+                display_name: agent_id.into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: Some(serde_json::json!({
+                    "allow": ["delegate"], "deny": [], "bundles": {},
+                    "require_approval": []
+                })),
+                skills: vec![],
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("store agent definition");
+    }
+    let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "the eastern approach is clear".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "as I said, the eastern approach".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "final scouting summary".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>
+        ]),
+        None,
+    );
+    let handler = GatewayDelegationHandler::new(state.clone());
+
+    handler
+        .handle_delegation(
+            "agent-b",
+            "scout the eastern approach",
+            None,
+            Some(
+                serde_json::to_value(vec![ChatMessage::new(
+                    Role::User,
+                    "the bridge is unsafe after dusk",
+                )])
+                .expect("serialise transferred context"),
+            ),
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-first",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("first delegation completes");
+
+    let sessions_after_first = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions");
+    assert_eq!(sessions_after_first.len(), 1);
+    let child_session_id = sessions_after_first[0].id;
+    let child_thread = storage
+        .list_by_session(child_session_id)
+        .await
+        .expect("list child threads")
+        .into_iter()
+        .next()
+        .expect("named child thread");
+    for active_state in [
+        TurnState::Pending,
+        TurnState::Processing,
+        TurnState::Delegating,
+        TurnState::AwaitingApproval,
+    ] {
+        let active_turn = storage
+            .create_turn(NewTurn {
+                thread_id: child_thread.id,
+                agent_id: "agent-b".into(),
+                state: active_state.clone(),
+                user_input: Some("simulated active detached task".into()),
+                parent_turn_id: Some(parent_turn.id),
+            })
+            .await
+            .expect("create active child turn");
+        let concurrent = handler
+            .handle_delegation(
+                "agent-b",
+                "must wait for the active turn",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("scout"),
+                DispatchContextComposition::default(),
+                "delegate-concurrent",
+                "agent-a",
+                parent_turn.id,
+                space.id,
+                CancellationToken::new(),
+                DelegateCompletionMode::Wait,
+            )
+            .await;
+        assert!(
+            concurrent
+                .err()
+                .is_some_and(|error| error.to_string().contains("sequential")),
+            "a named child cannot begin another turn while {active_state}"
+        );
+        assert_eq!(
+            captured_requests.lock().expect("captured requests").len(),
+            1,
+            "the {active_state} continuation is refused before provider dispatch"
+        );
+        storage
+            .update_turn_state(active_turn.id, TurnState::Completed)
+            .await
+            .expect("settle simulated child turn");
+    }
+
+    handler
+        .handle_delegation(
+            "agent-b",
+            "now report what you found",
+            Some("must-not-replace-the-original-task"),
+            None,
+            Some("/must/not/replace/the/original/location".into()),
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            Some(vec!["must-not-replace-original-skills".into()]),
+            Some("scout"),
+            DispatchContextComposition {
+                elements: Some(vec!["must-not-replace-original-elements".into()]),
+                variables: None,
+                assembly: Some("must-not-replace-original-assembly".into()),
+                skills: Some(vec!["must-not-replace-original-composition-skills".into()]),
+            },
+            "delegate-second",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("second delegation completes");
+
+    let sessions_after_second = storage
+        .list_sessions_by_agent_id("agent-b")
+        .await
+        .expect("list child sessions");
+    assert_eq!(
+        sessions_after_second.len(),
+        1,
+        "naming a child already delegated to continues it rather than opening a second"
+    );
+    assert_eq!(sessions_after_second[0].id, child_session_id);
+
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(requests.len(), 2, "two child turns ran");
+    let second = requests[1]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second.contains("scout the eastern approach")
+            && second.contains("the eastern approach is clear")
+            && second.contains("the bridge is unsafe after dusk"),
+        "the returned-to child still sees what it was told and what it answered: {second}"
+    );
+    drop(requests);
+
+    handler
+        .handle_delegation(
+            "agent-b",
+            "give me the final summary",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-third",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("third delegation completes");
+    let requests = captured_requests.lock().expect("captured requests");
+    assert_eq!(requests.len(), 3, "three child turns ran");
+    let third = requests[2]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for retained in [
+        "scout the eastern approach",
+        "the eastern approach is clear",
+        "now report what you found",
+        "as I said, the eastern approach",
+    ] {
+        assert!(
+            third.contains(retained),
+            "the third turn must retain every earlier task and response ({retained:?}): {third}"
+        );
+    }
+    drop(requests);
+
+    let parent = storage
+        .get_session(session.id)
+        .await
+        .expect("session query")
+        .expect("parent session");
+    let registered = parent
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(DELEGATED_CHILDREN_METADATA_KEY))
+        .and_then(|children| children.get("scout"))
+        .expect("the parent records the child it named");
+    assert_eq!(registered["agent_id"], "agent-b");
+    assert_eq!(registered["session_id"], child_session_id.to_string());
+    let child_metadata = sessions_after_second[0]
+        .metadata
+        .as_ref()
+        .expect("named child keeps creation metadata");
+    assert_eq!(
+        child_metadata[super::delegation::DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        child_metadata[super::delegation::DELEGATED_CHILD_SKILLS_METADATA_KEY],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        child_metadata[super::delegation::DELEGATED_CHILD_COMPOSITION_METADATA_KEY],
+        serde_json::json!({})
+    );
+
+    let mismatch = handler
+        .handle_delegation(
+            "agent-c",
+            "take over the scouting",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("scout"),
+            DispatchContextComposition::default(),
+            "delegate-mismatch",
+            "agent-a",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    let mismatch = match mismatch {
+        Err(error) => error,
+        Ok(_) => panic!("a name already used for another agent must be refused"),
+    };
+    assert!(
+        mismatch.to_string().contains("scout"),
+        "the refusal names the child: {mismatch}"
+    );
+    assert_eq!(
+        storage
+            .list_sessions_by_agent_id("agent-c")
+            .await
+            .expect("list agent-c sessions")
+            .len(),
+        0,
+        "a name collision must be refused before creating the replacement child"
+    );
+    assert_eq!(
+        captured_requests.lock().expect("captured requests").len(),
+        3,
+        "a name collision must be refused before provider dispatch"
     );
 }
 
@@ -9955,6 +10301,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         .handle_delegation(
             "agent-b",
             "complete the delegated work",
+            None,
             None,
             None,
             None,
@@ -10107,6 +10454,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
             None,
             None,
             Some(vec!["validated-skill".into()]),
+            None,
             DispatchContextComposition {
                 skills: Some(vec!["composition-skill".into()]),
                 ..Default::default()
@@ -10249,6 +10597,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             "agent-b",
             "Delegate once more",
             Some("delegation-only"),
+            None,
             None,
             None,
             None,
@@ -10432,6 +10781,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             Some(placed_workspace.to_string_lossy().into_owned()),
             None,
             None,
+            None,
             DispatchContextComposition::default(),
             "outer-placed-delegate",
             "gateway",
@@ -10600,6 +10950,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             None,
+            Some("reviewer"),
             DispatchContextComposition::default(),
             "wait-worktree-delegate-call",
             "gateway",
@@ -10623,17 +10974,14 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         storage.list_approvals().await.unwrap().is_empty(),
         "the waiting delegated turn must use its enforced grant without parking"
     );
-    assert!(
-        state
-            .worktree_host
-            .list_owner(wait_owner_id)
-            .await
-            .is_empty(),
-        "successful wait-mode delegation must release its worktree owner"
+    assert_eq!(
+        state.worktree_host.list_owner(wait_owner_id).await.len(),
+        1,
+        "a named wait-mode child keeps its worktree owner for continuation"
     );
     assert!(
-        !wait_worktree.exists(),
-        "successful wait-mode delegation must remove its worktree"
+        wait_worktree.exists(),
+        "a named wait-mode child's worktree remains available for continuation"
     );
 
     storage.require_result_working_directory();
@@ -10646,6 +10994,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             None,
+            Some("builder"),
             DispatchContextComposition::default(),
             "worktree-delegate-call",
             "gateway",
@@ -10735,24 +11084,24 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         "the durable completion reports the real provisioned directory"
     );
     for _ in 0..20 {
-        if state.worktree_host.list_owner(owner_id).await.is_empty() && !worktree.exists() {
+        if !state.worktree_host.list_owner(owner_id).await.is_empty() && worktree.exists() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    assert!(
-        state.worktree_host.list_owner(owner_id).await.is_empty(),
-        "successful detached delegation must release its worktree owner"
+    assert_eq!(
+        state.worktree_host.list_owner(owner_id).await.len(),
+        1,
+        "a named detached child keeps its worktree owner for continuation"
     );
     assert!(
-        !worktree.exists(),
-        "successful detached delegation must remove its worktree"
+        worktree.exists(),
+        "a named detached child's worktree remains available for continuation"
     );
     assert!(
         !repo.join("delegated-marker").exists(),
         "delegate writes must not touch the source repository"
     );
-
     let failed_outcome = GatewayDelegationHandler::new(state.clone())
         .handle_delegation(
             "agent-b",
@@ -10761,6 +11110,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             None,
             Some(repo.to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
             None,
             DispatchContextComposition::default(),
             "failed-worktree-delegate-call",
@@ -10815,6 +11165,9 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         !storage.result_was_created_without_working_directory(),
         "successful and failed detached Results must carry placement in their initial durable payloads"
     );
+    state.worktree_host.shutdown().await;
+    assert!(!wait_worktree.exists());
+    assert!(!worktree.exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -10896,6 +11249,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             Some(delegated_cwd.path().to_string_lossy().into_owned()),
             Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
             None,
+            None,
             DispatchContextComposition::default(),
             "detached-placement-delegate",
             "gateway",
@@ -10932,6 +11286,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             None,
             None,
             Some(denied_cwd.path().to_string_lossy().into_owned()),
+            None,
             None,
             None,
             DispatchContextComposition::default(),
@@ -13294,6 +13649,51 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
         .await
         .expect_err("revoked placement must fail closed");
     assert!(error.to_string().contains("no longer authorised"));
+}
+
+#[tokio::test]
+async fn named_child_placement_rederives_revoked_write_access() {
+    let placement = tempfile::tempdir().expect("placement");
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    let session = state
+        .storage
+        .get_session(session_id)
+        .await
+        .expect("session query")
+        .expect("session");
+    state
+        .session_approval_grants
+        .lock()
+        .expect("location grants")
+        .insert(crate::state::ApprovalGrantKey::location(
+            Some(session_id),
+            None,
+            placement.path().to_string_lossy(),
+            "read",
+        ));
+    let authority_context_id = Uuid::new_v4();
+    let metadata = serde_json::json!({
+        WORKER_PLACEMENT_CWD_METADATA_KEY: placement.path(),
+        WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY: true,
+        WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY: placement.path(),
+        WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY: authority_context_id,
+    });
+
+    let current = super::delegation::reauthorise_named_child_placement(
+        &state,
+        session.space_id,
+        Uuid::new_v4(),
+        session_id,
+        None,
+        None,
+        &metadata,
+    )
+    .await
+    .expect("read authority remains valid")
+    .expect("named child placement");
+
+    assert!(!current.can_write, "the creation-time write bit is revoked");
+    assert_eq!(current.authority_context_id, authority_context_id);
 }
 
 #[tokio::test]
