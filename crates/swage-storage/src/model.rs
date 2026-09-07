@@ -2236,8 +2236,33 @@ pub struct WorkflowJournalRecord {
     pub effect_kind: Option<String>,
     pub idempotency_key: Option<Uuid>,
     pub target_kind: Option<String>,
+    /// What the call was dispatched with, written before any provider work.
+    /// Generic JSON; the contract is enforced where the record is projected.
+    pub dispatch: Option<serde_json::Value>,
+    /// Every attempt the call ran, oldest first, each carrying the options
+    /// its own turn resolved. A call replay re-dispatched appends rather
+    /// than overwrites, so the interrupted attempt stays in the record.
+    pub dispatch_attempts: Option<serde_json::Value>,
+    /// Why the entry's work stopped, when that is not the work's own ending.
+    pub termination: Option<serde_json::Value>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// One provider request round inside a turn.
+///
+/// The row is written when the request goes out and settled when the round
+/// ends, so an outstanding request (no `completed_at`) is distinguishable
+/// from one that came back slowly.
+#[derive(Clone, Debug)]
+pub struct ProviderRoundRecord {
+    pub id: Uuid,
+    pub turn_id: Uuid,
+    pub round: i64,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Generic JSON; the outcome contract lives in swage-protocol.
+    pub outcome: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]

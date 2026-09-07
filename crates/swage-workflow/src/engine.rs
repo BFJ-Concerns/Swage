@@ -1666,6 +1666,7 @@ mod tests {
 
     use super::*;
     use crate::{AgentCallResult, EffectReceipt};
+    use swage_protocol::client::workflow::WorkflowCallUsage;
 
     struct FakeHost {
         outputs: Mutex<VecDeque<Value>>,
@@ -1693,8 +1694,10 @@ mod tests {
             self.active.fetch_sub(1, Ordering::SeqCst);
             Ok(AgentCallResult {
                 output: json!("ok"),
-                input_tokens: 0,
-                output_tokens: 0,
+                usage: WorkflowCallUsage::Known {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
                 working_directory: None,
                 served_model: None,
                 session_id: None,
@@ -1742,8 +1745,10 @@ mod tests {
                     .expect("outputs")
                     .pop_front()
                     .expect("scripted output"),
-                input_tokens: 1,
-                output_tokens: 1,
+                usage: WorkflowCallUsage::Known {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
                 working_directory: None,
                 served_model: None,
                 session_id: None,
@@ -1861,8 +1866,10 @@ mod tests {
                 .unwrap_or(Ok(json!("ok")))?;
             Ok(AgentCallResult {
                 output,
-                input_tokens: 1,
-                output_tokens: 1,
+                usage: WorkflowCallUsage::Known {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
                 working_directory,
                 served_model: None,
                 session_id: Some(uuid::Uuid::from_u128(0xA)),
