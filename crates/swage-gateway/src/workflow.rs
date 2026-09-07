@@ -12679,14 +12679,14 @@ mod tests {
             .expect("cancellation pause remains open")
             .forget();
 
-        let Json(posted) = post_operator_run_event(
+        let Json(posted) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(run.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.continue".into(),
                 payload: serde_json::json!({"approved": true}),
             }),
-        )
+        ))
         .await
         .expect("wake the parked run");
         assert!(posted.wake_provisioned);
@@ -13483,36 +13483,36 @@ mod tests {
         .expect("start awaiting run");
         wait_for_run_state(&storage, started.id, "parked").await;
 
-        let Json(_) = post_operator_run_event(
+        let Json(_) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "first"}),
             }),
-        )
+        ))
         .await
         .expect("queue first same-kind answer");
         wait_for_run_state(&storage, started.id, "parked").await;
-        let Json(_) = post_operator_run_event(
+        let Json(_) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "second"}),
             }),
-        )
+        ))
         .await
         .expect("queue second same-kind answer");
         wait_for_run_state(&storage, started.id, "parked").await;
-        let Json(_) = post_operator_run_event(
+        let Json(_) = Box::pin(post_operator_run_event(
             State(state),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "control.start".into(),
                 payload: Value::Null,
             }),
-        )
+        ))
         .await
         .expect("release queued awaits");
 
@@ -14254,14 +14254,14 @@ mod tests {
             .cloned()
             .expect("the original generation remains installed while cleanup is paused");
 
-        let Json(posted) = post_operator_run_event(
+        let Json(posted) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(run.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "accept"}),
             }),
-        )
+        ))
         .await
         .expect("post event and relaunch while the parked generation still owns its token");
         assert!(posted.wake_provisioned);
