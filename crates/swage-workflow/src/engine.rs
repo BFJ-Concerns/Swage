@@ -16,7 +16,7 @@ use crate::{
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
-    const NAMES: [(&str, &str); 13] = [
+    const NAMES: [(&str, &str); 19] = [
         ("AgentCallError", "AgentCallError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
         ("BudgetExceededError", "BudgetExceededError"),
@@ -30,6 +30,12 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         ("WaitTimerError", "WaitTimerError"),
         ("RunEventError", "RunEventError"),
         ("BudgetSnapshotError", "BudgetSnapshotError"),
+        ("InvalidAgentOptionError", "InvalidAgentOptionError"),
+        ("InvalidAgentPromptError", "InvalidAgentPromptError"),
+        ("InvalidAgentSchemaError", "InvalidAgentSchemaError"),
+        ("WorkflowReferenceError", "WorkflowReferenceError"),
+        ("WorkflowArgumentsError", "WorkflowArgumentsError"),
+        ("KnowledgeStoreError", "KnowledgeStoreError"),
     ];
     NAMES
         .iter()
@@ -42,6 +48,18 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
             })
         })
         .unwrap_or_else(|| (fallback.to_string(), error.to_string()))
+}
+
+fn is_pre_spawn_author_error(error: &str) -> bool {
+    [
+        "InvalidAgentOptionError",
+        "InvalidAgentPromptError",
+        "InvalidAgentSchemaError",
+        "WorkflowReferenceError",
+        "WorkflowArgumentsError",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
 }
 
 /// Hard limits applied by the host to each fresh JavaScript runtime.
@@ -59,6 +77,7 @@ pub struct EngineLimits {
 pub struct ScriptCapabilities {
     pub delivery: bool,
     pub composition: bool,
+    pub captured_sources: bool,
 }
 
 /// Metadata carried by portable workflow scripts. It is deliberately save-time
@@ -504,7 +523,7 @@ impl WorkflowEngine {
                                     Ok(request) => request,
                                     Err(error) => return serde_json::json!({
                                         "ok": false,
-                                        "error": {"name": "AgentCallError", "message": error.to_string()}
+                                        "error": {"name": "InvalidAgentOptionError", "message": error.to_string(), "pre_spawn": true}
                                     }).to_string(),
                                 };
                                 let mut request = request;
@@ -516,7 +535,11 @@ impl WorkflowEngine {
                                         {
                                             return serde_json::json!({
                                                 "ok": false,
-                                                "error": {"name": "EmptyAgentOutputError", "message": "agent returned empty output"}
+                                                "error": {
+                                                    "name": "EmptyAgentOutputError",
+                                                    "message": "agent returned empty output",
+                                                    "agent_call_admitted": true,
+                                                }
                                             }).to_string();
                                         }
                                         // Worker metadata rides beside the output so
@@ -529,18 +552,40 @@ impl WorkflowEngine {
                                                 "session_id": session_id,
                                                 "thread_id": thread_id,
                                             }));
+                                        let value = if request.identity == Some(true) {
+                                            serde_json::json!({
+                                                "label": request.label,
+                                                "phase": request.phase,
+                                                "output": result.output,
+                                                "failure": null,
+                                            })
+                                        } else {
+                                            result.output
+                                        };
                                         serde_json::json!({
                                             "ok": true,
-                                            "value": result.output,
+                                            "value": value,
                                             "session": session,
                                             "working_directory": result.working_directory,
                                         }).to_string()
                                     }
-                                    Err(WorkflowHostError::SchemaExhausted { .. }) => {
+                                    Err(WorkflowHostError::SchemaExhausted { message, .. }) => {
                                         // Exhausting a schema's validation attempts is a
                                         // script-visible absence, not an ordinary agent
-                                        // failure. Keep this typed so other failures throw.
-                                        serde_json::json!({"ok": true, "value": null, "session": null}).to_string()
+                                        // failure. Identified calls retain that distinction
+                                        // for a fan-in; unmarked calls keep the bare-null
+                                        // contract.
+                                        let value = if request.identity == Some(true) {
+                                            serde_json::json!({
+                                                "label": request.label,
+                                                "phase": request.phase,
+                                                "output": null,
+                                                "failure": {"message": message},
+                                            })
+                                        } else {
+                                            Value::Null
+                                        };
+                                        serde_json::json!({"ok": true, "value": value, "session": null}).to_string()
                                     }
                                     Err(error) => {
                                         let (host_reference, error) = match error {
@@ -551,7 +596,13 @@ impl WorkflowEngine {
                                         let (name, message) = named_host_error(&error, "AgentCallError");
                                         serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": name, "message": message, "host_reference": host_reference}
+                                            "error": {
+                                                "name": name,
+                                                "message": message,
+                                                "host_reference": host_reference,
+                                                "agent_call_admitted": true,
+                                                "pre_spawn": is_pre_spawn_author_error(&error),
+                                            }
                                         }).to_string()
                                     }
                                 }
@@ -577,6 +628,28 @@ impl WorkflowEngine {
                     ).map_err(|error| error.to_string())?;
                     ctx.globals().set("__workerPlacements", placements).map_err(|error| error.to_string())?;
 
+                    if capabilities.captured_sources {
+                        let captured_sources_host = Arc::clone(&host);
+                        let captured_sources_cancellation = host_cancellation.clone();
+                        let captured_sources = Function::new(
+                            ctx.clone(),
+                            Async(move || {
+                                let host = Arc::clone(&captured_sources_host);
+                                let cancellation = captured_sources_cancellation.clone();
+                                async move {
+                                    match host.captured_sources(cancellation).await {
+                                        Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
+                                        Err(error) => {
+                                            let (name, message) = named_host_error(&error, "KnowledgeStoreError");
+                                            serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
+                                        }
+                                    }
+                                }
+                            }),
+                        ).map_err(|error| error.to_string())?;
+                        ctx.globals().set("__capturedSources", captured_sources).map_err(|error| error.to_string())?;
+                    }
+
                     let log_host = Arc::clone(&host);
                     let log = Function::new(ctx.clone(), move |message: String| log_host.record("log", message)).map_err(|error| error.to_string())?;
                     ctx.globals().set("__log", log).map_err(|error| error.to_string())?;
@@ -597,7 +670,7 @@ impl WorkflowEngine {
                                         Ok(args) => args,
                                         Err(error) => return serde_json::json!({
                                             "ok": false,
-                                            "error": {"name": "WorkflowCompositionError", "message": error.to_string()}
+                                            "error": {"name": "WorkflowArgumentsError", "message": error.to_string(), "pre_spawn": true}
                                         }).to_string(),
                                     };
                                     match host
@@ -609,7 +682,7 @@ impl WorkflowEngine {
                                             let (name, message) = named_host_error(&error, "WorkflowCompositionError");
                                             serde_json::json!({
                                                 "ok": false,
-                                                "error": {"name": name, "message": message}
+                                                "error": {"name": name, "message": message, "pre_spawn": is_pre_spawn_author_error(&error)}
                                             }).to_string()
                                         }
                                     }
@@ -881,26 +954,49 @@ impl WorkflowEngine {
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (response.error.pre_spawn === true) {
+                                    Object.defineProperty(error, "__swagePreSpawnAuthorError", { value: true });
+                                }
                                 throw error;
                             }
                             return response.value;
                         };
+                        const identifiedAgentEnvelopes = new WeakSet();
+                        const markIdentifiedAgentEnvelope = (value) => {
+                            if (value !== null && typeof value === "object") {
+                                identifiedAgentEnvelopes.add(value);
+                            }
+                            return value;
+                        };
                         // Agent responses carry a continuation token beside the
                         // value; only agentStart handles surface it.
-                        const unwrapAgentResponse = (json) => {
+                        const unwrapAgentResponse = (json, request) => {
                             const response = JSON.parse(json);
                             if (!response.ok) {
                                 const error = new Error(response.error.message);
                                 error.name = response.error.name;
+                                if (response.error.pre_spawn === true) {
+                                    Object.defineProperty(error, "__swagePreSpawnAuthorError", { value: true });
+                                }
                                 if (typeof response.error.host_reference === "string") {
                                     Object.defineProperty(error, "__swageAgentCallReference", {
                                         value: response.error.host_reference,
                                     });
                                 }
+                                if (request.identity === true && response.error.agent_call_admitted === true) {
+                                    Object.defineProperty(error, "__swageAgentCallIdentity", {
+                                        value: {
+                                            label: request.label ?? null,
+                                            phase: request.phase ?? null,
+                                        },
+                                    });
+                                }
                                 throw error;
                             }
                             return {
-                                value: response.value,
+                                value: request.identity === true
+                                    ? markIdentifiedAgentEnvelope(response.value)
+                                    : response.value,
                                 session: response.session ?? null,
                                 workingDirectory: response.working_directory ?? null,
                             };
@@ -909,6 +1005,24 @@ impl WorkflowEngine {
                         // unset; only *defined* call-site values override, so a
                         // conditional spread leaving `model: undefined` still
                         // falls back to the default it was meant to.
+                        const isJsonValue = (candidate, seen = new Set()) => {
+                            if (candidate === null) return true;
+                            switch (typeof candidate) {
+                                case "boolean":
+                                case "string": return true;
+                                case "number": return Number.isFinite(candidate);
+                                case "object":
+                                    if (seen.has(candidate)) return false;
+                                    seen.add(candidate);
+                                    const valid = Array.isArray(candidate)
+                                        ? candidate.every((value) => isJsonValue(value, seen))
+                                        : Object.getPrototypeOf(candidate) === Object.prototype
+                                            && Object.values(candidate).every((value) => isJsonValue(value, seen));
+                                    seen.delete(candidate);
+                                    return valid;
+                                default: return false;
+                            }
+                        };
                         const mergeDefaults = (options) => {
                             const merged = { ...__defaults };
                             for (const key of Object.keys(options)) {
@@ -920,7 +1034,7 @@ impl WorkflowEngine {
                             const merged = mergeDefaults(options);
                             const knownOptions = new Set([
                                 "agent", "task", "tools", "skills", "model", "fallbackModel", "effort", "timeoutMs",
-                                "cwd", "isolation", "schema", "maxAttempts", "label",
+                                "cwd", "isolation", "schema", "maxAttempts", "label", "phase", "identity",
                                 "session", "elements", "variables", "assembly",
                             ]);
                             for (const key of Object.keys(merged)) {
@@ -934,6 +1048,27 @@ impl WorkflowEngine {
                                 const error = new Error("opts.agent is required");
                                 error.name = "AgentRequiredError";
                                 throw error;
+                            }
+                            // Name-list options are coerced per element below,
+                            // so a non-array would otherwise fail as a bare
+                            // TypeError — unrecognisable to fan-out as the
+                            // author error it is.
+                            for (const key of ["tools", "skills"]) {
+                                const value = merged[key];
+                                if (value === undefined || value === null) continue;
+                                if (!Array.isArray(value)) {
+                                    const error = new Error(`opts.${key} must be an array of names`);
+                                    error.name = "InvalidAgentOptionError";
+                                    throw error;
+                                }
+                            }
+                            for (const [key, type] of [["phase", "string"], ["identity", "boolean"]]) {
+                                const value = merged[key];
+                                if (value !== undefined && value !== null && typeof value !== type) {
+                                    const error = new TypeError(`opts.${key} must be a ${type}`);
+                                    error.name = "InvalidAgentOptionError";
+                                    throw error;
+                                }
                             }
                             return {
                                 prompt: "",
@@ -968,21 +1103,46 @@ impl WorkflowEngine {
                                 schema: merged.schema ?? null,
                                 max_attempts: merged.maxAttempts ?? 3,
                                 label: merged.label ?? null,
+                                phase: merged.phase ?? null,
+                                ...(merged.identity === undefined || merged.identity === null
+                                    ? {}
+                                    : { identity: merged.identity }),
                                 session: merged.session ?? null,
                                 elements: merged.elements ?? null,
                                 variables: merged.variables ?? null,
                                 assembly: merged.assembly ?? null,
                             };
                         };
+                        const agentRequestJson = (request, caller) => {
+                            if (!isJsonValue(request)) {
+                                const error = new TypeError(`${caller}() options must be JSON values`);
+                                error.name = "InvalidAgentOptionError";
+                                throw error;
+                            }
+                            return JSON.stringify(request);
+                        };
+                        const validateAgentOptions = (options, caller) => {
+                            if (options === null || typeof options !== "object" || Array.isArray(options)) {
+                                const error = new TypeError(`${caller}() options must be an object`);
+                                error.name = "InvalidAgentOptionError";
+                                throw error;
+                            }
+                        };
                         const validateAgentPrompt = (prompt, caller) => {
                             if (typeof prompt !== "string") {
-                                throw new TypeError(`${caller} prompt must be a string`);
+                                const error = new TypeError(`${caller} prompt must be a string`);
+                                error.name = "InvalidAgentPromptError";
+                                throw error;
                             }
                         };
                         globalThis.agent = async (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agent");
+                            validateAgentOptions(options, "agent");
                             const request = buildAgentRequest(options);
-                            const response = unwrapAgentResponse(await __agent(prompt, JSON.stringify(request)));
+                            const response = unwrapAgentResponse(
+                                await __agent(prompt, agentRequestJson(request, "agent")),
+                                request,
+                            );
                             return response.value;
                         };
                         globalThis.workerPlacements = async () => {
@@ -1004,16 +1164,18 @@ impl WorkflowEngine {
                         // one session.
                         globalThis.agentStart = (prompt, options = {}) => {
                             validateAgentPrompt(prompt, "agentStart");
+                            validateAgentOptions(options, "agentStart");
                             const request = buildAgentRequest(options);
+                            const requestJson = agentRequestJson(request, "agentStart");
                             const handle = {
                                 label: request.label,
                                 done: false,
                                 session: request.session ?? null,
                                 workingDirectory: null,
                             };
-                            handle.result = __agent(prompt, JSON.stringify(request))
+                            handle.result = __agent(prompt, requestJson)
                                 .then((json) => {
-                                    const response = unwrapAgentResponse(json);
+                                    const response = unwrapAgentResponse(json, request);
                                     handle.done = true;
                                     handle.session = response.session ?? handle.session;
                                     handle.workingDirectory = response.workingDirectory;
@@ -1071,8 +1233,17 @@ impl WorkflowEngine {
                             return wake;
                         };
                         if (typeof __workflow !== "undefined") {
+                            const workflowArgumentsJson = (args) => {
+                                const value = args ?? null;
+                                if (!isJsonValue(value)) {
+                                    const error = new TypeError("workflow() arguments must be JSON values");
+                                    error.name = "WorkflowArgumentsError";
+                                    throw error;
+                                }
+                                return JSON.stringify(value);
+                            };
                             globalThis.workflow = async (name, args = null) =>
-                                unwrapHostResponse(await __workflow(String(name), JSON.stringify(args ?? null)));
+                                unwrapHostResponse(await __workflow(String(name), workflowArgumentsJson(args)));
                         }
                         if (typeof __deliver !== "undefined") {
                             globalThis.deliver = async (payload, options = {}) => unwrapHostResponse(
@@ -1111,11 +1282,32 @@ impl WorkflowEngine {
                             })));
                         globalThis.deliverEvents = async (upToSeq) =>
                             unwrapHostResponse(await __deliverEvents(upToSeq));
+                        const isPreSpawnAuthorError = (error) => error.__swagePreSpawnAuthorError === true || new Set([
+                            "UnknownAgentOptionError",
+                            "AgentRequiredError",
+                            "InvalidAgentOptionError",
+                            "InvalidAgentPromptError",
+                            "InvalidAgentSchemaError",
+                            "WorkflowReferenceError",
+                            "WorkflowArgumentsError",
+                        ]).has(error.name);
+                        const isIdentifiedFailure = (value) => identifiedAgentEnvelopes.has(value)
+                            && value.failure !== null;
                         globalThis.parallel = async (thunks) => Promise.all(
                             thunks.map(async (thunk, index) => {
                                 try { return await thunk(); }
                                 catch (error) {
+                                    if (isPreSpawnAuthorError(error)) throw error;
                                     __log(`parallel thunk ${index} failed: ${error.name}: ${error.message}`);
+                                    const identity = error.__swageAgentCallIdentity;
+                                    if (identity !== undefined) {
+                                        return markIdentifiedAgentEnvelope({
+                                            label: identity.label,
+                                            phase: identity.phase,
+                                            output: null,
+                                            failure: { message: error.message },
+                                        });
+                                    }
                                     return null;
                                 }
                             })
@@ -1130,8 +1322,19 @@ impl WorkflowEngine {
                                 for (let stageIndex = 0; stageIndex < stages.length; stageIndex += 1) {
                                     try {
                                         previous = await stages[stageIndex](previous, item, index);
+                                        if (isIdentifiedFailure(previous)) return previous;
                                     } catch (error) {
+                                        if (isPreSpawnAuthorError(error)) throw error;
                                         __log(`pipeline item ${index} stage ${stageIndex} failed: ${error.name}: ${error.message}`);
+                                        const identity = error.__swageAgentCallIdentity;
+                                        if (identity !== undefined) {
+                                            return markIdentifiedAgentEnvelope({
+                                                label: identity.label,
+                                                phase: identity.phase,
+                                                output: null,
+                                                failure: { message: error.message },
+                                            });
+                                        }
                                         return null;
                                     }
                                 }
@@ -1151,6 +1354,10 @@ impl WorkflowEngine {
                         });
                         globalThis.budgetSnapshot = async () =>
                             unwrapHostResponse(await __budgetSnapshot());
+                        if (typeof __capturedSources === "function") {
+                            globalThis.capturedSources = async () =>
+                                unwrapHostResponse(await __capturedSources());
+                        }
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };
@@ -1339,7 +1546,7 @@ mod tests {
                 Option<swage_protocol::client::workflow::WorkerIsolation>,
             )>,
         >,
-        agent_outputs: Mutex<VecDeque<Result<Value, String>>>,
+        agent_outputs: Mutex<VecDeque<Result<Value, WorkflowHostError>>>,
         workflow_calls: Mutex<Vec<WorkflowCallRequest>>,
         workflow_output: Value,
         timer_calls: Mutex<Vec<u64>>,
@@ -1353,6 +1560,7 @@ mod tests {
         hold_verdict: String,
         deliveries_up_to: Mutex<Vec<u64>>,
         budget_snapshot: Value,
+        captured_sources: Value,
     }
 
     impl SurfaceHost {
@@ -1381,6 +1589,7 @@ mod tests {
                     "closing_remaining": null,
                     "winding_down": false,
                 }),
+                captured_sources: json!({"sources": []}),
             }
         }
     }
@@ -1544,6 +1753,10 @@ mod tests {
 
         async fn budget_snapshot(&self, _: CancellationToken) -> Result<Value, String> {
             Ok(self.budget_snapshot.clone())
+        }
+
+        async fn captured_sources(&self, _: CancellationToken) -> Result<Value, String> {
+            Ok(self.captured_sources.clone())
         }
     }
 
@@ -1891,6 +2104,211 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_invalid_option_values_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { maxAttempts: "many" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("invalid option rejection is catchable");
+
+        let error = serde_json::from_str::<Value>(&output).expect("error output");
+        assert_eq!(error["name"], "InvalidAgentOptionError");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "invalid option must name its decoding failure: {error}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_call_rejects_non_json_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await agent("inspect the unit", { schema: () => "not JSON" });
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("non-JSON agent option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "InvalidAgentOptionError",
+                "message": "agent() options must be JSON values",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_start_rejects_non_json_options_before_dispatch() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    const handle = agentStart("inspect the unit", { schema: () => "not JSON" });
+                    await handle.result;
+                    return null;
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("non-JSON agentStart option rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "InvalidAgentOptionError",
+                "message": "agentStart() options must be JSON values",
+            })
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_json_workflow_arguments_fail_before_the_host_call() {
+        let host = Arc::new(SurfaceHost::new());
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"try {
+                    await workflow("child", () => "not JSON");
+                } catch (error) {
+                    return { name: error.name, message: error.message };
+                }"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities {
+                    composition: true,
+                    ..ScriptCapabilities::default()
+                },
+            )
+            .await
+            .expect("non-JSON rejection is catchable");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("error output"),
+            json!({
+                "name": "WorkflowArgumentsError",
+                "message": "workflow() arguments must be JSON values",
+            })
+        );
+        assert!(host.workflow_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_and_pipeline_propagate_pre_spawn_author_errors() {
+        for source in [
+            r#"await parallel([() => agent("bad", { maxAttemps: 1 })]);"#,
+            r#"await pipeline(["one"], () => agent("bad", { maxAttemps: 1 }));"#,
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("author error must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unknown agent() option 'maxAttemps'"),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_name_list_options_propagate_through_fan_out() {
+        for (source, option) in [
+            (
+                r#"await parallel([() => agent("bad", { tools: "web_search" })]);"#,
+                "tools",
+            ),
+            (
+                r#"await pipeline(["one"], () => agent("bad", { skills: "testing" }));"#,
+                "skills",
+            ),
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("author error must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("opts.{option} must be an array of names")),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_object_agent_options_propagate_through_fan_out() {
+        for source in [
+            r#"await parallel([() => agent("bad", null)]);"#,
+            r#"await pipeline(["one"], () => agent("bad", null));"#,
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("non-object options must fail the run");
+            assert!(
+                error
+                    .to_string()
+                    .contains("agent() options must be an object"),
+                "unexpected propagated error: {error:?}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn agent_call_dispatches_with_recognised_options() {
         let host = Arc::new(SurfaceHost::new());
         WorkflowEngine::new(EngineLimits::default())
@@ -1898,7 +2316,7 @@ mod tests {
                 r#"await agent("inspect the unit", {
                     agent: "worker", task: "review", model: "cheap", fallbackModel: "sonnet", effort: "low",
                     timeoutMs: 75, cwd: "/repo", isolation: "worktree",
-                    schema: { type: "object" }, maxAttempts: 2, label: "inspect",
+                    schema: { type: "object" }, maxAttempts: 2, label: "inspect", phase: "review", identity: true,
                     session: { session_id: "00000000-0000-0000-0000-00000000000a", thread_id: "00000000-0000-0000-0000-00000000000b" },
                     skills: ["code-review", "testing"],
                     elements: ["current-work"], variables: { owner: "operator" }, assembly: "focused",
@@ -1921,6 +2339,8 @@ mod tests {
         assert_eq!(request.timeout_ms, Some(75));
         assert_eq!(request.max_attempts, 2);
         assert_eq!(request.label.as_deref(), Some("inspect"));
+        assert_eq!(request.phase.as_deref(), Some("review"));
+        assert_eq!(request.identity, Some(true));
         assert_eq!(
             request.elements.as_deref(),
             Some(["current-work".to_string()].as_slice())
@@ -1931,6 +2351,198 @@ mod tests {
             request.skills.as_deref(),
             Some(["code-review".to_string(), "testing".to_string()].as_slice())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_preserves_a_successful_worker_result() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!({"answer": "ready"})));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "source", phase: "research" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified success");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "source",
+                "phase": "research",
+                "output": {"answer": "ready"},
+                "failure": null,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_preserves_a_genuine_null_worker_result() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(Value::Null));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "empty source", phase: "research" });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified null success");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "empty source",
+                "phase": "research",
+                "output": null,
+                "failure": null,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn identified_agent_call_reports_schema_exhaustion_without_losing_its_leg() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: "SchemaExhaustedError: no valid object".into(),
+            }));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await agent("gather", { identity: true, label: "schema leg", phase: "research", schema: {type: "object"} });"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("identified schema collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "label": "schema leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "SchemaExhaustedError: no valid object"},
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_preserves_an_identified_operational_failure() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err("provider unavailable".into()));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await parallel([() => agent("gather", { identity: true, label: "network leg", phase: "research" })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("parallel collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!([{
+                "label": "network leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "provider unavailable"},
+            }])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parallel_preserves_an_identified_empty_output_failure() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!("   ")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"return await parallel([() => agent("gather", { identity: true, label: "empty leg", phase: "research" })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("parallel collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!([{
+                "label": "empty leg",
+                "phase": "research",
+                "output": null,
+                "failure": {"message": "agent returned empty output"},
+            }])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_identified_phase_propagates_through_parallel() {
+        let host = Arc::new(SurfaceHost::new());
+        let error = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await parallel([() => agent("gather", { identity: true, phase: 1 })]);"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect_err("invalid identified phase must fail the run");
+
+        assert!(
+            error.to_string().contains("opts.phase must be a string"),
+            "unexpected propagated error: {error:?}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_identity_option_propagates_through_pipeline() {
+        let host = Arc::new(SurfaceHost::new());
+        let error = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"await pipeline(["source"], () => agent("gather", { identity: "yes" }));"#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect_err("invalid identity option must fail the run");
+
+        assert!(
+            error
+                .to_string()
+                .contains("opts.identity must be a boolean"),
+            "unexpected propagated error: {error:?}"
+        );
+        assert!(host.agent_requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2020,7 +2632,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({
-                "name": "TypeError",
+                "name": "InvalidAgentPromptError",
                 "message": "agent prompt must be a string",
             }),
             "host received invalid prompts: {:?}",
@@ -2053,7 +2665,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output).unwrap(),
             json!({
-                "name": "TypeError",
+                "name": "InvalidAgentPromptError",
                 "message": "agentStart prompt must be a string",
             })
         );
@@ -2321,6 +2933,144 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_preserves_identified_schema_exhaustion_and_skips_later_stages() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Err(WorkflowHostError::SchemaExhausted {
+                host_reference: None,
+                message: "SchemaExhaustedError: no valid object".into(),
+            }));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather", {
+                        identity: true,
+                        label: "schema leg",
+                        phase: "research",
+                        schema: { type: "object" },
+                    }),
+                    () => {
+                        laterStageRan = true;
+                        return "overwritten";
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline schema collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{
+                    "label": "schema leg",
+                    "phase": "research",
+                    "output": null,
+                    "failure": {"message": "SchemaExhaustedError: no valid object"},
+                }],
+                "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_preserves_identified_empty_output_and_skips_later_stages() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(json!("")));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather", {
+                        identity: true,
+                        label: "empty leg",
+                        phase: "research",
+                    }),
+                    () => {
+                        laterStageRan = true;
+                        return "overwritten";
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline collapse");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{
+                    "label": "empty leg",
+                    "phase": "research",
+                    "output": null,
+                    "failure": {"message": "agent returned empty output"},
+                }],
+                "laterStageRan": false,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pipeline_continues_after_unmarked_output_matching_identified_failure_shape() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs.lock().unwrap().push_back(Ok(json!({
+            "label": "domain label",
+            "phase": "domain phase",
+            "output": "domain output",
+            "failure": {"message": "domain failure"},
+        })));
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                let laterStageRan = false;
+                const results = await pipeline(
+                    ["source"],
+                    () => agent("gather"),
+                    (previous) => {
+                        laterStageRan = true;
+                        return { continuedWith: previous.output };
+                    },
+                );
+                return { results, laterStageRan };
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("pipeline result");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).expect("output"),
+            json!({
+                "results": [{"continuedWith": "domain output"}],
+                "laterStageRan": true,
+            })
+        );
+        assert_eq!(host.agent_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn agent_start_surfaces_the_continuation_token_and_the_session_option_returns_it() {
         let host = Arc::new(SurfaceHost::new());
         host.agent_outputs
@@ -2506,6 +3256,7 @@ mod tests {
                 ScriptCapabilities {
                     delivery: false,
                     composition: true,
+                    ..ScriptCapabilities::default()
                 },
             )
             .await
@@ -2526,6 +3277,48 @@ mod tests {
                 "null",
                 CancellationToken::new(),
                 Some(Arc::new(SurfaceHost::new()) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("ungranted run");
+        assert_eq!(
+            serde_json::from_str::<Value>(&ungranted).unwrap(),
+            "undefined"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn captured_sources_are_exposed_only_when_granted() {
+        let host = Arc::new(SurfaceHost {
+            captured_sources: json!({
+                "sources": [{"url": "https://example.test/source", "observation_id": "obs-1"}]
+            }),
+            ..SurfaceHost::new()
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "return await capturedSources();",
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities {
+                    captured_sources: true,
+                    ..ScriptCapabilities::default()
+                },
+            )
+            .await
+            .expect("captured sources run");
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            json!({"sources": [{"url": "https://example.test/source", "observation_id": "obs-1"}]})
+        );
+
+        let ungranted = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                "return typeof capturedSources;",
+                "null",
+                CancellationToken::new(),
+                Some(host as Arc<dyn WorkflowHost>),
                 ScriptCapabilities::default(),
             )
             .await
@@ -2684,7 +3477,7 @@ mod tests {
             r#"{"brief":"write"}"#,
             CancellationToken::new(),
             Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
-            ScriptCapabilities { delivery: true, composition: false },
+            ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
         ).await.expect("composition");
 
         assert_eq!(
@@ -2791,7 +3584,7 @@ return review.content;
                 r#"{"writerPrompt":"draft","writerAgent":"writer","reviewerAgent":"reviewer","deliveryTarget":"public"}"#,
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
-                ScriptCapabilities { delivery: true, composition: false },
+                ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
             )
             .await
             .expect("write-review-deliver script runs");
@@ -2825,7 +3618,7 @@ return review.content;
                 r#"{"writerPrompt":"draft","writerAgent":"writer","reviewerAgent":"reviewer","deliveryTarget":"public"}"#,
                 CancellationToken::new(),
                 Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
-                ScriptCapabilities { delivery: true, composition: false },
+                ScriptCapabilities { delivery: true, composition: false, ..ScriptCapabilities::default() },
             )
             .await;
 

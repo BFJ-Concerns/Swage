@@ -101,6 +101,8 @@ return { reply };
   - `schema` — JSON Schema for a validated reply (object top level).
   - `maxAttempts` — schema retries before giving up (default 3).
   - `label` — names the worker in the run record.
+  - `identity: true` — return an identified result envelope for this call.
+  - `phase` — caller-supplied phase copied into an identified result envelope.
   - `tools` — call-scoped allow-list; it can only narrow the worker's
     effective grants, never widen them.
   - `skills` — named skills to activate for this worker.
@@ -123,12 +125,16 @@ return { reply };
     a definition never widens them.
 
   An unknown option key throws `UnknownAgentOptionError` before any
-  worker spawns; a non-string prompt throws a `TypeError`.
+  worker spawns; a non-string prompt throws `InvalidAgentPromptError`,
+  and a `tools` or `skills` value that is not an array of names throws
+  `InvalidAgentOptionError`.
 - **Return contract:** without `schema`, the worker's final text (a
   string). With `schema`, the validated JSON value, or `null` when
-  `maxAttempts` is exhausted without one — treat `null` as an absent
-  result and check for it before using the value. Other failures throw
-  an `Error` whose `name` classifies it (`AgentCallError`,
+  `maxAttempts` is exhausted without one. With `identity: true`, a
+  settled call returns `{ label, phase, output, failure }`: a non-null
+  `failure` names a failed leg, while `output: null` with
+  `failure: null` is a genuine null result. Other failures throw an
+  `Error` whose `name` classifies it (`AgentCallError`,
   `AgentCallTimeoutError`, `BudgetExceededError`, …). Extraction reads a
   reply as the whole text parsed as JSON, or else the FIRST fenced code
   block — so tell workers: reason first if needed, then exactly one
@@ -212,9 +218,13 @@ while (pending.length > 0) {
   );
   ```
 
-  Today every error inside `parallel`/`pipeline` collapses to `null`,
-  including an author error such as an unknown option — so check the
-  run log when a whole fan-out comes back `null`.
+  Inside `parallel`/`pipeline`, a worker that fails collapses to `null`
+  and the other items proceed. An author error — an unknown option, an
+  invalid option value, a schema that does not compile, an unknown composed
+  workflow, non-JSON workflow arguments — does not: it is rejected at the
+  call itself, before any worker starts, and fails the run with the error
+  naming the call. A whole fan-out coming back `null` therefore means the
+  workers failed; check the run journal for their errors.
 
 ### Composing saved workflows
 
