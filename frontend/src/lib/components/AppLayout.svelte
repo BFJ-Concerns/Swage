@@ -10,6 +10,7 @@
   import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
+  import { fetchWorkflowRun } from "../api/workflow-runs";
   import type { DisplayPreferences } from "../display-preferences";
   import type { Route } from "../router";
   import type { DesktopRuntimeInfo } from "../runtime";
@@ -20,6 +21,7 @@
   import type { StreamingStore } from "../stores/streaming";
   import type { PagesStore } from "../stores/pages";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+  import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
 
   type Surface = "conversation" | "operator" | "pages";
 
@@ -90,6 +92,29 @@
     }
   });
   const workflowRunId = $derived(route?.workflowRunId ?? null);
+  let workflowRunDetail = $state<WorkflowRunDetailResponse | null>(null);
+  let workflowRunLoadState = $state<"loading" | "loaded" | "absent" | "error">(
+    "loading",
+  );
+  let workflowRunError = $state("");
+  $effect(() => {
+    const requestedRunId = workflowRunId;
+    workflowRunDetail = null;
+    workflowRunError = "";
+    if (!requestedRunId) return;
+    workflowRunLoadState = "loading";
+    fetchWorkflowRun(requestedRunId)
+      .then((loaded) => {
+        if (requestedRunId !== workflowRunId) return;
+        workflowRunDetail = loaded;
+        workflowRunLoadState = loaded === null ? "absent" : "loaded";
+      })
+      .catch((error: unknown) => {
+        if (requestedRunId !== workflowRunId) return;
+        workflowRunError = error instanceof Error ? error.message : String(error);
+        workflowRunLoadState = "error";
+      });
+  });
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
   const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
@@ -135,8 +160,16 @@
   <!-- A run addressed directly by URL owns the body: its terminal account
        and detailed journal are the complete record of the visit. -->
   <main class="workflow-run">
-    <WorkflowRunView runId={workflowRunId} />
-    <WorkflowRunDetail runId={workflowRunId} />
+    <WorkflowRunView
+      detail={workflowRunDetail}
+      loadState={workflowRunLoadState}
+      errorMessage={workflowRunError}
+    />
+    <WorkflowRunDetail
+      detail={workflowRunDetail}
+      loadState={workflowRunLoadState}
+      errorMessage={workflowRunError}
+    />
   </main>
 {:else if settingsMode}
   <!-- The settings window chrome lives here; the pages own their content only. -->
