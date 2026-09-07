@@ -1000,10 +1000,7 @@ fn route_budget(budget: &WorkflowBudget, route: &str) -> WorkflowRouteBudget {
         })
 }
 
-fn configured_route_is_exhausted(
-    accounting: &TokenBudgetState,
-    budget: &WorkflowRouteBudget,
-) -> bool {
+fn route_is_exhausted(accounting: &TokenBudgetState, budget: &WorkflowRouteBudget) -> bool {
     let Some(limit) = budget.max_total_tokens else {
         return false;
     };
@@ -1016,24 +1013,26 @@ fn configured_route_is_exhausted(
 }
 
 #[derive(Clone)]
-struct FallbackRouteAdmission {
-    budgets: Arc<std::collections::BTreeMap<String, WorkflowRouteBudget>>,
+struct RouteAdmission {
+    budget: Arc<WorkflowBudget>,
     accounting: Arc<Mutex<RouteTokenBudgetState>>,
 }
 
-impl FallbackRouteAdmission {
+impl RouteAdmission {
     async fn admit(&self, route: &str) -> Result<(), WorkflowHostError> {
-        let Some(budget) = self.budgets.get(route) else {
-            return Ok(());
-        };
+        let budget = route_budget(&self.budget, route);
         let mut accounting = self.accounting.lock().await;
-        let ledger = accounting.ledger_mut(route);
+        let ledger = if self.budget.per_route.contains_key(route) {
+            accounting.ledger_mut(route)
+        } else {
+            &mut accounting.default
+        };
         if ledger.usage_unavailable_calls > 0 {
             Err(WorkflowHostError::Message(format!(
                 "BudgetUsageUnavailableError: token usage unavailable for {} completed call(s)",
                 ledger.usage_unavailable_calls
             )))
-        } else if configured_route_is_exhausted(ledger, budget) {
+        } else if route_is_exhausted(ledger, &budget) {
             Err(WorkflowHostError::Message(
                 "BudgetExceededError: token limit reached".into(),
             ))
@@ -2192,7 +2191,7 @@ async fn run_ephemeral_agent_call_with_admission(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-    fallback_route_admission: Option<&FallbackRouteAdmission>,
+    route_admission: Option<&RouteAdmission>,
 ) -> Result<AgentCallResult, WorkflowHostError> {
     if request.session.is_some()
         && let Some(task) = request.task.as_deref()
@@ -2576,7 +2575,7 @@ async fn run_ephemeral_agent_call_with_admission(
                         "AgentCallError: selected model failed before output ({error}); declared fallback {fallback_model:?} is unavailable: {fallback_error}"
                     )
                 })?;
-            if let Some(admission) = fallback_route_admission
+            if let Some(admission) = route_admission
                 && let Some(route) =
                     swage_config::resolve_provider_route(&call_config.models, Some(&fallback_model))
             {
@@ -3187,11 +3186,20 @@ async fn resolve_agent_budget_route(
         // fallback to serve it the call fails as its catalogue error before a
         // worker exists: it draws on nothing, so it has no route and no
         // ceiling may refuse it.
-        return Ok(declared_fallback_model(request)
+        if let Some(route) = declared_fallback_model(request)
             .and_then(|fallback| {
                 swage_config::resolve_provider_route(&config.models, Some(fallback))
             })
-            .map(|route| route.provider_id.to_string()));
+            .map(|route| route.provider_id.to_string())
+        {
+            return Ok(Some(route));
+        }
+        return crate::turn::resolve_requested_turn_model(
+            &config,
+            request.model.as_deref().expect("checked above"),
+        )
+        .map(|_| None)
+        .map_err(|error| error.to_string());
     }
     Ok(Some(FALLBACK_PROVIDER_ROUTE.into()))
 }
@@ -3787,8 +3795,7 @@ async fn run_host_commands_inner(
                         let _ = reply.send(result.map_err(WorkflowHostError::Message));
                         continue;
                     }
-                    if existing_call.is_none() && configured_route_is_exhausted(ledger, route_limit)
-                    {
+                    if existing_call.is_none() && route_is_exhausted(ledger, route_limit) {
                         let reserve = route_limit.reserved_closing_tokens.unwrap_or(0);
                         let transition = ledger.closing_limit.is_none() && reserve > 0;
                         let transition_spent = ledger.spent;
@@ -4009,6 +4016,7 @@ async fn run_host_commands_inner(
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
                 let configured_route_budgets = Arc::new(budget.per_route.clone());
+                let admission_budget = Arc::new(budget.clone());
                 let call_uses_closing_partition = winding_down;
                 let semaphore = Arc::clone(&semaphore);
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
@@ -4033,8 +4041,8 @@ async fn run_host_commands_inner(
                     let hash = request_hash;
                     let existing = replay.get(current_seq as usize);
                     let failed_replay = existing.is_some_and(|entry| entry.status == "failed");
-                    let fallback_route_admission = FallbackRouteAdmission {
-                        budgets: Arc::clone(&configured_route_budgets),
+                    let route_admission = RouteAdmission {
+                        budget: Arc::clone(&admission_budget),
                         accounting: Arc::clone(&token_budget),
                     };
                     let (journal_entry_id, result) = if let Some(entry) = existing {
@@ -4090,7 +4098,7 @@ async fn run_host_commands_inner(
                                     request,
                                     resolved_working_directory,
                                     cancellation,
-                                    &fallback_route_admission,
+                                    &route_admission,
                                 ))
                                 .await,
                             )
@@ -4123,7 +4131,7 @@ async fn run_host_commands_inner(
                                         request,
                                         resolved_working_directory,
                                         cancellation,
-                                        &fallback_route_admission,
+                                        &route_admission,
                                     ))
                                     .await,
                                 )
@@ -5304,7 +5312,7 @@ async fn complete_agent_entry(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
-    fallback_route_admission: &FallbackRouteAdmission,
+    route_admission: &RouteAdmission,
 ) -> Result<AgentCallResult, WorkflowHostError> {
     let worktree_seq = resolved_working_directory
         .as_ref()
@@ -5319,7 +5327,7 @@ async fn complete_agent_entry(
         request,
         resolved_working_directory,
         cancellation,
-        Some(fallback_route_admission),
+        Some(route_admission),
     )
     .await
     {
@@ -20852,16 +20860,33 @@ protocol = "openai"
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
         let run_id = empty_journal_run(&storage, space.id).await;
+        let recorded = route_test_request("spend the fallback allowance", Some("alpha"));
+        journal_routed_agent_call(&storage, run_id, 0, &recorded, "alpha-route", Some(1)).await;
+        let budget = WorkflowBudget {
+            max_agent_calls: Some(3),
+            per_route: Default::default(),
+            max_total_tokens: Some(1),
+            reserved_closing_tokens: None,
+            max_concurrent_agent_calls: Some(1),
+        };
+        let replay = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("replay journal");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn SpaceStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             route_test_config("alpha", "alpha-route"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
         let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
+        let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run_id,
             space.id,
@@ -20869,21 +20894,30 @@ protocol = "openai"
             vec![],
             None,
             None,
-            WorkflowBudget {
-                max_agent_calls: Some(3),
-                per_route: Default::default(),
-                max_total_tokens: Some(1),
-                reserved_closing_tokens: None,
-                max_concurrent_agent_calls: Some(1),
-            },
-            vec![],
-            Arc::new(AtomicU32::new(0)),
-            Arc::new(AtomicU64::new(0)),
+            budget.clone(),
+            replay.clone(),
+            Arc::new(AtomicU32::new(1)),
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(Mutex::new(terminal_budget_accounting_from_journal(
+                &replay, &budget,
+            ))),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
         ));
+        let (replay_reply, replay_receive) = oneshot::channel();
+        tx.send(HostCommand::Agent {
+            request: recorded,
+            resolved_working_directory: None,
+            cancellation: CancellationToken::new(),
+            reply: replay_reply,
+        })
+        .expect("replay command");
+        replay_receive
+            .await
+            .expect("replay reply")
+            .expect("recorded spend replays");
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
             request: route_test_request("name a model that is not there", Some("missing")),
@@ -20904,6 +20938,29 @@ protocol = "openai"
         );
         drop(tx);
         task.await.expect("host task");
+        assert!(
+            storage
+                .list_sessions_by_agent_id("default")
+                .await
+                .expect("worker sessions")
+                .is_empty(),
+            "model resolution must fail before a worker exists"
+        );
+        assert!(
+            provider.requests.lock().expect("requests").is_empty(),
+            "model resolution must fail before a provider request"
+        );
+        assert_eq!(
+            storage
+                .list_workflow_journal(run_id)
+                .await
+                .expect("journal")
+                .iter()
+                .filter(|entry| entry.kind == "agent_call")
+                .count(),
+            1,
+            "the unknown-model call must not create a journal entry"
+        );
     }
 
     /// Holds its first call open until released, so a test can settle a call
@@ -21467,6 +21524,60 @@ protocol = "openai"
             provider.requests.lock().expect("requests").len(),
             1,
             "the exhausted fallback route must refuse before its provider request"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_on_an_unconfigured_route_uses_the_fallback_ledger() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "primary refused".into(),
+            }],
+            scripted_text_output("must not run"),
+        ])
+        .await;
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "max_total_tokens": 0,
+            "per_route": {
+                "primary-route": {"max_total_tokens": 7}
+            }
+        }))
+        .expect("route budget");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    try {
+                        await agent("answer", {
+                            agent: "default", model: "pinned", fallbackModel: "fallback"
+                        });
+                    } catch (error) {
+                        return error.name;
+                    }
+                "#
+                .into(),
+                args: Value::Null,
+                budget: Some(budget),
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.final_output,
+            Some(Value::String("BudgetExceededError".into()))
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "the exhausted fallback ledger must refuse before the fallback provider request"
         );
     }
 
@@ -22555,6 +22666,139 @@ protocol = "openai"
                 ..
             }
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unavailable_usage_closes_only_its_configured_route() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                vec![
+                    swage_core::StreamChunk::Delta {
+                        content: "usage unavailable".into(),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                scripted_text_output_with_usage("other route", 1, 0),
+                scripted_text_output_with_usage("fallback ledger", 1, 0),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut config = fallback_test_config();
+        config.models.entries.insert(
+            "plain".into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: "unconfigured-route".into(),
+                model_id: "plain-wire".into(),
+                ..Default::default()
+            },
+        );
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            const unavailable = await agent("provider omits usage", {
+                agent: "default", model: "pinned", maxAttempts: 1
+            });
+            let refusal = null;
+            try {
+                await agent("same route must close", {
+                    agent: "default", model: "pinned", maxAttempts: 1
+                });
+            } catch (error) {
+                refusal = String(error);
+            }
+            const other = await agent("another configured route", {
+                agent: "default", model: "fallback", maxAttempts: 1
+            });
+            const fallback = await agent("the fallback ledger", {
+                agent: "default", model: "plain", maxAttempts: 1
+            });
+            return {unavailable, refusal, other, fallback, snapshot: await budgetSnapshot()};
+        "#;
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "max_agent_calls": 5,
+            "max_concurrent_agent_calls": 1,
+            "max_total_tokens": 10,
+            "reserved_closing_tokens": 2,
+            "per_route": {
+                "primary-route": {
+                    "max_total_tokens": 10,
+                    "reserved_closing_tokens": 2
+                },
+                "fallback-route": {
+                    "max_total_tokens": 10,
+                    "reserved_closing_tokens": 2
+                }
+            }
+        }))
+        .expect("route budget");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: Some(budget),
+            }),
+        )
+        .await
+        .expect("start run");
+        wait_for_terminal(&state, started.id).await;
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.state, WorkflowRunState::Completed);
+        let output = detail.run.final_output.expect("workflow output");
+        assert_eq!(output["unavailable"], "usage unavailable");
+        assert!(
+            output["refusal"]
+                .as_str()
+                .is_some_and(|error| error.contains("BudgetUsageUnavailableError")),
+            "the route with unknown spend must refuse its next call: {output}"
+        );
+        assert_eq!(output["other"], "other route");
+        assert_eq!(output["fallback"], "fallback ledger");
+        assert_eq!(output["snapshot"]["spent"], 1);
+        assert_eq!(output["snapshot"]["remaining"], 9);
+        assert_eq!(output["snapshot"]["closing_remaining"], 2);
+        assert_eq!(output["snapshot"]["usage_unavailable_calls"], 0);
+        let routes = &output["snapshot"]["per_route"];
+        assert_eq!(routes["primary-route"]["spent"], 0);
+        assert_eq!(routes["primary-route"]["remaining"], Value::Null);
+        assert_eq!(routes["primary-route"]["closing_remaining"], Value::Null);
+        assert_eq!(routes["primary-route"]["usage_unavailable_calls"], 1);
+        assert_eq!(routes["fallback-route"]["spent"], 1);
+        assert_eq!(routes["fallback-route"]["remaining"], 9);
+        assert_eq!(routes["fallback-route"]["closing_remaining"], 2);
+        assert_eq!(routes["fallback-route"]["usage_unavailable_calls"], 0);
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            3,
+            "only the unavailable route's second call is refused"
+        );
+
+        let terminal = detail
+            .journal
+            .iter()
+            .find(|entry| entry.kind == WorkflowJournalEntryKind::TerminalBudget)
+            .and_then(|entry| entry.result.as_ref())
+            .expect("terminal budget reading");
+        let terminal = serde_json::to_value(terminal).expect("terminal budget serialises");
+        assert_eq!(terminal["spent"], 1);
+        assert_eq!(terminal["remaining"], 9);
+        assert_eq!(terminal["closing_remaining"], 2);
+        assert_eq!(terminal["usage_unavailable_calls"], 0);
+        assert_eq!(terminal["per_route"], *routes);
     }
 
     #[tokio::test(flavor = "multi_thread")]
