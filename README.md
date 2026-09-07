@@ -230,7 +230,8 @@ first:
 - [First session](docs/first-session.md) — opening a space, attaching a
   repository as a workspace, and trusting it so its guidance reaches agents.
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
-  how a run survives a restart, and how its token budget is spent.
+  how a run survives a restart, how its token budget is spent (including
+  per-route partitions), and what each call's detail record contains.
 - [Agents and permissions](docs/agents-and-permissions.md) — agent
   definitions, operator guidance (`AGENTS.md`), effort resolution, what a
   tool call is allowed to do, approvals, and sandbox isolation.
