@@ -2422,6 +2422,34 @@ async fn process_turn_with_composition_and_focus(
                     (None, None, None)
                 };
 
+                if let Some(structured_output) = structured_output.as_ref() {
+                    use swage_storage::store::TurnStore;
+                    if let Err(error) = TurnStore::update_structured_output(
+                        state.storage.as_ref(),
+                        turn_id,
+                        structured_output,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            %error,
+                            %turn_id,
+                            "failed to persist structured_output"
+                        );
+                        let _ = record_durability::record_reconstruction_gap(
+                            state.storage.as_ref(),
+                            Some(session_id),
+                            turn_id,
+                            "structured_output",
+                            &error,
+                        )
+                        .await;
+                        record_integrity_lost.get_or_insert(format!(
+                            "structured output could not be persisted: {error}"
+                        ));
+                    }
+                }
+
                 let _ = ws_tx.send(ServerEvent::TurnComplete {
                     turn_id,
                     input_tokens: ws_input,
@@ -2479,39 +2507,7 @@ async fn process_turn_with_composition_and_focus(
 
     // Wait for the agent task to finish and surface any panic or error.
     match agent_handle.await {
-        Ok(Ok(outbound)) => {
-            // Agent completed successfully — persist structured_output if the
-            // turn produced validated schema output.
-            if let Some(ref output) = outbound.structured_output {
-                use swage_storage::store::TurnStore;
-                if let Err(e) =
-                    TurnStore::update_structured_output(&*state.storage, outbound.turn_id, output)
-                        .await
-                {
-                    // Constitutive record (record_durability.rs): validated
-                    // output that reached the client but not the record
-                    // makes the trail lie by omission, so the turn fails
-                    // loudly below. The degradation event is still
-                    // attempted so the trail names the gap even when the
-                    // turn row's failure stamp is all that survives.
-                    tracing::error!(
-                        error = %e,
-                        turn_id = %outbound.turn_id,
-                        "failed to persist structured_output"
-                    );
-                    let _ = record_durability::record_reconstruction_gap(
-                        state.storage.as_ref(),
-                        Some(session_id),
-                        outbound.turn_id,
-                        "structured_output",
-                        &e,
-                    )
-                    .await;
-                    record_integrity_lost
-                        .get_or_insert(format!("structured output could not be persisted: {e}"));
-                }
-            }
-        }
+        Ok(Ok(_outbound)) => {}
         Ok(Err(AgentError::Cancelled)) => {
             // Cancellation is cooperative — the agent already set
             // TurnState::Interrupted and ThreadState::Idle in storage.

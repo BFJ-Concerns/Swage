@@ -15,6 +15,12 @@ pub struct AssemblyReport {
     pub compaction_applied: Vec<CompactionRecord>,
     pub warnings: Vec<String>,
     pub errors: Vec<AssemblyError>,
+    /// Baseline elements the assembly script renounced by name, with the
+    /// reason it gave. An element absent from the assembled context and
+    /// absent from this list is a floor breach, not a choice.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub declared_omissions: Vec<DeclaredOmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, unknown>")]
     pub effective_tool_permissions: Option<serde_json::Value>,
@@ -39,6 +45,7 @@ impl AssemblyReport {
             compaction_applied: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            declared_omissions: Vec::new(),
             effective_tool_permissions: None,
             tool_scope: None,
             provider_visible: None,
@@ -51,6 +58,15 @@ impl Default for AssemblyReport {
     fn default() -> Self {
         Self::new("default")
     }
+}
+
+/// One baseline element the assembly deliberately left out of the context.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+pub struct DeclaredOmission {
+    /// The omitted element's name, as it appears in the elements projection.
+    pub element: String,
+    /// The reason the assembly gave for leaving it out.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -99,4 +115,50 @@ pub struct AssemblyError {
 pub struct TurnContextResponse {
     pub turn_id: Uuid,
     pub report: AssemblyReport,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AssemblyReport, DeclaredOmission};
+
+    #[test]
+    fn a_declared_omission_crosses_the_wire_as_its_element_and_reason() {
+        let mut report = AssemblyReport::new("focus");
+        report.declared_omissions.push(DeclaredOmission {
+            element: "working_norms".to_string(),
+            reason: "the operator instructions carry their own".to_string(),
+        });
+
+        let serialised = serde_json::to_value(&report).expect("serialise report");
+        assert_eq!(
+            serialised["declared_omissions"][0]["element"],
+            "working_norms"
+        );
+        assert_eq!(
+            serialised["declared_omissions"][0]["reason"],
+            "the operator instructions carry their own"
+        );
+
+        let parsed: AssemblyReport =
+            serde_json::from_value(serialised).expect("a serialised report round-trips");
+        assert_eq!(parsed.declared_omissions[0].element, "working_norms");
+    }
+
+    #[test]
+    fn a_report_without_declared_omissions_parses_with_none_recorded() {
+        let parsed: AssemblyReport = serde_json::from_value(serde_json::json!({
+            "assembly_name": "default",
+            "elements": [],
+            "total_tokens": 0,
+            "compaction_applied": [],
+            "warnings": [],
+            "errors": [],
+            "effective_tool_permissions": [],
+            "provider_visible": null,
+            "duration": {"secs": 0, "nanos": 0}
+        }))
+        .expect("a report omitting the field parses");
+
+        assert!(parsed.declared_omissions.is_empty());
+    }
 }

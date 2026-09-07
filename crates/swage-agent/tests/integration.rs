@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_agent::context::TurnExecutionContext;
-use swage_agent::{AgentBuilder, AgentConfig, AgentEvent, TurnRequest};
+use swage_agent::{AgentBuilder, AgentConfig, AgentError, AgentEvent, TurnRequest};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ProviderError,
     ProviderResponseWitness, Role, StreamChunk, TokenUsage, ToolCompletionRequest,
@@ -739,7 +739,7 @@ async fn streaming_turn_compacts_context_before_provider_stream() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn native_count_breach_keeps_its_model_and_compacts_after_a_retry_failure() {
+async fn native_count_breach_keeps_its_model_and_survives_a_failed_recount() {
     let (storage, space, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(NativeCountCompactionProvider::new());
     let mut config = resolved_config("agent-a");
@@ -761,22 +761,25 @@ async fn native_count_breach_keeps_its_model_and_compacts_after_a_retry_failure(
     ];
 
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    agent
+    // The summarised prompt is still too large for the byte upper bound to
+    // prove safe, so the confirmed breach stands and the local estimate
+    // cannot talk the turn past its capacity.
+    let error = agent
         .process_turn_streaming(request, event_tx)
         .await
-        .expect("a native-count breach must not be discarded after a retry failure");
+        .expect_err("an unproven prompt keeps the native-count breach");
+    assert!(matches!(error, AgentError::CompactionFailed(_)));
 
     let count_requests = provider.count_requests();
-    assert_eq!(count_requests.len(), 2);
     assert_eq!(count_requests[0].model.as_deref(), Some("selected-model"));
     assert_eq!(count_requests[1].model.as_deref(), Some("selected-model"));
     assert_eq!(count_requests[0].messages.len(), 4);
     assert_eq!(count_requests[1].messages.len(), 3);
 
-    let stream_requests = provider.stream_requests();
-    assert_eq!(stream_requests.len(), 1);
-    assert_eq!(stream_requests[0].model.as_deref(), Some("selected-model"));
-    assert_eq!(stream_requests[0].messages.len(), 3);
+    assert!(
+        provider.stream_requests().is_empty(),
+        "a prompt over capacity is never sent to the provider"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
