@@ -128,6 +128,7 @@ enum ResponseItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseContentPart {
     InputText { text: String },
+    InputImage { image_url: String },
     OutputText { text: String },
 }
 
@@ -237,18 +238,27 @@ impl ResponsesProvider {
             }
         };
 
+        let content = message
+            .content()
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } if !text.is_empty() => {
+                    Some(if message.role() == Role::Assistant {
+                        ResponseContentPart::OutputText { text: text.clone() }
+                    } else {
+                        ResponseContentPart::InputText { text: text.clone() }
+                    })
+                }
+                ContentPart::ImageUrl { url } => Some(ResponseContentPart::InputImage {
+                    image_url: url.clone(),
+                }),
+                ContentPart::Text { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
         let mut items = Vec::new();
-        let text = Self::text_content(message);
-        if !text.is_empty() {
-            let part = if message.role() == Role::Assistant {
-                ResponseContentPart::OutputText { text }
-            } else {
-                ResponseContentPart::InputText { text }
-            };
-            items.push(ResponseItem::Message {
-                role,
-                content: vec![part],
-            });
+        if !content.is_empty() {
+            items.push(ResponseItem::Message { role, content });
         }
 
         if let Some(calls) = message.tool_calls() {
@@ -796,6 +806,50 @@ mod tests {
         assert_eq!(json[0]["role"], "developer");
         assert_eq!(json[0]["content"][0]["type"], "input_text");
         assert_eq!(json[0]["content"][0]["text"], "You are helpful");
+    }
+
+    #[test]
+    fn convert_user_image_lands_as_input_image() {
+        let message = ChatMessage::new_parts(
+            Role::User,
+            vec![
+                ContentPart::Text {
+                    text: "Describe this image".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
+                },
+            ],
+        );
+
+        let json = serde_json::to_value(ResponsesProvider::convert_messages(&[message])).unwrap();
+        assert_eq!(
+            json[0]["content"],
+            serde_json::json!([
+                {"type": "input_text", "text": "Describe this image"},
+                {"type": "input_image", "image_url": "data:image/png;base64,cG5nLWJ5dGVz"}
+            ])
+        );
+    }
+
+    #[test]
+    fn convert_image_only_user_keeps_the_request_message() {
+        let message = ChatMessage::new_parts(
+            Role::User,
+            vec![ContentPart::ImageUrl {
+                url: "https://example.test/cat.png".into(),
+            }],
+        );
+
+        let json = serde_json::to_value(ResponsesProvider::convert_messages(&[message])).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "https://example.test/cat.png"}]
+            }])
+        );
     }
 
     #[test]
