@@ -7,21 +7,19 @@
   because it is the record of an ending rather than a progress reading.
 -->
 <script lang="ts">
-  import { fetchWorkflowRun } from "../api/workflows";
-  import type { WorkflowRun } from "../protocol/WorkflowRun";
+  import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
   import type { WorkflowRunEnding } from "../protocol/WorkflowRunEnding";
   import type { WorkflowWorkerAccount } from "../protocol/WorkflowWorkerAccount";
 
   interface Props {
-    runId: string;
+    detail: WorkflowRunDetailResponse | null;
+    loadState: "loading" | "loaded" | "absent" | "error";
+    errorMessage: string;
   }
 
-  let { runId }: Props = $props();
+  let { detail, loadState, errorMessage }: Props = $props();
 
-  let run = $state<WorkflowRun | null>(null);
-  let isLoading = $state(true);
-  let errorMessage = $state<string | null>(null);
-
+  const run = $derived(detail?.run ?? null);
   const account = $derived(run?.terminal_account ?? null);
 
   // The four standings, in the order a reader wants them: what came back,
@@ -76,31 +74,14 @@
     return typeof output === "string" ? output : JSON.stringify(output);
   }
 
-  $effect(() => {
-    let isCurrent = true;
-    run = null;
-    isLoading = true;
-    errorMessage = null;
-    fetchWorkflowRun(runId)
-      .then((response) => {
-        if (isCurrent) run = response.run;
-      })
-      .catch((error: unknown) => {
-        if (isCurrent) errorMessage = error instanceof Error ? error.message : String(error);
-      })
-      .finally(() => {
-        if (isCurrent) isLoading = false;
-      });
-    return () => {
-      isCurrent = false;
-    };
-  });
 </script>
 
 <main class="run">
-  {#if isLoading}
+  {#if loadState === "loading"}
     <p class="notice">Loading run…</p>
-  {:else if errorMessage}
+  {:else if loadState === "absent"}
+    <p class="notice">No run with that id was found.</p>
+  {:else if loadState === "error"}
     <p class="notice" role="alert">{errorMessage}</p>
   {:else if run}
     <header>

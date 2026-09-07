@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { mount, tick, unmount } from "svelte";
+import { afterEach, describe, expect, it } from "vitest";
+import { mount, unmount } from "svelte";
 import WorkflowRunView from "../components/WorkflowRunView.svelte";
-import WorkflowRunViewHarness from "./fixtures/WorkflowRunViewHarness.svelte";
 import type { WorkflowRun } from "../protocol/WorkflowRun";
+import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
 import type { WorkflowRunEnding } from "../protocol/WorkflowRunEnding";
 import type { WorkflowRunTerminalAccount } from "../protocol/WorkflowRunTerminalAccount";
 
@@ -31,10 +31,25 @@ function run(
   } as unknown as WorkflowRun;
 }
 
-function respondWith(body: unknown): ReturnType<typeof vi.spyOn> {
-  return vi
-    .spyOn(globalThis, "fetch")
-    .mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+function detail(workflowRun: WorkflowRun): WorkflowRunDetailResponse {
+  return {
+    run: workflowRun,
+    journal: [],
+    wake_metrics: {
+      gate_evaluations: 0,
+      gate_wakes: 0,
+      gate_suppressions: 0,
+      events_posted: 0,
+      events_pending: 0,
+    },
+  };
+}
+
+function render(workflowRun: WorkflowRun): MountedComponent {
+  return mount(WorkflowRunView, {
+    target: document.body,
+    props: { detail: detail(workflowRun), loadState: "loaded", errorMessage: "" },
+  });
 }
 
 function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
@@ -53,7 +68,6 @@ describe("WorkflowRunView", () => {
     if (component) unmount(component);
     component = undefined;
     document.body.replaceChildren();
-    vi.restoreAllMocks();
   });
 
   it("reads the ending, every worker's standing, and the recoverable work", async () => {
@@ -126,12 +140,7 @@ describe("WorkflowRunView", () => {
       },
       settled_at: "2026-09-02T10:05:00Z",
     };
-    const fetchSpy = respondWith({ run: run(account), journal: [], wake_metrics: {} });
-
-    component = mount(WorkflowRunView, { target: document.body, props: { runId: "run 1" } });
-    await vi.waitFor(() => expect(document.body.textContent).toContain("Cancelled"));
-
-    expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run%201", { method: "GET" });
+    component = render(run(account));
     const text = document.body.textContent ?? "";
     // The partition is legible as a partition: the cancelled run's in-flight
     // worker reads as cut short rather than failed, and says so where it ran.
@@ -155,10 +164,7 @@ describe("WorkflowRunView", () => {
   });
 
   it("says a run that has not ended has no account yet", async () => {
-    respondWith({ run: run(null), journal: [], wake_metrics: {} });
-
-    component = mount(WorkflowRunView, { target: document.body, props: { runId: "run-1" } });
-    await vi.waitFor(() => expect(document.body.textContent).toContain("has not ended yet"));
+    component = render(run(null));
 
     expect(document.body.textContent).not.toContain("Cut short");
   });
@@ -181,66 +187,16 @@ describe("WorkflowRunView", () => {
       "Interrupted without resume — the workflow source was unavailable",
     ],
   ])("describes the %s ending", async (ending, expected) => {
-    respondWith({ run: run(emptyAccount(ending)), journal: [], wake_metrics: {} });
-
-    component = mount(WorkflowRunView, { target: document.body, props: { runId: "run-1" } });
-
-    await vi.waitFor(() => expect(document.body.textContent).toContain(expected));
+    component = render(run(emptyAccount(ending)));
+    expect(document.body.textContent).toContain(expected);
   });
 
-  it("surfaces a failed read rather than an empty run", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
-
-    component = mount(WorkflowRunView, { target: document.body, props: { runId: "missing" } });
-    await tick();
-    await vi.waitFor(() =>
-      expect(document.querySelector('[role="alert"]')?.textContent).toContain("404"),
-    );
-  });
-
-  it("reloads for a new run ID and ignores the previous run's late response", async () => {
-    let resolveFirst: ((response: Response) => void) | undefined;
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-      const url = String(input);
-      if (url.endsWith("/run-a")) {
-        return new Promise<Response>((resolve) => {
-          resolveFirst = resolve;
-        });
-      }
-      if (url.endsWith("/run-b")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              run: run(null, "run-b", "second run"),
-              journal: [],
-              wake_metrics: {},
-            }),
-            { status: 200 },
-          ),
-        );
-      }
-      throw new Error(`unexpected request: ${url}`);
+  it("surfaces a failed shared-record read rather than an empty run", () => {
+    component = mount(WorkflowRunView, {
+      target: document.body,
+      props: { detail: null, loadState: "error", errorMessage: "read failed" },
     });
 
-    const harness = mount(WorkflowRunViewHarness, { target: document.body });
-    component = harness;
-    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run-a", { method: "GET" }));
-
-    harness.show("run-b");
-    await vi.waitFor(() => expect(document.body.textContent).toContain("second run"));
-
-    resolveFirst?.(
-      new Response(
-        JSON.stringify({
-          run: run(null, "run-a", "first run"),
-          journal: [],
-          wake_metrics: {},
-        }),
-        { status: 200 },
-      ),
-    );
-    await tick();
-    expect(document.body.textContent).toContain("second run");
-    expect(document.body.textContent).not.toContain("first run");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("read failed");
   });
 });
