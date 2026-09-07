@@ -3448,18 +3448,21 @@ async fn run_host_commands_inner(
                     continue;
                 }
                 // A durable parked wait: a long enough sleep, with no other
-                // timer armed and no host work in flight, tears the engine
-                // down instead of holding an OS thread on a timer. The run
+                // timer armed, no host work in flight, and no sibling command
+                // already queued, tears the engine down instead of holding an
+                // OS thread on a timer. The run
                 // records when it is due; the waker resumes it by replay,
-                // and this same arm then fires the remainder. Both guards
+                // and this same arm then fires the remainder. These guards
                 // are load-bearing: an in-flight call would be
                 // double-executed by wake replay if it were still
-                // unsettled, and an armed sibling timer would die unfired.
-                // The in-flight counter is loop-owned truth — the journal
-                // can lag a dispatch, so it must not be the guard.
+                // unsettled, and an armed or queued sibling timer would die
+                // unfired. The in-flight counter and command queue are
+                // loop-owned truth — the journal can lag a dispatch, so it
+                // must not be the guard.
                 if effective_ms >= park_threshold_ms
                     && pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
+                    && commands.is_empty()
                 {
                     match state.storage.set_workflow_run_parked(run_id, due).await {
                         Ok(()) => {
@@ -3806,14 +3809,14 @@ async fn run_host_commands_inner(
                     parked_replies.push(reply);
                     continue;
                 }
-                // Parking honours the same two guards a durable timer wait
-                // does: an in-flight call would be double-executed by wake
-                // replay, and an armed sibling timer would die unfired. A
-                // An answered sibling must also reach the script first: it
-                // may be the winner of a concurrent race while this hold
-                // remains open. Raising a hold is itself idempotent, so when
-                // a guard refuses the park the engine simply stays up and
-                // watches the decision in process.
+                // Parking honours the same guards a durable timer wait does:
+                // an in-flight or queued call would be replayed before it had
+                // settled, and an armed or queued sibling timer would die
+                // unfired. An answered sibling must also reach the script
+                // first: it may be the winner of a concurrent race while
+                // this hold remains open. Raising a hold is itself
+                // idempotent, so when a guard refuses the park the engine
+                // simply stays up and watches the decision in process.
                 let answered_concurrent_hold = replay_has_answered_concurrent_hold(
                     &state,
                     run_id,
@@ -3823,6 +3826,7 @@ async fn run_host_commands_inner(
                 .await;
                 if pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
+                    && commands.is_empty()
                     && !answered_concurrent_hold
                 {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
@@ -14866,6 +14870,67 @@ mod tests {
             .expect("verdict");
         assert_eq!(answer["verdict"], "ship");
 
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_queued_before_a_timer_keeps_the_engine_until_the_timer_fires() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+
+        let (hold_reply, hold_receive) = oneshot::channel();
+        tx.send(HostCommand::Hold {
+            request: decision_hold("ship it, or hold it?"),
+            cancellation: CancellationToken::new(),
+            reply: hold_reply,
+        })
+        .expect("queue the hold first");
+        let (timer_reply, timer_receive) = oneshot::channel();
+        tx.send(HostCommand::Timer {
+            ms: 10,
+            timer_id: 0,
+            cancellation: CancellationToken::new(),
+            reply: timer_reply,
+        })
+        .expect("queue the sibling timer second");
+
+        let fired = tokio::time::timeout(std::time::Duration::from_secs(2), timer_receive)
+            .await
+            .expect("the queued sibling timer fires without a replay")
+            .expect("timer reply")
+            .expect("timer result");
+        assert_eq!(fired, serde_json::json!({"fired": true}));
+        let (confirm_reply, confirm_receive) = oneshot::channel();
+        tx.send(HostCommand::ConfirmTimer {
+            timer_id: 0,
+            reply: confirm_reply,
+        })
+        .expect("confirm the winning timer");
+        confirm_receive
+            .await
+            .expect("timer confirmation reply")
+            .expect("confirm timer");
+
+        let hold_id = wait_for_open_hold(&storage, run.id).await;
+        let waiting = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(waiting.state, "running", "queued work refused the park");
+        assert!(waiting.wake_at.is_none());
+
+        answer_open_hold(&state, hold_id).await;
+        let answer = hold_receive
+            .await
+            .expect("hold reply")
+            .expect("hold answer");
+        assert_eq!(answer["verdict"], "ship");
         drop(tx);
         task.await.expect("host loop");
     }
