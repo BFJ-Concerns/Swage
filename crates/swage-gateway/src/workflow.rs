@@ -800,6 +800,28 @@ fn configured_route_is_exhausted(
     }
 }
 
+#[derive(Clone)]
+struct FallbackRouteAdmission {
+    budgets: Arc<std::collections::BTreeMap<String, WorkflowRouteBudget>>,
+    accounting: Arc<Mutex<RouteTokenBudgetState>>,
+}
+
+impl FallbackRouteAdmission {
+    async fn admit(&self, route: &str) -> Result<(), WorkflowHostError> {
+        let Some(budget) = self.budgets.get(route) else {
+            return Ok(());
+        };
+        let mut accounting = self.accounting.lock().await;
+        if configured_route_is_exhausted(accounting.ledger_mut(route), budget) {
+            Err(WorkflowHostError::Message(
+                "BudgetExceededError: token limit reached".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn route_was_winding_down_before(
     journal: &[WorkflowJournalRecord],
     sequence: u64,
@@ -1883,6 +1905,7 @@ async fn latest_turn(
         .map_err(Into::into)
 }
 
+#[cfg(test)]
 async fn run_ephemeral_agent_call(
     state: &AppState,
     run_id: Uuid,
@@ -1893,6 +1916,34 @@ async fn run_ephemeral_agent_call(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
+) -> Result<AgentCallResult, WorkflowHostError> {
+    run_ephemeral_agent_call_with_admission(
+        state,
+        run_id,
+        space_id,
+        dispatch_bound_agent_ids,
+        dispatch_bound_task_definition_ids,
+        journal_entry_id,
+        request,
+        resolved_working_directory,
+        cancellation,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_ephemeral_agent_call_with_admission(
+    state: &AppState,
+    run_id: Uuid,
+    space_id: Uuid,
+    dispatch_bound_agent_ids: &[String],
+    dispatch_bound_task_definition_ids: &[String],
+    journal_entry_id: Uuid,
+    request: AgentCallRequest,
+    resolved_working_directory: Option<ResolvedWorkerPlacement>,
+    cancellation: CancellationToken,
+    fallback_route_admission: Option<&FallbackRouteAdmission>,
 ) -> Result<AgentCallResult, WorkflowHostError> {
     if request.session.is_some()
         && let Some(task) = request.task.as_deref()
@@ -2244,6 +2295,12 @@ async fn run_ephemeral_agent_call(
                         "AgentCallError: selected model failed before output ({error}); declared fallback {fallback_model:?} is unavailable: {fallback_error}"
                     )
                 })?;
+            if let Some(admission) = fallback_route_admission
+                && let Some(route) =
+                    swage_config::resolve_provider_route(&call_config.models, Some(&fallback_model))
+            {
+                admission.admit(route.provider_id).await?;
+            }
             let fallback = execute_workflow_agent_turn(
                 state,
                 session_id,
@@ -3575,7 +3632,7 @@ async fn run_host_commands_inner(
                 let replay = Arc::clone(&replay);
                 let spent = Arc::clone(&spent_tokens);
                 let token_budget = Arc::clone(&token_budget);
-                let configured_route_budgets = budget.per_route.clone();
+                let configured_route_budgets = Arc::new(budget.per_route.clone());
                 let call_uses_closing_partition = winding_down;
                 let semaphore = Arc::clone(&semaphore);
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
@@ -3600,6 +3657,10 @@ async fn run_host_commands_inner(
                     let hash = request_hash;
                     let existing = replay.get(current_seq as usize);
                     let failed_replay = existing.is_some_and(|entry| entry.status == "failed");
+                    let fallback_route_admission = FallbackRouteAdmission {
+                        budgets: Arc::clone(&configured_route_budgets),
+                        accounting: Arc::clone(&token_budget),
+                    };
                     let (journal_entry_id, result) = if let Some(entry) = existing {
                         let journal_entry_id = entry.id;
                         if entry.args_hash != hash {
@@ -3653,6 +3714,7 @@ async fn run_host_commands_inner(
                                     request,
                                     resolved_working_directory,
                                     cancellation,
+                                    &fallback_route_admission,
                                 ))
                                 .await,
                             )
@@ -3685,6 +3747,7 @@ async fn run_host_commands_inner(
                                         request,
                                         resolved_working_directory,
                                         cancellation,
+                                        &fallback_route_admission,
                                     ))
                                     .await,
                                 )
@@ -4834,11 +4897,12 @@ async fn complete_agent_entry(
     request: AgentCallRequest,
     resolved_working_directory: Option<ResolvedWorkerPlacement>,
     cancellation: CancellationToken,
+    fallback_route_admission: &FallbackRouteAdmission,
 ) -> Result<AgentCallResult, WorkflowHostError> {
     let worktree_seq = resolved_working_directory
         .as_ref()
         .and_then(|placement| placement.worktree_seq);
-    match run_ephemeral_agent_call(
+    match run_ephemeral_agent_call_with_admission(
         state,
         run_id,
         space_id,
@@ -4848,6 +4912,7 @@ async fn complete_agent_entry(
         request,
         resolved_working_directory,
         cancellation,
+        Some(fallback_route_admission),
     )
     .await
     {
@@ -4909,6 +4974,9 @@ fn classify_agent_call_failure(
             }
         }
         WorkflowHostError::AgentCall { .. } => error,
+        WorkflowHostError::Message(message) if message.starts_with("BudgetExceededError:") => {
+            WorkflowHostError::Message(message)
+        }
         WorkflowHostError::Message(message) => WorkflowHostError::AgentCall {
             host_reference,
             message,
@@ -20808,6 +20876,60 @@ protocol = "openai"
             .expect("terminal budget result");
         assert_eq!(terminal["per_route"]["primary-route"]["spent"], 0);
         assert_eq!(terminal["per_route"]["fallback-route"]["spent"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_fallback_refuses_an_exhausted_provider_route_before_dispatch() {
+        let (state, storage, provider, space_id) = fallback_test_state(vec![
+            vec![swage_core::StreamChunk::Error {
+                message: "primary refused".into(),
+            }],
+            scripted_text_output("must not run"),
+        ])
+        .await;
+        let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
+            "per_route": {
+                "primary-route": {"max_total_tokens": 7},
+                "fallback-route": {"max_total_tokens": 0}
+            }
+        }))
+        .expect("route budget");
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    try {
+                        await agent("answer", {
+                            agent: "default", model: "pinned", fallbackModel: "fallback"
+                        });
+                    } catch (error) {
+                        return error.name;
+                    }
+                "#
+                .into(),
+                args: Value::Null,
+                budget: Some(budget),
+            }),
+        )
+        .await
+        .expect("start workflow");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(
+            run.final_output,
+            Some(Value::String("BudgetExceededError".into()))
+        );
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            1,
+            "the exhausted fallback route must refuse before its provider request"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
