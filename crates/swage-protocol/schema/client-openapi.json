@@ -2598,6 +2598,15 @@
               "string",
               "null"
             ]
+          },
+          "worker_staleness_threshold_ms": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2908,6 +2917,15 @@
             "default": null,
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "worker_staleness_threshold_ms": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           }
@@ -5770,6 +5788,11 @@
             "const": "wind_down",
             "description": "The working allowance was exhausted. The triggering agent call was\nnot started; replay returns the same wind-down signal at this point.",
             "type": "string"
+          },
+          {
+            "const": "worker",
+            "description": "A held worker was opened, closed, or read for staleness. The request\nnames which of the three; the result carries the worker's identity and,\nfor a staleness read, the recorded idle gap and route threshold.",
+            "type": "string"
           }
         ]
       },
@@ -5901,6 +5924,84 @@
             "required": [
               "kind",
               "paths"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "creation": true,
+              "kind": {
+                "const": "worker_open",
+                "type": "string"
+              },
+              "worker_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "worker_id",
+              "creation"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "closed_by": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "worker_close",
+                "type": "string"
+              },
+              "worker_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "worker_id",
+              "closed_by"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "idle_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "worker_staleness",
+                "type": "string"
+              },
+              "route": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stale": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "threshold_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "idle_ms"
             ],
             "type": "object"
           },

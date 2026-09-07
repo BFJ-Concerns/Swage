@@ -1,12 +1,12 @@
 use super::{
-    AgentError, AppState, Arc, CancellationToken, DelegationExecutor, DelegationHandler,
-    DispatchContextComposition, GatewayDispatcherRequest, MessageRouter, NewAgentMessage, Uuid,
-    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
-    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
-    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
-    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_space_workspace,
-    build_approval_registrar, build_assembly_elements,
+    AgentError, AppState, Arc, CancellationToken, DELEGATED_CHILDREN_METADATA_KEY,
+    DelegationExecutor, DelegationHandler, DispatchContextComposition, GatewayDispatcherRequest,
+    MessageRouter, NewAgentMessage, Uuid, WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY,
+    WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY, WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY,
+    WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
+    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
+    apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
+    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
@@ -19,11 +19,179 @@ use super::{
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
 use swage_agent::{
-    AgentEvent, DelegatedAssembly, DelegationContextAssembler, DelegationOutcome,
-    DelegationSnapshotRecorder,
+    AgentEvent, DelegatedAssembly, DelegatedChildContinuation, DelegationContextAssembler,
+    DelegationOutcome, DelegationSnapshotRecorder,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+
+pub(super) const DELEGATED_CHILD_SKILLS_METADATA_KEY: &str = "delegated_child_skills";
+pub(super) const DELEGATED_CHILD_COMPOSITION_METADATA_KEY: &str = "delegated_child_composition";
+pub(super) const DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY: &str = "delegated_child_requested_cwd";
+const DELEGATED_CHILD_ISOLATION_METADATA_KEY: &str = "delegated_child_isolation";
+
+struct ResolvedNamedChild {
+    continuation: DelegatedChildContinuation,
+    metadata: serde_json::Value,
+}
+
+/// Look up a child this session has delegated to under `name`, and load
+/// everything it has heard and said so far.
+///
+/// The agent is fixed by the call that opened the child: a later call naming
+/// it must be talking to the same agent, or it is a different child wearing a
+/// used name. An unknown name is not an error — it opens a child.
+async fn resolve_named_child(
+    state: &AppState,
+    parent_session_id: Uuid,
+    name: &str,
+    target_agent_id: &str,
+) -> Result<Option<ResolvedNamedChild>, AgentError> {
+    let session = state
+        .storage
+        .get_session(parent_session_id)
+        .await?
+        .ok_or(AgentError::SessionNotFound(parent_session_id))?;
+    let Some(entry) = session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(DELEGATED_CHILDREN_METADATA_KEY))
+        .and_then(|children| children.get(name))
+    else {
+        return Ok(None);
+    };
+    let recorded_agent = entry.get("agent_id").and_then(serde_json::Value::as_str);
+    if recorded_agent != Some(target_agent_id) {
+        return Err(AgentError::InvalidConfig(format!(
+            "child {name:?} is {recorded_agent:?}, not {target_agent_id:?}; \
+             use a different name to delegate to a different agent"
+        )));
+    }
+    let id = |field: &str| {
+        entry
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or_else(|| {
+                AgentError::InvalidConfig(format!("child {name:?} has no usable {field}"))
+            })
+    };
+    let session_id = id("session_id")?;
+    let thread_id = id("thread_id")?;
+    let child_session = state
+        .storage
+        .get_session(session_id)
+        .await?
+        .ok_or(AgentError::SessionNotFound(session_id))?;
+    if child_session.agent_id != target_agent_id {
+        return Err(AgentError::InvalidConfig(format!(
+            "child {name:?} session belongs to {:?}, not {target_agent_id:?}",
+            child_session.agent_id
+        )));
+    }
+    let turns = state.storage.list_turns_by_thread(thread_id).await?;
+    if turns.iter().any(|turn| !turn.state.is_terminal()) {
+        return Err(AgentError::InvalidConfig(format!(
+            "child {name:?} is still taking its previous turn; named child turns are sequential"
+        )));
+    }
+    let history = super::rebuild_thread_history_messages(state.storage.as_ref(), thread_id)
+        .await
+        .map_err(|error| {
+            AgentError::InvalidConfig(format!("cannot reload child {name:?}: {error}"))
+        })?;
+    Ok(Some(ResolvedNamedChild {
+        continuation: DelegatedChildContinuation {
+            session_id,
+            thread_id,
+            history,
+        },
+        metadata: child_session
+            .metadata
+            .unwrap_or_else(|| serde_json::json!({})),
+    }))
+}
+
+/// Record a freshly opened child under the name the caller gave it, so a later
+/// delegate call naming it returns to this child.
+async fn record_named_child(
+    state: &AppState,
+    parent_session_id: Uuid,
+    name: &str,
+    target_agent_id: &str,
+    child_session_id: Uuid,
+    child_thread_id: Uuid,
+) -> Result<(), AgentError> {
+    let session = state
+        .storage
+        .get_session(parent_session_id)
+        .await?
+        .ok_or(AgentError::SessionNotFound(parent_session_id))?;
+    let mut metadata = session.metadata.unwrap_or_else(|| serde_json::json!({}));
+    if !metadata[DELEGATED_CHILDREN_METADATA_KEY].is_object() {
+        metadata[DELEGATED_CHILDREN_METADATA_KEY] = serde_json::json!({});
+    }
+    metadata[DELEGATED_CHILDREN_METADATA_KEY][name] = serde_json::json!({
+        "agent_id": target_agent_id,
+        "session_id": child_session_id,
+        "thread_id": child_thread_id,
+    });
+    state
+        .storage
+        .set_session_metadata(parent_session_id, Some(metadata))
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn reauthorise_named_child_placement(
+    state: &AppState,
+    space_id: Uuid,
+    sender_turn_id: Uuid,
+    sender_session_id: Uuid,
+    active_workspace_attachment_id: Option<Uuid>,
+    sender_placement: Option<&ResolvedWorkerDirectory>,
+    metadata: &serde_json::Value,
+) -> Result<Option<ResolvedWorkerDirectory>, AgentError> {
+    let Some(path) = metadata
+        .get(WORKER_PLACEMENT_CWD_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+    else {
+        return Ok(None);
+    };
+    let authority_path = metadata
+        .get(WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            AgentError::InvalidConfig("named child placement is missing its authority path".into())
+        })?;
+    let authority_context_id = metadata
+        .get(WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            AgentError::InvalidConfig(
+                "named child placement is missing its authority context".into(),
+            )
+        })?;
+    let authority = resolve_authorised_worker_directory(
+        state,
+        space_id,
+        sender_turn_id,
+        Some(sender_session_id),
+        active_workspace_attachment_id,
+        sender_placement,
+        authority_path,
+    )
+    .await
+    .map_err(AgentError::InvalidConfig)?;
+    Ok(Some(ResolvedWorkerDirectory {
+        path,
+        can_write: authority.can_write,
+        authority_path: authority.path,
+        authority_context_id,
+    }))
+}
 
 pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &str) -> Uuid {
     let mut digest = Sha256::new();
@@ -329,6 +497,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         cwd: Option<String>,
         isolation: Option<swage_protocol::client::workflow::WorkerIsolation>,
         skills: Option<Vec<String>>,
+        child: Option<&str>,
         composition: DispatchContextComposition,
         delegate_call_id: &str,
         sender_agent_id: &str,
@@ -340,6 +509,65 @@ impl DelegationHandler for GatewayDelegationHandler {
         let space = self.state.space_store.get(space_id).await?.ok_or_else(|| {
             AgentError::InvalidConfig(format!("delegation space {space_id} no longer exists"))
         })?;
+        let sender_filesystem_authority =
+            self.filesystem_authority_for_turn(sender_turn_id).await?;
+        let active_workspace_attachment_id =
+            sender_filesystem_authority.active_workspace_attachment_id;
+        let sender_session_id = sender_filesystem_authority.session_id;
+        let existing_named_child = match child {
+            Some(name) => {
+                resolve_named_child(&self.state, sender_session_id, name, target_agent_id).await?
+            }
+            None => None,
+        };
+        let read_child_option = |key: &str| -> Result<Option<serde_json::Value>, AgentError> {
+            existing_named_child
+                .as_ref()
+                .map(|child| {
+                    child.metadata.get(key).cloned().ok_or_else(|| {
+                        AgentError::InvalidConfig(format!(
+                            "named child is missing its fixed {key} creation record"
+                        ))
+                    })
+                })
+                .transpose()
+        };
+        let task_definition = match existing_named_child.as_ref() {
+            Some(child) => child
+                .metadata
+                .get("task_definition")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            None => task_definition.map(str::to_owned),
+        };
+        let cwd = match read_child_option(DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY)? {
+            Some(value) => serde_json::from_value(value).map_err(|error| {
+                AgentError::InvalidConfig(format!("named child has invalid fixed cwd: {error}"))
+            })?,
+            None => cwd,
+        };
+        let isolation = match read_child_option(DELEGATED_CHILD_ISOLATION_METADATA_KEY)? {
+            Some(value) => serde_json::from_value(value).map_err(|error| {
+                AgentError::InvalidConfig(format!(
+                    "named child has invalid fixed isolation: {error}"
+                ))
+            })?,
+            None => isolation,
+        };
+        let skills = match read_child_option(DELEGATED_CHILD_SKILLS_METADATA_KEY)? {
+            Some(value) => serde_json::from_value(value).map_err(|error| {
+                AgentError::InvalidConfig(format!("named child has invalid fixed skills: {error}"))
+            })?,
+            None => skills,
+        };
+        let composition = match read_child_option(DELEGATED_CHILD_COMPOSITION_METADATA_KEY)? {
+            Some(value) => serde_json::from_value(value).map_err(|error| {
+                AgentError::InvalidConfig(format!(
+                    "named child has invalid fixed context composition: {error}"
+                ))
+            })?,
+            None => composition,
+        };
 
         let target_resolved =
             load_session_config(&self.state, &space.slug, target_agent_id).map_err(|error| {
@@ -366,7 +594,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_resolved
             }
         };
-        let target_resolved = match task_definition {
+        let target_resolved = match task_definition.as_deref() {
             Some(id) => {
                 let definition =
                     crate::service::resolve_task_definition(self.state.storage.as_ref(), id)
@@ -412,18 +640,25 @@ impl DelegationHandler for GatewayDelegationHandler {
             dispatch_bound_task_definition_ids_for_turn(&self.state, sender_turn_id)
                 .await
                 .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-        let sender_filesystem_authority =
-            self.filesystem_authority_for_turn(sender_turn_id).await?;
         let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
         add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
         if let Some(workflow_call_tools) = &sender_filesystem_authority.workflow_call_tools {
             session_metadata[WORKFLOW_CALL_TOOLS_METADATA_KEY] = workflow_call_tools.clone();
         }
-        if let Some(task_definition) = task_definition {
+        if let Some(task_definition) = task_definition.as_deref() {
             session_metadata["task_definition"] =
                 serde_json::Value::String(task_definition.to_string());
         }
+        session_metadata[DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY] = serde_json::json!(cwd);
+        session_metadata[DELEGATED_CHILD_ISOLATION_METADATA_KEY] = serde_json::json!(isolation);
+        session_metadata[DELEGATED_CHILD_SKILLS_METADATA_KEY] = serde_json::json!(skills);
+        session_metadata[DELEGATED_CHILD_COMPOSITION_METADATA_KEY] =
+            serde_json::to_value(&composition).map_err(|error| {
+                AgentError::InvalidConfig(format!(
+                    "failed to record named child context composition: {error}"
+                ))
+            })?;
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
             &space.slug,
@@ -446,9 +681,10 @@ impl DelegationHandler for GatewayDelegationHandler {
             apply_workflow_call_tools(effective_target_resolved, Some(&session_metadata))
                 .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
 
-        let active_workspace_attachment_id =
-            sender_filesystem_authority.active_workspace_attachment_id;
-        let sender_session_id = sender_filesystem_authority.session_id;
+        if let Some(existing) = existing_named_child.as_ref() {
+            session_metadata = existing.metadata.clone();
+        }
+        let existing_child = existing_named_child.map(|child| child.continuation);
         let mut target_agent_config = build_agent_config_for_space_workspace(
             &self.state,
             target_agent_id.to_string(),
@@ -460,55 +696,68 @@ impl DelegationHandler for GatewayDelegationHandler {
         )
         .await;
         let mut worktree_owner_id = None;
-        let placement = match isolation {
-            None => match cwd.as_deref() {
-                Some(cwd) => Some(
-                    resolve_authorised_worker_directory(
+        let placement = if existing_child.is_some() {
+            reauthorise_named_child_placement(
+                &self.state,
+                space_id,
+                sender_turn_id,
+                sender_session_id,
+                active_workspace_attachment_id,
+                sender_filesystem_authority.placement.as_ref(),
+                &session_metadata,
+            )
+            .await?
+        } else {
+            match isolation {
+                None => match cwd.as_deref() {
+                    Some(cwd) => Some(
+                        resolve_authorised_worker_directory(
+                            &self.state,
+                            space_id,
+                            sender_turn_id,
+                            Some(sender_session_id),
+                            active_workspace_attachment_id,
+                            sender_filesystem_authority.placement.as_ref(),
+                            cwd,
+                        )
+                        .await
+                        .map_err(AgentError::InvalidConfig)?,
+                    ),
+                    None => sender_filesystem_authority.placement.clone(),
+                },
+                Some(swage_protocol::client::workflow::WorkerIsolation::Worktree) => {
+                    let repo = cwd.as_deref().ok_or_else(|| {
+                        AgentError::InvalidConfig(
+                            "delegate isolation=worktree requires cwd to name the git repository"
+                                .into(),
+                        )
+                    })?;
+                    let repo = resolve_authorised_worker_directory(
                         &self.state,
                         space_id,
                         sender_turn_id,
                         Some(sender_session_id),
                         active_workspace_attachment_id,
                         sender_filesystem_authority.placement.as_ref(),
-                        cwd,
+                        repo,
                     )
                     .await
-                    .map_err(AgentError::InvalidConfig)?,
-                ),
-                None => sender_filesystem_authority.placement.clone(),
-            },
-            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree) => {
-                let repo = cwd.as_deref().ok_or_else(|| {
-                    AgentError::InvalidConfig(
-                        "delegate isolation=worktree requires cwd to name the git repository"
-                            .into(),
-                    )
-                })?;
-                let repo = resolve_authorised_worker_directory(
-                    &self.state,
-                    space_id,
-                    sender_turn_id,
-                    Some(sender_session_id),
-                    active_workspace_attachment_id,
-                    sender_filesystem_authority.placement.as_ref(),
-                    repo,
-                )
-                .await
-                .map_err(AgentError::InvalidConfig)?;
-                let owner_id = delegate_worktree_owner(sender_turn_id, delegate_call_id);
-                worktree_owner_id = Some(owner_id);
-                Some(ResolvedWorkerDirectory {
-                    path: self
-                        .state
-                        .worktree_host
-                        .provision(owner_id, 0, &repo.path)
-                        .await
-                        .map_err(AgentError::InvalidConfig)?
-                        .path,
-                    can_write: repo.can_write,
-                    authority_path: repo.authority_path,
-                    authority_context_id: repo.authority_context_id,
-                })
+                    .map_err(AgentError::InvalidConfig)?;
+                    let owner_id = delegate_worktree_owner(sender_turn_id, delegate_call_id);
+                    worktree_owner_id = Some(owner_id);
+                    Some(ResolvedWorkerDirectory {
+                        path: self
+                            .state
+                            .worktree_host
+                            .provision(owner_id, 0, &repo.path)
+                            .await
+                            .map_err(AgentError::InvalidConfig)?
+                            .path,
+                        can_write: repo.can_write,
+                        authority_path: repo.authority_path,
+                        authority_context_id: repo.authority_context_id,
+                    })
+                }
             }
         };
         if let Some(placement) = placement.as_ref() {
@@ -580,7 +829,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };
 
-        let mut payload = delegate_message_payload(composition, task, task_definition)?;
+        let mut payload = delegate_message_payload(composition, task, task_definition.as_deref())?;
         payload["placement"] = serde_json::json!({
             "cwd": placement.as_ref().map(|placement| &placement.path),
             "requested_cwd": cwd,
@@ -637,6 +886,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         session_metadata,
                         child_cancel_token,
                         None,
+                        existing_child,
                         placement
                             .as_ref()
                             .map(|placement| placement.path.to_string_lossy().into_owned()),
@@ -663,6 +913,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 .await;
 
                 if result_msg.payload.get("error").is_none()
+                    && child.is_none()
                     && let Some(owner_id) = worktree_owner_id
                 {
                     self.state.worktree_host.cleanup_owner(owner_id).await;
@@ -676,6 +927,32 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .await;
                     return Err(error);
                 }
+                if let Some(name) = child {
+                    let child_id = |field: &str| {
+                        result_msg
+                            .payload
+                            .get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                    };
+                    if let (Some(child_session_id), Some(child_thread_id)) =
+                        (child_id("child_session_id"), child_id("child_thread_id"))
+                        && let Err(error) = record_named_child(
+                            &self.state,
+                            sender_session_id,
+                            name,
+                            target_agent_id,
+                            child_session_id,
+                            child_thread_id,
+                        )
+                        .await
+                    {
+                        // The child answered; losing the name only costs the
+                        // caller the ability to come back to it, so the
+                        // result still stands.
+                        tracing::warn!(%error, child = name, "could not record the named child");
+                    }
+                }
                 Ok(DelegationOutcome::Completed(result_msg.payload.clone()))
             }
             DelegateCompletionMode::Detach => {
@@ -685,6 +962,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let detached_router = router.clone();
                 let worktree_host = Arc::clone(&self.state.worktree_host);
                 let placement = placement.clone();
+                let retain_worktree = child.is_some();
 
                 tokio::spawn(async move {
                     let result = executor
@@ -698,6 +976,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                             session_metadata,
                             child_cancel_token,
                             Some(started_tx),
+                            existing_child,
                             placement
                                 .as_ref()
                                 .map(|placement| placement.path.to_string_lossy().into_owned()),
@@ -716,6 +995,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         // it to the parent thread before claiming it Delivered.
                         Ok(result_msg) => {
                             if result_msg.payload.get("error").is_none()
+                                && !retain_worktree
                                 && let Some(owner_id) = worktree_owner_id
                             {
                                 worktree_host.cleanup_owner(owner_id).await;
@@ -739,6 +1019,19 @@ impl DelegationHandler for GatewayDelegationHandler {
                         "detached delegation stopped before child turn startup".to_string(),
                     )
                 })?;
+                if let Some(name) = child
+                    && let Err(error) = record_named_child(
+                        &self.state,
+                        sender_session_id,
+                        name,
+                        target_agent_id,
+                        detached.child_session_id,
+                        detached.child_thread_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, child = name, "could not record the named child");
+                }
                 Ok(DelegationOutcome::Detached(detached))
             }
         }

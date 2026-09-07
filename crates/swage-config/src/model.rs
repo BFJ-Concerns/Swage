@@ -55,6 +55,15 @@ pub struct ProviderEndpointConfig {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<PathBuf>,
+    /// How long a held worker's session may sit idle on this route before a
+    /// continued turn stops being the cheaper move. Routes differ — a proxy
+    /// holding a prompt cache for minutes and a metered key holding none do
+    /// not share a number — so this is declared per route and never defaulted
+    /// to a global constant. `None` means this route makes no claim: a
+    /// staleness reading over it reports the idle gap and says the verdict is
+    /// unknown rather than guessing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_staleness_threshold_ms: Option<u64>,
 }
 
 impl Default for ProviderEndpointConfig {
@@ -66,6 +75,7 @@ impl Default for ProviderEndpointConfig {
             base_url: None,
             command: None,
             state_dir: None,
+            worker_staleness_threshold_ms: None,
         }
     }
 }
@@ -115,6 +125,49 @@ impl ModelCatalogConfig {
     pub fn default_model(&self) -> Option<&ModelEndpointConfig> {
         self.entries.get(&self.default)
     }
+}
+
+/// The provider route a model draws on: the configured allowance and endpoint
+/// its calls actually touch, named by its provider id.
+///
+/// A "route" means this and only this wherever the term is used — held-worker
+/// staleness thresholds and per-route token accounting both resolve through
+/// [`resolve_provider_route`], so the two never disagree about which
+/// allowance a model belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProviderRoute<'a> {
+    pub provider_id: &'a str,
+    pub endpoint: &'a ProviderEndpointConfig,
+    pub model: &'a ModelEndpointConfig,
+}
+
+/// Resolve the provider route a model id draws on.
+///
+/// `model` is matched against the catalogue's keys first and its declared
+/// aliases second; `None` resolves the catalogue default. A model named but
+/// absent from the catalogue has no route — the caller must say so rather
+/// than substitute the default, since a mistyped model is not the default
+/// model's allowance.
+pub fn resolve_provider_route<'a>(
+    models: &'a ModelCatalogConfig,
+    providers: &'a ProviderCatalogConfig,
+    model: Option<&str>,
+) -> Option<ProviderRoute<'a>> {
+    let model = match model {
+        Some(name) => models.entries.get(name).or_else(|| {
+            models
+                .entries
+                .values()
+                .find(|entry| entry.aliases.iter().any(|alias| alias == name))
+        })?,
+        None => models.default_model()?,
+    };
+    let (provider_id, endpoint) = providers.entries.get_key_value(&model.provider_id)?;
+    Some(ProviderRoute {
+        provider_id,
+        endpoint,
+        model,
+    })
 }
 
 /// Sandbox isolation settings.
@@ -858,6 +911,91 @@ impl std::fmt::Display for HierarchyLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn route_catalogues() -> (ModelCatalogConfig, ProviderCatalogConfig) {
+        let mut models = ModelCatalogConfig {
+            default: "house".into(),
+            entries: HashMap::new(),
+        };
+        models.entries.insert(
+            "house".into(),
+            ModelEndpointConfig {
+                provider_id: "proxy".into(),
+                model_id: "house-1".into(),
+                aliases: vec!["cheap".into()],
+                context_window: None,
+                generation_preset: None,
+                default_effort: None,
+                capabilities: ModelCapabilitiesConfig::default(),
+            },
+        );
+        models.entries.insert(
+            "metered".into(),
+            ModelEndpointConfig {
+                provider_id: "vendor".into(),
+                model_id: "vendor-1".into(),
+                aliases: Vec::new(),
+                context_window: None,
+                generation_preset: None,
+                default_effort: None,
+                capabilities: ModelCapabilitiesConfig::default(),
+            },
+        );
+
+        let mut providers = ProviderCatalogConfig {
+            default: "proxy".into(),
+            entries: HashMap::new(),
+        };
+        providers.entries.insert(
+            "proxy".into(),
+            ProviderEndpointConfig {
+                protocol: Protocol::Anthropic,
+                base_url: Some("http://proxy.invalid".into()),
+                worker_staleness_threshold_ms: Some(600_000),
+                ..Default::default()
+            },
+        );
+        providers.entries.insert(
+            "vendor".into(),
+            ProviderEndpointConfig {
+                protocol: Protocol::Anthropic,
+                base_url: Some("http://vendor.invalid".into()),
+                ..Default::default()
+            },
+        );
+        (models, providers)
+    }
+
+    #[test]
+    fn provider_route_resolves_by_id_alias_and_default() {
+        let (models, providers) = route_catalogues();
+
+        let by_id = resolve_provider_route(&models, &providers, Some("house")).expect("by id");
+        assert_eq!(by_id.provider_id, "proxy");
+        assert_eq!(by_id.model.model_id, "house-1");
+        assert_eq!(by_id.endpoint.worker_staleness_threshold_ms, Some(600_000));
+
+        let by_alias = resolve_provider_route(&models, &providers, Some("cheap")).expect("alias");
+        assert_eq!(by_alias.provider_id, "proxy");
+        assert_eq!(by_alias.model.model_id, "house-1");
+
+        let by_default = resolve_provider_route(&models, &providers, None).expect("default");
+        assert_eq!(by_default.provider_id, "proxy");
+    }
+
+    #[test]
+    fn provider_route_is_per_route_and_absent_for_an_unknown_model() {
+        let (models, providers) = route_catalogues();
+
+        let metered = resolve_provider_route(&models, &providers, Some("metered")).expect("route");
+        assert_eq!(metered.provider_id, "vendor");
+        assert_eq!(
+            metered.endpoint.worker_staleness_threshold_ms, None,
+            "a route that declares no threshold does not inherit another route's"
+        );
+
+        assert!(resolve_provider_route(&models, &providers, Some("absent")).is_none());
+    }
 
     #[test]
     fn server_config_defaults() {

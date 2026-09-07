@@ -73,6 +73,40 @@ The optional `tools` array narrows a fresh worker call to the named tools. It
 is intersected with the worker's effective grants and therefore cannot grant
 new authority; continuations retain the allow-list chosen at worker creation.
 
+### Held workers
+
+Use `session()` when several stages should return to the same worker and keep
+its accumulated conversation. Creation fixes the worker's agent, task, tools,
+skills, model, effort, working directory, and isolation. The model and effort
+are resolved when the worker opens, so a later settings change cannot move the
+conversation to another route. Per-turn controls remain separate:
+
+```js
+const reviewer = await session({ agent: "reviewer", model: "careful" });
+await send(reviewer, "Inspect the evidence.");
+
+const reading = await staleness(reviewer);
+if (reading.stale !== true) {
+  await send(reviewer, "Now assess the conclusion.", { maxAttempts: 2 });
+}
+await close(reviewer);
+```
+
+`send()` accepts `schema`, `maxAttempts`, `timeoutMs`, and `label`. Turns are
+sequential: a second turn cannot start while the worker is busy. Effective
+authority is checked again for every turn even though the requested tools and
+skills stay fixed.
+
+`staleness()` returns `{stale, idleMs, thresholdMs, route}`. It measures idle
+time from the last completed turn against the worker route's configured
+threshold. A `stale` value of `null` means the route has no threshold, so the
+verdict is unknown rather than fresh. The reading is journalled and therefore
+replays identically.
+
+Call `close()` when the work is finished. Swage also closes open workers when
+the run returns, throws, or is cancelled; parking retains them so the run can
+resume. Repeated `close()` calls with the same worker object are harmless.
+
 ### Model fallback
 
 `agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. It
