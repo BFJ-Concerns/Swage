@@ -243,6 +243,8 @@
   .prompt {
     color: var(--ink-soft);
     margin-block: 0.25rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   dl {

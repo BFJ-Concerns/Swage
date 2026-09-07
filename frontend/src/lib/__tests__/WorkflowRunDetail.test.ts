@@ -8,6 +8,7 @@ vi.mock("../api/workflow-runs", () => ({
 
 import { fetchWorkflowRun } from "../api/workflow-runs";
 import WorkflowRunDetail from "../components/WorkflowRunDetail.svelte";
+import workflowRunDetailSource from "../components/WorkflowRunDetail.svelte?raw";
 import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
 import type { WorkflowAgentCallDetail } from "../protocol/WorkflowAgentCallDetail";
 
@@ -131,6 +132,22 @@ describe("WorkflowRunDetail", () => {
     expect(call).toContain("test-model");
     expect(document.querySelector(".usage")!.textContent).toContain(
       "11 in / 7 out",
+    );
+  });
+
+  it("preserves structured prompt whitespace and wraps long tokens", async () => {
+    const promptText = "Read both sections:\n\n  First   item\n  Second item";
+    await render(
+      runWith({
+        ...baseCall,
+        dispatch: { ...baseCall.dispatch!, prompt: promptText },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+
+    const prompt = document.querySelector<HTMLElement>(".prompt")!;
+    expect(prompt.textContent).toBe(promptText);
+    expect(workflowRunDetailSource).toMatch(
+      /\.prompt\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;/s,
     );
   });
 
