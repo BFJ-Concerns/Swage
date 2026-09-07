@@ -90,12 +90,7 @@ async fn resolve_named_child(
         )));
     }
     let turns = state.storage.list_turns_by_thread(thread_id).await?;
-    if turns.iter().any(|turn| {
-        matches!(
-            turn.state,
-            swage_storage::TurnState::Pending | swage_storage::TurnState::Processing
-        )
-    }) {
+    if turns.iter().any(|turn| !turn.state.is_terminal()) {
         return Err(AgentError::InvalidConfig(format!(
             "child {name:?} is still taking its previous turn; named child turns are sequential"
         )));
