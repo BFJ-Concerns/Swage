@@ -1165,6 +1165,11 @@ pub(crate) struct MockStorage {
     fail_provider_round_writes: AtomicBool,
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
+    pause_structured_output_writes: AtomicBool,
+    structured_output_write_started: Notify,
+    structured_output_write_release: Notify,
+    require_result_working_directory: AtomicBool,
+    result_created_without_working_directory: AtomicBool,
 }
 
 #[async_trait]
@@ -1570,6 +1575,11 @@ impl MockStorage {
             fail_provider_round_writes: AtomicBool::new(false),
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
+            pause_structured_output_writes: AtomicBool::new(false),
+            structured_output_write_started: Notify::new(),
+            structured_output_write_release: Notify::new(),
+            require_result_working_directory: AtomicBool::new(false),
+            result_created_without_working_directory: AtomicBool::new(false),
         }
     }
 
@@ -1625,6 +1635,29 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    fn pause_structured_output_writes(&self) {
+        self.pause_structured_output_writes
+            .store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_structured_output_write(&self) {
+        self.structured_output_write_started.notified().await;
+    }
+
+    fn release_structured_output_write(&self) {
+        self.structured_output_write_release.notify_one();
+    }
+
+    fn require_result_working_directory(&self) {
+        self.require_result_working_directory
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn result_was_created_without_working_directory(&self) -> bool {
+        self.result_created_without_working_directory
+            .load(Ordering::SeqCst)
     }
 
     pub(crate) fn last_snapshot_list_limit(&self) -> usize {
@@ -3195,6 +3228,10 @@ impl TurnStore for MockStorage {
         id: Uuid,
         output: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        if self.pause_structured_output_writes.load(Ordering::SeqCst) {
+            self.structured_output_write_started.notify_one();
+            self.structured_output_write_release.notified().await;
+        }
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.structured_output = Some(output.clone());
         }
@@ -4287,6 +4324,14 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
         msg: NewAgentMessage,
     ) -> Result<AgentMessage, StorageError> {
         msg.validate()?;
+
+        if self.require_result_working_directory.load(Ordering::SeqCst)
+            && msg.kind == swage_core::MessageKind::Result
+            && msg.payload.get("working_directory").is_none()
+        {
+            self.result_created_without_working_directory
+                .store(true, Ordering::SeqCst);
+        }
 
         let now = chrono::Utc::now();
         let record = AgentMessage {
@@ -10422,7 +10467,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     std::fs::create_dir(&repo).expect("repository directory");
     init_test_git_repository(&repo);
 
-    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let storage = Arc::new(MockStorage::new());
     let space = storage
         .get_or_create_default()
         .await
@@ -10502,6 +10547,9 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 finish_reason: None,
             },
         ],
+        vec![StreamChunk::Error {
+            message: "delegated provider failed".into(),
+        }],
     ]);
     let worktree_root = fixture.path().join("worker-worktrees");
     let mut config = swage_config::ResolvedConfig::default();
@@ -10571,6 +10619,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         "successful wait-mode delegation must remove its worktree"
     );
 
+    storage.require_result_working_directory();
     let outcome = GatewayDelegationHandler::new(state.clone())
         .handle_delegation(
             "agent-b",
@@ -10635,6 +10684,15 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 .iter()
                 .any(|message| message.kind == swage_core::MessageKind::Result)
         {
+            let result = result_messages
+                .iter()
+                .find(|message| message.kind == swage_core::MessageKind::Result)
+                .expect("the first observable detached result");
+            assert_eq!(
+                result.payload["working_directory"],
+                worktree.to_string_lossy().as_ref(),
+                "a parent waking on the first durable result must receive its placement"
+            );
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -10650,6 +10708,10 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
                 && message.payload.get("error").is_none()
         })
         .expect("the detached delegate should record a successful terminal result");
+    assert!(
+        !storage.result_was_created_without_working_directory(),
+        "a detached Result must carry placement in its initial durable payload"
+    );
     assert_eq!(
         result.payload["working_directory"],
         worktree.to_string_lossy().as_ref(),
@@ -10672,6 +10734,69 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     assert!(
         !repo.join("delegated-marker").exists(),
         "delegate writes must not touch the source repository"
+    );
+
+    let failed_outcome = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "agent-b",
+            "Fail after isolated worktree placement",
+            None,
+            None,
+            Some(repo.to_string_lossy().into_owned()),
+            Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
+            None,
+            DispatchContextComposition::default(),
+            "failed-worktree-delegate-call",
+            "gateway",
+            parent_turn.id,
+            space.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Detach,
+        )
+        .await
+        .expect("failing worktree delegation should start");
+    let failed_detached = match failed_outcome {
+        DelegationOutcome::Detached(detached) => detached,
+        DelegationOutcome::Completed(_) => panic!("expected detached delegation"),
+    };
+    let failed_delegate = storage
+        .get_agent_message(failed_detached.delegate_message_id)
+        .await
+        .expect("read failing delegate record")
+        .expect("durable failing delegate record");
+    let failed_worktree = failed_delegate.payload["placement"]["cwd"]
+        .as_str()
+        .expect("failing delegate resolved placement")
+        .to_string();
+
+    let mut failed_results = Vec::new();
+    for _ in 0..20 {
+        failed_results = storage
+            .list_by_correlation(failed_detached.delegate_message_id)
+            .await
+            .expect("list failing delegated result messages");
+        if failed_results
+            .iter()
+            .any(|message| message.kind == swage_core::MessageKind::Result)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let failed_result = failed_results
+        .iter()
+        .find(|message| {
+            message.kind == swage_core::MessageKind::Result
+                && message.payload.get("error").is_some()
+        })
+        .expect("the detached delegate should record a failed terminal result");
+    assert_eq!(
+        failed_result.payload["working_directory"], failed_worktree,
+        "the first durable failure reports the real provisioned directory"
+    );
+    assert!(
+        !storage.result_was_created_without_working_directory(),
+        "successful and failed detached Results must carry placement in their initial durable payloads"
     );
 }
 
@@ -13529,10 +13654,25 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
     );
 
     assert!(
-        output.messages[0]
-            .text_content()
-            .contains("Important space context"),
+        output
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("Important space context")),
         "a named assembly should be able to compose the loaded memory element"
+    );
+    assert!(
+        output
+            .report
+            .elements
+            .iter()
+            .any(|element| element.name == "memory"),
+        "the memory element is attributed to the script that added it"
+    );
+    // The script added only memory, so the baseline the default assembly
+    // would have carried is restored around it and leads the composition.
+    assert!(
+        output.report.elements[0].name == "orientation",
+        "the restored baseline precedes what the script composed"
     );
     assert_eq!(output.report.assembly_name, "memory-aware");
 }
@@ -14855,9 +14995,10 @@ async fn turn_complete_carries_structured_output_when_schema_passes() {
     }
 }
 
-/// After a valid schema turn, the turn record in storage has structured_output.
+/// A consumer can read structured output from storage as soon as it receives
+/// TurnComplete; the event must not outrun the durable projection.
 #[tokio::test]
-async fn structured_output_persisted_on_turn_after_schema_validation() {
+async fn structured_output_is_persisted_before_turn_complete() {
     let _guard = SwageHomeGuard::isolate();
     use swage_config::OutputConfig;
     use swage_core::FinishReason;
@@ -14885,23 +15026,40 @@ async fn structured_output_persisted_on_turn_after_schema_validation() {
         ..Default::default()
     };
 
-    let (state, session_id) = make_state_with_config(chunks, config).await;
+    let storage = Arc::new(MockStorage::new());
+    storage.pause_structured_output_writes();
+    let (state, session_id) =
+        make_state_with_config_and_storage(chunks, config, Arc::clone(&storage)).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    process_turn(
-        &state,
-        session_id,
-        None,
-        "give me x".to_string(),
-        tx,
-        Arc::new(Mutex::new(SubscriptionState::new(false))),
-        None,
-    )
-    .await
-    .expect("turn should complete");
+    let state_for_turn = state.clone();
+    let turn = tokio::spawn(async move {
+        process_turn(
+            &state_for_turn,
+            session_id,
+            None,
+            "give me x".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(false))),
+            None,
+        )
+        .await
+    });
 
-    // Drain events to let the turn finish.
-    while rx.try_recv().is_ok() {}
+    storage.wait_for_structured_output_write().await;
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, ServerEvent::TurnComplete { .. }),
+            "TurnComplete became observable before structured-output persistence completed"
+        );
+    }
+    storage.release_structured_output_write();
+
+    loop {
+        if matches!(rx.recv().await, Some(ServerEvent::TurnComplete { .. })) {
+            break;
+        }
+    }
 
     // Look up the turn in storage and verify structured_output was persisted.
     let threads = state.storage.list_by_session(session_id).await.unwrap();
@@ -14915,6 +15073,9 @@ async fn structured_output_persisted_on_turn_after_schema_validation() {
         "turn record should have structured_output persisted"
     );
     assert_eq!(turns[0].structured_output.as_ref().unwrap()["x"], 42);
+    turn.await
+        .expect("turn task should not panic")
+        .expect("turn should complete");
 }
 
 /// When NOT subscribed to context channel, TurnComplete omits usage fields.
