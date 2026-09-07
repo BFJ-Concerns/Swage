@@ -64,10 +64,27 @@ Trust is reversible. **Revoke trust** returns the workspace to
 without removing the attachment itself. **Detach** removes the workspace from the
 space entirely.
 
+## Start a conversation
+
+With a trusted workspace attached, the message input area at the bottom of
+the space shows an agent picker alongside the text field. This picker lists
+the space's effective agent definitions — the shipped default (**Swage
+default**) plus any operator-authored definitions visible to the space.
+Select an agent, type a message, and submit: the gateway creates the
+conversation bound to that agent definition and navigates to it
+immediately.
+
+If only the shipped default is available (a fresh install with no
+operator-authored definitions), the picker has one entry and the choice is
+automatic.
+
+[Agents and permissions](agents-and-permissions.md#what-agents-are-available)
+covers what the registry contains and how space-scoped definitions shadow
+global ones.
+
 ## What to do next
 
-With a trusted workspace attached, open a conversation from the space's
-main surface and start a turn. The agent will have access to the
+With a conversation open, start a turn. The agent will have access to the
 workspace's files and will follow whatever guidance its `AGENTS.md`
 provides. The [README's sandbox section](../README.md#the-first-turn-may-ask-about-sandboxing)
 covers what happens on the first tool call if bubblewrap is not yet
