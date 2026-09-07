@@ -13495,6 +13495,18 @@ mod tests {
                 .is_empty(),
             "completed runs leave no answerable holds"
         );
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("terminal run detail");
+        assert!(
+            detail
+                .holds
+                .iter()
+                .any(|hold| matches!(hold.state, WorkflowRunHoldState::Closed))
+        );
+        assert_eq!(detail.hold_metrics.holds_open, 0);
+        assert_eq!(detail.hold_metrics.holds_answered, 1);
+        assert_eq!(detail.hold_metrics.answers_rejected, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
