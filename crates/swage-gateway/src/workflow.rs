@@ -21095,6 +21095,7 @@ mod tests {
 
     fn worker_call_request(prompt: &str) -> AgentCallRequest {
         AgentCallRequest {
+            worker: None,
             prompt: prompt.into(),
             agent: Some("default".into()),
             task: None,
