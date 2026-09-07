@@ -1,7 +1,7 @@
 <!-- generated from agent-docs/ by the project-docs skill (doc-indexes.sh); do not edit -->
 
-<!-- source: agent-docs/agents-and-permissions.md -->
 
+<!-- source: agent-docs/agents-and-permissions.md -->
 
 # Agents and permissions
 
@@ -464,8 +464,8 @@ Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_pol
 - `Interrupt` — mark the turn as Interrupted; no further tool calls or
   completions are issued.
 
-<!-- source: agent-docs/first-session.md -->
 
+<!-- source: agent-docs/first-session.md -->
 
 # First session
 
@@ -521,8 +521,8 @@ instructions).
 read grant and guidance are removed from future turns. **Detach** removes the attachment
 entirely.
 
-<!-- source: agent-docs/interfaces-and-tooling.md -->
 
+<!-- source: agent-docs/interfaces-and-tooling.md -->
 
 # Interfaces and tooling
 
@@ -884,8 +884,8 @@ Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial page
 loads alike.
 
-<!-- source: agent-docs/workflow-engine.md -->
 
+<!-- source: agent-docs/workflow-engine.md -->
 
 # Workflow engine
 
@@ -1001,6 +1001,17 @@ result records `served_model`, the catalogue model that actually served the
 call. Continuation calls ignore `fallbackModel` and never make a fallback
 attempt; they use the worker's persisted model selection, including a fallback
 selected at creation.
+
+### Structured output extraction
+
+When a call supplies `schema`, the worker's response text is scanned for
+JSON values — bare, inside a Markdown fence, or preceded by prose. Every
+non-overlapping JSON value is validated against the schema in source order;
+the final schema-valid value wins. A model may reason through provisional
+values before delivering its result, so extraction tolerates surrounding
+text and intermediate candidates. When no value passes validation after
+`maxAttempts` retries, the call returns `null` (for `agent()`) or the
+handle's `.result` is `null` (for `agentStart()`).
 
 ### Held workers
 
