@@ -1195,20 +1195,14 @@ async fn process_turn_with_composition_and_focus(
     let thread_id = thread.id;
 
     // Step 2: Guard — reject if a turn is already active for this thread.
-    // Pending, Processing, AwaitingApproval, and Delegating all represent
-    // in-progress work; allowing a second turn would interleave history.
+    // Allowing a second turn before the previous one is terminal would
+    // interleave history.
     let existing_turns = state.storage.list_turns_by_thread(thread_id).await?;
     if existing_turns.iter().any(|t| {
         if existing_turn_id.is_some_and(|current_turn_id| t.id == current_turn_id) {
             return false;
         }
-        matches!(
-            t.state,
-            TurnState::Pending
-                | TurnState::Processing
-                | TurnState::AwaitingApproval
-                | TurnState::Delegating
-        )
+        !t.state.is_terminal()
     }) {
         return Err(GatewayError::TurnInProgress { session_id });
     }

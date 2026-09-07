@@ -312,7 +312,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'terminal_budget', 'captured_sources', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'budget', 'terminal_budget', 'captured_sources', 'wind_down', 'worker')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
@@ -340,9 +340,9 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
 /// falling outside the accepted set append to a second table hanging off the
 /// hold — an external attempt must not take a journal entry, which would put
 /// the script's own sequence at the mercy of who tried what. The journal's
-/// kind CHECK also widens for the new host-call kind (hold); SQLite cannot
-/// widen a CHECK in place, so the table is rebuilt, existing rows carrying
-/// over unchanged.
+/// kind CHECK also retains the worker lifecycle kind while widening for the
+/// new host-call kind (hold); SQLite cannot widen a CHECK in place, so the
+/// table is rebuilt, existing rows carrying over unchanged.
 const CREATE_WORKFLOW_RUN_HOLDS: &str = "
     CREATE TABLE IF NOT EXISTS workflow_run_holds (
         id                TEXT NOT NULL PRIMARY KEY,
@@ -384,7 +384,7 @@ const CREATE_WORKFLOW_RUN_HOLDS: &str = "
         run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
         seq               INTEGER NOT NULL,
         completed_order   INTEGER,
-        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'hold', 'budget', 'terminal_budget', 'captured_sources', 'wind_down')),
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'hold', 'budget', 'terminal_budget', 'captured_sources', 'wind_down', 'worker')),
         status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,

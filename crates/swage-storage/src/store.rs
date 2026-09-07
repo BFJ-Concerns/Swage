@@ -505,7 +505,7 @@ pub trait TurnStore: Send + Sync {
     /// must not stand as `Completed`. Every other caller uses
     /// `update_turn_state`.
     async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError>;
-    /// Find all active turns for a given agent (Pending, Processing, or AwaitingApproval).
+    /// Find all non-terminal turns for a given agent.
     ///
     /// Used by startup recovery, shutdown, and cancel to identify in-flight turns.
     async fn find_in_progress_by_agent(&self, agent_id: &str) -> Result<Vec<Turn>, StorageError>;
