@@ -6360,6 +6360,42 @@ pub async fn start_saved_run(
     ))
 }
 
+async fn reconcile_workflow_worker_liveness(
+    state: &AppState,
+    run_id: Uuid,
+    entries: &mut [WorkflowJournalRecord],
+    live_workers: &std::collections::HashMap<Uuid, swage_workflow::WorkerLiveness>,
+) -> Result<(), StorageError> {
+    let lacks_live_or_durable_liveness = |entry: &WorkflowJournalRecord| {
+        entry.kind == "agent_call"
+            && entry.status == "started"
+            && entry
+                .terminal_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("liveness"))
+                .is_none()
+            && !live_workers.contains_key(&entry.id)
+    };
+    if !entries.iter().any(lacks_live_or_durable_liveness) {
+        return Ok(());
+    }
+
+    let refreshed = state.storage.list_workflow_journal(run_id).await?;
+    let refreshed = refreshed
+        .into_iter()
+        .map(|entry| (entry.id, entry))
+        .collect::<std::collections::HashMap<_, _>>();
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| lacks_live_or_durable_liveness(entry))
+    {
+        if let Some(refreshed) = refreshed.get(&entry.id) {
+            *entry = refreshed.clone();
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -6370,7 +6406,7 @@ pub async fn get_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    let entries = state
+    let mut entries = state
         .storage
         .list_workflow_journal(id)
         .await
@@ -6416,7 +6452,12 @@ pub async fn get_run(
     // then by round: a call interrupted and re-dispatched would otherwise
     // surface only the attempt that finished, hiding the rounds the
     // interrupted one actually made.
+    #[cfg(test)]
+    workflow_run_detail_test_hook::pause_once(id).await;
     let live_workers = state.active_workflow_workers.lock().await.clone();
+    reconcile_workflow_worker_liveness(&state, id, &mut entries, &live_workers)
+        .await
+        .map_err(internal)?;
     let mut journal = Vec::with_capacity(entries.len());
     for entry in entries {
         let rounds = match entry.kind == "agent_call" {
@@ -6455,6 +6496,55 @@ pub async fn get_run(
         journal,
         wake_metrics,
     }))
+}
+
+#[cfg(test)]
+mod workflow_run_detail_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("workflow run detail test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause_once(run_id: Uuid) {
+        let pause = pauses()
+            .lock()
+            .expect("workflow run detail test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("workflow run detail test hook remains open")
+                .forget();
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -19717,6 +19807,68 @@ mod tests {
             );
         }
         server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_run_keeps_liveness_across_live_to_durable_handoff() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (provider, parked, release) = ParkedFirstDeltaProvider::new();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('parked worker');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("worker reaches parked provider boundary")
+            .expect("provider park signal");
+
+        let pause = workflow_run_detail_test_hook::install(started.id);
+        let detail_task = tokio::spawn(get_run(State(state.clone()), Path(started.id)));
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("workflow run detail test hook remains open")
+            .forget();
+        release.send(()).expect("release parked worker");
+        wait_for_terminal(&state, started.id).await;
+        assert!(
+            state.active_workflow_workers.lock().await.is_empty(),
+            "worker settles and evicts its live overlay while run detail is paused"
+        );
+        pause.release.add_permits(1);
+
+        let Json(detail) = detail_task
+            .await
+            .expect("join run detail request")
+            .expect("run detail succeeds");
+        let call = detail
+            .journal
+            .iter()
+            .find_map(|entry| entry.agent_call.as_ref())
+            .expect("agent call detail");
+        assert!(
+            call.liveness
+                .as_ref()
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "run detail uses durable liveness after the live overlay is evicted"
+        );
     }
 
     async fn stored_worker_liveness(
