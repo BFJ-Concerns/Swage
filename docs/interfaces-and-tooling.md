@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, image attachments and reference admission, pages, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, and route handling
+description: Network binding, the web UI's context inspector, image attachments and reference admission, pages, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -431,3 +431,43 @@ interface — four members rather than a coupling to the store's internals.
 Disconnecting the WebSocket is part of clearing the active conversation, so
 browser navigation to a deleted conversation does not leave an orphaned
 connection.
+
+## Gateway tools
+
+The gateway ships a set of built-in tools that agents call during turns. Most
+tools execute directly in the gateway process, bypassing the bubblewrap sandbox
+(`requires_device_execution: true` in the `Tool` trait). Two exceptions —
+`shell` and `memory` — are sandbox-eligible and run through the sandbox when
+one is available.
+
+**Filesystem and shell** — `file_read`, `file_write`, `file_edit`, `file_list`,
+`file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
+two sandbox-eligible tools.
+
+**Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
+`browser_type`, `browser_select`, and `browser_scroll`.
+
+**Knowledge base** — `knowledge_search`, `knowledge_record`, `knowledge_curate`,
+`knowledge_cite`, `knowledge_orient`, and `knowledge_curate_orientation`.
+
+**Workflow** — `workflow_run` (start a workflow), `workflow_list` (list saved
+scripts), `workflow_save` (save a script), and `workflow_run_account` (read a
+run's terminal account — see
+[Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
+`workflow_run_account` is scoped to the caller's session space: a run in
+another space reads as absent rather than forbidden.
+
+**Pages and delivery** — `page_read`, `page_write`, and `run_event_post`.
+
+**Scheduling** — `schedule` and `wake_me_later`.
+
+**Session and memory** — `session_values`, `agent_memory`, `tool_result_read`,
+`task_definition`, and `memory`. Of these, `memory` is one of the two
+sandbox-eligible tools.
+
+**Delegation** — `delegate` dispatches a child turn to a named agent definition.
+
+**External** — `url_fetch` and `web_search`.
+
+Operators can register additional tools through plugins; plugin tool names come
+from the plugin manifest rather than the gateway's built-in set.
