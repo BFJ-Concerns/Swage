@@ -21,9 +21,9 @@ use crate::model::{
     ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation,
     Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
     TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
-    WorkflowRunEventRecord,
-    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
