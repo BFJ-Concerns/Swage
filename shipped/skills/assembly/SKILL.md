@@ -10,7 +10,9 @@ architecture. The seat is deliberately not the scarce top tier — a top-tier
 session invoked here says so and offers to hand the seat down. One run
 serves one commission, and the run is done when the obligation ledger is
 discharged — every record proven or explicitly waived by the user — never
-when the units merely stop.
+when the units merely stop. The run's close is the QA campaign's open: a
+drained ledger hands the frozen lane to the shakedown skill (*Handing Off
+to the Campaign*, below) rather than merging promotion itself.
 
 ## Start From a Current Clone
 
@@ -73,9 +75,9 @@ writing a brief, read the candidate exemplar's spine entry and judge the
 fit — the exemplar is in the inventory, and the files the unit will touch
 sit inside its **Extends at** envelope without crossing **Imitation stops
 at**. No exemplar fits → the unit is not built here at all: mark its
-obligation `needs-spine` and tell the user maestro has work — the spine
-inventory is a whitelist, and improvising outside it is how builders
-imitate what nobody assessed. Builders read anything, modify and imitate
+obligation `needs-spine` and hand it to maestro (*Maestro Is a Dispatch*,
+below) — the spine inventory is a whitelist, and improvising outside it
+is how builders imitate what nobody assessed. Builders read anything, modify and imitate
 spine only. Do not dilute this gate under schedule pressure. **Estate and docs units are the exceptions**: their
 deliverables are tests and documentation, not product code. An estate brief
 names its obligation and ladder rung, and carries `Extends:` only when a
@@ -90,10 +92,36 @@ is reading-based, the verification legs are the whole discharge). An
 obligation whose deliverable is **instruction text** — an agent prompt, a
 model-steering document, anything future sessions execute unsupervised —
 and that is *not* so marked is the structural phase's unfinished work,
-not work awaiting an exemplar: mark it `needs-spine` and tell the user
-maestro has work, whatever the spine contains. A build unit against
+not work awaiting an exemplar: mark it `needs-spine` and hand it to
+maestro (*Maestro Is a Dispatch*), whatever the spine contains. A build unit against
 either is the misroute: one builds what already exists, the other hands
 the volume tier an artefact class it must not author.
+
+## Maestro Is a Dispatch
+
+A `needs-spine` record is not a question for the user: it is maestro's
+work, and maestro needs no user input to do it — the commission, the
+ledger, and the spine are all on disk. So a run that marks a record
+`needs-spine` dispatches maestro itself, at the moment the marking
+lands, rather than parking the record until a person notices. The
+dispatch is a delegated child (the `delegate` tool, `completion_mode`
+detach, `skills: ["maestro"]`, the project tree as `cwd`) briefed with
+exactly what a re-entry needs: the annexe path, the `needs-spine`
+record slugs, and the instruction to extend the spine, hand back through
+the handover ref, and rewrite the records to `open` — nothing more, since
+maestro reads its own situation from `build/`. One maestro child at a
+time: a second `needs-spine` marking while one is running joins that
+child's work list on its next re-entry, never a parallel structural seat
+on the same lane.
+
+Maestro's hand-back is an event for this run: its records return to
+`open` and the handover ref advances, so the next wake's reconciliation
+finds them as ordinary open work. The seat that dispatched maestro takes
+no structural decision itself — it names the gap and reads the result.
+The exception stays the user's: a `needs-spine` record that a maestro
+re-entry sends back unchanged, or that maestro's report says needs a
+commission decision, is surfaced to the user as a parked record, not
+redispatched.
 
 ## Pipelines Carry the Ceremony
 
@@ -329,6 +357,23 @@ cluster near-identical bodies, report an extraction worklist for the
 annexe issue log — can be commissioned on demand as cheap grunt-tier
 work whenever accumulation warrants it; it is never a close gate.
 
+## Handing Off to the Campaign
+
+Under PR mode the promotion PR merges only after the QA campaign has
+judged the assembled product — the campaign tier of the ladder is the
+shakedown skill's to discharge, not this run's. So run close ends with a
+hand-off, not a merge: freeze the lane, take the estate result, journal
+the close with the frozen tip named, and dispatch the campaign as a
+delegated child (`delegate`, detach, `skills: ["shakedown"]`, the project
+tree as `cwd`) briefed with the annexe path and the frozen sha and
+nothing else — the campaign reads its handover from the ledger. The
+campaign's merge-ready close is what merges promotion; a leakage close
+returns the branch here, reopening the affected obligations, and the
+next wake's reconciliation picks them up as open work. A run whose
+ledger drains while a campaign is already open on the same lane does not
+dispatch a second: it journals the new tip and lets the open campaign's
+moved-tip handling decide.
+
 ## Documentation Rides the Run
 
 Landed work drifts the repository's documentation: a unit that changes
@@ -430,6 +475,23 @@ carries the discipline; references/build-ledger.md applies it to the
 ledger). Journal events before the
 next sleep, not at wrap-up; commit annexe files as they change, staged by
 path. The run resumes from artefacts alone.
+
+**The seat is a fresh segment, not a session.** A run left unattended is
+steered by a standing schedule (the `schedule` tool: session `fresh`,
+this space, an agent whose definition activates this skill, an interval
+of ten to twenty minutes, gated on a cheap model whose criteria name the
+events worth a wake — a pipeline holding for a decision, a run that
+ended, a worker that died, allowance state that changed). Each fire is a
+new session with no transcript: it opens by reconciliation
+(references/ledger.md), reads the open runs and their pending holds
+(`workflow_run_status`), clears the whole batch of decisions at once
+(`run_event_post`), fills freed seats from the ready work, journals what
+it did, and ends. Nothing carries between segments except the annexe's
+records and the run records — so every decision is written to the
+record before the segment ends, or the next segment re-litigates it. An
+attended seat may hold a conversation open and self-wake instead; the
+discipline is the same, only the transcript differs. Arm the schedule at
+run open, before the first dispatch, and remove it at run close.
 
 Run events land in the record first; chat is a digest derived from it,
 never carrying anything the record does not. A chat message is triggered
