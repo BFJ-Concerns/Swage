@@ -155,7 +155,7 @@ async fn known_space_fresh_config_root_returns_shipped_catalogue() {
     let skills = body["skills"]
         .as_array()
         .expect("response should have a skills array");
-    assert_eq!(skills.len(), 6, "fresh roots expose all shipped skills");
+    assert_eq!(skills.len(), 7, "fresh roots expose all shipped skills");
     let names = skills
         .iter()
         .map(|skill| skill["name"].as_str().unwrap())
@@ -168,6 +168,7 @@ async fn known_space_fresh_config_root_returns_shipped_catalogue() {
             "maestro",
             "project-docs",
             "research",
+            "shakedown",
             "workflow-authoring"
         ]
     );
