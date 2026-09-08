@@ -262,7 +262,7 @@ treat every payload as a worker-reported claim.
 
   ```js
   await postEvent("decision_needed", { question: "Ship the fix?", options: ["yes", "no"] });
-  const answer = await awaitEvent({ kinds: ["decision"] });
+  const answer = await awaitEvent({ kinds: ["decision.answer"] });
   if (answer.payload?.verdict !== "yes") return { stopped: "declined" };
   ```
 

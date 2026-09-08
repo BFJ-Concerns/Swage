@@ -103,7 +103,7 @@ workflows this skill carries (`build-verify`, `estate-unit`,
 worker: the
 templates make verification a stage the script reaches rather than a
 decision anyone makes, and landing waits for verdicts by construction.
-A pipeline's holds arrive as `decision-needed` events on its run's
+A pipeline's holds arrive as `decision.needed` events on its run's
 queue; you answer by posting the decision event back into the run, and
 an unanswered decision blocks that unit while the rest of the fleet
 moves.

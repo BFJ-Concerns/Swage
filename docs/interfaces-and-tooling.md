@@ -451,11 +451,13 @@ two sandbox-eligible tools.
 `knowledge_cite`, `knowledge_orient`, and `knowledge_curate_orientation`.
 
 **Workflow** — `workflow_run` (start a workflow), `workflow_list` (list saved
-scripts), `workflow_save` (save a script), and `workflow_run_account` (read a
-run's terminal account — see
+scripts), `workflow_save` (save a script), `workflow_run_status` (list the
+space's runs that have not ended with the events each is waiting on, or read
+one run in any state), and `workflow_run_account` (read a run's terminal
+account — see
 [Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
-`workflow_run_account` is scoped to the caller's session space: a run in
-another space reads as absent rather than forbidden.
+`workflow_run_status` and `workflow_run_account` are scoped to the caller's
+session space: a run in another space reads as absent rather than forbidden.
 
 **Pages and delivery** — `page_read`, `page_write`, and `run_event_post`.
 
