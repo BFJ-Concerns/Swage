@@ -783,7 +783,7 @@ mod tests {
         for name in ["global-skill", "space-skill", "agent-skill"] {
             assert!(skills.iter().any(|skill| skill.name == name));
         }
-        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 6);
+        assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 7);
         assert!(warnings.is_empty());
     }
 
@@ -798,7 +798,7 @@ mod tests {
 
         let (skills, _) = SkillManager::discover_available(root_dir.path(), space_dir.path(), None);
 
-        assert_eq!(skills.len(), 8);
+        assert_eq!(skills.len(), 9);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
     }
 
