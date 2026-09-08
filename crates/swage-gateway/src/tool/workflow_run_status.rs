@@ -125,7 +125,7 @@ impl Tool for WorkflowRunStatusTool {
             "properties": {
                 "run_id": {
                     "type": "string",
-                    "description": "Optional. Read this one run (any state) instead of listing the space's open runs.",
+                    "description": "Optional. Omit it (or leave it empty) to list every open run in the space. Give a run's UUID to read that one run in any state.",
                 },
             },
             "additionalProperties": false,
@@ -141,10 +141,20 @@ impl Tool for WorkflowRunStatusTool {
             name: WORKFLOW_RUN_STATUS_TOOL.into(),
             message,
         };
+        // Models routinely send an optional field as "" rather than
+        // omitting it; an empty or blank run_id means "list the open runs".
         let run_id = params
             .get("run_id")
             .and_then(Value::as_str)
-            .map(|raw| Uuid::parse_str(raw).map_err(|error| invalid(error.to_string())))
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(|raw| {
+                Uuid::parse_str(raw).map_err(|error| {
+                    invalid(format!(
+                        "run_id must be a run UUID from workflow_run_status or workflow_run, or omitted to list every open run: {error}"
+                    ))
+                })
+            })
             .transpose()?;
         let session_id =
             Uuid::parse_str(ctx.session_id()).map_err(|error| invalid(error.to_string()))?;
@@ -295,6 +305,14 @@ mod tests {
             .expect("named run");
         assert_eq!(one["runs"][0]["ended"], true);
         assert_eq!(one["runs"][0]["state"], "completed");
+
+        // A model that sends the optional field as "" gets the listing, not
+        // a parameter error it will retry forever.
+        let blank = WorkflowRunStatusTool
+            .execute(json!({"run_id": "  "}), &context)
+            .await
+            .expect("blank run_id lists");
+        assert_eq!(blank["runs"].as_array().map(Vec::len), Some(1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
