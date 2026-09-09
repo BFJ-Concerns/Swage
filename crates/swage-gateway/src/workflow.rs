@@ -38,7 +38,7 @@ use swage_storage::{
 };
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
-    EffectRecoveryHost, EngineLimits, GateRequest, HeldWorkerOpen, HoldRequest,
+    EffectRecoveryHost, EngineLimits, EventDelivery, GateRequest, HeldWorkerOpen, HoldRequest,
     QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities,
     WorkflowCallRequest, WorkflowEngine, WorkflowHost, WorkflowHostError, journal_args_hash,
     recover_started_effect,
@@ -1781,7 +1781,7 @@ enum HostCommand {
         reply: oneshot::Sender<Result<Value, String>>,
     },
     DeliverEvents {
-        up_to_seq: u64,
+        selection: EventDelivery,
         reply: oneshot::Sender<Result<Value, String>>,
     },
     BudgetSnapshot {
@@ -2146,11 +2146,11 @@ impl WorkflowHost for ChannelWorkflowHost {
 
     async fn deliver_run_events(
         &self,
-        up_to_seq: u64,
+        selection: EventDelivery,
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         let (reply, receive) = oneshot::channel();
-        self.send(HostCommand::DeliverEvents { up_to_seq, reply })?;
+        self.send(HostCommand::DeliverEvents { selection, reply })?;
         receive
             .await
             .map_err(|_| "workflow host dropped delivery reply".to_string())?
@@ -5958,10 +5958,10 @@ async fn run_host_commands_inner(
                     }
                 });
             }
-            HostCommand::DeliverEvents { up_to_seq, reply } => {
+            HostCommand::DeliverEvents { selection, reply } => {
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
-                let request_json =
-                    serde_json::json!({ "action": "deliver", "up_to_seq": up_to_seq });
+                let mut request_json = serde_json::to_value(&selection).expect("event selection");
+                request_json["action"] = serde_json::json!("deliver");
                 let hash = journal_args_hash(&request_json);
                 let result = match replay.get(current_seq as usize) {
                     Some(entry) if entry.args_hash != hash => {
@@ -5977,7 +5977,7 @@ async fn run_host_commands_inner(
                         .unwrap_or_else(|| "recorded event failure".to_string())),
                     // Started: the stamp is idempotent, so redoing it is safe.
                     Some(entry) => {
-                        complete_events_delivery(&state, run_id, entry.id, current_seq, up_to_seq)
+                        complete_events_delivery(&state, run_id, entry.id, current_seq, &selection)
                             .await
                     }
                     None => {
@@ -6000,7 +6000,7 @@ async fn run_host_commands_inner(
                                     run_id,
                                     intent.id,
                                     current_seq,
-                                    up_to_seq,
+                                    &selection,
                                 )
                                 .await
                             }
@@ -7417,13 +7417,33 @@ async fn complete_events_delivery(
     run_id: Uuid,
     entry_id: Uuid,
     delivery_seq: u64,
-    up_to_seq: u64,
+    selection: &EventDelivery,
 ) -> Result<Value, String> {
+    match selection {
+        EventDelivery::Through { up_to_seq } => {
+            state
+                .storage
+                .mark_workflow_run_events_delivered(run_id, *up_to_seq, delivery_seq)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        EventDelivery::One { event_seq } => {
+            state
+                .storage
+                .mark_workflow_run_event_delivered(run_id, *event_seq, delivery_seq)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    // Recover the same result if delivery committed before journal settlement.
     let delivered = state
         .storage
-        .mark_workflow_run_events_delivered(run_id, up_to_seq, delivery_seq)
+        .list_workflow_run_events(run_id)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .iter()
+        .filter(|event| event.delivered_wake_seq == Some(delivery_seq))
+        .count();
     let result = serde_json::json!({ "delivered": delivered });
     state
         .complete_workflow_journal_entry(entry_id, result.clone())
@@ -18725,6 +18745,134 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn shipped_holds_acknowledge_only_the_answered_request_across_replay() {
+        tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(async {
+            for pipeline in [
+                include_str!("../../../shipped/skills/assembly/workflows/build-verify.js"),
+                include_str!("../../../shipped/skills/assembly/workflows/docs-update.js"),
+                include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js"),
+            ] {
+                let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+                let space = storage.get_or_create_default().await.expect("space");
+                let make_state = || AppState::new(
+                    Arc::clone(&storage) as Arc<dyn Storage>, Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                    Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+                    swage_config::ResolvedConfig::default(), crate::tool::ToolDispatcher::allow_all(vec![]), None,
+                );
+                let state = make_state();
+                let start = pipeline.find("let holdCount = 0;").unwrap();
+                let end = pipeline[start..].find("// ---------------------------------------------------------------- restate").unwrap() + start;
+                let source = format!(r#"{}
+                    await postEvent("worker.progress", {{ message: "keep pending" }});
+                    await postEvent("decision.needed", {{ nonce: "parallel", options: ["accept"] }});
+                    const first = await runHold("first", {{}}, ["accept"]);
+                    const second = await runHold("second", {{}}, ["accept"]);
+                    return [first.nonce, second.nonce];
+                "#, &pipeline[start..end]);
+                let Json(started) = start_inline_run(State(state.clone()), Path(space.id), Json(StartInlineWorkflowRunRequest {
+                    source, args: Value::Null, budget: None,
+                })).await.expect("start hold fixture");
+                wait_for_run_state(&storage, started.id, "parked").await;
+                for payload in [
+                    serde_json::json!({"nonce": "stale", "verdict": "accept"}),
+                    serde_json::json!({"nonce": "first-1", "verdict": "unknown"}),
+                    serde_json::json!({"nonce": "first-1", "verdict": "accept", "note": 17}),
+                ] {
+                    Box::pin(post_operator_run_event(State(state.clone()), Path(started.id), Json(PostWorkflowRunEventRequest {
+                        kind: "decision.answer".into(), payload,
+                    }))).await.expect("invalid answer");
+                    wait_for_run_state(&storage, started.id, "parked").await;
+                    let pending = storage.list_pending_workflow_run_events(started.id).await.unwrap();
+                    assert_eq!(pending.len(), 3, "invalid answer must not resolve the request");
+                    assert!(pending.iter().any(|event| event.payload["nonce"] == "first-1"));
+                }
+                Box::pin(post_operator_run_event(State(state.clone()), Path(started.id), Json(PostWorkflowRunEventRequest {
+                    kind: "decision.answer".into(), payload: serde_json::json!({"nonce": "first-1", "verdict": "accept"}),
+                }))).await.expect("first answer");
+                wait_for_run_state(&storage, started.id, "parked").await;
+                let pending = storage.list_pending_workflow_run_events(started.id).await.unwrap();
+                assert_eq!(pending.len(), 3);
+                assert!(!pending.iter().any(|event| event.payload["nonce"] == "first-1"));
+                assert!(pending.iter().any(|event| event.payload["nonce"] == "second-2"));
+
+                // A fresh gateway reconstructs the parked run from its stored journal.
+                drop(state);
+                storage.update_workflow_run_state(started.id, "interrupted", None, None, None).await.unwrap();
+                let state = make_state();
+                resume_workflow_run_record(state.clone(), storage.get_workflow_run(started.id).await.unwrap().unwrap())
+                    .await.expect("resume on fresh gateway state");
+                wait_for_run_state(&storage, started.id, "parked").await;
+                Box::pin(post_operator_run_event(State(state.clone()), Path(started.id), Json(PostWorkflowRunEventRequest {
+                    kind: "decision.answer".into(), payload: serde_json::json!({"nonce": "second-2", "verdict": "accept"}),
+                }))).await.expect("second answer");
+                let completed = wait_for_run_state(&storage, started.id, "completed").await;
+                assert_eq!(completed.final_output, Some(serde_json::json!(["first-1", "second-2"])));
+                let pending = storage.list_pending_workflow_run_events(started.id).await.unwrap();
+                assert_eq!(pending.len(), 2);
+                assert_eq!(pending[0].kind, "worker.progress");
+                assert_eq!(pending[1].payload["nonce"], "parallel");
+                let events = storage.list_workflow_run_events(started.id).await.unwrap();
+                assert_eq!(events.len(), 9, "replay does not duplicate requests or erase audit history");
+            }
+        })).await.expect("holds settle within test deadline");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exact_event_acknowledgement_recovers_after_stamp_before_journal_settlement() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let event = storage
+            .create_workflow_run_event(NewWorkflowRunEvent {
+                run_id: run.id,
+                journal_entry_id: Uuid::new_v4(),
+                kind: "decision.needed".into(),
+                payload: serde_json::json!({"nonce": "first"}),
+                source_surface: "script".into(),
+                source_agent_id: None,
+                source_session_id: None,
+                source_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let request = serde_json::json!({"action": "deliver", "event_seq": event.seq});
+        let intent = state
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "event".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .mark_workflow_run_event_delivered(run.id, event.seq, 0)
+            .await
+            .unwrap();
+        let result = complete_events_delivery(
+            &state,
+            run.id,
+            intent.id,
+            0,
+            &EventDelivery::One {
+                event_seq: event.seq,
+            },
+        )
+        .await
+        .expect("recover started acknowledgement");
+        assert_eq!(result, serde_json::json!({"delivered": 1}));
+        let journal = storage.list_workflow_journal(run.id).await.unwrap();
+        assert_eq!(journal[0].status, "completed");
+        assert_eq!(journal[0].result, Some(result));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -19155,7 +19303,7 @@ mod tests {
 
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::DeliverEvents {
-            up_to_seq: 2,
+            selection: EventDelivery::Through { up_to_seq: 2 },
             reply,
         })
         .expect("deliver");
