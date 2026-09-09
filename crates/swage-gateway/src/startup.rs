@@ -668,7 +668,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
         file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, knowledge::KnowledgeCiteTool,
+        file_write::FileWriteTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
         knowledge::KnowledgeSearchTool, memory::MemoryTool, page::PageReadTool,
@@ -721,6 +721,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         Arc::new(RunEventPostTool),
+        Arc::new(WorkflowHoldTool),
         Arc::new(SessionVariableTool),
         // Knowledge-base tools: the space's gathered external evidence.
         // Host-only; read, capture authoring, and curation authoring are

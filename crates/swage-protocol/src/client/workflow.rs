@@ -160,6 +160,67 @@ pub struct PostWorkflowRunEventResponse {
     pub wake_provisioned: bool,
 }
 
+/// A decision a running script is waiting on: what is being decided and the
+/// closed set of answers it will accept. A hold is raised by the script, is
+/// answered by an agent through a granted tool, and is the validated shape
+/// over the run's event queue rather than a second queue.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunHold {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// What is being decided, in the raising script's words. Data for the
+    /// answering agent to judge, never instructions to it.
+    pub content: String,
+    /// The answers this hold accepts. At least two distinct verdicts: a hold
+    /// with one permitted answer is no decision and is refused at raise.
+    pub verdicts: Vec<String>,
+    pub state: WorkflowRunHoldState,
+    /// The accepted verdict, once one has been given.
+    pub verdict: Option<String>,
+    /// Who answered. Derived from the answering session, never a parameter.
+    pub answered_by: Option<WorkflowRunEventSource>,
+    pub raised_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+    /// Answers refused for falling outside the accepted set, oldest first.
+    /// They hang on this hold rather than taking journal entries of their
+    /// own: an external attempt must not move the script's own sequence.
+    pub rejections: Vec<WorkflowRunHoldRejection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRunHoldState {
+    Open,
+    Answered,
+    Closed,
+}
+
+/// One refused answer, kept so the run record shows what was tried.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunHoldRejection {
+    pub id: Uuid,
+    pub attempted_verdict: String,
+    pub feedback: String,
+    pub source: WorkflowRunEventSource,
+    pub rejected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AnswerWorkflowRunHoldRequest {
+    pub hold_id: Uuid,
+    pub verdict: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct AnswerWorkflowRunHoldResponse {
+    pub hold: WorkflowRunHold,
+    /// Whether answering made a parked run due again. False when the run was
+    /// still holding its engine and will take the answer directly.
+    pub wake_provisioned: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowDecisionEventPayload {
     pub nonce: String,
@@ -392,6 +453,9 @@ pub enum WorkflowJournalEntryKind {
     Budget,
     /// The authoritative closing-partition balance when the run settled.
     TerminalBudget,
+    /// A decision hold: the script named a decision and its accepted
+    /// verdicts and waited. The entry completes with the accepted verdict.
+    Hold,
     /// A read-only view of source observations captured by this workflow run.
     CapturedSources,
     /// The working allowance was exhausted. The triggering agent call was
@@ -738,6 +802,12 @@ pub enum WorkflowJournalResult {
         per_route: std::collections::BTreeMap<String, WorkflowRouteBudgetReading>,
         usage_unavailable_calls: u32,
     },
+    Hold {
+        hold_id: Uuid,
+        content: String,
+        verdict: Option<String>,
+        answered_by: WorkflowRunEventSource,
+    },
     CapturedSources {
         #[ts(type = "unknown")]
         sources: Value,
@@ -778,6 +848,23 @@ pub struct WorkflowRunDetailResponse {
     /// queue — the falsification signal for a gated long run: a sustained
     /// high wake rate means the design's economics are failing.
     pub wake_metrics: WorkflowWakeMetrics,
+    /// The run's decision holds, oldest first, each carrying its accepted
+    /// verdict and every answer refused along the way.
+    pub holds: Vec<WorkflowRunHold>,
+    /// Derived counts over those holds: what the run is still waiting on,
+    /// what has been decided, and how often a decider offered something the
+    /// hold does not accept.
+    pub hold_metrics: WorkflowHoldMetrics,
+}
+
+/// Derived counters over a run's decision holds. Nothing here is stored:
+/// the hold rows and their rejection rows already hold the history, so the
+/// counters cannot drift from it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowHoldMetrics {
+    pub holds_open: u32,
+    pub holds_answered: u32,
+    pub answers_rejected: u32,
 }
 
 /// Derived counters over a run's wake machinery. `events_pending` counts

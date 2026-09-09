@@ -1486,6 +1486,60 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<bool, StorageError> {
         unimplemented!()
     }
+    async fn create_workflow_run_hold(
+        &self,
+        _: swage_storage::NewWorkflowRunHold,
+    ) -> Result<swage_storage::WorkflowRunHoldRecord, StorageError> {
+        unimplemented!()
+    }
+    async fn get_workflow_run_hold(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::WorkflowRunHoldRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_run_holds(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunHoldRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn list_open_workflow_run_holds(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunHoldRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn close_open_workflow_run_holds(&self, _: Uuid) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+    async fn answer_workflow_run_hold(
+        &self,
+        _: Uuid,
+        _: swage_storage::WorkflowRunHoldAnswer,
+    ) -> Result<swage_storage::WorkflowHoldSettlement, StorageError> {
+        unimplemented!()
+    }
+    async fn create_workflow_run_hold_rejection(
+        &self,
+        _: swage_storage::NewWorkflowRunHoldRejection,
+    ) -> Result<Option<swage_storage::WorkflowRunHoldRejectionRecord>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_workflow_run_hold_rejections(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::WorkflowRunHoldRejectionRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn park_workflow_run_if_hold_open(
+        &self,
+        _: Uuid,
+        _: chrono::DateTime<chrono::Utc>,
+        _: Uuid,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn create_workflow_journal_intent(
         &self,
         _: swage_storage::NewWorkflowJournalIntent,
@@ -8392,12 +8446,22 @@ async fn approval_resumption_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 5);
+    assert!(
+        second.messages.len() >= 5,
+        "resumed request needs its context and the user/tool replay"
+    );
     assert_eq!(second.messages[0].role(), Role::System);
     assert_eq!(second.messages[1].role(), Role::System);
-    assert_eq!(second.messages[2].role(), Role::User);
-    assert_eq!(second.messages[3].role(), Role::Assistant);
-    assert_eq!(second.messages[4].role(), Role::User);
+    let replay_start = second.messages.len() - 3;
+    assert!(
+        second.messages[..replay_start]
+            .iter()
+            .all(|message| message.role() == Role::System),
+        "only system context may precede the resumed user/tool replay"
+    );
+    assert_eq!(second.messages[replay_start].role(), Role::User);
+    assert_eq!(second.messages[replay_start + 1].role(), Role::Assistant);
+    assert_eq!(second.messages[replay_start + 2].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -8413,10 +8477,10 @@ async fn approval_resumption_keeps_structured_tool_messages() {
         }),
         "resumed request should retain the working norms"
     );
-    let assistant_replay = second
+    let assistant_replays = second
         .messages
         .iter()
-        .find(|message| {
+        .filter(|message| {
             message.role() == Role::Assistant
                 && message.tool_replay().is_some_and(|replay| {
                     replay.iter().any(|part| {
@@ -8429,7 +8493,13 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                     })
                 })
         })
-        .expect("assistant tool-use message should retain the structured echo call after approval");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_replays.len(),
+        1,
+        "the structured assistant tool call must appear in exactly one replay message"
+    );
+    let assistant_replay = assistant_replays[0];
     assert_eq!(
         assistant_replay
             .tool_replay()
@@ -8442,10 +8512,10 @@ async fn approval_resumption_keeps_structured_tool_messages() {
         1,
         "the approved tool call must be replayed exactly once"
     );
-    let user_replay = second
+    let user_replays = second
         .messages
         .iter()
-        .find(|message| {
+        .filter(|message| {
             message.role() == Role::User
                 && message.tool_replay().is_some_and(|replay| {
                     replay.iter().any(|part| {
@@ -8457,7 +8527,13 @@ async fn approval_resumption_keeps_structured_tool_messages() {
                     })
                 })
         })
-        .expect("user tool-result message should retain the structured echo result after approval");
+        .collect::<Vec<_>>();
+    assert_eq!(
+        user_replays.len(),
+        1,
+        "the structured tool result must appear in exactly one replay message"
+    );
+    let user_replay = user_replays[0];
     assert_eq!(
         user_replay
             .tool_replay()

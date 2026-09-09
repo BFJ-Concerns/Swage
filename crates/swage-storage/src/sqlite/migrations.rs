@@ -90,7 +90,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("057_pages", CREATE_PAGE_TABLES),
         ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
         ("059_page_templates", CREATE_PAGE_TEMPLATE_TABLES),
-        ("060_worker_call_record", CREATE_WORKER_CALL_RECORD),
+        ("060_workflow_run_holds", CREATE_WORKFLOW_RUN_HOLDS),
+        ("061_worker_call_record", CREATE_WORKER_CALL_RECORD),
     ]
 }
 
@@ -335,6 +336,79 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
     INSERT INTO workflow_journal_events_new SELECT * FROM workflow_journal;
     DROP TABLE workflow_journal;
     ALTER TABLE workflow_journal_events_new RENAME TO workflow_journal;
+    CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
+        ON workflow_journal(run_id, seq);
+";
+
+/// Decision holds: a script names a decision and the closed set of answers
+/// it accepts, then waits for an agent to answer through a granted tool. The
+/// hold row is keyed to the raising journal entry, making a raise
+/// exactly-once under replay the way a posted event is. Answers refused for
+/// falling outside the accepted set append to a second table hanging off the
+/// hold — an external attempt must not take a journal entry, which would put
+/// the script's own sequence at the mercy of who tried what. The journal's
+/// kind CHECK also retains the worker lifecycle kind while widening for the
+/// new host-call kind (hold); SQLite cannot widen a CHECK in place, so the
+/// table is rebuilt, existing rows carrying over unchanged.
+const CREATE_WORKFLOW_RUN_HOLDS: &str = "
+    CREATE TABLE IF NOT EXISTS workflow_run_holds (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        journal_entry_id  TEXT NOT NULL UNIQUE,
+        seq               INTEGER NOT NULL,
+        content           TEXT NOT NULL,
+        verdicts_json     TEXT NOT NULL,
+        state             TEXT NOT NULL CHECK (state IN ('open', 'answered', 'closed')),
+        verdict           TEXT,
+        answer_surface    TEXT,
+        answer_agent_id   TEXT,
+        answer_session_id TEXT,
+        answer_turn_id    TEXT,
+        raised_at         TEXT NOT NULL,
+        answered_at       TEXT,
+        UNIQUE (run_id, seq)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_run_holds_open
+        ON workflow_run_holds(run_id, seq)
+        WHERE state = 'open';
+
+    CREATE TABLE IF NOT EXISTS workflow_run_hold_rejections (
+        id                TEXT NOT NULL PRIMARY KEY,
+        hold_id           TEXT NOT NULL REFERENCES workflow_run_holds(id) ON DELETE CASCADE,
+        attempted_verdict TEXT NOT NULL,
+        feedback          TEXT NOT NULL,
+        source_surface    TEXT NOT NULL,
+        source_agent_id   TEXT,
+        source_session_id TEXT,
+        source_turn_id    TEXT,
+        rejected_at       TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_run_hold_rejections_hold
+        ON workflow_run_hold_rejections(hold_id, rejected_at);
+
+    CREATE TABLE workflow_journal_holds_new (
+        id                TEXT NOT NULL PRIMARY KEY,
+        run_id            TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        seq               INTEGER NOT NULL,
+        completed_order   INTEGER,
+        kind              TEXT NOT NULL CHECK (kind IN ('agent_call', 'worker_placement', 'effect', 'log', 'phase', 'workflow_call', 'timer', 'event', 'await_event', 'gate', 'hold', 'budget', 'terminal_budget', 'captured_sources', 'wind_down', 'worker')),
+        status            TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed')),
+        args_hash         TEXT NOT NULL,
+        request_json      TEXT NOT NULL,
+        result_json       TEXT,
+        terminal_metadata_json TEXT,
+        error_message     TEXT,
+        effect_kind       TEXT,
+        idempotency_key   TEXT,
+        target_kind       TEXT,
+        started_at        TEXT NOT NULL,
+        completed_at      TEXT,
+        UNIQUE (run_id, seq),
+        UNIQUE (run_id, completed_order)
+    );
+    INSERT INTO workflow_journal_holds_new SELECT * FROM workflow_journal;
+    DROP TABLE workflow_journal;
+    ALTER TABLE workflow_journal_holds_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
         ON workflow_journal(run_id, seq);
 ";
