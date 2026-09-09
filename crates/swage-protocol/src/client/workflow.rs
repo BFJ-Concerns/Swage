@@ -318,6 +318,88 @@ pub struct WorkflowHandoverEvent {
     pub delivery: WorkflowHandoverEventDelivery,
 }
 
+/// How a run ended. Every ending path names itself here, so no reader has to
+/// infer a run's end from silence or from the absence of a result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "ending", rename_all = "snake_case")]
+pub enum WorkflowRunEnding {
+    /// The script returned its result.
+    Returned,
+    /// The script threw, or the engine failed the run.
+    Threw { error: String },
+    /// An operator or a parent run cancelled it.
+    Cancelled,
+    /// The working token allowance ran out and the run ended under
+    /// wind-down rather than on its own terms.
+    WoundDown { error: String },
+    /// The gateway died with the run in flight and the run could not be
+    /// resumed. The reason is why the resume was refused.
+    InterruptedWithoutResume { reason: String },
+}
+
+/// One worker's standing in the run's terminal account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorkerAccount {
+    pub journal_entry_id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub label: Option<String>,
+    pub agent_definition_id: Option<String>,
+    /// The directory the worker ran in — the worktree kept rather than torn
+    /// down when the run did not return, so its work is still on disk.
+    pub placement: Option<String>,
+    /// The final Git state recorded when an isolated worker settled.
+    pub worktree: Option<WorkflowWorktreeCompletion>,
+    /// Absent for a worker that settled on its own account.
+    pub termination: Option<WorkflowWorkerTermination>,
+}
+
+/// Every worker the run dispatched, sorted by how it stood when the run
+/// ended. A worker appears in exactly one list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorkerPartition {
+    pub done: Vec<WorkflowWorkerAccount>,
+    pub failed: Vec<WorkflowWorkerAccount>,
+    pub cut_short: Vec<WorkflowWorkerAccount>,
+    pub unsettled: Vec<WorkflowWorkerAccount>,
+}
+
+/// A completed worker's output recovered from a run that never returned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowPartialResult {
+    pub journal_entry_id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub label: Option<String>,
+    #[ts(type = "unknown")]
+    pub output: Value,
+    /// Where the work was done, still on disk.
+    pub placement: Option<String>,
+}
+
+/// The completed work a run that never returned left behind. The type is the
+/// partial marking: these outputs are the run's recoverable work, never its
+/// result, and `reason` says what stopped the run from producing one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowPartialResults {
+    pub reason: String,
+    pub results: Vec<WorkflowPartialResult>,
+}
+
+/// The one terminal record of a run: what ended it, where every worker stood,
+/// and — when the script never returned — the completed work still recoverable
+/// from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowRunTerminalAccount {
+    pub ending: WorkflowRunEnding,
+    pub workers: WorkflowWorkerPartition,
+    /// Present exactly when the run ended without its script returning.
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_results: Option<WorkflowPartialResults>,
+    pub settled_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRun {
     pub id: Uuid,
@@ -339,6 +421,9 @@ pub struct WorkflowRun {
     #[ts(type = "unknown")]
     pub final_output: Option<Value>,
     pub handover: Option<WorkflowRunHandover>,
+    /// The run's terminal account: how it ended and where its workers stood.
+    /// Absent only while the run is still going.
+    pub terminal_account: Option<WorkflowRunTerminalAccount>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -455,7 +540,15 @@ pub enum WorkflowWorkerTermination {
     /// The worker's own work failed.
     Failed { message: String },
     /// The run ended while this worker was still working.
-    CutShort { cause: WorkflowCutShortCause },
+    CutShort {
+        cause: WorkflowCutShortCause,
+        /// The settling error written over the worker, where the terminal
+        /// account has one to preserve.
+        detail: Option<String>,
+    },
+    /// Nothing ever recorded an outcome for this worker — the run's end left
+    /// no process alive to settle it.
+    Unsettled,
 }
 
 /// The run-end circumstance that cut a worker short.
@@ -464,6 +557,12 @@ pub enum WorkflowWorkerTermination {
 pub enum WorkflowCutShortCause {
     /// The run was cancelled while the worker was in flight.
     RunCancelled,
+    /// The run returned while the worker was still in flight.
+    RunReturned,
+    /// The run failed while the worker was still in flight.
+    RunFailed,
+    /// The run reached its closing boundary while the worker was in flight.
+    RunWoundDown,
 }
 
 /// One provider request round inside a worker call.
@@ -557,6 +656,7 @@ pub struct WorkflowAgentCallDetail {
     pub session_id: Option<Uuid>,
     pub thread_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
+    pub liveness: Option<WorkflowWorkerLiveness>,
     /// The resolved state of the isolated worktree after the worker settled.
     pub worktree: Option<WorkflowWorktreeCompletion>,
     pub served_model: Option<String>,
@@ -575,6 +675,13 @@ pub struct WorkflowAgentCallDetail {
     /// as a call that made no provider request. The run detail always
     /// carries them.
     pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
+}
+
+/// Earliest liveness evidence for one workflow worker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct WorkflowWorkerLiveness {
+    pub started_at: DateTime<Utc>,
+    pub first_evidence_at: Option<DateTime<Utc>>,
 }
 
 /// The final Git state of an isolated worker worktree.

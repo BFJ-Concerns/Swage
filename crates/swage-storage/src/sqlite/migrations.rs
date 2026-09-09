@@ -245,7 +245,13 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         dispatch_bound_task_definition_ids_json TEXT NOT NULL,
         workflow_call_tools_json TEXT,
         wake_at              TEXT,
-        inherited_worker_placement_json TEXT
+        inherited_worker_placement_json TEXT,
+        -- The terminal account a run leaves when it ends by any path: the
+        -- ending, the partition of its workers, and the completed work
+        -- recoverable from a run that never returned. Generic JSON like
+        -- every other run blob; the contract lives in `swage-protocol` and
+        -- is enforced at the wire boundary.
+        terminal_account_json TEXT
     );
     INSERT INTO workflow_runs_parking_new (
         id, space_id, script_version_id, inline_workflow_id,
@@ -317,6 +323,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
         result_json       TEXT,
+        terminal_metadata_json TEXT,
         error_message     TEXT,
         effect_kind       TEXT,
         idempotency_key   TEXT,
@@ -389,6 +396,7 @@ const CREATE_WORKFLOW_RUN_HOLDS: &str = "
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
         result_json       TEXT,
+        terminal_metadata_json TEXT,
         error_message     TEXT,
         effect_kind       TEXT,
         idempotency_key   TEXT,
@@ -430,6 +438,7 @@ const ADD_WORKFLOW_RUN_PARENTAGE: &str = "
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
         result_json       TEXT,
+        terminal_metadata_json TEXT,
         error_message     TEXT,
         effect_kind       TEXT,
         idempotency_key   TEXT,
@@ -1184,6 +1193,7 @@ const COMPLETE_SCHEMA: &str = "
         args_hash         TEXT NOT NULL,
         request_json      TEXT NOT NULL,
         result_json       TEXT,
+        terminal_metadata_json TEXT,
         error_message     TEXT,
         effect_kind       TEXT,
         idempotency_key   TEXT,

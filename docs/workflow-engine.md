@@ -1,5 +1,5 @@
 ---
-description: How Swage runs workflow scripts — lifecycle, journalling, budget management, durable parking, and failure handling
+description: How Swage runs workflow scripts — lifecycle, journalling, budget management (including per-route), run detail, terminal account (how a run ended, worker standings, partial results), durable parking, and failure handling
 ---
 
 # Workflow engine
@@ -51,6 +51,12 @@ Map/Set, and regular expressions, but no `Date`, `setTimeout`, `fetch`, or
 `process`. `Math.random` throws to prevent non-deterministic branching, since
 replay depends on the script producing the same host-call sequence.
 
+A script may open with a `export const meta = { ... };` header declaring
+portable metadata: `name`, `description`, `task` (an opaque identity for
+grouping runs of the same task), and `argumentSchema` (a JSON Schema
+governing the workflow's arguments). The meta header is parsed at save time;
+the caged runtime never sees it.
+
 A script may open with `export const defaults = { ... };` to set default
 options (agent name, model, schema) merged into every `agent()` and
 `agentStart()` call. Call-site values override; unset fields fall through to
@@ -72,6 +78,12 @@ to complete or the timer to fire wins, and the result says which.
 The optional `tools` array narrows a fresh worker call to the named tools. It
 is intersected with the worker's effective grants and therefore cannot grant
 new authority; continuations retain the allow-list chosen at worker creation.
+
+Setting `identity: true` on a call opts it into an envelope that preserves the
+call's identity through fan-in — when schema validation is exhausted, the
+failure returns the call's `label` and `phase` rather than collapsing to `null`
+inside `parallel()` or `pipeline()`. The `phase` option groups calls in the
+journal, and `assembly` selects the context assembly strategy for the worker.
 
 ### Held workers
 
@@ -107,15 +119,29 @@ Call `close()` when the work is finished. Swage also closes open workers when
 the run returns, throws, or is cancelled; parking retains them so the run can
 resume. Repeated `close()` calls with the same worker object are harmless.
 
+### Structured output extraction
+
+When a call supplies `schema`, the worker's response is scanned for JSON
+values — bare, inside a Markdown fence, or preceded by prose. Every
+non-overlapping JSON value found in the text is validated against the schema
+in source order, and the final schema-valid value wins. A model may reason
+through provisional values before delivering its result, so the extractor
+tolerates surrounding text and intermediate candidates rather than requiring
+the response to be pure JSON. When no value passes validation after the
+configured retries (`maxAttempts`), the call returns `null` for `agent()`, or
+the handle's `.result` is `null` for `agentStart()`.
+
 ### Model fallback
 
-`agent()` and `agentStart()` accept `fallbackModel`, a catalogue model id. It
-is used only when the requested model is unavailable or the provider refuses
-or fails it before output; schema exhaustion and failures after output still return the
-established `null` result or throw. The completed call record's `served_model`
-names the model that actually served the call. Continuation calls ignore
-`fallbackModel` and never make a fallback attempt; they use the worker's
-persisted model selection, including a fallback selected at creation.
+`agent()`, `agentStart()`, and `session()` accept `fallbackModel`, a catalogue
+model id. For a held worker it is a creation-only option, fixed with the rest
+of the worker's execution envelope. It is used only when the requested model
+is unavailable or the provider refuses or fails it before output; schema
+exhaustion and failures after output still return the established `null` result
+or throw. The completed call record's `served_model` names the model that
+actually served the call. Continuation calls ignore `fallbackModel` and never
+make a fallback attempt; they use the worker's persisted model selection,
+including a fallback selected at creation.
 
 ### Composition
 
@@ -131,18 +157,23 @@ collapses to `null` rather than aborting the batch. `pipeline(items,
 worker fails stops at its failing stage while others continue.
 
 Author errors are the exception to that swallowing. An unknown or invalid
-agent option, a schema that does not compile, an unresolvable `workflow()`
-reference, and non-JSON `workflow()` arguments are all raised before the call
-spawns anything; inside `parallel` or `pipeline` they propagate out and fail
-the run, so a broken call is never reported as a failed worker slot.
+agent option (`InvalidAgentOptionError`), an invalid prompt
+(`InvalidAgentPromptError`), a schema that does not compile
+(`InvalidAgentSchemaError`), an unresolvable `workflow()` reference
+(`WorkflowReferenceError`), and non-JSON `workflow()` arguments
+(`WorkflowArgumentsError`) are all raised before the call spawns anything;
+inside `parallel` or `pipeline` they propagate out and fail the run, so a
+broken call is never reported as a failed worker slot.
 
 ## Journal and replay
 
 The journal is the mechanism that makes runs durable. Every host call follows
 a write-ahead pattern: an intent row is created in status `started` before the
-work begins, and the row is settled to `completed` or `failed` when the work
-finishes. If the gateway crashes between intent and settlement, the row is
-still `started` on resume and the work is re-executed.
+work begins, and the row is settled to `completed`, `failed`, or `cut_short`
+when the work finishes. `cut_short` means the run's own end stopped the
+entry's work — distinct from `failed`, which is the work's own failure. If
+the gateway crashes between intent and settlement, the row is still `started`
+on resume and the work is re-executed.
 
 ### Sequence numbering
 
@@ -201,6 +232,28 @@ The split is configured through `WorkflowBudget`, which also carries
 `max_concurrent_agent_calls` (the concurrency semaphore size, defaulting
 to 4).
 
+### Per-route budgets
+
+Token budgets can be partitioned by provider route. The `per_route` map on
+`WorkflowBudget` assigns each named provider entry its own ceiling
+(`max_total_tokens`) and optional closing reserve (`reserved_closing_tokens`).
+Every agent call is admitted against the ledger for its resolved provider
+route: calls on one entry never consume another entry's allowance. Routes
+without a `per_route` entry fall back to the top-level `max_total_tokens`.
+
+Declared fallback models that resolve to a routed provider entry are admitted
+against that entry's ledger, not the primary model's. When a call's usage is
+unavailable, the closing is charged only to the call's own route.
+
+`budgetSnapshot()` returns per-route balances in its `per_route` map when
+per-route budgets are configured. Each entry reports `spent`, `remaining`,
+`closing_remaining`, and `usage_unavailable_calls`. The terminal budget record
+at run completion carries the same per-route breakdown.
+
+At run creation, every `per_route` key must name a provider entry; a route's
+`reserved_closing_tokens` requires `max_total_tokens` on the same entry and
+cannot exceed it.
+
 ### Wind-down
 
 Each new working-partition agent call reserves one equal share of the working
@@ -244,11 +297,13 @@ accumulated replay credit.
 ### Budget reads
 
 `budgetSnapshot()` returns a journalled reading —
-`{spent, remaining, working_remaining, closing_remaining, winding_down}` — and
-is the only budget function safe for branching, because replay returns the
-recorded reading. The synchronous `budget.spent()` and `budget.remaining()`
-read live counters that reflect end-state values during replay, so branching
-on them would produce non-deterministic results.
+`{spent, remaining, working_remaining, closing_remaining, winding_down,
+per_route, usage_unavailable_calls}` — and is the only budget function safe
+for branching, because replay returns the recorded reading. The `per_route`
+field appears when per-route budgets are configured. The synchronous
+`budget.spent()` and `budget.remaining()` read live counters that reflect
+end-state values during replay, so branching on them would produce
+non-deterministic results.
 
 ## Durable run parking
 
@@ -382,6 +437,147 @@ Four mechanisms bound concurrent work:
 - **Agent-call counter**: a lifetime count checked against the budget's
   `max_agent_calls` cap.
 
+## Run detail
+
+A run's detail view returns every journal entry with full call-level
+information. Each `agent_call` entry carries a call detail whose fields
+tell the story of one worker from dispatch to settlement.
+
+### Dispatch record
+
+Every agent call records a dispatch before any provider work begins. The
+dispatch captures the prompt, the agent definition, the requested model and
+effort (before the turn resolves them), the provisioned placement (directory
+and write access), the call-scoped tool grants after intersection with the
+dispatching context's authority, and the resolved attempts — one per attempt
+the call ran, each stamped with the model, effort, session, thread, and turn
+the attempt actually used. A call interrupted by a crash and re-dispatched
+on replay records both attempts, so the record keeps the interrupted work
+rather than only the attempt that settled.
+
+### Provider rounds
+
+Each call detail carries the provider rounds its turn ran — the sequence of
+requests to the model provider. Each round records its attempt number, round
+number within the attempt, start and completion timestamps, and outcome. The
+outcome distinguishes a response (with a count of tool calls — zero when the
+model answered directly), a failure, an interruption (the request went out
+but the attempt that made it stopped), and an outstanding request still
+waiting for a response. A round the run's end interrupted has a completion
+timestamp marking when that became true, not when a response arrived.
+
+Provider rounds are absent on the live entry event (which fires as the entry
+settles) but always present in the run detail.
+
+### Usage
+
+A call's token usage is either known (input and output token counts from the
+provider) or unavailable with a reason. The two cases are distinct: a call
+whose provider reported no usage is not a call that spent nothing. The
+reasons are `provider_reported_no_usage` (the turn completed but the provider
+sent no counts) and `call_did_not_settle` (the call never settled, so no
+usage was collected).
+
+### Termination
+
+A call's termination records how the worker ended:
+
+- **`outstanding`** — the worker is still working.
+- **`settled`** — the worker ran to its own end, successfully or not.
+- **`failed`** — the worker's own work failed, with a message.
+- **`cut_short`** — the run ended while this worker was still working. The
+  cause names the circumstance: `run_cancelled`, `run_returned`, `run_failed`,
+  or `run_wound_down`. An optional `detail` field carries the settling error
+  written over the worker, when the terminal account has one to preserve.
+- **`unsettled`** — nothing ever recorded an outcome for this worker — the
+  run's end left no process alive to settle it.
+
+The `cut_short` status also appears on the journal entry itself — the entry
+settles as `cut_short` rather than `failed`, keeping the run's own end
+distinct from a worker failure.
+
+### Liveness stamps
+
+Each call detail carries liveness timestamps: `started_at` marks when the
+worker's dispatch window opened (captured between requesting and entering
+provider dispatch), and `first_evidence_at` marks when the first provider
+evidence arrived. `first_evidence_at` is absent when the worker settled
+without producing any evidence — refused at admission, or cut short before a
+response. The stamps are persisted at settlement and appear on the live run
+surface during execution.
+
+### Worktree completion
+
+When a worker ran in an isolated worktree, the call detail and journal result
+carry the worktree's final Git state: `base_commit` (the commit the worktree
+was cut from), `tip_commit` (HEAD when the worker settled), `changed` (whether
+commits exist beyond the base), and `removed` (whether the worktree was cleaned
+up after settlement). The completion is resolved after the worker settles by
+reading the worktree's state through the worktree host.
+
+## Terminal account
+
+When a run ends, the gateway assembles a terminal account — a single record
+of what ended it, where every worker stood at that moment, and what completed
+work survived. The account is absent while the run is still going; it appears
+the moment the run reaches a terminal state.
+
+### How a run ended
+
+Every ending path names itself, so no reader has to infer a run's end from
+silence or the absence of a result:
+
+- **Returned** — the script returned its result.
+- **Threw** — the script threw an error, or the engine failed the run.
+- **Cancelled** — an operator or a parent run cancelled it.
+- **Wound down** — the working token allowance ran out and the run ended under
+  wind-down rather than on its own terms.
+- **Interrupted without resume** — the gateway died with the run in flight and
+  the run could not be resumed; the reason says why.
+
+### Where every worker stood
+
+The account partitions every worker the run dispatched into exactly one of
+four standings: **done** (settled successfully), **failed** (the worker's own
+work failed), **cut short** (the run's ending stopped the worker while it was
+still working), and **unsettled** (nothing ever recorded an outcome — the
+run's end left no process alive to settle it). Each entry names its directory,
+its label, and — for workers that ran in an isolated worktree — the final Git
+state.
+
+### Partial results
+
+A run that ended without its script returning also carries partial results:
+the completed workers' output, recoverable as work rather than the run's
+result, with a reason saying what stopped the run from producing one. Each
+partial result names the worker, its output, and its directory.
+
+### Reading the account
+
+Three places expose the terminal account:
+
+1. **The run detail** — the `GET /api/workflow-runs/{id}` response carries the
+   account on the run record.
+2. **The run view** — the web UI route `/workflow-runs/{id}` renders the ending,
+   the worker partition, and partial results in one coherent view alongside
+   the journal.
+3. **The `workflow_run_account` tool** — an agent tool that reads the terminal
+   account for one run, scoped to the caller's space. Useful after a run ends
+   without returning, to find what survived and where.
+
+### Worker directory retention
+
+When a run ends without returning, the worker directories its account names
+are retained: the gateway claims them from the worktree host before recording
+the account, so from the moment a reader can find them nothing takes them
+away — not the gateway's shutdown, not the next one's startup sweep. A run
+that returned reclaims its workers' directories normally.
+
+A stale cancellation — a parked cancellation that loses to a resumed run —
+withdraws only its own retention claim. If the resumed run returned, the
+directories go back to the normal reclaim path; if it failed, its own
+retention claim is preserved.
+
 ## Carried workflows
 
 A workflow script can be carried by a skill instead of being authored as a
@@ -390,8 +586,10 @@ standalone row in a space. In the workflow listing, a carried workflow's
 immutable in place; an operator can shadow one by authoring a same-named
 workflow in the space.
 
-Each shipped skill carries its own workflows. When a skill is active on a
-session, its carried workflows become available, and any available workflow
+Each shipped skill carries its own workflows: the development-process
+skills — commission, maestro, assembly, and shakedown — carry their
+pipelines and waves, and the research skill carries its sweep. When a
+skill is active on a session, its carried workflows become available, and any available workflow
 starts by name through `workflow_run`. The research skill carries
 `research-sweep`.
 

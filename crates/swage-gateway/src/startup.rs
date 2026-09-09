@@ -709,6 +709,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(PageWriteTool),
         Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
+        Arc::new(crate::tool::workflow_run_account::WorkflowRunAccountTool),
+        Arc::new(crate::tool::workflow_run_status::WorkflowRunStatusTool),
         Arc::new(crate::tool::workflow_save::WorkflowSaveTool),
         // MemoryTool derives the memory path from ctx.working_directory() at runtime.
         Arc::new(MemoryTool),

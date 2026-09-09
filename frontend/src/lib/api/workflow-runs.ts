@@ -22,7 +22,9 @@ export function setBaseUrl(url: string): void {
 export async function fetchWorkflowRun(
   runId: string,
 ): Promise<WorkflowRunDetailResponse | null> {
-  const response = await fetch(`${baseUrl}/api/workflow-runs/${runId}`);
+  const response = await fetch(
+    `${baseUrl}/api/workflow-runs/${encodeURIComponent(runId)}`,
+  );
   if (response.status === 404) {
     return null;
   }

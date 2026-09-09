@@ -107,9 +107,11 @@ The resolution rules are:
 
 | Adapter | Levels | Can disable |
 |---|---|---|
-| Anthropic | `low`, `medium`, `high`, `max` | Yes |
+| Anthropic | `low`, `medium`, `high`, `max` | Yes (Claude models only) |
 | Chat Completions (OpenAI) | `minimal`, `low`, `medium`, `high`, `xhigh` | Yes (reasoning models only; non-reasoning models declare no control) |
 | Responses (OpenAI) | Same as Chat Completions | Same |
+| Google | Budget: Gemini 2.5 Flash `1`–`24576` tokens, Flash Lite `512`–`24576` tokens | Yes (Flash families only; other Google models declare no control) |
+| Codex | `low`, `medium`, `high`, `xhigh` | No (GPT-5.x models only; others declare no control) |
 
 A catalogue entry's `capabilities.effort` overrides the adapter's declaration
 for that model, so an operator can declare a custom capability for a

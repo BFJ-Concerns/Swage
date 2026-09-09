@@ -1,12 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mount, unmount } from "svelte";
-
-vi.mock("../api/workflow-runs", () => ({
-  fetchWorkflowRun: vi.fn(),
-}));
-
-import { fetchWorkflowRun } from "../api/workflow-runs";
 import WorkflowRunDetail from "../components/WorkflowRunDetail.svelte";
 import workflowRunDetailSource from "../components/WorkflowRunDetail.svelte?raw";
 import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -18,7 +12,6 @@ afterEach(() => {
   if (component) unmount(component);
   component = undefined;
   document.body.replaceChildren();
-  vi.resetAllMocks();
 });
 
 function runWith(call: WorkflowAgentCallDetail): WorkflowRunDetailResponse {
@@ -112,14 +105,11 @@ const baseCall: WorkflowAgentCallDetail = {
 } as unknown as WorkflowAgentCallDetail;
 
 async function render(detail: WorkflowRunDetailResponse): Promise<void> {
-  vi.mocked(fetchWorkflowRun).mockResolvedValue(detail);
   component = mount(WorkflowRunDetail, {
     target: document.body,
-    props: { runId: "run-1" },
+    props: { detail, loadState: "loaded", errorMessage: "" },
   });
-  await vi.waitFor(() => {
-    expect(document.querySelector(".call")).not.toBeNull();
-  });
+  expect(document.querySelector(".call")).not.toBeNull();
 }
 
 describe("WorkflowRunDetail", () => {

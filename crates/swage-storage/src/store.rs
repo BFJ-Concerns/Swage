@@ -1063,6 +1063,28 @@ pub trait WorkflowStore: Send + Sync {
         handover: Option<serde_json::Value>,
         error_message: Option<&str>,
     ) -> Result<(), StorageError>;
+    /// Write the run's terminal account. Separate from the state update so
+    /// the boot recovery path can account for a run it cannot resume without
+    /// moving the run's state.
+    ///
+    /// A terminal row is first-write-wins. An account on a still-running row
+    /// is a crash residue from the pre-terminal write and is replaceable by
+    /// the resumed run's actual ending.
+    async fn set_workflow_run_terminal_account(
+        &self,
+        id: Uuid,
+        account: serde_json::Value,
+    ) -> Result<(), StorageError>;
+    /// Atomically cancel a parked run, attach its account, and settle any
+    /// journal entries the cancellation caught in flight. `false` means a
+    /// waker or another canceller moved the run first.
+    async fn try_cancel_parked_workflow_run(
+        &self,
+        id: Uuid,
+        account: serde_json::Value,
+        journal_error: Option<&str>,
+        journal_termination: Option<serde_json::Value>,
+    ) -> Result<bool, StorageError>;
     async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
@@ -1216,6 +1238,13 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         id: Uuid,
         result: serde_json::Value,
+    ) -> Result<WorkflowJournalRecord, StorageError>;
+    /// Persists outcome-independent metadata before an entry's terminal
+    /// status is committed.
+    async fn set_workflow_journal_terminal_metadata(
+        &self,
+        id: Uuid,
+        metadata: serde_json::Value,
     ) -> Result<WorkflowJournalRecord, StorageError>;
     /// Settles an entry as `failed`, preserving the failure's own message so
     /// replay returns the recorded error instead of re-executing the call.
@@ -2669,6 +2698,22 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
+        async fn set_workflow_run_terminal_account(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn try_cancel_parked_workflow_run(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+            _: Option<&str>,
+            _: Option<serde_json::Value>,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
         async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
@@ -2814,6 +2859,13 @@ mod tests {
             unimplemented!()
         }
         async fn complete_workflow_journal_entry(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<WorkflowJournalRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn set_workflow_journal_terminal_metadata(
             &self,
             _: Uuid,
             _: serde_json::Value,

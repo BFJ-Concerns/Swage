@@ -27,7 +27,7 @@ export interface Route {
   path: string;
   conversationId: string | null;
   // Set when the URL names a workflow run, so the run's recorded journal
-  // can be read back on its own URL rather than only through a conversation.
+  // and terminal account can be read back on its own surface.
   workflowRunId: string | null;
   settingsTab: SettingsTab | null;
   settingsSpaceSlug: string | null;
@@ -68,7 +68,7 @@ export interface RouterOptions {
  * Recognised patterns:
  *   /                       → root, no active conversation
  *   /conversations/:id      → load conversation with that ID
- *   /workflow-runs/:id      → read back the recorded journal for that run
+ *   /workflow-runs/:id      → read back that run's record and terminal account
  *   anything else           → treated as root (unrecognised paths get SPA fallback)
  */
 export function parseRoute(pathname: string): Route {
