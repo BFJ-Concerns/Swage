@@ -106,10 +106,12 @@ Stages, with the holds where the pipeline waits on you:
    builder report's path, and the autonomous round history) and **holds
    for your per-finding dispositions**: `fix`, `contract-question`
    (routes to `build/gaps.md`, obligation parks), or `accept-with-note`
-   (journalled). The pipeline accepts `land` when every **severe**
-   finding carries exactly one valid disposition and no disposition is
-   `contract-question` (a contract question's documented result is a
-   parked obligation, so it cannot accompany a land); sub-severe
+   (journalled, with a non-empty reason in its `note`). Dispositions must
+   name unique, valid finding indices and one of these three values.
+   The pipeline accepts `land` when every **severe** finding is explicitly
+   accepted and no disposition is `contract-question` or `fix`. A `land`
+   carrying `fix` dispositions runs those repairs, re-verifies, and holds
+   for a fresh decision; a contract question requires `park`. Sub-severe
    findings left undispositioned are accepted by default and return in
    the result envelope as `issues_findings` — file them to the annexe
    `ISSUES.md` when you record the landing, so neglect can accept a
@@ -167,7 +169,10 @@ itself. The payload shapes are: restate holds take
 triage holds take `{verdict: land|fix|park, nonce, note?, dispositions?:
 [{finding: <index>, disposition: fix|contract-question|accept-with-note,
 note?}]}` — `finding` is the 0-based position in the hold content's
-findings array. After posting a decision, read the run's journal before
+findings array. Consuming an answer marks that answer delivered. After
+validating its nonce, offered verdict and note type, the script acknowledges
+only the corresponding request; unrelated pending events remain pending.
+After posting a decision, read the run's journal before
 acting on what happens next: a declined decision (a `land` the
 disposition check refuses) re-holds at a fresh nonce with identical hold
 content, and the reason (`land refused: …`) appears only in the run's
