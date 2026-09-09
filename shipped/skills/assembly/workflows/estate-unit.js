@@ -61,7 +61,7 @@ const runHold = async (stage, content, verdicts) => {
   // Raise the decision on the run's event queue and park until answered —
   // by a lead segment clearing its batch of decisions at a wake, or by the
   // operator through the run surface. Blocking is accepted: no timeout.
-  await postEvent("decision.needed", { stage, nonce, content, options: verdicts });
+  const request = await postEvent("decision.needed", { stage, nonce, content, options: verdicts });
   while (true) {
     const decision = await awaitEvent({ kinds: ["decision.answer"] });
     const payload = decision && decision.payload;
@@ -73,6 +73,13 @@ const runHold = async (stage, content, verdicts) => {
       log(`[hold] ${stage}: unknown verdict ${JSON.stringify(payload.verdict)} ignored (offered: ${verdicts.join(", ")}); still waiting for ${nonce}`);
       continue;
     }
+    if (payload.note !== undefined && typeof payload.note !== "string") {
+      log(`[hold] ${stage}: decision note must be a string; still waiting for ${nonce}`);
+      continue;
+    }
+    // Only this answered request is settled; concurrent requests and worker
+    // events retain their own acknowledgement lifecycle. Replay retains its seq.
+    await deliverEvents({ event_seq: request.seq });
     return payload;
   }
 };
@@ -276,62 +283,59 @@ while (true) {
   }, ["land", "fix", "park"]);
   if (triage.verdict === "park") return { outcome: "parked", plan, report, verdict, fixReport, autonomous_rounds: autonomousRounds };
 
-  if (triage.verdict === "land") {
-    // Every SEVERE finding needs exactly one valid disposition, and no
-    // contract-question may accompany a land. Sub-severe findings left
-    // undispositioned are accepted by default and returned as
-    // issues_findings for the annexe issue log — neglect can accept a
-    // minor into the issue log, never waive a severe.
-    const ds = triage.dispositions || [];
-    const seen = new Set();
-    let invalid = false;
-    for (const d of ds) {
-      if (!Number.isInteger(d.finding) || d.finding < 0 || d.finding >= verdict.findings.length || seen.has(d.finding)) invalid = true;
+  // Validate the same disposition contract for landing and repair. A land
+  // carrying fixes requests repair first; only a later decision can land it.
+  const dispositions = triage.dispositions === undefined ? [] : triage.dispositions;
+  const seen = new Set();
+  let invalid = !Array.isArray(dispositions);
+  if (!invalid) {
+    for (const d of dispositions) {
+      if (!d || typeof d !== "object" || Array.isArray(d)
+          || !Number.isInteger(d.finding) || d.finding < 0
+          || d.finding >= verdict.findings.length || seen.has(d.finding)
+          || !["fix", "contract-question", "accept-with-note"].includes(d.disposition)
+          || (d.note !== undefined && typeof d.note !== "string")
+          || (d.disposition === "accept-with-note" && !d.note?.trim())) {
+        invalid = true;
+        break;
+      }
       seen.add(d.finding);
     }
-    const undisposedSevere = verdict.findings
-      .map((f, i) => (f.severity === "severe" && !seen.has(i) ? i : null))
-      .filter((i) => i !== null);
-    const contractQs = ds.filter((d) => d.disposition === "contract-question");
-    if (invalid || undisposedSevere.length || contractQs.length) {
-      log(`land refused: ${invalid ? "invalid disposition index; " : ""}${undisposedSevere.length} severe finding(s) undispositioned; ${contractQs.length} contract-question(s) (those park the obligation) — re-holding`);
-      continue;
-    }
-    issuesFindings = verdict.findings.filter((f, i) => f.severity !== "severe" && !seen.has(i));
-    break;
   }
-
-  // The budget check runs before the dispatch, never after the re-verify,
-  // so the final verdict always reaches a hold.
-  if (rounds >= totalRoundLimit) {
-    log(`fix refused: the ${totalRoundLimit}-round budget is spent — land or park on the verdict as it stands (further repair is a re-briefed unit) — re-holding`);
+  if (invalid) {
+    log("decision refused: dispositions need unique valid finding indices, known dispositions and a non-empty note for acceptance — re-holding");
     continue;
   }
-  // A fix verdict is also a disposition of every finding, and the structured
-  // record must survive fix rounds as it survives lands: validate as the land
-  // branch does, and require at least one disposition marked fix — a fix
-  // verdict with none dispatches an empty round.
-  const fixDs = triage.dispositions || [];
-  {
-    const seen = new Set();
-    let invalid = false;
-    for (const d of fixDs) {
-      if (!Number.isInteger(d.finding) || d.finding < 0 || d.finding >= verdict.findings.length || seen.has(d.finding)) invalid = true;
-      seen.add(d.finding);
-    }
-    const fixCount = fixDs.filter((d) => d.disposition === "fix").length;
-    const contractQs = fixDs.filter((d) => d.disposition === "contract-question").length;
-    if (invalid || !fixDs.length || !fixCount || contractQs) {
-      log(`fix refused: ${invalid ? "invalid disposition index; " : ""}${!fixDs.length ? "no dispositions; " : !fixCount ? 'no disposition is "fix" — a fix verdict with none dispatches an empty round; ' : ""}${contractQs ? `${contractQs} contract-question(s) — a contract question's documented result is a parked obligation, so answer with park or re-disposition, never a fix dispatch; ` : ""}a fix verdict dispositions its findings by 0-based index with at least one marked fix (the note carries reasoning, never the record) — re-holding`);
+  if (dispositions.some((d) => d.disposition === "contract-question")) {
+    log("decision refused: a contract question requires park — re-holding");
+    continue;
+  }
+  const fixList = dispositions.filter((d) => d.disposition === "fix");
+  if (triage.verdict === "land") {
+    if (verdict.findings.some((f, i) => f.severity === "severe" && !seen.has(i))) {
+      log("land refused: every severe finding needs a disposition — re-holding");
       continue;
     }
+    if (!fixList.length) {
+      issuesFindings = verdict.findings.filter((f, i) => f.severity !== "severe" && !seen.has(i));
+      break;
+    }
+    log("land deferred: requested fixes must be repaired and re-verified before a fresh landing decision");
   }
-  const fixList = fixDs.filter((d) => d.disposition === "fix");
+  if (!fixList.length) {
+    log("fix refused: at least one disposition must request a fix — re-holding");
+    continue;
+  }
+  // Check the budget before dispatch so every final verification reaches a hold.
+  if (rounds >= totalRoundLimit) {
+    log(`fix refused: the ${totalRoundLimit}-round budget is spent — accept the measured residue with reasons or park for a re-brief — re-holding`);
+    continue;
+  }
   // A ruling issued at triage stays in force for every later verification:
   // the re-verifier judges the delta the ruling authorised, so a triage note
   // it never saw makes a compliant builder read as ignoring the brief.
   if (triage.note && triage.note.trim()) rulings.push(triage.note.trim());
-  for (const d of triage.dispositions || [])
+  for (const d of dispositions)
     if (d.note && d.note.trim())
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
   fixReport = await agent(
