@@ -42,6 +42,8 @@ function detail(workflowRun: WorkflowRun): WorkflowRunDetailResponse {
       events_posted: 0,
       events_pending: 0,
     },
+    holds: [],
+    hold_metrics: { holds_open: 0, holds_answered: 0, answers_rejected: 0 },
   };
 }
 
