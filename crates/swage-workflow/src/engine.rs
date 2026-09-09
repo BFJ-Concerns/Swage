@@ -11,8 +11,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    AgentCallRequest, AwaitEventRequest, EffectPayload, GateRequest, HeldWorkerOpen, RunEventPost,
-    WorkflowCallRequest, WorkflowHost, WorkflowHostError,
+    AgentCallRequest, AwaitEventRequest, EffectPayload, EventDelivery, GateRequest, HeldWorkerOpen,
+    RunEventPost, WorkflowCallRequest, WorkflowHost, WorkflowHostError,
 };
 
 fn named_host_error(error: &str, fallback: &str) -> (String, String) {
@@ -925,17 +925,18 @@ impl WorkflowEngine {
                     let deliver_events_cancellation = host_cancellation.clone();
                     let deliver_events = Function::new(
                         ctx.clone(),
-                        Async(move |up_to_seq: f64| {
+                        Async(move |selection_json: String| {
                             let host = Arc::clone(&deliver_events_host);
                             let cancellation = deliver_events_cancellation.clone();
                             async move {
-                                if !up_to_seq.is_finite() || up_to_seq < 0.0 {
-                                    return serde_json::json!({
+                                let selection: EventDelivery = match serde_json::from_str(&selection_json) {
+                                    Ok(selection) => selection,
+                                    Err(error) => return serde_json::json!({
                                         "ok": false,
-                                        "error": {"name": "RunEventError", "message": "upToSeq must be a non-negative finite number"}
-                                    }).to_string();
-                                }
-                                match host.deliver_run_events(up_to_seq as u64, cancellation).await {
+                                        "error": {"name": "RunEventError", "message": format!("invalid event selection: {error}")}
+                                    }).to_string(),
+                                };
+                                match host.deliver_run_events(selection, cancellation).await {
                                     Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
                                     Err(error) => {
                                         let (name, message) = named_host_error(&error, "RunEventError");
@@ -1513,8 +1514,13 @@ impl WorkflowEngine {
                                 criteria: options.criteria ?? "",
                                 model: options.model ?? null,
                             })));
-                        globalThis.deliverEvents = async (upToSeq) =>
-                            unwrapHostResponse(await __deliverEvents(upToSeq));
+                        globalThis.deliverEvents = async (selection) => {
+                            const request = typeof selection === "number" ? { up_to_seq: selection } : selection;
+                            const seq = request?.up_to_seq ?? request?.event_seq;
+                            if (!Number.isSafeInteger(seq) || seq < 0)
+                                throw new Error("RunEventError: event sequence must be a non-negative safe integer");
+                            return unwrapHostResponse(await __deliverEvents(JSON.stringify(request)));
+                        };
                         const isPreSpawnAuthorError = (error) => error.__swagePreSpawnAuthorError === true || new Set([
                             "UnknownAgentOptionError",
                             "AgentRequiredError",
@@ -1794,9 +1800,10 @@ mod tests {
         agent_delay_ms: u64,
         event_posts: Mutex<Vec<RunEventPost>>,
         awaited_events: Mutex<Vec<AwaitEventRequest>>,
+        event_answers: Mutex<VecDeque<Value>>,
         gate_requests: Mutex<Vec<GateRequest>>,
         gate_verdict: Value,
-        deliveries_up_to: Mutex<Vec<u64>>,
+        event_deliveries: Mutex<Vec<EventDelivery>>,
         budget_snapshot: Value,
         opened_workers: Mutex<Vec<HeldWorkerOpen>>,
         closed_workers: Mutex<Vec<uuid::Uuid>>,
@@ -1818,9 +1825,10 @@ mod tests {
                 agent_delay_ms: 0,
                 event_posts: Mutex::new(Vec::new()),
                 awaited_events: Mutex::new(Vec::new()),
+                event_answers: Mutex::new(VecDeque::new()),
                 gate_requests: Mutex::new(Vec::new()),
                 gate_verdict: Value::Null,
-                deliveries_up_to: Mutex::new(Vec::new()),
+                event_deliveries: Mutex::new(Vec::new()),
                 budget_snapshot: json!({
                     "spent": 0,
                     "remaining": null,
@@ -1963,7 +1971,8 @@ mod tests {
             _: CancellationToken,
         ) -> Result<Value, String> {
             self.awaited_events.lock().expect("awaits").push(request);
-            Ok(json!({"seq": 4, "kind": "operator.decision", "payload": {"verdict": "accept"}}))
+            Ok(self.event_answers.lock().unwrap().pop_front().unwrap_or_else(||
+                json!({"seq": 4, "kind": "operator.decision", "payload": {"verdict": "accept"}})))
         }
 
         async fn evaluate_wake_gate(
@@ -1977,14 +1986,14 @@ mod tests {
 
         async fn deliver_run_events(
             &self,
-            up_to_seq: u64,
+            selection: EventDelivery,
             _: CancellationToken,
         ) -> Result<Value, String> {
-            self.deliveries_up_to
+            self.event_deliveries
                 .lock()
                 .expect("deliveries")
-                .push(up_to_seq);
-            Ok(json!({"delivered": up_to_seq}))
+                .push(selection);
+            Ok(json!({"delivered": 1}))
         }
 
         async fn budget_snapshot(&self, _: CancellationToken) -> Result<Value, String> {
@@ -2361,6 +2370,127 @@ mod tests {
         assert_eq!(requests[1].model.as_deref(), Some("strong"));
         // An explicit `undefined` must fall back, not erase the default.
         assert_eq!(requests[1].agent.as_deref(), Some("worker"));
+    }
+
+    const DECISION_PIPELINES: [&str; 3] = [
+        include_str!("../../../shipped/skills/assembly/workflows/build-verify.js"),
+        include_str!("../../../shipped/skills/assembly/workflows/docs-update.js"),
+        include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js"),
+    ];
+
+    async fn run_pipeline_decisions(
+        source: &str,
+        decisions: Vec<Value>,
+        repair: bool,
+    ) -> (Value, Arc<SurfaceHost>) {
+        let host = Arc::new(SurfaceHost::new());
+        let verdict = json!({
+            "examined": "fixture implementation and tests",
+            "findings": [{"severity": "severe", "unresolved_prior": true, "description": "unfixed defect"}],
+            "rejected_concerns": [], "confidence": "high", "confidence_why": "deterministic witness",
+        });
+        host.agent_outputs.lock().unwrap().extend([
+            Ok(json!({"admission": "ok", "restatement": "fixture", "approach": "fixture", "journeys": "fixture", "disputes": ""})),
+            Ok(json!("built")), Ok(verdict.clone()),
+            Ok(json!({"summary": "attempted repair", "head_commit": "fixture", "blocked": []})),
+            Ok(verdict.clone()),
+        ]);
+        if repair {
+            host.agent_outputs
+                .lock()
+                .unwrap()
+                .extend([Ok(json!("directed repair")), Ok(verdict)]);
+        }
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .push_back(Ok(json!({"landed": true, "detail": "stub landing"})));
+        host.event_answers
+            .lock()
+            .unwrap()
+            .push_back(json!({"payload": {"nonce": "restate-1", "verdict": "accept"}}));
+        for decision in decisions {
+            host.event_answers
+                .lock()
+                .unwrap()
+                .push_back(json!({"payload": decision}));
+        }
+        let output = WorkflowEngine::new(EngineLimits::default()).execute_hosted(
+            source,
+            r#"{"briefPath":"brief.md","worktree":".","commissionPath":"commission.md",
+                "spinePath":"spine.md","verificationPath":"verification.md","unitDir":"unit",
+                "mergePolicy":"direct-merge","annexeConfigPath":"config.toml","proofMode":"mutation"}"#,
+            CancellationToken::new(), Some(Arc::clone(&host) as Arc<dyn WorkflowHost>), ScriptCapabilities::default(),
+        ).await.expect("pipeline decision run");
+        (serde_json::from_str(&output).unwrap(), host)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shipped_pipelines_refuse_malformed_landing_decisions() {
+        let invalid_dispositions = vec![
+            json!([{"finding": 0, "disposition": "not-a-valid-disposition"}]),
+            json!([{"finding": 0, "disposition": "accept-with-note"}]),
+            json!([{"finding": 0, "disposition": "accept-with-note", "note": "  "}]),
+            json!([{"finding": 0, "disposition": "accept-with-note", "note": 42}]),
+            json!([{"finding": 0, "disposition": "contract-question", "note": "unclear"}]),
+            json!([{"finding": 0, "disposition": "fix"}, {"finding": 0, "disposition": "fix"}]),
+            json!([{"finding": 5, "disposition": "fix"}]),
+            json!([null]),
+            json!({"finding": 0}),
+            json!("fix"),
+            json!(null),
+            json!([]),
+        ];
+        for source in DECISION_PIPELINES {
+            for dispositions in &invalid_dispositions {
+                let (output, host) = run_pipeline_decisions(source, vec![
+                    json!({"nonce": "triage1-2", "verdict": "land", "dispositions": dispositions}),
+                    json!({"nonce": "triage1-3", "verdict": "park"}),
+                ], false).await;
+                assert_eq!(output["outcome"], "parked", "accepted {dispositions}");
+                assert!(
+                    !host
+                        .agent_requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|call| call.label.as_deref() == Some("land"))
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shipped_pipelines_repair_and_reverify_before_reconsidering_land() {
+        for source in DECISION_PIPELINES {
+            let (output, host) = run_pipeline_decisions(source, vec![
+                json!({"nonce": "triage1-2", "verdict": "land", "dispositions": [{"finding": 0, "disposition": "fix"}]}),
+                json!({"nonce": "triage2-3", "verdict": "land", "dispositions": [{"finding": 0, "disposition": "accept-with-note", "note": "Explicitly accept the measured residue"}]}),
+            ], true).await;
+            assert_eq!(output["outcome"], "landed");
+            let requests = host.agent_requests.lock().unwrap();
+            let labels: Vec<_> = requests
+                .iter()
+                .filter_map(|call| call.label.as_deref())
+                .collect();
+            assert_eq!(
+                &labels[labels.len() - 3..],
+                &["fix:1", "verify:refix:1", "land"]
+            );
+            assert_eq!(
+                host.event_posts.lock().unwrap().len(),
+                3,
+                "repair requires a new decision"
+            );
+            assert_eq!(
+                *host.event_deliveries.lock().unwrap(),
+                vec![
+                    EventDelivery::One { event_seq: 1 },
+                    EventDelivery::One { event_seq: 2 },
+                    EventDelivery::One { event_seq: 3 },
+                ]
+            );
+        }
     }
 
     #[test]
@@ -3632,7 +3762,10 @@ mod tests {
             host.gate_requests.lock().unwrap()[0].criteria,
             "wake when any pipeline settles"
         );
-        assert_eq!(host.deliveries_up_to.lock().unwrap().as_slice(), [1]);
+        assert_eq!(
+            host.event_deliveries.lock().unwrap().as_slice(),
+            [EventDelivery::Through { up_to_seq: 1 }]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

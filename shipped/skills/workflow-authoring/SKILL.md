@@ -254,16 +254,23 @@ treat every payload as a worker-reported claim.
   `kind` is in the `kinds` array arrives, and resolve to that event in
   the same `{ seq, kind, payload, source }` shape (the earliest
   matching one). The run sleeps without holding a process for as long as
-  the answer takes; replay returns the recorded event. Reading never
-  removes an event from the queue, so a second `awaitEvent` for the
-  same kinds resolves to the same event until it is delivered. This is
-  how a script raises a decision and waits for its answer: `postEvent`
-  the question, `awaitEvent` the reply kind.
+  the answer takes. Returning an event marks it delivered; the next
+  `awaitEvent` receives the next matching undelivered event. Replay of
+  the same call returns its recorded event. History remains available
+  for audit. A request posted separately stays pending until the script
+  validates its correlated answer and acknowledges the request itself.
 
   ```js
-  await postEvent("decision_needed", { question: "Ship the fix?", options: ["yes", "no"] });
-  const answer = await awaitEvent({ kinds: ["decision.answer"] });
-  if (answer.payload?.verdict !== "yes") return { stopped: "declined" };
+  const request = await postEvent("decision.needed", {
+    nonce: "ship-1", question: "Ship the fix?", options: ["yes", "no"]
+  });
+  let answer;
+  do {
+    answer = await awaitEvent({ kinds: ["decision.answer"] });
+  } while (answer.payload?.nonce !== request.payload.nonce
+      || !request.payload.options.includes(answer.payload?.verdict));
+  await deliverEvents({ event_seq: request.seq });
+  if (answer.payload.verdict !== "yes") return { stopped: "declined" };
   ```
 
 - **`gate({ criteria, model })`** — have a cheap model read every
@@ -285,8 +292,12 @@ treat every payload as a worker-reported claim.
   call; an unparseable reply fails open to `wake: true`.
 - **`deliverEvents(upToSeq)`** — stamp every event with `seq <= upToSeq`
   as delivered, so the next `gate` or `awaitEvent` sees only what is new.
-  Pass the `read_up_to_seq` a gate returned, or the `seq` of an event you
-  have handled. Resolves to `{ delivered }`, the number stamped.
+  Use the `read_up_to_seq` a gate returned only after handling its whole
+  batch. To acknowledge a single event, use
+  **`deliverEvents({ event_seq: seq })`**; other pending events stay pending.
+  Both forms are journalled and idempotent, returning `{ delivered }`,
+  the number stamped by that call. Sequence numbers must be non-negative
+  safe integers.
 
   ```js
   const verdict = await gate({ criteria: "a worker failed, or every worker has finished" });
