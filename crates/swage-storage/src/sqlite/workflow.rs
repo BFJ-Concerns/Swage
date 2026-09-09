@@ -6,9 +6,10 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowScript,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion,
+    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
+    NewWorkflowRunHoldRejection, NewWorkflowScript, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::WorkflowStore;
@@ -210,6 +211,52 @@ fn run_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunEventRe
         posted_at: time(row.get(10)?)?,
         delivered_wake_seq: row.get::<_, Option<i64>>(11)?.map(|value| value as u64),
         delivered_at: delivered_at.map(time).transpose()?,
+    })
+}
+
+const RUN_HOLD_COLUMNS: &str = "id, run_id, journal_entry_id, seq, content, verdicts_json, state, verdict, answer_surface, answer_agent_id, answer_session_id, answer_turn_id, raised_at, answered_at";
+
+fn run_hold_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunHoldRecord> {
+    let answered_at: Option<String> = row.get(13)?;
+    Ok(WorkflowRunHoldRecord {
+        id: uuid(row.get(0)?)?,
+        run_id: uuid(row.get(1)?)?,
+        journal_entry_id: uuid(row.get(2)?)?,
+        seq: row.get::<_, i64>(3)? as u64,
+        content: row.get(4)?,
+        verdicts: serde_json::from_str(&row.get::<_, String>(5)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        state: row.get(6)?,
+        verdict: row.get(7)?,
+        answer_surface: row.get(8)?,
+        answer_agent_id: row.get(9)?,
+        answer_session_id: row.get::<_, Option<String>>(10)?.map(uuid).transpose()?,
+        answer_turn_id: row.get::<_, Option<String>>(11)?.map(uuid).transpose()?,
+        raised_at: time(row.get(12)?)?,
+        answered_at: answered_at.map(time).transpose()?,
+    })
+}
+
+const RUN_HOLD_REJECTION_COLUMNS: &str = "id, hold_id, attempted_verdict, feedback, source_surface, source_agent_id, source_session_id, source_turn_id, rejected_at";
+
+fn run_hold_rejection_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkflowRunHoldRejectionRecord> {
+    Ok(WorkflowRunHoldRejectionRecord {
+        id: uuid(row.get(0)?)?,
+        hold_id: uuid(row.get(1)?)?,
+        attempted_verdict: row.get(2)?,
+        feedback: row.get(3)?,
+        source_surface: row.get(4)?,
+        source_agent_id: row.get(5)?,
+        source_session_id: row.get::<_, Option<String>>(6)?.map(uuid).transpose()?,
+        source_turn_id: row.get::<_, Option<String>>(7)?.map(uuid).transpose()?,
+        rejected_at: time(row.get(8)?)?,
     })
 }
 
@@ -470,11 +517,17 @@ impl WorkflowStore for SqliteStorage {
     ) -> Result<bool, StorageError> {
         let from = from.to_string();
         let to = to.to_string();
+        let now = Utc::now().to_rfc3339();
         self.with_conn(move |conn| {
+            // A terminal target stamps its completion here rather than in a
+            // second write, so a claimed cancellation needs no follow-up to
+            // be a finished run.
             let count = conn.execute(
-                "UPDATE workflow_runs SET state=?3, wake_at=NULL, completed_at=NULL \
+                "UPDATE workflow_runs SET state=?3, wake_at=NULL, \
+                 completed_at=CASE WHEN ?3 IN ('completed', 'failed', 'cancelled') \
+                     THEN ?4 ELSE NULL END \
                  WHERE id=?1 AND state=?2",
-                params![id.to_string(), from, to],
+                params![id.to_string(), from, to, now],
             )?;
             Ok(count > 0)
         })
@@ -784,6 +837,238 @@ impl WorkflowStore for SqliteStorage {
         .await
     }
 
+    async fn create_workflow_run_hold(
+        &self,
+        hold: NewWorkflowRunHold,
+    ) -> Result<WorkflowRunHoldRecord, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let verdicts = serde_json::to_string(&hold.verdicts)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        self.with_conn(move |conn| {
+            // Seq assignment and the idempotency key live in one statement,
+            // as they do for a posted event: a replayed raise inserts
+            // nothing and reads back the decision the original run opened.
+            conn.execute(
+                "INSERT INTO workflow_run_holds (id, run_id, journal_entry_id, seq, content, verdicts_json, state, raised_at) \
+                 VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM workflow_run_holds WHERE run_id = ?2), ?4, ?5, 'open', ?6) \
+                 ON CONFLICT(journal_entry_id) DO NOTHING",
+                params![
+                    id.to_string(),
+                    hold.run_id.to_string(),
+                    hold.journal_entry_id.to_string(),
+                    hold.content,
+                    verdicts,
+                    now.to_rfc3339()
+                ],
+            )?;
+            conn.query_row(
+                &format!(
+                    "SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds WHERE journal_entry_id = ?1"
+                ),
+                [hold.journal_entry_id.to_string()],
+                run_hold_row,
+            )
+        })
+        .await
+    }
+
+    async fn get_workflow_run_hold(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowRunHoldRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!("SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds WHERE id = ?1"),
+                [id.to_string()],
+                run_hold_row,
+            )
+            .optional()
+        })
+        .await
+    }
+
+    async fn list_workflow_run_holds(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_HOLD_COLUMNS} FROM workflow_run_holds \
+                 WHERE run_id = ?1 ORDER BY seq ASC"
+            ))?;
+            stmt.query_map([run_id.to_string()], run_hold_row)?
+                .collect()
+        })
+        .await
+    }
+
+    async fn list_open_workflow_run_holds(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {} FROM workflow_run_holds h \
+                 JOIN workflow_runs r ON r.id = h.run_id \
+                 WHERE r.space_id = ?1 AND h.state = 'open' \
+                 ORDER BY h.raised_at ASC",
+                RUN_HOLD_COLUMNS
+                    .split(", ")
+                    .map(|column| format!("h.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))?;
+            stmt.query_map([space_id.to_string()], run_hold_row)?
+                .collect()
+        })
+        .await
+    }
+
+    async fn close_open_workflow_run_holds(&self, run_id: Uuid) -> Result<u64, StorageError> {
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_run_holds SET state = 'closed' WHERE run_id = ?1 AND state = 'open'",
+                [run_id.to_string()],
+            )?;
+            Ok(changed as u64)
+        })
+        .await
+    }
+
+    async fn answer_workflow_run_hold(
+        &self,
+        id: Uuid,
+        answer: WorkflowRunHoldAnswer,
+    ) -> Result<WorkflowHoldSettlement, StorageError> {
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // Only an open hold on a run that can still resume settles.
+            // A second answerer arriving behind the first changes nothing
+            // and is told it lost; so does an answer that arrives after the
+            // run went terminal, so cancellation and answer have one winner
+            // rather than a verdict attributed to a run that cannot take it.
+            let changed = tx.execute(
+                "UPDATE workflow_run_holds \
+                 SET state = 'answered', verdict = ?2, answer_surface = ?3, answer_agent_id = ?4, \
+                     answer_session_id = ?5, answer_turn_id = ?6, answered_at = ?7 \
+                 WHERE id = ?1 AND state = 'open' AND EXISTS (\
+                     SELECT 1 FROM workflow_runs \
+                     WHERE workflow_runs.id = workflow_run_holds.run_id \
+                       AND workflow_runs.state NOT IN ('completed', 'failed', 'cancelled')\
+                 )",
+                params![
+                    id.to_string(),
+                    answer.verdict,
+                    answer.surface,
+                    answer.agent_id,
+                    answer.session_id.map(|id| id.to_string()),
+                    answer.turn_id.map(|id| id.to_string()),
+                    now.to_rfc3339()
+                ],
+            )?;
+            if changed != 1 {
+                return Ok(WorkflowHoldSettlement::default());
+            }
+            // The verdict and the run's wake commit together: a parked run
+            // whose decision has been made is due in the same instant it is
+            // answered, so no crash can strand an answered hold on a run
+            // still sleeping on its distant wake time.
+            let woken = tx.execute(
+                "UPDATE workflow_runs SET wake_at=?2 \
+                 WHERE id=(SELECT run_id FROM workflow_run_holds WHERE id=?1) \
+                   AND state='parked'",
+                params![id.to_string(), now.to_rfc3339()],
+            )?;
+            tx.commit()?;
+            Ok(WorkflowHoldSettlement {
+                settled: true,
+                wake_provisioned: woken == 1,
+            })
+        })
+        .await
+    }
+
+    async fn create_workflow_run_hold_rejection(
+        &self,
+        rejection: NewWorkflowRunHoldRejection,
+    ) -> Result<Option<WorkflowRunHoldRejectionRecord>, StorageError> {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        self.with_conn(move |conn| {
+            let inserted = conn.execute(
+                "INSERT INTO workflow_run_hold_rejections (id, hold_id, attempted_verdict, feedback, source_surface, source_agent_id, source_session_id, source_turn_id, rejected_at) \
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 \
+                 WHERE EXISTS (\
+                     SELECT 1 FROM workflow_run_holds \
+                     JOIN workflow_runs ON workflow_runs.id = workflow_run_holds.run_id \
+                     WHERE workflow_run_holds.id = ?2 \
+                       AND workflow_run_holds.state = 'open' \
+                       AND workflow_runs.state NOT IN ('completed', 'failed', 'cancelled')\
+                 )",
+                params![
+                    id.to_string(),
+                    rejection.hold_id.to_string(),
+                    rejection.attempted_verdict,
+                    rejection.feedback,
+                    rejection.source_surface,
+                    rejection.source_agent_id,
+                    rejection.source_session_id.map(|id| id.to_string()),
+                    rejection.source_turn_id.map(|id| id.to_string()),
+                    now.to_rfc3339()
+                ],
+            )?;
+            if inserted == 0 {
+                return Ok(None);
+            }
+            conn.query_row(
+                &format!(
+                    "SELECT {RUN_HOLD_REJECTION_COLUMNS} FROM workflow_run_hold_rejections WHERE id = ?1"
+                ),
+                [id.to_string()],
+                run_hold_rejection_row,
+            )
+            .map(Some)
+        })
+        .await
+    }
+
+    async fn list_workflow_run_hold_rejections(
+        &self,
+        hold_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRejectionRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {RUN_HOLD_REJECTION_COLUMNS} FROM workflow_run_hold_rejections \
+                 WHERE hold_id = ?1 ORDER BY rejected_at ASC, id ASC"
+            ))?;
+            stmt.query_map([hold_id.to_string()], run_hold_rejection_row)?
+                .collect()
+        })
+        .await
+    }
+
+    async fn park_workflow_run_if_hold_open(
+        &self,
+        id: Uuid,
+        wake_at: DateTime<Utc>,
+        hold_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE workflow_runs SET state='parked', wake_at=?2, completed_at=NULL \
+                 WHERE id=?1 AND state='running' AND EXISTS (\
+                     SELECT 1 FROM workflow_run_holds \
+                     WHERE id=?3 AND run_id=?1 AND state='open'\
+                 )",
+                params![id.to_string(), wake_at.to_rfc3339(), hold_id.to_string()],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     async fn create_workflow_journal_intent(
         &self,
         intent: NewWorkflowJournalIntent,
@@ -1066,6 +1351,336 @@ mod tests {
             !parked.iter().any(|run| run.id == running.id),
             "running workflows are not recovery owners"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_is_keyed_to_its_raise_and_stops_being_parkable_once_answered() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "hold-store".into(),
+                slug: "hold-store".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: Uuid::new_v4().to_string(),
+                args: serde_json::Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+                task: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "hold".into(),
+                args_hash: "hash".into(),
+                request: serde_json::json!({"action": "raise"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("raise intent");
+        let new_hold = || NewWorkflowRunHold {
+            run_id: run.id,
+            journal_entry_id: entry.id,
+            content: "Ship the release?".into(),
+            verdicts: vec!["ship".into(), "hold".into()],
+        };
+        let hold = storage
+            .create_workflow_run_hold(new_hold())
+            .await
+            .expect("open the hold");
+        let redone = storage
+            .create_workflow_run_hold(new_hold())
+            .await
+            .expect("redo the raise");
+        assert_eq!(
+            redone.id, hold.id,
+            "a redone raise reads its own decision back instead of opening a second one"
+        );
+
+        assert!(
+            storage
+                .park_workflow_run_if_hold_open(
+                    run.id,
+                    Utc::now() + chrono::Duration::hours(1),
+                    hold.id
+                )
+                .await
+                .expect("park on the open hold"),
+            "a run waiting on an open hold parks"
+        );
+        storage
+            .update_workflow_run_state(run.id, "running", None, None, None)
+            .await
+            .expect("resume");
+        assert!(
+            storage
+                .answer_workflow_run_hold(
+                    hold.id,
+                    WorkflowRunHoldAnswer {
+                        verdict: "ship".into(),
+                        surface: "agent".into(),
+                        agent_id: Some("decider".into()),
+                        session_id: Some(Uuid::new_v4()),
+                        turn_id: Some(Uuid::new_v4()),
+                    },
+                )
+                .await
+                .expect("answer the hold")
+                .settled,
+            "the first answer wins"
+        );
+        assert!(
+            !storage
+                .park_workflow_run_if_hold_open(
+                    run.id,
+                    Utc::now() + chrono::Duration::hours(1),
+                    hold.id
+                )
+                .await
+                .expect("park attempt after the answer"),
+            "an answer that wins the race is never slept past"
+        );
+        assert!(
+            !storage
+                .answer_workflow_run_hold(
+                    hold.id,
+                    WorkflowRunHoldAnswer {
+                        verdict: "hold".into(),
+                        surface: "agent".into(),
+                        agent_id: Some("latecomer".into()),
+                        session_id: None,
+                        turn_id: None,
+                    },
+                )
+                .await
+                .expect("second answer")
+                .settled,
+            "a hold takes one verdict, not the last one offered"
+        );
+        let answered = storage
+            .get_workflow_run_hold(hold.id)
+            .await
+            .expect("read")
+            .expect("hold");
+        assert_eq!(answered.verdict.as_deref(), Some("ship"));
+        assert_eq!(answered.state, "answered");
+        assert!(
+            storage
+                .list_open_workflow_run_holds(space.id)
+                .await
+                .expect("open holds")
+                .is_empty(),
+            "an answered hold leaves the decider's list"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answering_a_parked_run_s_hold_makes_it_due_in_the_same_write() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "hold-wake".into(),
+                slug: "hold-wake".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: Uuid::new_v4().to_string(),
+                args: serde_json::Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+                task: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "hold".into(),
+                args_hash: "hash".into(),
+                request: serde_json::json!({"action": "raise"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("raise intent");
+        let hold = storage
+            .create_workflow_run_hold(NewWorkflowRunHold {
+                run_id: run.id,
+                journal_entry_id: entry.id,
+                content: "Ship the release?".into(),
+                verdicts: vec!["ship".into(), "hold".into()],
+            })
+            .await
+            .expect("open the hold");
+        assert!(
+            storage
+                .park_workflow_run_if_hold_open(
+                    run.id,
+                    Utc::now() + chrono::Duration::days(36500),
+                    hold.id
+                )
+                .await
+                .expect("park on the open hold"),
+            "the run sleeps until its decision is made"
+        );
+
+        let settlement = storage
+            .answer_workflow_run_hold(
+                hold.id,
+                WorkflowRunHoldAnswer {
+                    verdict: "ship".into(),
+                    surface: "agent".into(),
+                    agent_id: Some("decider".into()),
+                    session_id: Some(Uuid::new_v4()),
+                    turn_id: Some(Uuid::new_v4()),
+                },
+            )
+            .await
+            .expect("answer the hold");
+        assert!(settlement.settled);
+        assert!(
+            settlement.wake_provisioned,
+            "settling a parked run's decision is also what makes it due"
+        );
+        let due = storage
+            .list_due_parked_workflow_runs(Utc::now())
+            .await
+            .expect("due runs");
+        assert!(
+            due.iter().any(|owed| owed.id == run.id),
+            "no crash can leave an answered hold on a run still sleeping: the same write owes the relaunch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_arriving_after_the_run_went_terminal_loses() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let space = storage
+            .create(NewSpace {
+                name: "hold-cancel".into(),
+                slug: "hold-cancel".parse().expect("slug"),
+            })
+            .await
+            .expect("space");
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                source: Some("return null".into()),
+                source_hash: Uuid::new_v4().to_string(),
+                args: serde_json::Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+                task: None,
+            })
+            .await
+            .expect("run");
+        let entry = storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "hold".into(),
+                args_hash: "hash".into(),
+                request: serde_json::json!({"action": "raise"}),
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("raise intent");
+        let hold = storage
+            .create_workflow_run_hold(NewWorkflowRunHold {
+                run_id: run.id,
+                journal_entry_id: entry.id,
+                content: "Ship the release?".into(),
+                verdicts: vec!["ship".into(), "hold".into()],
+            })
+            .await
+            .expect("open the hold");
+
+        // The cancellation lands between an answerer's read of the run and
+        // its write of the verdict.
+        storage
+            .update_workflow_run_state(run.id, "cancelled", None, None, None)
+            .await
+            .expect("cancel the waiting run");
+
+        assert!(
+            !storage
+                .answer_workflow_run_hold(
+                    hold.id,
+                    WorkflowRunHoldAnswer {
+                        verdict: "ship".into(),
+                        surface: "agent".into(),
+                        agent_id: Some("latecomer".into()),
+                        session_id: Some(Uuid::new_v4()),
+                        turn_id: Some(Uuid::new_v4()),
+                    },
+                )
+                .await
+                .expect("late answer")
+                .settled,
+            "cancellation and answer have one winner, and cancellation got there first"
+        );
+        let unanswered = storage
+            .get_workflow_run_hold(hold.id)
+            .await
+            .expect("read")
+            .expect("hold");
+        assert_eq!(
+            unanswered.state, "open",
+            "a run that cannot resume is never given a verdict"
+        );
+        assert!(unanswered.verdict.is_none());
+        assert!(unanswered.answer_agent_id.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

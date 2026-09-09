@@ -2224,6 +2224,87 @@ pub struct NewWorkflowRunEvent {
     pub source_turn_id: Option<Uuid>,
 }
 
+/// A decision a running script is waiting on. One row per raise, keyed to
+/// the journal entry that raised it so a replayed raise reads its own row
+/// back instead of opening a second decision.
+#[derive(Clone, Debug)]
+pub struct WorkflowRunHoldRecord {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub journal_entry_id: Uuid,
+    pub seq: u64,
+    pub content: String,
+    pub verdicts: Vec<String>,
+    pub state: String,
+    pub verdict: Option<String>,
+    pub answer_surface: Option<String>,
+    pub answer_agent_id: Option<String>,
+    pub answer_session_id: Option<Uuid>,
+    pub answer_turn_id: Option<Uuid>,
+    pub raised_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowRunHold {
+    pub run_id: Uuid,
+    pub journal_entry_id: Uuid,
+    pub content: String,
+    pub verdicts: Vec<String>,
+}
+
+/// An answer refused for falling outside a hold's accepted set. Rejections
+/// append to the hold they were offered to; nothing about a hold is ever
+/// edited away.
+#[derive(Clone, Debug)]
+pub struct WorkflowRunHoldRejectionRecord {
+    pub id: Uuid,
+    pub hold_id: Uuid,
+    pub attempted_verdict: String,
+    pub feedback: String,
+    pub source_surface: String,
+    pub source_agent_id: Option<String>,
+    pub source_session_id: Option<Uuid>,
+    pub source_turn_id: Option<Uuid>,
+    pub rejected_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowRunHoldRejection {
+    pub hold_id: Uuid,
+    pub attempted_verdict: String,
+    pub feedback: String,
+    pub source_surface: String,
+    pub source_agent_id: Option<String>,
+    pub source_session_id: Option<Uuid>,
+    pub source_turn_id: Option<Uuid>,
+}
+
+/// Attribution for an answer, derived by the gateway from the answering
+/// session — never accepted as a parameter.
+#[derive(Clone, Debug)]
+pub struct WorkflowRunHoldAnswer {
+    pub verdict: String,
+    pub surface: String,
+    pub agent_id: Option<String>,
+    pub session_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+/// What settling a hold did to it and to its run. The verdict and the
+/// parked run's wake are one write, so an answered hold never sits on a run
+/// still parked on its distant wake time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkflowHoldSettlement {
+    /// The hold was open on a resumable run and now carries this verdict.
+    /// `false` means another answerer, a cancellation, or the run's own
+    /// completion settled it first.
+    pub settled: bool,
+    /// The run was parked on this decision and is now due, so the next wake
+    /// pass relaunches it.
+    pub wake_provisioned: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowJournalRecord {
     pub id: Uuid,

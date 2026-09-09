@@ -15,13 +15,15 @@ use crate::model::{
     NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput, NewSchedule,
     NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition,
     NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
-    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page,
-    PageAnnotation, PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin,
-    ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SessionVariable, SourceCapture, SourceObservation, Space, SpaceSlug, TaskDefinition, Thread,
-    ThreadBranch, ThreadState, ToolCallRecord, Turn, TurnState, UpdateSchedule,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunRecord, WorkflowScriptRecord,
-    WorkflowScriptVersion, WorkspaceAttachment,
+    NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment,
+    OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule, PageTemplate,
+    PageTemplateModule, PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation,
+    Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
+    TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1089,12 @@ pub trait WorkflowStore: Send + Sync {
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
     /// (a concurrent cancellation, another waker) and must not proceed.
+    ///
+    /// This is the one claim every run-state transition goes through, so a
+    /// concurrent answer and cancellation have exactly one winner. A
+    /// terminal target settles the run completely: the wake time is cleared
+    /// and the completion stamped in the same write, leaving nothing for a
+    /// loser to finish.
     async fn try_transition_workflow_run_state(
         &self,
         id: Uuid,
@@ -1156,6 +1164,63 @@ pub trait WorkflowStore: Send + Sync {
         run_id: Uuid,
         event_seq: u64,
         delivered_wake_seq: u64,
+    ) -> Result<bool, StorageError>;
+    /// Open a decision hold. `seq` is assigned by the store, dense per run;
+    /// the insert is idempotent on `journal_entry_id` — a replayed raise
+    /// reads its existing hold back rather than opening a second decision.
+    async fn create_workflow_run_hold(
+        &self,
+        hold: NewWorkflowRunHold,
+    ) -> Result<WorkflowRunHoldRecord, StorageError>;
+    async fn get_workflow_run_hold(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkflowRunHoldRecord>, StorageError>;
+    /// All of a run's holds, answered or not, ordered by seq ascending.
+    async fn list_workflow_run_holds(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError>;
+    /// Every unanswered hold across a space's runs, oldest first — what an
+    /// agent holding the answering tool may still decide.
+    async fn list_open_workflow_run_holds(
+        &self,
+        space_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError>;
+    /// Close every unanswered hold once its run has completed without using
+    /// it. Closed holds remain on the run record but are no longer decisions
+    /// an agent can answer.
+    async fn close_open_workflow_run_holds(&self, run_id: Uuid) -> Result<u64, StorageError>;
+    /// Settle a hold with an accepted verdict and, when its run is parked on
+    /// that decision, make the run due in the same write.
+    ///
+    /// A settlement that is not the decision leaves both untouched:
+    /// `settled` is `false` when another answerer won the race or the run
+    /// can no longer take a verdict.
+    async fn answer_workflow_run_hold(
+        &self,
+        id: Uuid,
+        answer: WorkflowRunHoldAnswer,
+    ) -> Result<WorkflowHoldSettlement, StorageError>;
+    /// Record an answer refused for falling outside the accepted set, but
+    /// only while the hold is open and its run can still resume. `None`
+    /// means the hold or run settled first. The hold itself is untouched.
+    async fn create_workflow_run_hold_rejection(
+        &self,
+        rejection: NewWorkflowRunHoldRejection,
+    ) -> Result<Option<WorkflowRunHoldRejectionRecord>, StorageError>;
+    /// A hold's refused answers, oldest first.
+    async fn list_workflow_run_hold_rejections(
+        &self,
+        hold_id: Uuid,
+    ) -> Result<Vec<WorkflowRunHoldRejectionRecord>, StorageError>;
+    /// Atomically park a running hold waiter only if its hold is still open.
+    /// `false` means an answer landed first or the run changed state.
+    async fn park_workflow_run_if_hold_open(
+        &self,
+        id: Uuid,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        hold_id: Uuid,
     ) -> Result<bool, StorageError>;
     async fn create_workflow_journal_intent(
         &self,
@@ -2723,6 +2788,60 @@ mod tests {
             _: Uuid,
             _: u64,
             _: u64,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+        async fn create_workflow_run_hold(
+            &self,
+            _: NewWorkflowRunHold,
+        ) -> Result<WorkflowRunHoldRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn get_workflow_run_hold(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<WorkflowRunHoldRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_run_holds(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+        async fn list_open_workflow_run_holds(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+        async fn close_open_workflow_run_holds(&self, _: Uuid) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+        async fn answer_workflow_run_hold(
+            &self,
+            _: Uuid,
+            _: WorkflowRunHoldAnswer,
+        ) -> Result<WorkflowHoldSettlement, StorageError> {
+            unimplemented!()
+        }
+        async fn create_workflow_run_hold_rejection(
+            &self,
+            _: NewWorkflowRunHoldRejection,
+        ) -> Result<Option<WorkflowRunHoldRejectionRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_workflow_run_hold_rejections(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<WorkflowRunHoldRejectionRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+        async fn park_workflow_run_if_hold_open(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+            _: Uuid,
         ) -> Result<bool, StorageError> {
             unimplemented!()
         }

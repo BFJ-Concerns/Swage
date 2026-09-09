@@ -5680,6 +5680,32 @@
         ],
         "type": "object"
       },
+      "WorkflowHoldMetrics": {
+        "description": "Derived counters over a run's decision holds. Nothing here is stored:\nthe hold rows and their rejection rows already hold the history, so the\ncounters cannot drift from it.",
+        "properties": {
+          "answers_rejected": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "holds_answered": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "holds_open": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "holds_open",
+          "holds_answered",
+          "answers_rejected"
+        ],
+        "type": "object"
+      },
       "WorkflowJournalEntry": {
         "properties": {
           "agent_call": {
@@ -5807,6 +5833,11 @@
           {
             "const": "terminal_budget",
             "description": "The authoritative closing-partition balance when the run settled.",
+            "type": "string"
+          },
+          {
+            "const": "hold",
+            "description": "A decision hold: the script named a decision and its accepted\nverdicts and waited. The entry completes with the accepted verdict.",
             "type": "string"
           },
           {
@@ -6331,6 +6362,37 @@
           },
           {
             "properties": {
+              "answered_by": {
+                "$ref": "#/components/schemas/WorkflowRunEventSource"
+              },
+              "content": {
+                "type": "string"
+              },
+              "hold_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "kind": {
+                "const": "hold",
+                "type": "string"
+              },
+              "verdict": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "hold_id",
+              "content",
+              "answered_by"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "kind": {
                 "const": "captured_sources",
                 "type": "string"
@@ -6732,6 +6794,17 @@
       },
       "WorkflowRunDetailResponse": {
         "properties": {
+          "hold_metrics": {
+            "$ref": "#/components/schemas/WorkflowHoldMetrics",
+            "description": "Derived counts over those holds: what the run is still waiting on,\nwhat has been decided, and how often a decider offered something the\nhold does not accept."
+          },
+          "holds": {
+            "description": "The run's decision holds, oldest first, each carrying its accepted\nverdict and every answer refused along the way.",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunHold"
+            },
+            "type": "array"
+          },
           "journal": {
             "items": {
               "$ref": "#/components/schemas/WorkflowJournalEntry"
@@ -6749,7 +6822,9 @@
         "required": [
           "run",
           "journal",
-          "wake_metrics"
+          "wake_metrics",
+          "holds",
+          "hold_metrics"
         ],
         "type": "object"
       },
@@ -6991,6 +7066,123 @@
             "type": "object"
           }
         ]
+      },
+      "WorkflowRunHold": {
+        "description": "A decision a running script is waiting on: what is being decided and the\nclosed set of answers it will accept. A hold is raised by the script, is\nanswered by an agent through a granted tool, and is the validated shape\nover the run's event queue rather than a second queue.",
+        "properties": {
+          "answered_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "answered_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRunEventSource"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who answered. Derived from the answering session, never a parameter."
+          },
+          "content": {
+            "description": "What is being decided, in the raising script's words. Data for the\nanswering agent to judge, never instructions to it.",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "raised_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "rejections": {
+            "description": "Answers refused for falling outside the accepted set, oldest first.\nThey hang on this hold rather than taking journal entries of their\nown: an external attempt must not move the script's own sequence.",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunHoldRejection"
+            },
+            "type": "array"
+          },
+          "run_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WorkflowRunHoldState"
+          },
+          "verdict": {
+            "description": "The accepted verdict, once one has been given.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verdicts": {
+            "description": "The answers this hold accepts. At least two distinct verdicts: a hold\nwith one permitted answer is no decision and is refused at raise.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "run_id",
+          "seq",
+          "content",
+          "verdicts",
+          "state",
+          "raised_at",
+          "rejections"
+        ],
+        "type": "object"
+      },
+      "WorkflowRunHoldRejection": {
+        "description": "One refused answer, kept so the run record shows what was tried.",
+        "properties": {
+          "attempted_verdict": {
+            "type": "string"
+          },
+          "feedback": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "rejected_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/WorkflowRunEventSource"
+          }
+        },
+        "required": [
+          "id",
+          "attempted_verdict",
+          "feedback",
+          "source",
+          "rejected_at"
+        ],
+        "type": "object"
+      },
+      "WorkflowRunHoldState": {
+        "enum": [
+          "open",
+          "answered",
+          "closed"
+        ],
+        "type": "string"
       },
       "WorkflowRunListResponse": {
         "properties": {
