@@ -2131,6 +2131,9 @@ pub struct WorkflowRunRecord {
     pub state: String,
     pub final_output: Option<serde_json::Value>,
     pub handover: Option<serde_json::Value>,
+    /// The run's terminal account as written at its ending. Generic JSON; the
+    /// contract is `swage_protocol::client::workflow::WorkflowRunTerminalAccount`.
+    pub terminal_account: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub engine_version: String,
     /// The full ordered lineage of agent contexts bounding this run. Worker
@@ -2313,6 +2316,7 @@ pub struct WorkflowJournalRecord {
     pub args_hash: String,
     pub request: serde_json::Value,
     pub result: Option<serde_json::Value>,
+    pub terminal_metadata: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub effect_kind: Option<String>,
     pub idempotency_key: Option<Uuid>,

@@ -12,9 +12,10 @@ resume.
 Two of the shared rules bear repeating because this run is where they bite:
 `waived` is written only on the user's recorded say-so — there is no
 self-waiver; and `needs-spine` **routes, it does not queue** — marking it
-means telling the user maestro has work, and only maestro rewrites it to
-`open` (in the same edit that lands the covering exemplar), so those
-records are maestro's re-entry list, never a backlog this run absorbs.
+means dispatching maestro (SKILL.md, *Maestro Is a Dispatch*), and only
+maestro rewrites it to `open` (in the same edit that lands the covering
+exemplar), so those records are maestro's re-entry list, never a backlog
+this run absorbs.
 
 ## The Triage Wave
 

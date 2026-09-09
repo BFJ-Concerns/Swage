@@ -1,12 +1,13 @@
 ---
-description: First-session walkthrough — open a space, attach a workspace, trust it so its AGENTS.md feeds agent context
+description: First-session walkthrough — open a space, optionally attach and trust a workspace, start a conversation with a chosen agent
 ---
 
 # First session
 
-After the gateway is running and a provider is configured (README), the
-first session requires a space, a workspace attachment, and a trust
-decision.
+After the gateway is running and a provider is configured (README), a
+first session needs only an opened space. Attaching a workspace and
+trusting it are optional — they give agents file access and project
+guidance, but a conversation can start without either.
 
 ## Open a space
 
@@ -49,6 +50,20 @@ See [Agents and permissions — Operator guidance](agents-and-permissions.md#ope
 for how trusted workspace guidance layers into the instruction chain
 (global `AGENTS.md` → workspace `AGENTS.md` → agent-definition
 instructions).
+
+## Start a conversation with a chosen agent
+
+The message input area includes an agent picker that lists the space's
+effective agent definitions — the shipped default (`"gateway"`, display
+name **Swage default**) plus any operator-authored definitions visible to
+the space. Selecting an agent and submitting the first message creates a
+conversation bound to that definition and navigates to it immediately.
+
+The picker queries `GET /api/spaces/{spaceId}/agent-definitions`. The
+`agent_id` field of `CreateConversationRequest` carries the selection;
+omitting it uses the default. See
+[Agents and permissions — Effective agent registry](agents-and-permissions.md#effective-agent-registry)
+for what the registry contains and how definitions shadow.
 
 ## Revoke trust and detach
 

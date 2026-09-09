@@ -1,5 +1,6 @@
 //! Durable workflow HTTP surface and detached engine supervision.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicU32, AtomicU64, Ordering},
@@ -11,6 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swage_config::skill::SkillDefinition;
 use swage_core::{ChatMessage, CompletionRequest, GatewayError, Role, StorageError};
+use swage_protocol::client::error::ErrorCode;
 use swage_protocol::client::workflow::{
     AnswerWorkflowRunHoldRequest, AnswerWorkflowRunHoldResponse, CreateWorkflowScriptRequest,
     PostWorkflowRunEventRequest, PostWorkflowRunEventResponse, StartInlineWorkflowRunRequest,
@@ -18,11 +20,13 @@ use swage_protocol::client::workflow::{
     WorkflowArgumentContract, WorkflowBudget, WorkflowCallUsage, WorkflowCutShortCause,
     WorkflowHandoverEvent, WorkflowHandoverEventDelivery, WorkflowHandoverFailedCall,
     WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind, WorkflowJournalResult,
-    WorkflowRouteBudget, WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEvent,
-    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection,
-    WorkflowRunHoldState, WorkflowRunListResponse, WorkflowRunState, WorkflowScript,
-    WorkflowScriptListResponse, WorkflowUsageUnavailableReason, WorkflowWorkerPlacementRecord,
-    WorkflowWorkerTermination,
+    WorkflowPartialResult, WorkflowPartialResults, WorkflowRouteBudget, WorkflowRun,
+    WorkflowRunDetailResponse, WorkflowRunEnding, WorkflowRunEvent, WorkflowRunEventSource,
+    WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection, WorkflowRunHoldState,
+    WorkflowRunListResponse, WorkflowRunState, WorkflowRunTerminalAccount, WorkflowScript,
+    WorkflowScriptListResponse, WorkflowUsageUnavailableReason, WorkflowWorkerAccount,
+    WorkflowWorkerPartition, WorkflowWorkerPlacementRecord, WorkflowWorkerTermination,
+    WorkflowWorktreeCompletion,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -684,6 +688,16 @@ fn journal_wire(
             })
             .ok()
     });
+    let liveness = entry
+        .terminal_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("liveness"))
+        .cloned()
+        .map(serde_json::from_value::<swage_workflow::WorkerLiveness>)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(workflow_worker_liveness_wire)
+        .transpose()?;
     let agent_call = if entry.kind == "agent_call" {
         let agent_result = result.as_ref().and_then(|result| match result {
             WorkflowJournalResult::AgentCall {
@@ -765,6 +779,7 @@ fn journal_wire(
                 .or(agent_result
                     .and_then(|(_, _, turn_id, _, _)| *turn_id)
                     .or(resolved.and_then(|resolution| resolution.turn_id))),
+            liveness,
             served_model: stored_result
                 .and_then(|result| result.get("served_model"))
                 .and_then(Value::as_str)
@@ -805,6 +820,23 @@ fn journal_wire(
         effect,
         started_at: entry.started_at,
         completed_at: entry.completed_at,
+    })
+}
+
+fn workflow_worker_liveness_wire(
+    liveness: swage_workflow::WorkerLiveness,
+) -> Result<swage_protocol::client::workflow::WorkflowWorkerLiveness, String> {
+    Ok(swage_protocol::client::workflow::WorkflowWorkerLiveness {
+        started_at: liveness
+            .started_at
+            .parse()
+            .map_err(|error| format!("invalid workflow worker start timestamp: {error}"))?,
+        first_evidence_at: liveness
+            .first_evidence_at
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|error| format!("invalid workflow worker evidence timestamp: {error}"))?,
     })
 }
 
@@ -954,6 +986,7 @@ mod journal_result_contract_tests {
             args_hash: String::new(),
             request: Value::Null,
             result: Some(serde_json::json!({"kind": "log", "fired": true})),
+            terminal_metadata: None,
             error_message: None,
             dispatch: None,
             dispatch_attempts: None,
@@ -2535,6 +2568,43 @@ fn fallback_is_eligible(
     )
 }
 
+async fn record_workflow_worker_evidence(state: &AppState, entry_id: Uuid, event: &ServerEvent) {
+    if matches!(
+        event,
+        ServerEvent::Token { .. } | ServerEvent::ToolStart { .. }
+    ) && let Some(liveness) = state
+        .active_workflow_workers
+        .lock()
+        .await
+        .get_mut(&entry_id)
+        && liveness.first_evidence_at.is_none()
+    {
+        liveness.first_evidence_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+}
+
+async fn persist_workflow_worker_liveness(
+    state: &AppState,
+    entry_id: Uuid,
+) -> Result<(), StorageError> {
+    let liveness = state
+        .active_workflow_workers
+        .lock()
+        .await
+        .get(&entry_id)
+        .cloned();
+    if let Some(liveness) = liveness {
+        state
+            .storage
+            .set_workflow_journal_terminal_metadata(
+                entry_id,
+                serde_json::json!({ "liveness": liveness }),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_workflow_agent_turn(
     state: &AppState,
@@ -2596,7 +2666,10 @@ async fn execute_workflow_agent_turn(
                 }
                 break result;
             }
-            Some(event) = events_rx.recv() => events.push(event),
+            Some(event) = events_rx.recv() => {
+                record_workflow_worker_evidence(state, journal_entry_id, &event).await;
+                events.push(event);
+            }
             () = cancellation.cancelled() => {
                 call_cancellation.cancel();
                 if let Err(error) = processing.await {
@@ -2640,9 +2713,13 @@ async fn execute_workflow_agent_turn(
     while let Ok(Some(event)) =
         tokio::time::timeout(std::time::Duration::from_millis(50), events_rx.recv()).await
     {
+        record_workflow_worker_evidence(state, journal_entry_id, &event).await;
         events.push(event);
     }
-    events.extend(std::iter::from_fn(|| events_rx.try_recv().ok()));
+    while let Ok(event) = events_rx.try_recv() {
+        record_workflow_worker_evidence(state, journal_entry_id, &event).await;
+        events.push(event);
+    }
     Ok(WorkflowTurnAttempt {
         outcome,
         events,
@@ -3278,71 +3355,390 @@ async fn run_ephemeral_agent_call_with_admission(
 /// join the resolved configuration model.
 const PARK_TIMER_THRESHOLD_MS: u64 = 60_000;
 
-/// Settle the entries still running when the run ended.
+/// The error written over every journal entry a cancellation caught in
+/// flight. Cancellation alone settles the journal: a run that ended any other
+/// way may still be replayed, and a replay reads its own unsettled intents.
+const CANCELLED_JOURNAL_SETTLEMENT: &str = "WorkflowCancelledError: run cancelled";
+
+/// What cut a worker short, said in the account rather than written over the
+/// worker's journal entry. The ending names itself, so a reader never has to
+/// infer from the wording of a failure that was not the worker's own.
+fn run_end_settlement_detail(ending: &WorkflowRunEnding) -> &'static str {
+    match ending {
+        WorkflowRunEnding::Cancelled => CANCELLED_JOURNAL_SETTLEMENT,
+        WorkflowRunEnding::Threw { .. } => "WorkflowRunEndedError: the run failed",
+        WorkflowRunEnding::WoundDown { .. } => "WorkflowRunEndedError: the run wound down",
+        WorkflowRunEnding::Returned => "WorkflowRunEndedError: the run returned",
+        WorkflowRunEnding::InterruptedWithoutResume { .. } => {
+            "WorkflowRunEndedError: the run was interrupted"
+        }
+    }
+}
+
+fn cut_short_termination(ending: &WorkflowRunEnding) -> Option<WorkflowWorkerTermination> {
+    let cause = match ending {
+        WorkflowRunEnding::Returned => WorkflowCutShortCause::RunReturned,
+        WorkflowRunEnding::Threw { .. } => WorkflowCutShortCause::RunFailed,
+        WorkflowRunEnding::Cancelled => WorkflowCutShortCause::RunCancelled,
+        WorkflowRunEnding::WoundDown { .. } => WorkflowCutShortCause::RunWoundDown,
+        WorkflowRunEnding::InterruptedWithoutResume { .. } => return None,
+    };
+    Some(WorkflowWorkerTermination::CutShort {
+        cause,
+        detail: Some(run_end_settlement_detail(ending).to_string()),
+    })
+}
+
+/// How the run ended, from the state it settled into.
 ///
-/// These workers did not fail — the run's own end stopped them — so each is
-/// settled with that cause rather than with a failure the worker never had.
-/// The same end reaches the provider requests they had out: nothing can
-/// answer those any more, so each is ended as interrupted here rather than
-/// left reading as a request still in flight.
-async fn settle_cancelled_workflow_journal(
+/// A failed run may have ended under its closing boundary rather than on its
+/// own terms; `refine_ending` separates the two from the journal, so the
+/// coarse reading here never has to guess.
+fn ending_of_terminal_state(run_state: &str, error: Option<&str>) -> WorkflowRunEnding {
+    match run_state {
+        "completed" => WorkflowRunEnding::Returned,
+        "cancelled" => WorkflowRunEnding::Cancelled,
+        _ => WorkflowRunEnding::Threw {
+            error: error
+                .unwrap_or("the run failed without a recorded error")
+                .to_string(),
+        },
+    }
+}
+
+/// A failed run that latched wind-down ended under its closing boundary. The
+/// latch is a completed `wind_down` journal entry — an intent alone may have
+/// failed before the closing boundary took effect. This is never inferred from
+/// the script's error text.
+fn refine_ending(
+    ending: WorkflowRunEnding,
+    journal: &[WorkflowJournalRecord],
+) -> WorkflowRunEnding {
+    match ending {
+        WorkflowRunEnding::Threw { error }
+            if journal
+                .iter()
+                .any(|entry| entry.kind == "wind_down" && entry.status == "completed") =>
+        {
+            WorkflowRunEnding::WoundDown { error }
+        }
+        ending => ending,
+    }
+}
+
+/// The directories the host provisioned for this run's workers, keyed by the
+/// sequence of the call each one placed.
+///
+/// A worker that never returned a result carries no directory in its own
+/// record, and its work is exactly the work most worth finding again. The
+/// placement is journalled immediately before the call it places, so the
+/// provisioning entry at `seq` belongs to the call at `seq + 1`.
+fn provisioned_placements(journal: &[WorkflowJournalRecord]) -> HashMap<u64, String> {
+    journal
+        .iter()
+        .filter(|entry| entry.kind == "worker_placement" && entry.status == "completed")
+        .filter_map(|entry| {
+            let result = journal_result_from_storage(
+                WorkflowJournalEntryKind::WorkerPlacement,
+                entry.result.as_ref()?,
+            )
+            .ok()?;
+            match result {
+                WorkflowJournalResult::WorkerPlacement { path, .. } => Some((entry.seq + 1, path)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn worker_placement_of(
+    entry: &WorkflowJournalRecord,
+    placements: &HashMap<u64, String>,
+) -> Option<String> {
+    if worker_worktree_completion(entry).is_some_and(|completion| completion.removed) {
+        return None;
+    }
+    entry
+        .result
+        .as_ref()
+        .and_then(|result| {
+            journal_result_from_storage(WorkflowJournalEntryKind::AgentCall, result).ok()
+        })
+        .and_then(|result| match result {
+            WorkflowJournalResult::AgentCall {
+                working_directory, ..
+            } => working_directory,
+            _ => None,
+        })
+        .or_else(|| placements.get(&entry.seq).cloned())
+}
+
+fn worker_worktree_completion(entry: &WorkflowJournalRecord) -> Option<WorkflowWorktreeCompletion> {
+    entry
+        .result
+        .as_ref()
+        .and_then(|result| {
+            journal_result_from_storage(WorkflowJournalEntryKind::AgentCall, result).ok()
+        })
+        .and_then(|result| match result {
+            WorkflowJournalResult::AgentCall { worktree, .. } => worktree,
+            _ => None,
+        })
+}
+
+fn worker_account(
+    entry: &WorkflowJournalRecord,
+    placements: &HashMap<u64, String>,
+    termination: Option<WorkflowWorkerTermination>,
+) -> WorkflowWorkerAccount {
+    WorkflowWorkerAccount {
+        journal_entry_id: entry.id,
+        seq: entry.seq,
+        label: entry
+            .request
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        agent_definition_id: entry
+            .request
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        placement: worker_placement_of(entry, placements),
+        worktree: worker_worktree_completion(entry),
+        termination,
+    }
+}
+
+/// Account for every worker the run dispatched, at the instant it ends.
+///
+/// The journal is read once, and read here rather than later, because an
+/// entry still `started` when the run ends is exactly the worker the ending
+/// cut short — a fact that stops being legible as soon as anything else
+/// touches the entry. An ending nobody was alive to observe — a gateway death
+/// — leaves its workers `unsettled` rather than dressed as cut short by a
+/// process that arrived long afterwards. Cancellation additionally settles the
+/// journal it caught in flight, as it always has.
+async fn account_for_run_end(
     storage: &dyn Storage,
     run_id: Uuid,
-    cause: WorkflowCutShortCause,
-) {
-    let termination = match serde_json::to_value(WorkflowWorkerTermination::CutShort { cause }) {
-        Ok(termination) => termination,
+    ending: WorkflowRunEnding,
+) -> Option<WorkflowRunTerminalAccount> {
+    let journal = match storage.list_workflow_journal(run_id).await {
+        Ok(journal) => journal,
         Err(error) => {
-            tracing::warn!(%run_id, %error, "could not serialise cut-short termination");
-            return;
+            tracing::warn!(
+                %run_id,
+                %error,
+                "could not read the journal to account for the run's end"
+            );
+            return None;
         }
     };
-    let message = match cause {
-        WorkflowCutShortCause::RunCancelled => "WorkflowCancelledError: run cancelled",
-    };
-    match storage.list_workflow_journal(run_id).await {
-        Ok(entries) => {
-            for entry in entries
-                .into_iter()
-                .filter(|entry| entry.status == "started")
+    let ending = refine_ending(ending, &journal);
+    let cut_short = cut_short_termination(&ending);
+    let account = terminal_account_from_journal(&journal, ending.clone(), cut_short.clone());
+    if matches!(ending, WorkflowRunEnding::Cancelled) {
+        interrupt_cut_short_worker_rounds(storage, run_id, &journal).await;
+        let termination =
+            serde_json::to_value(cut_short.expect("a cancellation cuts workers short"))
+                .expect("worker termination serialises to JSON");
+        for entry in journal.iter().filter(|entry| entry.status == "started") {
+            if let Err(error) = storage
+                .cut_short_workflow_journal_entry(
+                    entry.id,
+                    termination.clone(),
+                    CANCELLED_JOURNAL_SETTLEMENT,
+                )
+                .await
             {
-                match agent_call_attempt_turns(&entry) {
-                    Ok(turns) => {
-                        if let Err(error) = interrupt_outstanding_rounds(storage, turns).await {
-                            tracing::warn!(
-                                %run_id,
-                                journal_entry_id = %entry.id,
-                                %error,
-                                "could not end the cut-short worker's outstanding provider rounds"
-                            );
-                        }
-                    }
-                    Err(problem) => tracing::warn!(
-                        %run_id,
-                        journal_entry_id = %entry.id,
-                        %problem,
-                        "could not read the cut-short worker's attempts"
-                    ),
-                }
-                if let Err(error) = storage
-                    .cut_short_workflow_journal_entry(entry.id, termination.clone(), message)
-                    .await
-                {
+                tracing::warn!(
+                    %run_id,
+                    journal_entry_id = %entry.id,
+                    %error,
+                    "could not settle cancelled workflow journal entry"
+                );
+            }
+        }
+    }
+    Some(account)
+}
+
+/// End the provider requests belonging to workers the run cut short. The
+/// journal settlement itself is performed while the terminal account is
+/// recorded, so both projections use the same derived termination.
+async fn interrupt_cut_short_worker_rounds(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    journal: &[WorkflowJournalRecord],
+) {
+    for entry in journal.iter().filter(|entry| entry.status == "started") {
+        match agent_call_attempt_turns(entry) {
+            Ok(turns) => {
+                if let Err(error) = interrupt_outstanding_rounds(storage, turns).await {
                     tracing::warn!(
                         %run_id,
                         journal_entry_id = %entry.id,
                         %error,
-                        "could not settle cancelled workflow journal entry"
+                        "could not end the cut-short worker's outstanding provider rounds"
                     );
                 }
             }
+            Err(problem) => tracing::warn!(
+                %run_id,
+                journal_entry_id = %entry.id,
+                %problem,
+                "could not read the cut-short worker's attempts"
+            ),
         }
-        Err(error) => tracing::warn!(
-            %run_id,
-            %error,
-            "could not list workflow journal while settling cancellation"
-        ),
     }
+}
+
+fn terminal_account_from_journal(
+    journal: &[WorkflowJournalRecord],
+    ending: WorkflowRunEnding,
+    cut_short_termination: Option<WorkflowWorkerTermination>,
+) -> WorkflowRunTerminalAccount {
+    let placements = provisioned_placements(journal);
+    let mut workers = WorkflowWorkerPartition::default();
+    let mut recovered = Vec::new();
+    for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
+        if entry.status == "started"
+            && !matches!(ending, WorkflowRunEnding::InterruptedWithoutResume { .. })
+        {
+            workers.cut_short.push(worker_account(
+                entry,
+                &placements,
+                cut_short_termination.clone(),
+            ));
+            continue;
+        }
+        match entry.status.as_str() {
+            "completed" => {
+                workers.done.push(worker_account(entry, &placements, None));
+                if let Some(WorkflowJournalResult::AgentCall { output, .. }) =
+                    entry.result.as_ref().and_then(|result| {
+                        journal_result_from_storage(WorkflowJournalEntryKind::AgentCall, result)
+                            .ok()
+                    })
+                {
+                    recovered.push(WorkflowPartialResult {
+                        journal_entry_id: entry.id,
+                        seq: entry.seq,
+                        label: entry
+                            .request
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        output,
+                        placement: worker_placement_of(entry, &placements),
+                    });
+                }
+            }
+            "failed" => workers.failed.push(worker_account(
+                entry,
+                &placements,
+                Some(WorkflowWorkerTermination::Failed {
+                    message: entry
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "the worker failed without a recorded error".into()),
+                }),
+            )),
+            _ => workers.unsettled.push(worker_account(
+                entry,
+                &placements,
+                Some(WorkflowWorkerTermination::Unsettled),
+            )),
+        }
+    }
+    // A run that returned has a result of its own; its completed workers are
+    // accounted for, not offered as a stand-in for one.
+    let partial_results =
+        (!matches!(ending, WorkflowRunEnding::Returned)).then(|| WorkflowPartialResults {
+            reason: partial_reason(&ending),
+            results: recovered,
+        });
+    WorkflowRunTerminalAccount {
+        ending,
+        workers,
+        partial_results,
+        settled_at: chrono::Utc::now(),
+    }
+}
+
+/// Why the run's completed work is partial rather than a result.
+fn partial_reason(ending: &WorkflowRunEnding) -> String {
+    match ending {
+        WorkflowRunEnding::Returned => "the run returned".into(),
+        WorkflowRunEnding::Threw { error } => format!("the run failed before returning: {error}"),
+        WorkflowRunEnding::Cancelled => "the run was cancelled before returning".into(),
+        WorkflowRunEnding::WoundDown { error } => {
+            format!("the run wound down before returning: {error}")
+        }
+        WorkflowRunEnding::InterruptedWithoutResume { reason } => {
+            format!(
+                "the gateway ended with the run in flight and it could not be resumed: {reason}"
+            )
+        }
+    }
+}
+
+/// The worker directories a run's ending kept, as its own account names them.
+///
+/// A run that returned has a result of its own, and its workers' directories
+/// are reclaimed with the rest of the run's scaffolding as they always were.
+/// Every other ending leaves the account pointing a reader at them, so those
+/// are the directories the host must stop reclaiming.
+fn retained_placements(account: &WorkflowRunTerminalAccount) -> Vec<String> {
+    if matches!(account.ending, WorkflowRunEnding::Returned) {
+        return Vec::new();
+    }
+    let workers = &account.workers;
+    [
+        &workers.done,
+        &workers.failed,
+        &workers.cut_short,
+        &workers.unsettled,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|worker| worker.placement.clone())
+    .collect()
+}
+
+/// Write the run's terminal account, having assembled it. Serialisation
+/// cannot fail: every field is a JSON-safe scalar, string, or list of the
+/// same, and the workers' outputs came out of the journal as JSON. The write
+/// itself is first-write-wins once the row is terminal. A residue on a running
+/// row can only be from a crash between the account and state writes, so a
+/// resumed run replaces it with its actual ending.
+///
+/// The directories the account names are claimed from the worktree host
+/// first, so that from the moment a reader can find them nothing — not this
+/// gateway's shutdown, not the next one's reclaim sweep — takes them away.
+async fn record_terminal_account(
+    storage: &dyn Storage,
+    worktree_host: &crate::worktree::WorktreeHost,
+    run_id: Uuid,
+    account: WorkflowRunTerminalAccount,
+) -> Result<(), swage_core::StorageError> {
+    let placements = retained_placements(&account);
+    let claim = worktree_host.retain(run_id, &placements).await;
+    let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
+    if let Err(error) = storage
+        .set_workflow_run_terminal_account(run_id, account)
+        .await
+    {
+        if let Some(claim) = claim {
+            worktree_host.withdraw(run_id, claim).await;
+        }
+        return Err(error);
+    }
+    if placements.is_empty() {
+        worktree_host.release(run_id).await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -6406,6 +6802,13 @@ async fn complete_agent_entry(
     cancellation: CancellationToken,
     route_admission: &RouteAdmission,
 ) -> Result<AgentCallResult, WorkflowHostError> {
+    state.active_workflow_workers.lock().await.insert(
+        entry_id,
+        swage_workflow::WorkerLiveness {
+            started_at: chrono::Utc::now().to_rfc3339(),
+            first_evidence_at: None,
+        },
+    );
     let worktree_seq = resolved_working_directory
         .as_ref()
         .and_then(|placement| placement.worktree_seq);
@@ -6424,12 +6827,18 @@ async fn complete_agent_entry(
     .await
     {
         Ok(mut result) => {
+            if let Err(error) = persist_workflow_worker_liveness(state, entry_id).await {
+                state.active_workflow_workers.lock().await.remove(&entry_id);
+                return Err(WorkflowHostError::Message(error.to_string()));
+            }
             if let Some(worktree_seq) = worktree_seq {
-                let completion = state
-                    .worktree_host
-                    .finish(run_id, worktree_seq)
-                    .await
-                    .map_err(WorkflowHostError::Message)?;
+                let completion = match state.worktree_host.finish(run_id, worktree_seq).await {
+                    Ok(completion) => completion,
+                    Err(error) => {
+                        state.active_workflow_workers.lock().await.remove(&entry_id);
+                        return Err(WorkflowHostError::Message(error));
+                    }
+                };
                 result.worktree = Some(swage_workflow::WorktreeCompletion {
                     base_commit: completion.base_commit,
                     tip_commit: completion.tip_commit,
@@ -6437,26 +6846,41 @@ async fn complete_agent_entry(
                     removed: completion.removed,
                 });
             }
-            state
+            let completion = state
                 .complete_workflow_journal_entry(
                     entry_id,
                     serde_json::to_value(&result).expect("agent result serialises"),
                 )
-                .await
-                .map_err(|error| error.to_string())?;
+                .await;
+            state.active_workflow_workers.lock().await.remove(&entry_id);
+            completion.map_err(|error| error.to_string())?;
             Ok(result)
         }
         // A failure the script observes (and may catch in parallel/pipeline)
         // must settle durably too, or replay treats the entry as live work
         // and re-executes the call — which may then succeed and change the
-        // resumed path. Cancellation is settled for every in-flight entry at
-        // the owning run boundary after the host loop drains.
+        // resumed path. Settling cancellation here also preserves the
+        // worker's terminal metadata before the live overlay is removed.
         Err(error) => {
-            if !error.to_string().starts_with("WorkflowCancelledError") {
+            let cancelled = error.to_string() == "WorkflowCancelledError";
+            let error_message = if cancelled {
+                "WorkflowCancelledError: run cancelled".to_string()
+            } else {
+                error.to_string()
+            };
+            if let Err(metadata_error) = persist_workflow_worker_liveness(state, entry_id).await {
+                tracing::warn!(
+                    journal_entry_id = %entry_id,
+                    %metadata_error,
+                    "could not persist failed workflow worker liveness"
+                );
+            }
+            if !cancelled {
                 let _ = state
-                    .fail_workflow_journal_entry(entry_id, &error.to_string())
+                    .fail_workflow_journal_entry(entry_id, &error_message)
                     .await;
             }
+            state.active_workflow_workers.lock().await.remove(&entry_id);
             Err(error)
         }
     }
@@ -7526,6 +7950,16 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
                     record.id
                 ))
             })?,
+        terminal_account: record
+            .terminal_account
+            .map(serde_json::from_value::<WorkflowRunTerminalAccount>)
+            .transpose()
+            .map_err(|error| {
+                internal(format!(
+                    "workflow run {} terminal account does not match the recorded contract: {error}",
+                    record.id
+                ))
+            })?,
         error_message: record.error_message,
         created_at: record.created_at,
         completed_at: record.completed_at,
@@ -8062,14 +8496,6 @@ async fn launch_existing_run(
         {
             tracing::warn!(%run_id, %problem, "could not record terminal budget audit entry");
         }
-        if run_state == "cancelled" {
-            settle_cancelled_workflow_journal(
-                storage.as_ref(),
-                run_id,
-                WorkflowCutShortCause::RunCancelled,
-            )
-            .await;
-        }
         let handover = if run_state == "failed" && output.is_none() {
             match terminal_failed_call_reference {
                 Some(host_reference) => {
@@ -8101,18 +8527,58 @@ async fn launch_existing_run(
         let handover = handover.map(|handover| {
             serde_json::to_value(&handover).expect("workflow handover serialises to JSON")
         });
-        // Once the engine has a terminal result, no outstanding decision can
+        // Every ending accounts for itself, and the account lands before the
+        // run reaches its terminal state: a reader that sees the run has
+        // ended sees the account of how, not a run that is briefly over with
+        // nothing to say for itself. It is also assembled before any worktree
+        // is reclaimed, since it names the directories the workers ran in.
+        let ending = ending_of_terminal_state(run_state, error.as_deref());
+        let account_error = match account_for_run_end(storage.as_ref(), run_id, ending).await {
+            Some(account) => {
+                record_terminal_account(storage.as_ref(), &worktree_host, run_id, account)
+                    .await
+                    .err()
+                    .map(|error| error.to_string())
+            }
+            None => Some("could not read the journal to record the run's terminal account".into()),
+        };
+        let (run_state, output, handover, error) = match account_error {
+            Some(account_error) => {
+                tracing::warn!(%run_id, %account_error, "leaving workflow run interrupted until its terminal account can be recorded");
+                ("interrupted", None, None, Some(account_error))
+            }
+            None => (run_state, output, handover, error),
+        };
+        // Once the run has genuinely ended, no outstanding decision can
         // affect it. Stop their in-process watchers and remove the remaining
         // rows from the answering queue before publishing the terminal run.
+        // An ending left interrupted resumes by replay and reads its holds
+        // back, so those stay open.
         cancellation.cancel();
-        if let Err(error) = storage.close_open_workflow_run_holds(run_id).await {
+        if run_state != "interrupted"
+            && let Err(error) = storage.close_open_workflow_run_holds(run_id).await
+        {
             tracing::warn!(%run_id, %error, "could not close unanswered workflow holds");
         }
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
+        #[cfg(test)]
+        let returned_cleanup_pause = if state_update.is_ok() && run_state == "completed" {
+            workflow_cleanup_test_hook::pause_at(
+                run_id,
+                workflow_cleanup_test_hook::Point::ReturnedCleanup,
+            )
+            .await
+        } else {
+            None
+        };
         if state_update.is_ok() && run_state == "completed" {
             worktree_host.cleanup_owner(run_id).await;
+        }
+        #[cfg(test)]
+        if let Some(pause) = returned_cleanup_pause {
+            pause.finished.add_permits(1);
         }
         let _ = storage
             .create_audit_event(NewAuditEvent {
@@ -8169,12 +8635,22 @@ mod workflow_cleanup_test_hook {
     use tokio::sync::Semaphore;
     use uuid::Uuid;
 
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub(super) enum Point {
+        ActiveGenerationRemoval,
+        ParkedCancellationRetained,
+        ReturnedCleanup,
+    }
+
     pub(super) struct Pause {
         pub(super) entered: Semaphore,
         pub(super) release: Semaphore,
         pub(super) finished: Semaphore,
         removed: AtomicBool,
     }
+
+    type PauseKey = (Uuid, Point);
+    type PauseRegistry = Mutex<HashMap<PauseKey, Arc<Pause>>>;
 
     impl Pause {
         pub(super) fn record_removal(&self, removed: bool) {
@@ -8186,12 +8662,16 @@ mod workflow_cleanup_test_hook {
         }
     }
 
-    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
-        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+    fn pauses() -> &'static PauseRegistry {
+        static PAUSES: OnceLock<PauseRegistry> = OnceLock::new();
         PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
     pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        install_at(run_id, Point::ActiveGenerationRemoval)
+    }
+
+    pub(super) fn install_at(run_id: Uuid, point: Point) -> Arc<Pause> {
         let pause = Arc::new(Pause {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
@@ -8201,15 +8681,19 @@ mod workflow_cleanup_test_hook {
         pauses()
             .lock()
             .expect("workflow cleanup test-hook registry")
-            .insert(run_id, Arc::clone(&pause));
+            .insert((run_id, point), Arc::clone(&pause));
         pause
     }
 
     pub(super) async fn pause_once(run_id: Uuid) -> Option<Arc<Pause>> {
+        pause_at(run_id, Point::ActiveGenerationRemoval).await
+    }
+
+    pub(super) async fn pause_at(run_id: Uuid, point: Point) -> Option<Arc<Pause>> {
         let pause = pauses()
             .lock()
             .expect("workflow cleanup test-hook registry")
-            .remove(&run_id);
+            .remove(&(run_id, point));
         if let Some(pause) = &pause {
             pause.entered.add_permits(1);
             pause
@@ -8361,6 +8845,42 @@ pub async fn start_saved_run(
     ))
 }
 
+async fn reconcile_workflow_worker_liveness(
+    state: &AppState,
+    run_id: Uuid,
+    entries: &mut [WorkflowJournalRecord],
+    live_workers: &std::collections::HashMap<Uuid, swage_workflow::WorkerLiveness>,
+) -> Result<(), StorageError> {
+    let lacks_live_or_durable_liveness = |entry: &WorkflowJournalRecord| {
+        entry.kind == "agent_call"
+            && entry.status == "started"
+            && entry
+                .terminal_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("liveness"))
+                .is_none()
+            && !live_workers.contains_key(&entry.id)
+    };
+    if !entries.iter().any(lacks_live_or_durable_liveness) {
+        return Ok(());
+    }
+
+    let refreshed = state.storage.list_workflow_journal(run_id).await?;
+    let refreshed = refreshed
+        .into_iter()
+        .map(|entry| (entry.id, entry))
+        .collect::<std::collections::HashMap<_, _>>();
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| lacks_live_or_durable_liveness(entry))
+    {
+        if let Some(refreshed) = refreshed.get(&entry.id) {
+            *entry = refreshed.clone();
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8371,7 +8891,7 @@ pub async fn get_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    let entries = state
+    let mut entries = state
         .storage
         .list_workflow_journal(id)
         .await
@@ -8417,6 +8937,12 @@ pub async fn get_run(
     // then by round: a call interrupted and re-dispatched would otherwise
     // surface only the attempt that finished, hiding the rounds the
     // interrupted one actually made.
+    #[cfg(test)]
+    workflow_test_hook::pause_once(id).await;
+    let live_workers = state.active_workflow_workers.lock().await.clone();
+    reconcile_workflow_worker_liveness(&state, id, &mut entries, &live_workers)
+        .await
+        .map_err(internal)?;
     let mut journal = Vec::with_capacity(entries.len());
     for entry in entries {
         let rounds = match entry.kind == "agent_call" {
@@ -8441,6 +8967,14 @@ pub async fn get_run(
             false => None,
         };
         journal.push(journal_wire(entry, rounds).map_err(internal)?);
+    }
+    for entry in &mut journal {
+        if let Some(liveness) = live_workers.get(&entry.id)
+            && let Some(agent_call) = entry.agent_call.as_mut()
+        {
+            agent_call.liveness =
+                Some(workflow_worker_liveness_wire(liveness.clone()).map_err(internal)?);
+        }
     }
     let holds = run_hold_projections(&state, id).await?;
     // Hold economics are derived the same way the wake economics are: the
@@ -8467,6 +9001,55 @@ pub async fn get_run(
         holds,
         hold_metrics,
     }))
+}
+
+#[cfg(test)]
+mod workflow_test_hook {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use tokio::sync::Semaphore;
+    use uuid::Uuid;
+
+    pub(super) struct Pause {
+        pub(super) entered: Semaphore,
+        pub(super) release: Semaphore,
+    }
+
+    fn pauses() -> &'static Mutex<HashMap<Uuid, Arc<Pause>>> {
+        static PAUSES: OnceLock<Mutex<HashMap<Uuid, Arc<Pause>>>> = OnceLock::new();
+        PAUSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn install(run_id: Uuid) -> Arc<Pause> {
+        let pause = Arc::new(Pause {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        });
+        pauses()
+            .lock()
+            .expect("workflow run detail test-hook registry")
+            .insert(run_id, Arc::clone(&pause));
+        pause
+    }
+
+    pub(super) async fn pause_once(run_id: Uuid) {
+        let pause = pauses()
+            .lock()
+            .expect("workflow run detail test-hook registry")
+            .remove(&run_id);
+        if let Some(pause) = pause {
+            pause.entered.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("workflow run detail test hook remains open")
+                .forget();
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -8509,63 +9092,90 @@ pub async fn cancel_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+    #[cfg(test)]
+    workflow_test_hook::pause_once(id).await;
     // A parked run has no engine to signal: cancel it in the record so the
     // waker never relaunches it.
     if run.state == "parked" {
-        return Ok(Json(try_cancel_parked_workflow_run(&state, &run).await?));
+        #[cfg(test)]
+        workflow_pause_test_hook::pause(PAUSE_BEFORE_CANCELLATION_CLAIM, id).await;
+        close_open_held_workers(state.storage.as_ref(), id).await;
+        let journal = state
+            .storage
+            .list_workflow_journal(id)
+            .await
+            .map_err(internal)?;
+        let ending = refine_ending(WorkflowRunEnding::Cancelled, &journal);
+        let journal_error =
+            matches!(ending, WorkflowRunEnding::Cancelled).then_some(CANCELLED_JOURNAL_SETTLEMENT);
+        let cut_short = cut_short_termination(&ending);
+        let journal_termination = cut_short
+            .clone()
+            .map(|termination| serde_json::to_value(termination).expect("termination serialises"));
+        let account = terminal_account_from_journal(&journal, ending, cut_short);
+        let placements = retained_placements(&account);
+        let claim = state.worktree_host.retain(id, &placements).await;
+        #[cfg(test)]
+        workflow_cleanup_test_hook::pause_at(
+            id,
+            workflow_cleanup_test_hook::Point::ParkedCancellationRetained,
+        )
+        .await;
+        let account = serde_json::to_value(account).expect("terminal account serialises to JSON");
+        let claimed = state
+            .storage
+            .try_cancel_parked_workflow_run(id, account, journal_error, journal_termination)
+            .await
+            .map_err(internal)?;
+        if !claimed {
+            if let Some(claim) = claim {
+                state.worktree_host.withdraw(id, claim).await;
+            }
+            let run = state
+                .storage
+                .get_workflow_run(id)
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+            // A completed run may already have swept while the stale claim
+            // was present. Repeating its owner cleanup after withdrawing the
+            // claim is idempotent; a running generation performs the cleanup
+            // itself after it records completion.
+            if run.state == "completed" {
+                state.worktree_host.cleanup_owner(id).await;
+            }
+            return Err(ApiError::conflict(format!(
+                "workflow run {id} is no longer parked; not cancelling"
+            )));
+        }
+        if placements.is_empty() {
+            state.worktree_host.release(id).await;
+        }
+        if journal_error.is_some() {
+            interrupt_cut_short_worker_rounds(state.storage.as_ref(), id, &journal).await;
+        }
+        let budget = budget_wire(&run.budget);
+        if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
+            tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
+        }
+        // The claim is also the decision against any answer racing it: an
+        // answer settles the same run row, so winning here is proof no answer
+        // has relaunched an engine, and the holds left open can be closed
+        // without one to miss.
+        state
+            .storage
+            .close_open_workflow_run_holds(id)
+            .await
+            .map_err(internal)?;
+        let cancelled = state
+            .storage
+            .get_workflow_run(id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+        return Ok(Json(run_wire(cancelled)?));
     }
     Ok(Json(run_wire(run)?))
-}
-
-/// Cancel a run that is parked on a durable wait.
-///
-/// The claim comes first and everything else follows from winning it. An
-/// answer racing this cancellation settles the same run row: whichever of
-/// the two moves the run out of `parked` first is the decision, and the
-/// loser sees the winner's state and stops. Because relaunching a parked run
-/// is that same claim, a won cancellation is proof no answer has launched an
-/// engine — there is no engine left for the tear-down below to miss.
-async fn try_cancel_parked_workflow_run(
-    state: &AppState,
-    run: &WorkflowRunRecord,
-) -> Result<WorkflowRun, ApiError> {
-    #[cfg(test)]
-    workflow_pause_test_hook::pause(PAUSE_BEFORE_CANCELLATION_CLAIM, run.id).await;
-    let id = run.id;
-    let claimed = state
-        .storage
-        .try_transition_workflow_run_state(id, "parked", "cancelled")
-        .await
-        .map_err(internal)?;
-    let settled = state
-        .storage
-        .get_workflow_run(id)
-        .await
-        .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    if !claimed {
-        return Err(ApiError::conflict(format!(
-            "workflow run {id} is no longer parked; it is {} and was not cancelled",
-            settled.state
-        )));
-    }
-    close_open_held_workers(state.storage.as_ref(), id).await;
-    settle_cancelled_workflow_journal(
-        state.storage.as_ref(),
-        id,
-        WorkflowCutShortCause::RunCancelled,
-    )
-    .await;
-    let budget = budget_wire(&run.budget);
-    if let Err(problem) = record_terminal_budget_from_journal(state, id, &budget).await {
-        tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
-    }
-    state
-        .storage
-        .close_open_workflow_run_holds(id)
-        .await
-        .map_err(internal)?;
-    run_wire(settled)
 }
 
 pub async fn resume_run(
@@ -8680,6 +9290,29 @@ pub(crate) async fn resume_owed_workflow_runs(state: &AppState) -> usize {
             }
             Err(error) => {
                 tracing::warn!(%run_id, error = %error, "failed to resume workflow run");
+                // A run this pass cannot relaunch has ended by gateway death:
+                // nothing will run its script again, so it accounts for
+                // itself here rather than reading as silence. A lost race is
+                // not an ending — another owner holds the run and will
+                // account for it. Resume policy is untouched either way: the
+                // run's own state is left exactly as it was found.
+                if error.code() != ErrorCode::Conflict {
+                    let ending = WorkflowRunEnding::InterruptedWithoutResume {
+                        reason: error.message().to_string(),
+                    };
+                    if let Some(account) =
+                        account_for_run_end(state.storage.as_ref(), run_id, ending).await
+                        && let Err(error) = record_terminal_account(
+                            state.storage.as_ref(),
+                            &state.worktree_host,
+                            run_id,
+                            account,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%run_id, %error, "could not record the interrupted run's terminal account");
+                    }
+                }
             }
         }
     }
@@ -8759,6 +9392,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use futures::StreamExt;
     use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
@@ -11071,6 +11705,60 @@ mod tests {
         pending_call_started: Arc<Notify>,
     }
 
+    struct ReleasableProvider {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ReleasableProvider {
+        fn model_id(&self) -> &str {
+            "releasable-model"
+        }
+
+        async fn complete(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            let first = futures::stream::once(async move {
+                started.notify_one();
+                release.notified().await;
+                swage_core::StreamChunk::Delta {
+                    content: "finished after wake".into(),
+                }
+            });
+            Box::pin(futures::StreamExt::chain(
+                first,
+                futures::stream::iter([
+                    swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    }),
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ]),
+            ))
+        }
+    }
+
     #[async_trait::async_trait]
     impl swage_provider::LlmProvider for SettlementProvider {
         fn model_id(&self) -> &str {
@@ -11249,6 +11937,64 @@ mod tests {
         requests: std::sync::Mutex<Vec<swage_core::CompletionRequest>>,
     }
 
+    struct ParkedFirstDeltaProvider {
+        parked: std::sync::Mutex<Option<oneshot::Sender<chrono::DateTime<chrono::Utc>>>>,
+        release: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    struct PendingWithoutEvidenceProvider {
+        pending: Arc<Notify>,
+    }
+
+    impl ParkedFirstDeltaProvider {
+        fn new() -> (
+            Self,
+            oneshot::Receiver<chrono::DateTime<chrono::Utc>>,
+            oneshot::Sender<()>,
+        ) {
+            let (parked_tx, parked_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            (
+                Self {
+                    parked: std::sync::Mutex::new(Some(parked_tx)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                },
+                parked_rx,
+                release_tx,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for PendingWithoutEvidenceProvider {
+        fn model_id(&self) -> &str {
+            "pending-without-evidence"
+        }
+
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            self.pending.notify_one();
+            Box::pin(futures::stream::pending())
+        }
+    }
+
     const RESEARCH_SWEEP_QUOTE: &str = "The landed source supports the purpose.";
 
     /// Matches responses to stage prompts so concurrent gather calls cannot
@@ -11296,7 +12042,9 @@ mod tests {
             if text.contains("leave worktree unchanged") {
                 return Box::pin(futures::stream::iter(scripted_text_output("unchanged")));
             }
-            let file = if text.contains("first-marker") {
+            let file = if text.contains("retained marker") {
+                "retained-marker"
+            } else if text.contains("first-marker") {
                 "first-marker"
             } else {
                 "second-marker"
@@ -11414,6 +12162,71 @@ mod tests {
                 Some(output) => Box::pin(futures::stream::iter(output)),
                 None => Box::pin(futures::stream::pending()),
             }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for ParkedFirstDeltaProvider {
+        fn model_id(&self) -> &str {
+            "parked-first-delta"
+        }
+
+        async fn complete(
+            &self,
+            _: swage_core::CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unimplemented!("workflow calls use streaming")
+        }
+
+        fn stream(
+            &self,
+            request: swage_core::CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            let prompt = request
+                .messages
+                .iter()
+                .map(swage_core::ChatMessage::text_content)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !prompt.contains("parked worker") {
+                return Box::pin(futures::stream::iter(scripted_text_output("evidence")));
+            }
+            let parked = self.parked.lock().expect("parked sender").take();
+            let release = self
+                .release
+                .lock()
+                .expect("release receiver")
+                .take()
+                .expect("one parked call");
+            Box::pin(
+                futures::stream::once(async move {
+                    parked
+                        .expect("first parked call")
+                        .send(chrono::Utc::now())
+                        .expect("park signal");
+                    release.await.expect("release parked worker");
+                    swage_core::StreamChunk::Delta {
+                        content: "evidence".into(),
+                    }
+                })
+                .chain(futures::stream::iter(vec![
+                    swage_core::StreamChunk::Usage(swage_core::TokenUsage {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                    }),
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ])),
+            )
         }
     }
 
@@ -15011,8 +15824,29 @@ mod tests {
             })
             .expect("failed run should retain its worktree path");
         assert!(
-            !retained_path.exists(),
-            "the failed run reclaims its unchanged worker worktree"
+            retained_path.join("retained-marker").exists(),
+            "the failed run keeps its changed worker worktree"
+        );
+        let failed_account = terminal_account_of(&storage, failed.id).await;
+        assert_eq!(
+            failed_account.workers.done[0].placement.as_deref(),
+            Some(retained_path.to_string_lossy().as_ref())
+        );
+        assert!(
+            failed_account.workers.done[0]
+                .worktree
+                .as_ref()
+                .is_some_and(|completion| completion.changed && !completion.removed)
+        );
+        assert_eq!(
+            failed_account
+                .partial_results
+                .as_ref()
+                .expect("a run that never returned offers its completed work")
+                .results[0]
+                .placement
+                .as_deref(),
+            Some(retained_path.to_string_lossy().as_ref())
         );
 
         let cancelled_source = format!(
@@ -15052,25 +15886,57 @@ mod tests {
             !cancelled_path.exists(),
             "a terminal cancelled run reclaims its completed worker worktree"
         );
+        let cancelled_account = terminal_account_of(&storage, cancelled.id).await;
+        assert!(cancelled_account.workers.done[0].placement.is_none());
+        assert!(
+            cancelled_account.workers.done[0]
+                .worktree
+                .as_ref()
+                .is_some_and(|completion| !completion.changed && completion.removed)
+        );
+
+        // A worktree no account names is still the gateway's to reclaim; this
+        // one stands in for the ordinary case shutdown exists for.
+        let unclaimed_owner = Uuid::new_v4();
+        let unclaimed_path = state
+            .worktree_host
+            .provision(unclaimed_owner, 0, &repo)
+            .await
+            .expect("provision a worktree no account names");
+        assert!(unclaimed_path.path.exists());
 
         state.worktree_host.shutdown().await;
-        assert!(!retained_path.exists());
-        assert!(!cancelled_path.exists());
         assert!(
-            !fixture
-                .path()
-                .join("worker-worktrees")
-                .join(failed.id.to_string())
-                .exists(),
-            "shutdown cleanup must remove the empty per-run directory"
+            !unclaimed_path.path.exists(),
+            "shutdown must still reclaim a worktree no terminal account names"
         );
         assert!(
-            !fixture
-                .path()
-                .join("worker-worktrees")
-                .join(cancelled.id.to_string())
-                .exists(),
-            "shutdown cleanup must remove the cancelled run directory"
+            retained_path.join("retained-marker").exists() && !cancelled_path.exists(),
+            "shutdown keeps the changed placement named by the failed run's account"
+        );
+
+        // Nor may the next gateway's reclaim sweep take them. It starts with
+        // an empty map, so the claim has to be readable from the disk.
+        let leftover_owner = Uuid::new_v4();
+        let leftover_path = state
+            .worktree_host
+            .provision(leftover_owner, 0, &repo)
+            .await
+            .expect("provision a crash-stranded worktree");
+        let restarted = crate::worktree::WorktreeHost::new(crate::worktree::WorktreeConfig {
+            root: fixture.path().join("worker-worktrees"),
+        });
+        restarted
+            .recover(&crate::worktree::WorktreeRecoveryClaims::default())
+            .await
+            .expect("startup worktree recovery");
+        assert!(
+            !leftover_path.path.exists(),
+            "startup recovery must still reclaim a crash-stranded worktree no account names"
+        );
+        assert!(
+            retained_path.join("retained-marker").exists() && !cancelled_path.exists(),
+            "startup recovery honours the failed run account's durable placement claim"
         );
     }
 
@@ -15515,6 +16381,423 @@ mod tests {
                 .filter(|entry| entry.kind == "terminal_budget")
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parked_cancellation_losing_to_a_wake_keeps_the_resumed_runs_account() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let source = r#"
+            await awaitEvent({ kinds: ["operator.continue"] });
+            return await agent("finish after wake", { agent: "default", maxAttempts: 1 });
+        "#;
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: Value::Null,
+                budget: serde_json::json!({}),
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let provider_started = Arc::new(Notify::new());
+        let provider_release = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ReleasableProvider {
+                started: Arc::clone(&provider_started),
+                release: Arc::clone(&provider_release),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        launch_existing_run(state.clone(), run.clone(), source.into(), None)
+            .await
+            .expect("launch awaiting run");
+        wait_for_run_state(&storage, run.id, "parked").await;
+        wait_for_workflow_thread_exit(run.id).await;
+        wait_for_active_workflow_run_release(&state, run.id).await;
+
+        let cancellation_pause = workflow_test_hook::install(run.id);
+        let cancellation_state = state.clone();
+        let cancellation =
+            tokio::spawn(async move { cancel_run(State(cancellation_state), Path(run.id)).await });
+        cancellation_pause
+            .entered
+            .acquire()
+            .await
+            .expect("cancellation pause remains open")
+            .forget();
+
+        let Json(posted) = Box::pin(post_operator_run_event(
+            State(state.clone()),
+            Path(run.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.continue".into(),
+                payload: serde_json::json!({"approved": true}),
+            }),
+        ))
+        .await
+        .expect("wake the parked run");
+        assert!(posted.wake_provisioned);
+        provider_started.notified().await;
+
+        cancellation_pause.release.add_permits(1);
+        let cancellation = cancellation.await.expect("cancellation task");
+        provider_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let resumed = storage
+                    .get_workflow_run(run.id)
+                    .await
+                    .expect("resumed run")
+                    .expect("resumed run remains present");
+                if resumed.state == "completed" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("resumed run completes");
+
+        let account = terminal_account_of(&storage, run.id).await;
+        assert_eq!(account.ending, WorkflowRunEnding::Returned);
+        assert!(
+            cancellation.is_err_and(|error| error.code() == ErrorCode::Conflict),
+            "the stale parked cancellation must lose to the resumed generation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parked_cancellation_losing_after_return_withdraws_its_retention_claim() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("run git setup")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("write seed");
+        for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("commit seed")
+                    .success()
+            );
+        }
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let placement_tool = Arc::new(PlacementWriteTool::default());
+        let worktree_root = fixture.path().join("worker-worktrees");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PlacementWritingProvider::default()),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                placement_tool as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        )
+        .with_worktree_root(worktree_root.clone());
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).expect("serialise cwd");
+        let source = format!(
+            r#"
+                await agent("write retained marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+                await awaitEvent({{ kinds: ["operator.continue"] }});
+                return {{ done: true }};
+            "#
+        );
+        let Json(run) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start placed waiting run");
+        wait_for_run_state(&storage, run.id, "parked").await;
+        wait_for_workflow_thread_exit(run.id).await;
+        wait_for_active_workflow_run_release(&state, run.id).await;
+        let placement = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("parked run journal")
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("parked run records its isolated worker placement");
+        let retained_marker = worktree_root
+            .join(run.id.to_string())
+            .join(".retained-placements");
+        assert!(placement.join("retained-marker").exists());
+
+        let cancellation_start = workflow_test_hook::install(run.id);
+        let returned_cleanup = workflow_cleanup_test_hook::install_at(
+            run.id,
+            workflow_cleanup_test_hook::Point::ReturnedCleanup,
+        );
+        let cancellation_retained = workflow_cleanup_test_hook::install_at(
+            run.id,
+            workflow_cleanup_test_hook::Point::ParkedCancellationRetained,
+        );
+        let cancellation_state = state.clone();
+        let cancellation =
+            tokio::spawn(async move { cancel_run(State(cancellation_state), Path(run.id)).await });
+        cancellation_start
+            .entered
+            .acquire()
+            .await
+            .expect("cancellation start pause remains open")
+            .forget();
+
+        let Json(posted) = Box::pin(post_operator_run_event(
+            State(state.clone()),
+            Path(run.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.continue".into(),
+                payload: serde_json::json!({"approved": true}),
+            }),
+        ))
+        .await
+        .expect("wake the parked run");
+        assert!(posted.wake_provisioned);
+        returned_cleanup
+            .entered
+            .acquire()
+            .await
+            .expect("returned cleanup pause remains open")
+            .forget();
+
+        cancellation_start.release.add_permits(1);
+        cancellation_retained
+            .entered
+            .acquire()
+            .await
+            .expect("retention pause remains open")
+            .forget();
+        assert!(
+            retained_marker.exists(),
+            "the stale cancellation has claimed the placement"
+        );
+
+        returned_cleanup.release.add_permits(1);
+        returned_cleanup
+            .finished
+            .acquire()
+            .await
+            .expect("returned cleanup pause remains open")
+            .forget();
+        assert!(
+            placement.exists(),
+            "the stale claim makes the returned-path cleanup skip the placement"
+        );
+
+        cancellation_retained.release.add_permits(1);
+        let cancellation = cancellation.await.expect("cancellation task");
+        assert!(
+            cancellation.is_err_and(|error| error.code() == ErrorCode::Conflict),
+            "the stale parked cancellation must lose to the returned run"
+        );
+        assert!(
+            !placement.exists(),
+            "a returned run must not retain a worker worktree after a stale cancellation loses"
+        );
+        assert!(
+            !retained_marker.exists(),
+            "a returned run must not retain a durable placement claim"
+        );
+        assert_eq!(
+            terminal_account_of(&storage, run.id).await.ending,
+            WorkflowRunEnding::Returned
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_parked_cancellation_preserves_a_failed_winner_retention_claim() {
+        let fixture = tempfile::tempdir().expect("scratch fixture");
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("run git setup")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("write seed");
+        for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .status()
+                    .expect("commit seed")
+                    .success()
+            );
+        }
+
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let worktree_root = fixture.path().join("worker-worktrees");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PlacementWritingProvider::default()),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(PlacementWriteTool::default()) as Arc<dyn crate::tool::Tool>
+            ]),
+            None,
+        )
+        .with_worktree_root(worktree_root.clone());
+        let cwd = serde_json::to_string(&repo.to_string_lossy()).expect("serialise cwd");
+        let source = format!(
+            r#"
+                await agent("write retained marker", {{ cwd: {cwd}, isolation: "worktree", maxAttempts: 1 }});
+                await awaitEvent({{ kinds: ["operator.continue"] }});
+                throw new Error("failed after wake");
+            "#
+        );
+        let Json(run) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source,
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start placed waiting run");
+        wait_for_run_state(&storage, run.id, "parked").await;
+        wait_for_workflow_thread_exit(run.id).await;
+        wait_for_active_workflow_run_release(&state, run.id).await;
+        let placement = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("parked run journal")
+            .into_iter()
+            .find_map(|entry| {
+                (entry.kind == "worker_placement")
+                    .then(|| entry.result?["path"].as_str().map(std::path::PathBuf::from))?
+            })
+            .expect("parked run records its isolated worker placement");
+        let retained_marker = worktree_root
+            .join(run.id.to_string())
+            .join(".retained-placements");
+        assert!(placement.join("retained-marker").exists());
+
+        let cancellation_start = workflow_test_hook::install(run.id);
+        let cancellation_retained = workflow_cleanup_test_hook::install_at(
+            run.id,
+            workflow_cleanup_test_hook::Point::ParkedCancellationRetained,
+        );
+        let cancellation_state = state.clone();
+        let cancellation =
+            tokio::spawn(async move { cancel_run(State(cancellation_state), Path(run.id)).await });
+        cancellation_start
+            .entered
+            .acquire()
+            .await
+            .expect("cancellation start pause remains open")
+            .forget();
+
+        let Json(posted) = Box::pin(post_operator_run_event(
+            State(state.clone()),
+            Path(run.id),
+            Json(PostWorkflowRunEventRequest {
+                kind: "operator.continue".into(),
+                payload: serde_json::json!({"approved": true}),
+            }),
+        ))
+        .await
+        .expect("wake the parked run");
+        assert!(posted.wake_provisioned);
+        wait_for_run_state(&storage, run.id, "failed").await;
+        assert!(retained_marker.exists());
+
+        cancellation_start.release.add_permits(1);
+        cancellation_retained
+            .entered
+            .acquire()
+            .await
+            .expect("retention pause remains open")
+            .forget();
+        cancellation_retained.release.add_permits(1);
+        let cancellation = cancellation.await.expect("cancellation task");
+        assert!(
+            cancellation.is_err_and(|error| error.code() == ErrorCode::Conflict),
+            "the stale parked cancellation must lose to the failed resumed generation"
+        );
+
+        let account = terminal_account_of(&storage, run.id).await;
+        assert!(matches!(account.ending, WorkflowRunEnding::Threw { .. }));
+        assert_eq!(account.workers.done.len(), 1);
+        assert!(
+            account.workers.done[0]
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| worktree.changed),
+            "the retained worker must carry its changed worktree account"
+        );
+        assert!(
+            placement.exists(),
+            "the winning account's worktree survives"
+        );
+        assert!(
+            retained_marker.exists(),
+            "the winning account's durable retention marker survives"
         );
     }
 
@@ -17355,36 +18638,36 @@ mod tests {
         .expect("start awaiting run");
         wait_for_run_state(&storage, started.id, "parked").await;
 
-        let Json(_) = post_operator_run_event(
+        let Json(_) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "first"}),
             }),
-        )
+        ))
         .await
         .expect("queue first same-kind answer");
         wait_for_run_state(&storage, started.id, "parked").await;
-        let Json(_) = post_operator_run_event(
+        let Json(_) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "second"}),
             }),
-        )
+        ))
         .await
         .expect("queue second same-kind answer");
         wait_for_run_state(&storage, started.id, "parked").await;
-        let Json(_) = post_operator_run_event(
+        let Json(_) = Box::pin(post_operator_run_event(
             State(state),
             Path(started.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "control.start".into(),
                 payload: Value::Null,
             }),
-        )
+        ))
         .await
         .expect("release queued awaits");
 
@@ -18585,14 +19868,14 @@ mod tests {
             .cloned()
             .expect("the original generation remains installed while cleanup is paused");
 
-        let Json(posted) = post_operator_run_event(
+        let Json(posted) = Box::pin(post_operator_run_event(
             State(state.clone()),
             Path(run.id),
             Json(PostWorkflowRunEventRequest {
                 kind: "operator.decision".into(),
                 payload: serde_json::json!({"verdict": "accept"}),
             }),
-        )
+        ))
         .await
         .expect("post event and relaunch while the parked generation still owns its token");
         assert!(posted.wake_provisioned);
@@ -22381,6 +23664,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("injected wind-down completion failure"))
         );
+        let account = terminal_account_of(&storage, started.id).await;
+        // The run caught the refusal and returned, so its account names a
+        // return. The `wind_down` entry it left behind never completed, and a
+        // failed entry is not the host's record of a crossing.
+        assert!(matches!(account.ending, WorkflowRunEnding::Returned));
 
         storage
             .with_conn(|connection| {
@@ -22407,6 +23695,58 @@ mod tests {
             provider.requests.lock().expect("requests").len(),
             1,
             "replay does not duplicate completed provider work"
+        );
+    }
+
+    #[test]
+    fn only_a_completed_wind_down_entry_names_the_closing_boundary_as_the_ending() {
+        fn wind_down(status: &str) -> WorkflowJournalRecord {
+            WorkflowJournalRecord {
+                id: Uuid::new_v4(),
+                run_id: Uuid::new_v4(),
+                seq: 1,
+                completed_order: None,
+                kind: "wind_down".into(),
+                status: status.into(),
+                args_hash: String::new(),
+                request: Value::Null,
+                result: None,
+                terminal_metadata: None,
+                error_message: None,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                dispatch: None,
+                dispatch_attempts: None,
+                termination: None,
+            }
+        }
+        let threw = || WorkflowRunEnding::Threw {
+            error: "boom".into(),
+        };
+
+        assert!(
+            matches!(
+                refine_ending(threw(), &[wind_down("completed")]),
+                WorkflowRunEnding::WoundDown { .. }
+            ),
+            "a completed wind-down entry is the host's record of the crossing"
+        );
+        assert!(
+            matches!(
+                refine_ending(threw(), &[wind_down("failed")]),
+                WorkflowRunEnding::Threw { .. }
+            ),
+            "a wind-down intent that never completed did not close the run"
+        );
+        assert!(
+            matches!(
+                refine_ending(threw(), &[wind_down("started")]),
+                WorkflowRunEnding::Threw { .. }
+            ),
+            "a wind-down intent still in flight did not close the run"
         );
     }
 
@@ -25753,6 +27093,432 @@ protocol = "openai"
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_run_shows_worker_liveness_before_first_evidence_and_after_settlement() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (provider, parked, release) = ParkedFirstDeltaProvider::new();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let router = crate::server::build_router(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test gateway");
+        let address = listener.local_addr().expect("test gateway address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("serve test gateway");
+        });
+        let dispatch_window_opened_at = chrono::Utc::now();
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source:
+                    "return await Promise.all([agent('parked worker'), agent('streaming worker')]);"
+                        .into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: None,
+                    max_total_tokens: None,
+                    reserved_closing_tokens: None,
+                    max_concurrent_agent_calls: Some(2),
+                    per_route: Default::default(),
+                }),
+            }),
+        )
+        .await
+        .expect("start run");
+        let provider_dispatch_at = tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("worker reaches parked provider boundary")
+            .expect("provider park signal");
+
+        let client = reqwest::Client::new();
+        let run_url = format!("http://{address}/api/workflow-runs/{}", started.id);
+        let live = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let detail = client
+                    .get(&run_url)
+                    .send()
+                    .await
+                    .expect("request live detail")
+                    .error_for_status()
+                    .expect("live detail succeeds")
+                    .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+                    .await
+                    .expect("live detail deserialises");
+                let parked = detail
+                    .journal
+                    .iter()
+                    .find(|entry| entry.request["prompt"] == "parked worker")
+                    .and_then(|entry| entry.agent_call.as_ref())
+                    .and_then(|call| call.liveness.as_ref());
+                let streaming = detail
+                    .journal
+                    .iter()
+                    .find(|entry| entry.request["prompt"] == "streaming worker")
+                    .and_then(|entry| entry.agent_call.as_ref())
+                    .and_then(|call| call.liveness.as_ref());
+                if parked.is_some_and(|stamp| stamp.first_evidence_at.is_none())
+                    && streaming.is_some_and(|stamp| stamp.first_evidence_at.is_some())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            live.is_ok(),
+            "live API exposes distinct worker evidence states"
+        );
+
+        release.send(()).expect("release parked worker");
+        wait_for_terminal(&state, started.id).await;
+        let settled = client
+            .get(&run_url)
+            .send()
+            .await
+            .expect("request settled detail")
+            .error_for_status()
+            .expect("settled detail succeeds")
+            .json::<swage_protocol::client::workflow::WorkflowRunDetailResponse>()
+            .await
+            .expect("settled detail deserialises");
+        let liveness = settled
+            .journal
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .agent_call
+                    .as_ref()
+                    .and_then(|call| call.liveness.as_ref())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(liveness.len(), 2, "both calls persist liveness");
+        assert!(
+            liveness
+                .iter()
+                .all(|stamp| stamp.first_evidence_at.is_some())
+        );
+        let parked_liveness = settled
+            .journal
+            .iter()
+            .find(|entry| entry.request["prompt"] == "parked worker")
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("parked worker liveness");
+        assert!(
+            dispatch_window_opened_at <= parked_liveness.started_at
+                && parked_liveness.started_at <= provider_dispatch_at,
+            "started_at is captured between requesting and entering provider dispatch"
+        );
+        assert!(
+            provider_dispatch_at <= parked_liveness.first_evidence_at.expect("first evidence"),
+            "dispatch precedes the first provider evidence"
+        );
+        assert!(
+            state.active_workflow_workers.lock().await.is_empty(),
+            "settled success evicts every live overlay"
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("settled journal");
+        for entry in journal.iter().filter(|entry| entry.kind == "agent_call") {
+            assert!(
+                stored_worker_liveness(&storage, entry.id)
+                    .await
+                    .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+                "settled success stores its evidence stamps independently of the live overlay"
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_run_keeps_liveness_across_live_to_durable_handoff() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (provider, parked, release) = ParkedFirstDeltaProvider::new();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('parked worker');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), parked)
+            .await
+            .expect("worker reaches parked provider boundary")
+            .expect("provider park signal");
+
+        let pause = workflow_test_hook::install(started.id);
+        let detail_task = tokio::spawn(get_run(State(state.clone()), Path(started.id)));
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("workflow run detail test hook remains open")
+            .forget();
+        release.send(()).expect("release parked worker");
+        wait_for_terminal(&state, started.id).await;
+        assert!(
+            state.active_workflow_workers.lock().await.is_empty(),
+            "worker settles and evicts its live overlay while run detail is paused"
+        );
+        pause.release.add_permits(1);
+
+        let Json(detail) = detail_task
+            .await
+            .expect("join run detail request")
+            .expect("run detail succeeds");
+        let call = detail
+            .journal
+            .iter()
+            .find_map(|entry| entry.agent_call.as_ref())
+            .expect("agent call detail");
+        assert!(
+            call.liveness
+                .as_ref()
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "run detail uses durable liveness after the live overlay is evicted"
+        );
+    }
+
+    async fn stored_worker_liveness(
+        storage: &SqliteStorage,
+        entry_id: Uuid,
+    ) -> Option<swage_workflow::WorkerLiveness> {
+        let metadata = storage
+            .with_conn(move |connection| {
+                connection.query_row(
+                    "SELECT terminal_metadata_json FROM workflow_journal WHERE id = ?1",
+                    [entry_id.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .await
+            .expect("read durable terminal metadata")?;
+        let metadata: Value = serde_json::from_str(&metadata).expect("terminal metadata JSON");
+        serde_json::from_value(metadata.get("liveness")?.clone())
+            .expect("stored worker liveness shape")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_worker_persists_liveness_after_live_overlay_is_evicted() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(ScriptedRecordingProvider {
+                outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
+                    swage_core::StreamChunk::Error {
+                        message: "provider failed".into(),
+                    },
+                ]])),
+                requests: std::sync::Mutex::new(vec![]),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('failing worker', { maxAttempts: 1 });".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start failing run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("failed journal");
+        let failed = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("failed agent call");
+        assert_eq!(failed.status, "failed");
+        let stored_liveness = stored_worker_liveness(&storage, failed.id)
+            .await
+            .expect("failed call stores dispatch liveness");
+        assert_eq!(
+            stored_liveness.first_evidence_at, None,
+            "a provider failure before output has no evidence stamp"
+        );
+        assert!(
+            !state
+                .active_workflow_workers
+                .lock()
+                .await
+                .contains_key(&failed.id),
+            "failed call evicts its live overlay"
+        );
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("failed run detail");
+        let detail_liveness = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == failed.id)
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("failed run detail projects durable dispatch liveness");
+        assert_eq!(detail_liveness.first_evidence_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tool_start_is_worker_evidence_before_any_text() {
+        let (state, storage, _, space_id) = fallback_test_state_with_tools(
+            vec![
+                vec![
+                    swage_core::StreamChunk::ToolUse {
+                        call_id: "echo-1".into(),
+                        name: "echo".into(),
+                        arguments: serde_json::json!({"text": "work"}),
+                    },
+                    swage_core::StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![swage_core::StreamChunk::Error {
+                    message: "failed before text".into(),
+                }],
+            ],
+            vec![
+                Arc::new(crate::test_support::NamedTool::new("echo")) as Arc<dyn crate::tool::Tool>
+            ],
+        )
+        .await;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space_id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"return await agent("tool-only worker", { tools: ["echo"], maxAttempts: 1 });"#
+                    .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start tool-only run");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("tool-only journal");
+        let failed = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("tool-only agent call");
+        assert_eq!(failed.status, "failed");
+        assert!(
+            stored_worker_liveness(&storage, failed.id)
+                .await
+                .is_some_and(|stamp| stamp.first_evidence_at.is_some()),
+            "ToolStart stamps evidence before any text is emitted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_worker_persists_liveness_after_live_overlay_is_evicted() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let pending = Arc::new(Notify::new());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(PendingWithoutEvidenceProvider {
+                pending: Arc::clone(&pending),
+            }),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return await agent('cancelled worker');".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start cancellable run");
+        tokio::time::timeout(std::time::Duration::from_secs(2), pending.notified())
+            .await
+            .expect("worker reaches pending stream");
+        cancel_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("request cancellation");
+        wait_for_terminal(&state, started.id).await;
+
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("cancelled journal");
+        let cancelled = journal
+            .iter()
+            .find(|entry| entry.kind == "agent_call")
+            .expect("cancelled agent call");
+        assert_eq!(cancelled.status, "failed");
+        let stored_liveness = stored_worker_liveness(&storage, cancelled.id)
+            .await
+            .expect("cancelled call stores dispatch liveness");
+        assert_eq!(
+            stored_liveness.first_evidence_at, None,
+            "a worker cancelled before output has no evidence stamp"
+        );
+        assert!(
+            !state
+                .active_workflow_workers
+                .lock()
+                .await
+                .contains_key(&cancelled.id),
+            "cancelled call evicts its live overlay"
+        );
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("cancelled run detail");
+        let detail_liveness = detail
+            .journal
+            .iter()
+            .find(|entry| entry.id == cancelled.id)
+            .and_then(|entry| entry.agent_call.as_ref())
+            .and_then(|call| call.liveness.as_ref())
+            .expect("cancelled run detail projects durable dispatch liveness");
+        assert_eq!(detail_liveness.first_evidence_at, None);
+    }
+
     async fn wait_for_terminal(state: &AppState, id: Uuid) {
         tokio::time::timeout(std::time::Duration::from_secs(45), async {
             loop {
@@ -25820,6 +27586,574 @@ protocol = "openai"
         .expect("worker turn becomes interrupted");
     }
 
+    async fn recorded_terminal_account(storage: &SqliteStorage, run_id: Uuid) -> Value {
+        storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present")
+            .terminal_account
+            .expect("recorded terminal account")
+    }
+
+    async fn terminal_account_of(
+        storage: &SqliteStorage,
+        run_id: Uuid,
+    ) -> WorkflowRunTerminalAccount {
+        let record = storage
+            .get_workflow_run(run_id)
+            .await
+            .expect("run")
+            .expect("present");
+        let account = record
+            .terminal_account
+            .unwrap_or_else(|| panic!("run {run_id} recorded no terminal account"));
+        serde_json::from_value(account).expect("terminal account matches the recorded contract")
+    }
+
+    fn scripted_state(
+        storage: &Arc<SqliteStorage>,
+        outputs: Vec<Vec<swage_core::StreamChunk>>,
+    ) -> (AppState, Arc<ScriptedRecordingProvider>) {
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from(outputs)),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(storage) as Arc<dyn Storage>,
+            Arc::clone(storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        (state, provider)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn returned_run_accounts_its_workers_and_offers_no_partial_results() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (state, _provider) =
+            scripted_state(&storage, vec![scripted_text_output("survey reply")]);
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const survey = await agent("survey the ground", {agent: "default", label: "survey"});
+                    return { survey };
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let account = terminal_account_of(&storage, started.id).await;
+        assert_eq!(account.ending, WorkflowRunEnding::Returned);
+        assert_eq!(account.workers.done.len(), 1);
+        assert_eq!(account.workers.done[0].label.as_deref(), Some("survey"));
+        assert_eq!(
+            account.workers.done[0].agent_definition_id.as_deref(),
+            Some("default")
+        );
+        assert!(account.workers.done[0].termination.is_none());
+        assert!(account.workers.failed.is_empty());
+        assert!(account.workers.cut_short.is_empty());
+        assert!(account.workers.unsettled.is_empty());
+        assert!(
+            account.partial_results.is_none(),
+            "a run with a result of its own offers no partial results"
+        );
+
+        let Json(detail) = get_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(
+            detail.run.terminal_account.expect("account on run detail"),
+            account
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_terminal_account_write_failure_prevents_terminal_visibility() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        storage
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER reject_terminal_account
+                     BEFORE UPDATE OF terminal_account_json ON workflow_runs
+                     WHEN NEW.terminal_account_json IS NOT NULL
+                     BEGIN SELECT RAISE(FAIL, 'injected terminal account failure'); END;",
+                )
+            })
+            .await
+            .expect("install terminal account failure trigger");
+        let (state, _provider) = scripted_state(&storage, vec![]);
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: "return { settled: true };".into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let record = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(record.state, "interrupted");
+        assert!(record.terminal_account.is_none());
+        assert!(
+            record
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("injected terminal account failure")),
+            "{:?}",
+            record.error_message
+        );
+
+        let Json(detail) = get_run(State(state), Path(started.id))
+            .await
+            .expect("run detail");
+        assert_eq!(detail.run.state, WorkflowRunState::Interrupted);
+        assert!(detail.run.terminal_account.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_run_surfaces_its_completed_worker_as_a_partial_result() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (state, _provider) =
+            scripted_state(&storage, vec![scripted_text_output("survey findings")]);
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    await agent("survey the ground", {agent: "default", label: "survey"});
+                    throw new Error("the run failed after the survey");
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let account = terminal_account_of(&storage, started.id).await;
+        let WorkflowRunEnding::Threw { error } = &account.ending else {
+            panic!("unexpected ending: {:?}", account.ending);
+        };
+        assert!(error.contains("the run failed after the survey"), "{error}");
+        assert_eq!(account.workers.done.len(), 1);
+        assert_eq!(account.workers.done[0].label.as_deref(), Some("survey"));
+        assert!(account.workers.failed.is_empty());
+        let partial = account
+            .partial_results
+            .expect("a run that never returned offers its completed work");
+        assert!(
+            partial.reason.contains("failed before returning"),
+            "{}",
+            partial.reason
+        );
+        assert_eq!(partial.results.len(), 1);
+        assert_eq!(partial.results[0].label.as_deref(), Some("survey"));
+        assert_eq!(
+            partial.results[0].output,
+            Value::String("survey findings".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_run_accounts_for_the_worker_that_actually_failed() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let failure = "the survey provider rejected the request";
+        let (state, _provider) = scripted_state(
+            &storage,
+            vec![vec![swage_core::StreamChunk::Error {
+                message: failure.into(),
+            }]],
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    await agent("survey the ground", {
+                        agent: "default",
+                        label: "failed survey",
+                        maxAttempts: 1,
+                    });
+                "#
+                .into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let account = terminal_account_of(&storage, started.id).await;
+        assert!(matches!(account.ending, WorkflowRunEnding::Threw { .. }));
+        assert!(account.workers.done.is_empty());
+        assert_eq!(account.workers.failed.len(), 1);
+        let failed = &account.workers.failed[0];
+        assert_eq!(failed.label.as_deref(), Some("failed survey"));
+        assert!(
+            matches!(
+                &failed.termination,
+                Some(WorkflowWorkerTermination::Failed { message }) if message.contains(failure)
+            ),
+            "{:?}",
+            failed.termination
+        );
+        assert!(account.workers.cut_short.is_empty());
+        assert!(account.workers.unsettled.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_that_threw_under_wind_down_names_the_closing_boundary_as_its_ending() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (state, _provider) = scripted_state(
+            &storage,
+            vec![
+                scripted_text_output("first segment"),
+                scripted_text_output("second segment"),
+                scripted_text_output("third segment"),
+            ],
+        );
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const burst = [0, 1, 2, 3].map((i) =>
+                        agentStart(`work ${i}`, {agent: "default", label: `worker ${i}`})
+                    );
+                    await Promise.all(
+                        burst.map((handle) => handle.result.catch((error) => error.name))
+                    );
+                    throw new Error("stopped inside the closing partition");
+                "#
+                .into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: None,
+                    per_route: Default::default(),
+                    max_total_tokens: Some(14),
+                    reserved_closing_tokens: Some(8),
+                    max_concurrent_agent_calls: Some(3),
+                }),
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_terminal(&state, started.id).await;
+
+        let account = terminal_account_of(&storage, started.id).await;
+        let WorkflowRunEnding::WoundDown { error } = &account.ending else {
+            panic!("unexpected ending: {:?}", account.ending);
+        };
+        assert!(
+            error.contains("stopped inside the closing partition"),
+            "{error}"
+        );
+        assert_eq!(account.workers.done.len(), 3);
+        let partial = account
+            .partial_results
+            .expect("wind-down leaves recoverable work");
+        assert!(partial.reason.contains("wound down"));
+        assert_eq!(partial.results.len(), 3);
+        let mut outputs = partial
+            .results
+            .into_iter()
+            .map(|result| result.output.as_str().expect("text result").to_string())
+            .collect::<Vec<_>>();
+        outputs.sort();
+        assert_eq!(
+            outputs,
+            ["first segment", "second segment", "third segment"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_a_run_reads_its_in_flight_worker_as_cut_short_not_failed() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (state, provider) =
+            scripted_state(&storage, vec![scripted_text_output("finishing reply")]);
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: r#"
+                    const first = agentStart("finish this", {agent: "default", label: "finishing", maxAttempts: 1});
+                    await first.result;
+                    const second = agentStart("never answered", {agent: "default", label: "hanging", maxAttempts: 1});
+                    return await second.result;
+                "#
+                .into(),
+                args: Value::Null,
+                budget: Some(WorkflowBudget {
+                    max_agent_calls: Some(4),
+                    per_route: Default::default(),
+                    max_total_tokens: None,
+                    reserved_closing_tokens: None,
+                    max_concurrent_agent_calls: Some(2),
+                }),
+            }),
+        )
+        .await
+        .expect("start inline run");
+        wait_for_provider_requests(&provider, 2).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let journal = storage
+                    .list_workflow_journal(started.id)
+                    .await
+                    .expect("journal");
+                if journal
+                    .iter()
+                    .any(|entry| entry.kind == "agent_call" && entry.status == "completed")
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the answered worker completes");
+        cancel_run(State(state.clone()), Path(started.id))
+            .await
+            .expect("cancel the run");
+        wait_for_terminal(&state, started.id).await;
+
+        let account = terminal_account_of(&storage, started.id).await;
+        assert_eq!(account.ending, WorkflowRunEnding::Cancelled);
+        assert_eq!(
+            account
+                .workers
+                .done
+                .iter()
+                .map(|worker| worker.label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("finishing")]
+        );
+        assert_eq!(
+            account
+                .workers
+                .cut_short
+                .iter()
+                .map(|worker| worker.label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("hanging")],
+            "the worker the cancellation caught in flight is cut short, not failed"
+        );
+        assert!(
+            matches!(
+                account.workers.cut_short[0].termination,
+                Some(WorkflowWorkerTermination::CutShort { .. })
+            ),
+            "{:?}",
+            account.workers.cut_short[0].termination
+        );
+        assert!(account.workers.failed.is_empty());
+        let partial = account
+            .partial_results
+            .expect("cancelled run's recovered work");
+        assert_eq!(partial.results.len(), 1);
+        assert_eq!(
+            partial.results[0].output,
+            Value::String("finishing reply".into())
+        );
+
+        // The recorded blob is the wire shape, tag and all: a later reader
+        // parses it back through the protocol contract, never by guesswork.
+        let recorded = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present")
+            .terminal_account
+            .expect("recorded account");
+        assert_eq!(recorded["ending"]["ending"], "cancelled");
+        assert_eq!(
+            recorded["workers"]["cut_short"][0]["termination"]["termination"],
+            "cut_short"
+        );
+        assert_eq!(
+            recorded["workers"]["cut_short"][0]["termination"]["cause"],
+            "run_cancelled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_the_gateway_could_not_resume_accounts_for_itself_without_settling_anything() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        // A run with neither source nor script version cannot be relaunched:
+        // it stands in for the run whose gateway died under it.
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: None,
+                source_hash: source_hash(""),
+                args: Value::Null,
+                budget: Value::Null,
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        let request =
+            serde_json::json!({"prompt": "in flight", "label": "in flight", "agent": "default"});
+        storage
+            .create_workflow_journal_intent(NewWorkflowJournalIntent {
+                run_id: run.id,
+                seq: 0,
+                kind: "agent_call".into(),
+                args_hash: journal_args_hash(&request),
+                request,
+                effect_kind: None,
+                idempotency_key: None,
+                target_kind: None,
+            })
+            .await
+            .expect("in-flight worker");
+        storage
+            .update_workflow_run_state(run.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt the run");
+        let (state, _provider) = scripted_state(&storage, vec![]);
+
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+
+        let account = terminal_account_of(&storage, run.id).await;
+        let WorkflowRunEnding::InterruptedWithoutResume { reason } = &account.ending else {
+            panic!("unexpected ending: {:?}", account.ending);
+        };
+        assert!(!reason.is_empty());
+        assert_eq!(account.workers.unsettled.len(), 1);
+        assert_eq!(
+            account.workers.unsettled[0].label.as_deref(),
+            Some("in flight")
+        );
+        assert_eq!(
+            account.workers.unsettled[0].termination,
+            Some(WorkflowWorkerTermination::Unsettled)
+        );
+        assert!(account.workers.cut_short.is_empty());
+        // Nothing was alive to settle this worker, and the account does not
+        // pretend otherwise: its journal entry is left exactly as found.
+        let entry = storage
+            .list_workflow_journal(run.id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .next()
+            .expect("journal entry");
+        assert_eq!(entry.status, "started");
+        assert_eq!(entry.error_message, None);
+        // Resume policy is untouched: the run's own state did not move.
+        assert_eq!(
+            storage
+                .get_workflow_run(run.id)
+                .await
+                .expect("run")
+                .expect("present")
+                .state,
+            "interrupted"
+        );
+        // The run stays owed on every later wake pass, and each pass fails to
+        // relaunch it again — but a run ends once, so the account it ended
+        // with is the account it keeps rather than one re-settled at each
+        // tick's instant.
+        let first = recorded_terminal_account(&storage, run.id).await;
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(resume_owed_workflow_runs(&state).await, 0);
+        assert_eq!(
+            recorded_terminal_account(&storage, run.id).await,
+            first,
+            "a later recovery pass re-settled the account it had already written"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_detail_rejects_a_terminal_account_outside_the_contract() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let (state, _provider) = scripted_state(&storage, vec![]);
+        // A run that has recorded no account of its own, so the blob under
+        // test is the only one the projection can read.
+        let run = storage
+            .create_workflow_run(NewWorkflowRun {
+                space_id: space.id,
+                parent_run_id: None,
+                parent_seq: None,
+                script_version_id: None,
+                inline_workflow_id: None,
+                inline_workflow_name: None,
+                inline_workflow_version: None,
+                carrying_skill: None,
+                task: None,
+                source: None,
+                source_hash: source_hash(""),
+                args: Value::Null,
+                budget: Value::Null,
+                engine_version: "test".into(),
+                dispatch_bound_agent_ids: vec![],
+                dispatch_bound_task_definition_ids: vec![],
+                workflow_call_tools: None,
+                inherited_worker_placement: None,
+            })
+            .await
+            .expect("run");
+        storage
+            .set_workflow_run_terminal_account(
+                run.id,
+                serde_json::json!({"ending": {"ending": "evaporated"}}),
+            )
+            .await
+            .expect("write an out-of-contract account");
+
+        let error = get_run(State(state.clone()), Path(run.id))
+            .await
+            .expect_err("an out-of-contract account is refused, never projected");
+        assert!(
+            error
+                .to_string()
+                .contains("terminal account does not match the recorded contract"),
+            "{error}"
+        );
+    }
     async fn wait_for_open_worker_round(storage: &SqliteStorage) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -26724,6 +29058,7 @@ protocol = "openai"
             only_agent_call(&detail).termination,
             WorkflowWorkerTermination::CutShort {
                 cause: WorkflowCutShortCause::RunCancelled,
+                detail: Some(CANCELLED_JOURNAL_SETTLEMENT.into()),
             }
         );
         assert_eq!(
@@ -26858,6 +29193,7 @@ protocol = "openai"
             call.termination,
             WorkflowWorkerTermination::CutShort {
                 cause: WorkflowCutShortCause::RunCancelled,
+                detail: Some(CANCELLED_JOURNAL_SETTLEMENT.into()),
             }
         );
         assert_eq!(

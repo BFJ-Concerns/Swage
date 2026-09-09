@@ -60,6 +60,9 @@ pub struct AppState {
     pub active_turns: Arc<AsyncMutex<HashMap<Uuid, CancellationToken>>>,
     /// Detached workflow runs addressable by run id for cancellation.
     pub active_workflow_runs: Arc<AsyncMutex<HashMap<Uuid, CancellationToken>>>,
+    /// In-memory liveness evidence for workflow workers which have not yet
+    /// written their terminal journal result.
+    pub active_workflow_workers: Arc<AsyncMutex<HashMap<Uuid, swage_workflow::WorkerLiveness>>>,
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
     pub active_connections: Arc<AsyncMutex<HashSet<Uuid>>>,
@@ -322,6 +325,7 @@ impl AppState {
             config: config.clone(),
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_workflow_runs: Arc::new(AsyncMutex::new(HashMap::new())),
+            active_workflow_workers: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
             tool_dispatcher: tool_dispatcher.clone(),
             activity_tracker: Arc::new(ActivityTracker::new()),

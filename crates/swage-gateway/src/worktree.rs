@@ -37,9 +37,26 @@ pub struct WorktreeRecoveryClaims {
     pub retained_paths: HashSet<PathBuf>,
 }
 
+/// Names the placements a run's terminal account points a reader at. The
+/// marker sits in the owner's directory beside the worker directories, never
+/// inside one, so a worker's own git worktree stays clean.
+const RETAINED_PLACEMENTS_MARKER: &str = ".retained-placements";
+
 pub struct WorktreeHost {
     config: WorktreeConfig,
     inner: Mutex<HashMap<(Uuid, u64), ProvisionedWorktree>>,
+    retained: Mutex<HashMap<PathBuf, HashSet<Uuid>>>,
+}
+
+/// One caller's contribution to a run's retained-placement marker.
+///
+/// Several generations can briefly claim the same run while a parked-state
+/// transition races. Withdrawing one claim must therefore remove only that
+/// claimant's interest, leaving the marker and in-memory retention in place
+/// for whichever generation actually ended the run.
+pub struct RetainedPlacementClaim {
+    claimant_id: Uuid,
+    paths: Vec<PathBuf>,
 }
 
 impl WorktreeHost {
@@ -47,7 +64,103 @@ impl WorktreeHost {
         Self {
             config,
             inner: Mutex::new(HashMap::new()),
+            retained: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Keep the placements a run's terminal account names.
+    ///
+    /// A run that ended without returning offers its unfinished work through
+    /// the directory each worker ran in, so that directory has to outlive
+    /// both this gateway's shutdown and the next one's reclaim sweep. The
+    /// claim is durable — a marker beside the worker directories — because
+    /// the process that wrote the account is rarely the process a reader
+    /// comes back to.
+    pub async fn retain(&self, owner_id: Uuid, paths: &[String]) -> Option<RetainedPlacementClaim> {
+        if paths.is_empty() {
+            return None;
+        }
+        let paths = paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let claimant_id = Uuid::new_v4();
+        let mut retained = self.retained.lock().await;
+        let mut claims = HashMap::<PathBuf, HashSet<PathBuf>>::new();
+        for path in &paths {
+            let owner_root = self.owner_root_for(owner_id, path);
+            if path.starts_with(&owner_root) {
+                claims.entry(owner_root).or_default().insert(path.clone());
+            }
+        }
+        for (owner_root, claimed) in claims {
+            if !owner_root.is_dir() {
+                continue;
+            }
+            let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
+            for path in read_retained_placements(&marker).await {
+                retained.entry(path).or_default().insert(Uuid::nil());
+            }
+            for path in claimed {
+                retained.entry(path).or_default().insert(claimant_id);
+            }
+            write_retained_placements(
+                &marker,
+                retained.keys().filter(|path| path.starts_with(&owner_root)),
+            )
+            .await;
+        }
+        Some(RetainedPlacementClaim { claimant_id, paths })
+    }
+
+    /// Withdraw one proposed claim without disturbing a winning generation's
+    /// claim for the same placements.
+    pub async fn withdraw(&self, owner_id: Uuid, claim: RetainedPlacementClaim) {
+        let mut retained = self.retained.lock().await;
+        let mut owner_roots = HashSet::new();
+        for path in claim.paths {
+            let owner_root = self.owner_root_for(owner_id, &path);
+            owner_roots.insert(owner_root);
+            if let Some(claimants) = retained.get_mut(&path) {
+                claimants.remove(&claim.claimant_id);
+                if claimants.is_empty() {
+                    retained.remove(&path);
+                }
+            }
+        }
+        for owner_root in owner_roots {
+            let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
+            write_retained_placements(
+                &marker,
+                retained.keys().filter(|path| path.starts_with(&owner_root)),
+            )
+            .await;
+        }
+    }
+
+    /// Withdraw every durable placement claim for an owner whose run returned.
+    pub async fn release(&self, owner_id: Uuid) {
+        let owner_root = self.config.root.join(owner_id.to_string());
+        let marker = owner_root.join(RETAINED_PLACEMENTS_MARKER);
+        let claimed = read_retained_placements(&marker).await;
+        self.retained
+            .lock()
+            .await
+            .retain(|path, _| !claimed.contains(path));
+        match tokio::fs::remove_file(&marker).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                path = %marker.display(),
+                %error,
+                "could not release the run's retained placement claims"
+            ),
+        }
+    }
+
+    fn owner_root_for(&self, owner_id: Uuid, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.config.root)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .map(|owner| self.config.root.join(owner.as_os_str()))
+            .unwrap_or_else(|| self.config.root.join(owner_id.to_string()))
     }
 
     pub async fn provision(
@@ -224,6 +337,19 @@ impl WorktreeHost {
                 continue;
             }
             let owner_path = owner.path();
+            // A placement a terminal account claimed outlives the gateway
+            // that wrote the account: the claim is read back here so this
+            // process both leaves it alone and honours it in its own cleanup.
+            let retained =
+                read_retained_placements(&owner_path.join(RETAINED_PLACEMENTS_MARKER)).await;
+            self.retained.lock().await.extend(
+                retained
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, HashSet::from([Uuid::nil()]))),
+            );
+            let mut retained_paths = claims.retained_paths.clone();
+            retained_paths.extend(retained);
             let mut workers = match tokio::fs::read_dir(&owner_path).await {
                 Ok(workers) => workers,
                 Err(error) => {
@@ -265,9 +391,7 @@ impl WorktreeHost {
                         continue;
                     }
                 };
-                if claims.retained_paths.contains(&path)
-                    || claims.retained_paths.contains(&canonical_path)
-                {
+                if retained_paths.contains(&path) || retained_paths.contains(&canonical_path) {
                     continue;
                 }
                 let listed = match Command::new(git)
@@ -310,13 +434,20 @@ impl WorktreeHost {
         Ok(recovered)
     }
 
+    /// Reclaim an owner's worktrees, except the placements a terminal account
+    /// has claimed. A claimed placement keeps its entry in the map as well as
+    /// its directory on disk: it is still a worktree this host provisioned,
+    /// and the account names it for a reader who has not read it yet.
     pub async fn cleanup_owner(&self, owner_id: Uuid) {
+        let retained = self.retained.lock().await.clone();
         let resources = {
             let mut inner = self.inner.lock().await;
             let keys = inner
-                .keys()
-                .filter(|(id, _)| *id == owner_id)
-                .copied()
+                .iter()
+                .filter(|((id, _), worktree)| {
+                    *id == owner_id && !retained.contains_key(&worktree.path)
+                })
+                .map(|(key, _)| *key)
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| inner.remove(&key))
@@ -339,6 +470,46 @@ impl WorktreeHost {
         for owner_id in owner_ids {
             self.cleanup_owner(owner_id).await;
         }
+    }
+}
+
+/// The placements claimed in one owner's marker, or none where no claim has
+/// been written — an owner with nothing to keep reads the same as an owner
+/// whose marker cannot be read, and both leave the ordinary sweep in charge.
+async fn read_retained_placements(marker: &Path) -> HashSet<PathBuf> {
+    match tokio::fs::read_to_string(marker).await {
+        Ok(claimed) => claimed
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(error) => {
+            tracing::warn!(path = %marker.display(), %error, "cannot read retained placement claims");
+            HashSet::new()
+        }
+    }
+}
+
+async fn write_retained_placements<'a>(marker: &Path, paths: impl Iterator<Item = &'a PathBuf>) {
+    let mut lines = paths
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    lines.sort();
+    let result = if lines.is_empty() {
+        tokio::fs::remove_file(marker).await
+    } else {
+        tokio::fs::write(marker, lines.join("\n") + "\n").await
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if lines.is_empty() && error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            path = %marker.display(),
+            %error,
+            "could not update the run's retained placement claims on disk"
+        ),
     }
 }
 
@@ -394,48 +565,44 @@ async fn remove_worktree(repo: &Path, path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn finalises_changed_and_unchanged_worktrees_differently() {
-        let temp = tempfile::tempdir().unwrap();
-        let repo = temp.path().join("repo");
-        tokio::fs::create_dir(&repo).await.unwrap();
+    /// A one-commit git repository for worktrees to be cut from.
+    async fn seed_repo(repo: &Path) {
+        tokio::fs::create_dir(repo).await.unwrap();
         for args in [
             &["init"][..],
             &["config", "user.email", "test@example.invalid"][..],
             &["config", "user.name", "Test"][..],
         ] {
-            assert!(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
+            assert!(git(repo, args).await);
         }
         tokio::fs::write(repo.join("seed"), "seed").await.unwrap();
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["add", "seed"])
-                .status()
-                .await
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["commit", "-m", "seed"])
-                .status()
-                .await
-                .unwrap()
-                .success()
-        );
+        assert!(git(repo, &["add", "seed"]).await);
+        assert!(git(repo, &["commit", "-m", "seed"]).await);
+    }
+
+    #[tokio::test]
+    async fn finalises_changed_and_unchanged_worktrees_differently() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        seed_repo(&repo).await;
+    }
+
+    async fn git(repo: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .await
+            .unwrap()
+            .success()
+    }
+
+    #[tokio::test]
+    async fn provisions_isolated_siblings_and_lists_then_removes_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        seed_repo(&repo).await;
         let config = WorktreeConfig {
             root: temp.path().join("worktrees"),
         };
@@ -497,44 +664,7 @@ mod tests {
     async fn restart_recovers_registered_worktrees_for_retained_terminal_owners() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
-        tokio::fs::create_dir(&repo).await.unwrap();
-        for args in [
-            &["init"][..],
-            &["config", "user.email", "test@example.invalid"][..],
-            &["config", "user.name", "Test"][..],
-        ] {
-            assert!(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .await
-                    .unwrap()
-                    .success()
-            );
-        }
-        tokio::fs::write(repo.join("seed"), "seed").await.unwrap();
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["add", "seed"])
-                .status()
-                .await
-                .unwrap()
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["commit", "-m", "seed"])
-                .status()
-                .await
-                .unwrap()
-                .success()
-        );
+        seed_repo(&repo).await;
         let config = WorktreeConfig {
             root: temp.path().join("worktrees"),
         };
@@ -593,6 +723,105 @@ mod tests {
                 .count(),
             1,
             "recovery must remove registrations as well as directories"
+        );
+    }
+
+    #[tokio::test]
+    async fn returned_owner_releases_a_claim_recovered_from_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        seed_repo(&repo).await;
+        let config = WorktreeConfig {
+            root: temp.path().join("worktrees"),
+        };
+        let owner = Uuid::new_v4();
+        let path;
+        {
+            let host = WorktreeHost::new(config.clone());
+            path = host.provision(owner, 0, &repo).await.unwrap();
+            host.retain(owner, &[path.path.to_string_lossy().into_owned()])
+                .await;
+        }
+
+        let restarted = WorktreeHost::new(config.clone());
+        restarted
+            .recover(&WorktreeRecoveryClaims::default())
+            .await
+            .expect("recover retained placement");
+        assert!(path.path.exists(), "the durable claim survives recovery");
+        restarted
+            .restore(owner, 0, &repo, &path.path, Some(path.base_commit.clone()))
+            .await
+            .unwrap();
+        restarted.release(owner).await;
+        restarted.cleanup_owner(owner).await;
+        assert!(
+            !path.path.exists(),
+            "a returned owner no longer retains its placement"
+        );
+        assert!(
+            !config
+                .root
+                .join(owner.to_string())
+                .join(RETAINED_PLACEMENTS_MARKER)
+                .exists(),
+            "releasing a returned owner removes the durable claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_placements_outlive_shutdown_and_the_next_startup_sweep() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        seed_repo(&repo).await;
+        let config = WorktreeConfig {
+            root: temp.path().join("worktrees"),
+        };
+        let host = WorktreeHost::new(config.clone());
+        let claimed_owner = Uuid::new_v4();
+        let swept_owner = Uuid::new_v4();
+        let claimed = host.provision(claimed_owner, 0, &repo).await.unwrap();
+        let alongside = host.provision(claimed_owner, 1, &repo).await.unwrap();
+        let swept = host.provision(swept_owner, 0, &repo).await.unwrap();
+
+        let terminal_run = Uuid::new_v4();
+        host.retain(terminal_run, &[claimed.path.to_string_lossy().into_owned()])
+            .await;
+        host.shutdown().await;
+
+        assert!(
+            claimed.path.exists(),
+            "shutdown must keep a placement a terminal account claimed"
+        );
+        assert!(
+            !alongside.path.exists() && !swept.path.exists(),
+            "shutdown must still reclaim every unclaimed placement"
+        );
+
+        let restarted = WorktreeHost::new(config);
+        assert_eq!(
+            restarted
+                .recover(&WorktreeRecoveryClaims::default())
+                .await
+                .unwrap(),
+            0,
+            "the next startup's sweep must reclaim nothing that was claimed"
+        );
+        assert!(claimed.path.exists());
+        restarted
+            .restore(
+                claimed_owner,
+                0,
+                &repo,
+                &claimed.path,
+                Some(claimed.base_commit.clone()),
+            )
+            .await
+            .unwrap();
+        restarted.cleanup_owner(claimed_owner).await;
+        assert!(
+            claimed.path.exists(),
+            "a claim read back from disk governs the restarted gateway's cleanup too"
         );
     }
 

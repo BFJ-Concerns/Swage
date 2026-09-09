@@ -237,6 +237,7 @@ describe("AppLayout shell navigation", () => {
       component = undefined;
     }
     document.body.replaceChildren();
+    vi.restoreAllMocks();
   });
 
   it("shows the space picker before a space is selected", () => {
@@ -252,6 +253,23 @@ describe("AppLayout shell navigation", () => {
     expect(document.querySelector(".conversation-list")).not.toBeNull();
     expect(document.querySelector('[aria-label="Conversation messages"]')).not.toBeNull();
     expect(document.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+  });
+
+  it("loads one shared record for the workflow run account and journal", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 404 }));
+    component = mountLayout({ routePath: "/workflow-runs/run%201" });
+
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run%201");
+    await vi.waitFor(() => {
+      expect(document.querySelectorAll(".workflow-run .notice, .workflow-run .status"))
+        .toHaveLength(2);
+    });
+    expect(document.querySelector(".workflow-run")?.textContent).not.toContain("HTTP 404");
   });
 
   it("offers the shipped default and effective definitions when starting a conversation", () => {

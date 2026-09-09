@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, image attachments, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, and route handling
+description: Network binding, the web UI's context inspector, image attachments and reference admission, pages, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -95,28 +95,32 @@ where each entry is a tagged content part. The only attachment kind today is
 `image_url` — an image addressed by a URL (either `https://` or a `data:`
 URL carrying the bytes inline).
 
-The gateway checks whether the configured provider can consume image parts
-before anything is persisted. If the provider's protocol does not support
-vision, the turn is refused immediately rather than the image being silently
-dropped.
+The gateway checks two things before anything is persisted: whether the
+configured provider supports vision at all, and whether it can resolve the
+specific URL form the client submitted. A provider that does not support
+vision refuses the turn outright. A provider that supports vision but
+cannot resolve the reference — for example, a web URL sent to a Google
+provider that only accepts inline data or Google File API URIs — is also
+refused, with a message advising a base64 `data:` URL instead. Both checks
+return a 422 validation error before the turn reaches the database.
 
-Which protocols accept images depends on whether the provider adapter
-actually maps image content parts to the wire body. At this tree, only two
-protocols claim vision:
+Which protocols accept images, and which URL forms they accept:
 
-| Protocol | Vision | Notes |
+| Protocol | Vision | Accepted references |
 |---|---|---|
-| Chat Completions (`openai`) | Yes | Maps image parts as typed content arrays |
-| OpenRouter | Yes | Uses the same Chat Completions adapter |
-| OpenAI Responses | No | Text parts only in the current adapter |
-| Anthropic | No | Text parts only in the current adapter |
-| Google | No | Text parts only in the current adapter |
-| Codex | No | Assembled text only |
+| Chat Completions (OpenAI) | Yes | Any `https` or `data:` URL |
+| OpenRouter | Yes | Any `https` or `data:` URL (same adapter) |
+| OpenAI Responses | Yes | Any `https` or `data:` URL |
+| Anthropic | Yes | Any `https` or `data:` URL |
+| Google | Yes | `data:` URLs (carried inline) and Google File API URIs; ordinary web URLs are refused |
+| Codex | No | — |
 
-When an image is present, the Chat Completions adapter sends the message
-content as a JSON array of typed parts rather than a plain string, keeping
-text-only messages in the original string form. Stored messages carry their
-attachments as records that survive round-trips through the API.
+When an image is present, each adapter converts it to the provider's native
+wire format — a typed content array for Chat Completions, an `input_image`
+part for OpenAI Responses, an `image` block for Anthropic, and `inlineData`
+or `fileData` for Google. Text-only messages keep the plain string form.
+Stored messages carry their attachments as records that survive round-trips
+through the API.
 
 ## Provider credentials
 
@@ -186,6 +190,72 @@ tool manages itself. The Codex CLI keeps its ChatGPT OAuth tokens in an
 gateway registers the Codex access and refresh tokens as file-backed secrets
 pointing into that document, so they resolve, audit, and redact through the
 governed system without being copied out of the CLI's own store.
+
+## Pages
+
+Pages are work surfaces inside a space, assembled from ordered module
+instances. An agent or workflow can write to a page's modules, and users
+can annotate individual modules with notes.
+
+### Templates
+
+A page template is a reusable shape — a named list of module rows in a
+fixed order. Creating a page with `template_id` set seeds the new page's
+modules from the template. The seeded modules belong to the page from that
+point on: the template is recorded as the fork's origin (visible as
+`forked_from_template_id` on the page), but later template edits do not
+propagate to pages that were forked from it.
+
+### Annotations
+
+Annotations are notes attached to individual modules of a page. Each note
+carries a body and optional tags. Updating an annotation replaces its body
+and tags together; the prior text is preserved in the page's provenance
+trail. Deleting an annotation removes it permanently.
+
+Annotation addresses stop at module grain: there is no way to annotate the
+page as a whole or a position inside a module's content.
+
+### Work-surface reconnect
+
+When a WebSocket connection to a page's work surface drops and reconnects,
+the page state is refetched to pick up any writes that landed while
+disconnected.
+
+## Delivery targets
+
+A run's output can be routed to one or more destinations. The four target
+kinds are: an external channel (Telegram, dev DM or thread), the gateway's
+local store (as a log record), a page in the run's own space, and a
+webhook URL. Setting `store_local_output` on the routing request adds a
+local-storage target alongside any explicit targets.
+
+### No-delivery records
+
+When a schedule run produces no output delivery, the gateway records a
+no-delivery entry so the run history accounts for every tick. Three
+outcomes produce this record:
+
+- **Gate skip** — the gate model decided no work was needed. The run is
+  marked `skipped` with skip reason `gate`.
+- **Overlap skip** — a previous run was still executing when this run came
+  due. The run is marked `skipped` with skip reason `overlap`.
+- **Failure before delivery** — the run failed before delivery was
+  attempted. The run is marked `failed` with an error message describing
+  the failure.
+
+A run that fails after delivery has already been attempted does not
+receive a no-delivery record — the delivery records themselves account
+for it.
+
+## Device registration
+
+Remote devices register through `POST /api/devices/register`. The `kind` field on a
+registration request names the device type and defaults to
+`attached_device`. Registering a device with kind `local` is refused —
+a local device has no remote producer to register. The same constraint
+applies to recovery imports, so the remote-device registry never holds a
+local entry.
 
 ## API error contract
 
@@ -361,3 +431,45 @@ interface — four members rather than a coupling to the store's internals.
 Disconnecting the WebSocket is part of clearing the active conversation, so
 browser navigation to a deleted conversation does not leave an orphaned
 connection.
+
+## Gateway tools
+
+The gateway ships a set of built-in tools that agents call during turns. Most
+tools execute directly in the gateway process, bypassing the bubblewrap sandbox
+(`requires_device_execution: true` in the `Tool` trait). Two exceptions —
+`shell` and `memory` — are sandbox-eligible and run through the sandbox when
+one is available.
+
+**Filesystem and shell** — `file_read`, `file_write`, `file_edit`, `file_list`,
+`file_search`, `shell`, and `python_execute`. Of these, `shell` is one of the
+two sandbox-eligible tools.
+
+**Browser** — `browser_navigate`, `browser_snapshot`, `browser_click`,
+`browser_type`, `browser_select`, and `browser_scroll`.
+
+**Knowledge base** — `knowledge_search`, `knowledge_record`, `knowledge_curate`,
+`knowledge_cite`, `knowledge_orient`, and `knowledge_curate_orientation`.
+
+**Workflow** — `workflow_run` (start a workflow), `workflow_list` (list saved
+scripts), `workflow_save` (save a script), `workflow_run_status` (list the
+space's runs that have not ended with the events each is waiting on, or read
+one run in any state), and `workflow_run_account` (read a run's terminal
+account — see
+[Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
+`workflow_run_status` and `workflow_run_account` are scoped to the caller's
+session space: a run in another space reads as absent rather than forbidden.
+
+**Pages and delivery** — `page_read`, `page_write`, and `run_event_post`.
+
+**Scheduling** — `schedule` and `wake_me_later`.
+
+**Session and memory** — `session_values`, `agent_memory`, `tool_result_read`,
+`task_definition`, and `memory`. Of these, `memory` is one of the two
+sandbox-eligible tools.
+
+**Delegation** — `delegate` dispatches a child turn to a named agent definition.
+
+**External** — `url_fetch` and `web_search`.
+
+Operators can register additional tools through plugins; plugin tool names come
+from the plugin manifest rather than the gateway's built-in set.
