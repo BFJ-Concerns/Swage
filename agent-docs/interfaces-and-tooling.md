@@ -505,6 +505,7 @@ two sandbox-eligible tools.
 | `workflow_list` | `workflow_list.rs` |
 | `workflow_save` | `workflow_save.rs` |
 | `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session space; a run in another space reads as absent. |
+| `workflow_run_status` | `workflow_run_status.rs` — lists the space's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same space scoping as `workflow_run_account`. |
 
 ### Pages and delivery
 

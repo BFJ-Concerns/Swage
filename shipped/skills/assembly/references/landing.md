@@ -55,11 +55,13 @@ build's integration lane until promotion:
   opened a `WIP:` promotion PR (structural branch → main) at handover; it
   stands red while obligations remain, and its number is recorded in the
   ledger header. When the ledger is drained — every record `proven` or
-  `waived`, the assembled-whole estate result in evidence — de-WIP and
-  **merge the promotion PR yourself**. This is the stated exception to
-  the rule below that you never merge: the autonomous review system never
-  reviews or merges structural PRs, so this merge is the assembly seat's
-  own release act, gated on the drained ledger, and journalled. Before
+  `waived`, the assembled-whole estate result in evidence — the branch
+  goes to the QA campaign, and the campaign's merge-ready close is what
+  de-WIPs and merges the promotion PR (SKILL.md, *Handing Off to the
+  Campaign*). The autonomous review system never reviews or merges
+  structural PRs, so that merge is a seat's own release act, gated on the
+  drained ledger and the campaign's recommendation, and journalled by
+  whichever seat performs it. Before
   taking the estate result, freeze the lane — no unit merges into the
   structural branch afterwards — and check reachability: every commit a
   `proven` obligation's evidence points at must be reachable from the
@@ -354,7 +356,8 @@ run's evidence and does not wait for it.
   reason where its unit was abandoned.
 - **A de-WIPed PR belongs to the autonomous PR-review system** — never
   merged by you or a worker. The one exception is the promotion PR
-  (*PR-Mode Topology*, above), which that system never touches.
+  (*PR-Mode Topology*, above), which that system never touches and the
+  QA campaign's close merges.
 - **Merge order is wired, not narrated**: a stacked dependent's ordering
   is already carried by its PR target (*Stack Rulings*, above); an
   ordering targeting cannot express (an estate PR composing others'
