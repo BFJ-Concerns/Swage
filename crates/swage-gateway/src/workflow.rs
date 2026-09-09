@@ -1886,12 +1886,21 @@ impl ChannelWorkflowHost {
     }
 }
 
+/// Close admission for a durable park, unless work is already queued for the
+/// loop. A command taken off the channel but not yet dispatched — one a
+/// failed park attempt handed back — is as much queued work as one still on
+/// the channel: parking over it would dispatch it into a parked run, and the
+/// wake's replay would then run it a second time.
 fn begin_host_park(
     admission: &StdMutex<HostCommandAdmission>,
     commands: &mpsc::UnboundedReceiver<HostCommand>,
+    deferred_commands: &std::collections::VecDeque<HostCommand>,
 ) -> bool {
     let mut admission = admission.lock().expect("host command admission");
-    if matches!(admission.state, HostCommandAdmissionState::Open) && commands.is_empty() {
+    if matches!(admission.state, HostCommandAdmissionState::Open)
+        && commands.is_empty()
+        && deferred_commands.is_empty()
+    {
         admission.state = HostCommandAdmissionState::Parking;
         true
     } else {
@@ -5506,7 +5515,7 @@ async fn run_host_commands_inner(
                 if effective_ms >= park_threshold_ms
                     && pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
-                    && begin_host_park(&admission, &commands)
+                    && begin_host_park(&admission, &commands, &deferred_commands)
                 {
                     let park_result = state.storage.set_workflow_run_parked(run_id, due).await;
                     deferred_commands.extend(finish_host_park(&admission, park_result.is_ok()));
@@ -5873,7 +5882,7 @@ async fn run_host_commands_inner(
                 if pending_timers.is_empty()
                     && in_flight.load(Ordering::SeqCst) == 0
                     && !answered_concurrent_hold
-                    && begin_host_park(&admission, &commands)
+                    && begin_host_park(&admission, &commands, &deferred_commands)
                 {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
                     #[cfg(test)]
@@ -6954,27 +6963,36 @@ async fn complete_event_post(
 /// when a park guard refused — a parked run is woken by the answer itself.
 const HOLD_WATCH_INTERVAL_MS: u64 = 200;
 
-/// Whether this replayed hold has an answered sibling that was raised in the
-/// same generation. The answer is runnable work: keeping the engine alive
-/// lets it reach the script and win any concurrent composition it belongs to.
-/// A new hold raised after replaying a sequential answer is not concurrent
-/// with it and can park normally. Storage uncertainty refuses the durable
-/// park because parking could hide a valid answer behind an open sibling.
+/// Whether this replayed hold has an answered sibling that was open alongside
+/// it. The answer is runnable work: keeping the engine alive lets it reach
+/// the script and win any concurrent composition it belongs to. A sibling
+/// settled before this hold was raised is sequential, not concurrent — its
+/// answer already reaches the script through its own completed entry, so a
+/// hold raised after it can park normally. Storage uncertainty refuses the
+/// durable park because parking could hide a valid answer behind an open
+/// sibling.
 async fn replay_has_answered_concurrent_hold(
     state: &AppState,
     run_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
 ) -> bool {
-    if !replay
+    let Some(current) = replay
         .iter()
-        .any(|entry| entry.seq == current_seq && entry.kind == "hold")
-    {
+        .find(|entry| entry.seq == current_seq && entry.kind == "hold")
+    else {
         return false;
-    }
+    };
+    let settled_before_this_hold = |entry: &WorkflowJournalRecord| {
+        entry.status == "completed"
+            && entry
+                .completed_at
+                .is_some_and(|completed_at| completed_at <= current.started_at)
+    };
     let sibling_hold_entries = replay
         .iter()
         .filter(|entry| entry.seq != current_seq && entry.kind == "hold")
+        .filter(|entry| !settled_before_this_hold(entry))
         .map(|entry| entry.id)
         .collect::<std::collections::HashSet<_>>();
     if sibling_hold_entries.is_empty() {
@@ -18264,6 +18282,108 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let space = storage.get_or_create_default().await.expect("space");
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let source = r#"
+            const first = await hold({ content: "Choose the release channel", verdicts: ["stable", "beta"] });
+            const second = await hold({ content: "Choose the announcement", verdicts: ["publish", "quiet"] });
+            return { first: first.verdict, second: second.verdict };
+        "#;
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(space.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start sequentially held run");
+        wait_for_run_state(&storage, started.id, "parked").await;
+        wait_for_active_workflow_run_release(&state, started.id).await;
+        let first_id = wait_for_open_hold(&storage, started.id).await;
+        answer_run_hold(
+            &state,
+            AnswerWorkflowRunHoldRequest {
+                hold_id: first_id,
+                verdict: "stable".into(),
+            },
+            None,
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await
+        .expect("answer the first hold");
+        // The run resumes on the first verdict and parks on the second.
+        wait_for_run_state(&storage, started.id, "parked").await;
+        wait_for_active_workflow_run_release(&state, started.id).await;
+        let second_id = storage
+            .list_workflow_run_holds(started.id)
+            .await
+            .expect("list holds")
+            .into_iter()
+            .find(|hold| hold.state == "open")
+            .expect("the second hold is open")
+            .id;
+
+        // The gateway dies before the second park is observed: recovery
+        // finds the run interrupted with the first decision settled and the
+        // second still open.
+        storage
+            .update_workflow_run_state(started.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupt");
+        assert_eq!(resume_owed_workflow_runs(&state).await, 1);
+
+        // A hold raised after a settled sibling is sequential, not
+        // concurrent: recovery parks it durably instead of keeping an engine
+        // up to watch it.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_for_run_state(&storage, started.id, "parked"),
+        )
+        .await
+        .expect("a recovered sequential hold parks its run");
+        wait_for_active_workflow_run_release(&state, started.id).await;
+
+        answer_run_hold(
+            &state,
+            AnswerWorkflowRunHoldRequest {
+                hold_id: second_id,
+                verdict: "publish".into(),
+            },
+            None,
+            RunEventSource {
+                surface: "operator",
+                agent_id: None,
+                session_id: None,
+                turn_id: None,
+            },
+        )
+        .await
+        .expect("answer the second hold");
+        let completed = wait_for_run_state(&storage, started.id, "completed").await;
+        assert_eq!(
+            completed.final_output,
+            Some(serde_json::json!({"first": "stable", "second": "publish"}))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let space = storage.get_or_create_default().await.expect("space");
@@ -19644,6 +19764,135 @@ mod tests {
         );
 
         hold_task.abort();
+        drop(host);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_does_not_park_over_commands_a_failed_park_handed_back() {
+        let provider = Arc::new(ScriptedGateProvider {
+            replies: std::sync::Mutex::new(std::collections::VecDeque::from([
+                r#"{"wake":true,"reasoning":"the gate ran on a live run"}"#,
+            ])),
+            calls: AtomicUsize::new(0),
+        });
+        let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
+        let park = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let admission = Arc::new(StdMutex::new(HostCommandAdmission::default()));
+        let spent_tokens = Arc::new(AtomicU64::new(0));
+        let host = Arc::new(ChannelWorkflowHost {
+            tx,
+            admission: Arc::clone(&admission),
+            spent_tokens: Arc::clone(&spent_tokens),
+            max_total_tokens: None,
+        });
+        let task = tokio::spawn(run_host_commands_with_budget(
+            state.clone(),
+            run.id,
+            run.space_id,
+            vec![],
+            vec![],
+            None,
+            None,
+            WorkflowBudget::default(),
+            vec![],
+            Arc::new(AtomicU32::new(0)),
+            spent_tokens,
+            Arc::new(Mutex::new(RouteTokenBudgetState::default())),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            park.clone(),
+            PARK_TIMER_THRESHOLD_MS,
+            admission,
+            rx,
+        ));
+
+        // An undelivered event, so the late gate has something to judge and
+        // reaches the provider rather than answering itself.
+        host.post_run_event(
+            RunEventPost {
+                kind: "worker.completion".into(),
+                payload: serde_json::json!({"worker": "w1"}),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post an event for the late gate");
+
+        // The first hold opens and closes admission for its park.
+        let pause = workflow_pause_test_hook::install(PAUSE_BEFORE_HOLD_PARK, run.id);
+        let first_host = Arc::clone(&host);
+        let first_hold = tokio::spawn(async move {
+            first_host
+                .raise_hold(decision_hold("ship the first?"), CancellationToken::new())
+                .await
+        });
+        pause
+            .entered
+            .acquire()
+            .await
+            .expect("park hook remains open")
+            .forget();
+
+        // A second hold and then a gate arrive while the first is parking.
+        // Each is deferred at its send, so their order is fixed here: the
+        // hold is handed back to the loop ahead of the gate.
+        let mut second_hold =
+            Box::pin(host.raise_hold(decision_hold("ship the second?"), CancellationToken::new()));
+        assert!(futures::poll!(second_hold.as_mut()).is_pending());
+        let mut late_gate = Box::pin(host.evaluate_wake_gate(
+            GateRequest {
+                criteria: "wake when the worker has settled".into(),
+                model: None,
+            },
+            CancellationToken::new(),
+        ));
+        assert!(futures::poll!(late_gate.as_mut()).is_pending());
+
+        // The first hold is answered before its park lands, so the park's
+        // storage guard refuses it and both deferred commands come back to
+        // the loop as queued work.
+        let first_id = wait_for_open_hold(&storage, run.id).await;
+        answer_open_hold(&state, first_id).await;
+        pause.release.add_permits(1);
+        let first = first_hold
+            .await
+            .expect("first hold task")
+            .expect("the answered first hold reaches the script");
+        assert_eq!(first["verdict"], "ship");
+
+        // The second hold is processed with the gate still queued behind it:
+        // it must not park, so the gate runs on a live run.
+        late_gate
+            .await
+            .expect("a command a failed park handed back runs on the live run");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            storage
+                .get_workflow_run(run.id)
+                .await
+                .expect("read run")
+                .expect("run")
+                .state,
+            "running",
+            "a hold must not park over a command the failed park handed back"
+        );
+        assert!(!park.is_cancelled());
+
+        let second_id = storage
+            .list_workflow_run_holds(run.id)
+            .await
+            .expect("list holds")
+            .into_iter()
+            .find(|hold| hold.state == "open")
+            .expect("the second hold is still open")
+            .id;
+        answer_open_hold(&state, second_id).await;
+        let second = second_hold
+            .await
+            .expect("the watched second hold reaches the script");
+        assert_eq!(second["verdict"], "ship");
+
         drop(host);
         task.await.expect("host loop");
     }
