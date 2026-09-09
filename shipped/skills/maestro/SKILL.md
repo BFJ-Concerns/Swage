@@ -6,8 +6,10 @@ description: Run the structural phase of a commissioned build — bring the code
 # Maestro
 
 Run one commission's structural phase from the strongest judgement tier
-available — when this session is not that tier, say so to the user and stop
-rather than doing structural judgement from a cheaper seat. Establish only
+available — when this session is not that tier, say so and stop rather
+than doing structural judgement from a cheaper seat (a dispatched
+re-entry that finds itself under-tiered ends with that in its report, so
+the dispatching run can re-brief on the right tier). Establish only
 the spine the commission's remaining work needs; feature volume belongs to
 the assembly skill. The builders that follow extend proven patterns well
 and improvise badly, so the phase's product is the **spine**: landed
@@ -40,7 +42,16 @@ No modes or flags — read the world:
   locates records; it is not a read, so open the work list only after
   reading each `needs-spine` record whole. Re-entry from the
   assembly skill is the ordinary
-  case — records marked `needs-spine` open the work list. A
+  case — records marked `needs-spine` open the work list — and it
+  ordinarily arrives as a dispatch: the assembly run delegates this
+  skill the moment it marks a record, with the annexe path and the
+  slugs, and reads the result from the ledger rather than from a
+  conversation. A dispatched re-entry therefore needs no user in the
+  loop: it takes its work list from the records, hands back through the
+  handover ref, and ends with a report naming what it covered, what it
+  left `needs-spine` with why, and any question only a commission
+  decision can settle — the last two are what the dispatching run
+  surfaces to the user. A
   `needs-spine` record's `Must be true` and `Proof` fields are the
   assembly's discharge criteria, never this seat's bar: covered means
   an exemplar the record's build unit would extend, judged by reading,

@@ -105,6 +105,20 @@ const RESEARCH_FILES: &[ShippedFile] = &[
     shipped_workflow_file!("research/workflows/research-sweep.js", true),
 ];
 
+const SHAKEDOWN_FILES: &[ShippedFile] = &[
+    shipped_file!("shakedown/SKILL.md"),
+    shipped_file!("shakedown/references/build-ledger.md"),
+    shipped_file!("shakedown/references/campaign.md"),
+    shipped_file!("shakedown/references/charters.md"),
+    shipped_file!("shakedown/references/effort-calibration.md"),
+    shipped_file!("shakedown/references/findings.md"),
+    shipped_file!("shakedown/references/instruments.md"),
+    shipped_file!("shakedown/references/model-selection.md"),
+    shipped_file!("shakedown/references/state.md"),
+    shipped_file!("shakedown/workflows/driver-wave.js"),
+    shipped_file!("shakedown/workflows/judgement-wave.js"),
+];
+
 const WORKFLOW_AUTHORING_FILES: &[ShippedFile] = &[shipped_file!("workflow-authoring/SKILL.md")];
 
 pub(crate) const SHIPPED_SKILLS: &[ShippedSkill] = &[
@@ -132,6 +146,11 @@ pub(crate) const SHIPPED_SKILLS: &[ShippedSkill] = &[
         name: "research",
         source: include_str!("../../../shipped/skills/research/SKILL.md"),
         files: RESEARCH_FILES,
+    },
+    ShippedSkill {
+        name: "shakedown",
+        source: include_str!("../../../shipped/skills/shakedown/SKILL.md"),
+        files: SHAKEDOWN_FILES,
     },
     ShippedSkill {
         name: "workflow-authoring",

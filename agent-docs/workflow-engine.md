@@ -807,8 +807,10 @@ when it is not a standalone authored row. A carried workflow is
 immutable in place; an operator can shadow it by authoring a same-named
 workflow in the space.
 
-Each shipped skill carries its own workflows. When a skill is active on
-a session, its carried workflows become available, and any available
+Each shipped skill carries its own workflows: the development-process
+skills — commission, maestro, assembly, and shakedown — carry their
+pipelines and waves, and the research skill carries its sweep. When a
+skill is active on a session, its carried workflows become available, and any available
 workflow starts by name through `workflow_run`. The research skill
 (`shipped/skills/research/`) carries `research-sweep`.
 

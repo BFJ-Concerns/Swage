@@ -365,11 +365,14 @@ mod tests {
             "unknown name should be an execution failure: {error}"
         );
         assert!(model_visible.contains("not-a-workflow"));
-        assert!(model_visible.contains("13 workflows are available"));
+        assert!(model_visible.contains("15 workflows are available"));
         assert!(model_visible.contains("`workflow_list`"));
         assert!(model_visible.contains("Showing "));
-        assert!(model_visible.contains(" of 13 names"));
-        assert!(model_visible.contains("research-sweep"));
+        assert!(model_visible.contains(" of 15 names"));
+        // The preview is character-bounded and alphabetical: the first
+        // carried name always fits, so it is the one that proves names reach
+        // the model at all.
+        assert!(model_visible.contains("blind-rederivation"));
         assert!(
             !model_visible.contains("..."),
             "the production error must reach the model without silent truncation: {model_visible}"

@@ -153,12 +153,12 @@ Stages, with the holds where the pipeline waits on you:
    Landing).
 
 **Holds are nonce-correlated events on the run's queue.** Each hold posts
-a `decision-needed` event carrying the hold's exact content
+a `decision.needed` event carrying the hold's exact content
 (`{stage, nonce, content, options}`) and pauses the pipeline until the
-answering `decision` event arrives — posted into the run from outside the
+answering `decision.answer` event arrives — posted into the run from outside the
 script: by you (the lead) clearing your batch of pending decisions at a
 wake, or by the operator through the run surface. The decision's payload
-echoes the hold's exact nonce — take it from the `decision-needed` event,
+echoes the hold's exact nonce — take it from the `decision.needed` event,
 never construct it from the stage name: a stage that repeats runs as
 numbered instances (`triage1`, `triage2`, …), and a decision naming an
 earlier attempt's nonce is silently ignored; the script checks the nonce
@@ -171,7 +171,7 @@ findings array. After posting a decision, read the run's journal before
 acting on what happens next: a declined decision (a `land` the
 disposition check refuses) re-holds at a fresh nonce with identical hold
 content, and the reason (`land refused: …`) appears only in the run's
-log entries — the next `decision-needed` event alone cannot tell a
+log entries — the next `decision.needed` event alone cannot tell a
 rejected decision from the verifier re-raising the same findings. There
 is no hold timeout: an unanswered decision parks that unit's run —
 blocking is accepted — and every completed stage survives in the
@@ -280,8 +280,8 @@ run with its own journal, event queue, and budgets; an interrupted run
 resumes by replay, so nothing completed is re-executed and no salvage
 ceremony is needed — the journal is the salvage.
 
-Watch a pipeline through its run record and events: a `decision-needed`
-event is a hold awaiting your answer (post the `decision` event back into
+Watch a pipeline through its run record and events: a `decision.needed`
+event is a hold awaiting your answer (post the `decision.answer` event back into
 the run — the hold protocol above); a run parked on an unanswered
 decision stays parked until you answer, and answering wakes it. Batch
 your attention: clear the pending decisions across every live pipeline at

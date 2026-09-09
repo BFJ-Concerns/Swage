@@ -27,9 +27,9 @@ export const defaults = {
 //   (config.toml, for push_policy)
 //
 // HOLD PROTOCOL (documented for the orchestrator in references/pipelines.md):
-// at each hold the pipeline posts a "decision-needed" event carrying the
+// at each hold the pipeline posts a "decision.needed" event carrying the
 // hold's exact content and pauses on the run's event queue until the
-// answering "decision" event arrives — posted from outside the script by a
+// answering "decision.answer" event arrives — posted from outside the script by a
 // lead segment clearing its batch of decisions at a wake, or by the
 // operator through the run surface. The decision's payload echoes the
 // hold's nonce and carries {verdict, note?, dispositions?}; a stale
@@ -67,9 +67,9 @@ const runHold = async (stage, content, verdicts) => {
   // by a lead segment clearing its batch of decisions at a wake, or by the
   // operator through the run surface. Blocking is accepted: there is no
   // hold timeout, and the journal carries every completed stage meanwhile.
-  await postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  await postEvent("decision.needed", { stage, nonce, content, options: verdicts });
   while (true) {
-    const decision = await awaitEvent({ kinds: ["decision"] });
+    const decision = await awaitEvent({ kinds: ["decision.answer"] });
     const payload = decision && decision.payload;
     if (!payload || payload.nonce !== nonce) {
       log(`[hold] ${stage}: stale or unaddressed decision ignored; still waiting for ${nonce}`);

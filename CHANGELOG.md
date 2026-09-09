@@ -6,11 +6,14 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The shipped assembly pipelines' holds now post and await namespaced event kinds (`decision.needed`, `decision.answer`); the engine rejected the previous bare kinds, so no hold could be raised or answered.
 - Anthropic-shaped provider streams now reject malformed tool-use blocks without a name before they can enter replay.
 - A stale cancellation that loses to a resumed workflow run now withdraws only its own worktree-retention claim, so the winning run's recoverable work remains available.
 
 ### Added
 
+- The shakedown skill — the detection-only QA campaign that follows a discharged build ledger — now ships with the gateway alongside commission, maestro, and assembly, carrying its driver and judgement waves as workflows started by name.
+- Agents can read which workflow runs in their space are still going and what each is waiting on through the new `workflow_run_status` tool: every run that has not ended with its undelivered events — a pipeline's pending hold among them — or one named run in any state. The schedule gate's state digest now carries the same open runs and pending events, so a schedule that steers pipelines wakes on accumulated decisions rather than on the clock.
 - A workflow run that ends by any path now leaves a terminal account: how it ended, and a partition of every worker it dispatched into done, failed, cut short, and unsettled, each with the directory its work was left in. A run that never returned also surfaces its completed workers' output as partial results with the reason it produced none, on the run detail, on the run's own view at `/workflow-runs/{id}`, and through the new `workflow_run_account` tool a lead agent can read; the run view loads one coherent record for its account and journal, and the worker directories such an account names are kept, surviving the gateway's shutdown and the next one's startup sweep.
 - Workflow run details now show when each worker started and first produced evidence.
 - Workflow token budgets enforce independent ceilings and closing reserves for each configured provider route; every call, including a declared fallback, is admitted against its provider route's ledger or the run-wide fallback ledger, while recovery preserves the admission already granted to interrupted calls.

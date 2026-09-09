@@ -28,9 +28,9 @@ export const defaults = {
 //     deliberately breaking the behaviour in a scratch checkout of the
 //     CURRENT tree, watching the tests fail, and restoring.
 //
-// Hold protocol: identical to build-verify.js — a "decision-needed" event
+// Hold protocol: identical to build-verify.js — a "decision.needed" event
 // carrying the hold's exact content, answered by a nonce-echoing
-// "decision" event posted from outside the script (lead segment or
+// "decision.answer" event posted from outside the script (lead segment or
 // operator). No hold timeout: an unanswered decision blocks.
 
 const {
@@ -61,9 +61,9 @@ const runHold = async (stage, content, verdicts) => {
   // Raise the decision on the run's event queue and park until answered —
   // by a lead segment clearing its batch of decisions at a wake, or by the
   // operator through the run surface. Blocking is accepted: no timeout.
-  await postEvent("decision-needed", { stage, nonce, content, options: verdicts });
+  await postEvent("decision.needed", { stage, nonce, content, options: verdicts });
   while (true) {
-    const decision = await awaitEvent({ kinds: ["decision"] });
+    const decision = await awaitEvent({ kinds: ["decision.answer"] });
     const payload = decision && decision.payload;
     if (!payload || payload.nonce !== nonce) {
       log(`[hold] ${stage}: stale or unaddressed decision ignored; still waiting for ${nonce}`);
