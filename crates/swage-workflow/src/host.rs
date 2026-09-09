@@ -214,6 +214,14 @@ pub struct AwaitEventRequest {
     pub kinds: Vec<String>,
 }
 
+/// Select the events acknowledged by a script after handling them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum EventDelivery {
+    Through { up_to_seq: u64 },
+    One { event_seq: u64 },
+}
+
 /// A wake-gate evaluation over the run's pending events: a cheap model reads
 /// the raw events against the script's criteria and judges whether waking
 /// the lead is worth it.
@@ -445,11 +453,11 @@ pub trait WorkflowHost: Send + Sync {
         Err("HoldError: this host does not support decision holds".into())
     }
 
-    /// Stamp pending events up to `up_to_seq` as delivered by the current
-    /// wake (journalled, idempotent). Resolves to `{delivered}`.
+    /// Acknowledge the selected events (journalled, idempotent). Resolves
+    /// to `{delivered}` without consuming unrelated pending events.
     async fn deliver_run_events(
         &self,
-        _up_to_seq: u64,
+        _selection: EventDelivery,
         _cancellation: CancellationToken,
     ) -> Result<Value, String> {
         Err("RunEventError: this host does not support run events".into())
