@@ -19721,7 +19721,9 @@ mod tests {
         task.await.expect("host loop");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // Both synchronous sends must finish before the host loop can poll: this
+    // exercises already-queued work, not a command arriving after a hold parks.
+    #[tokio::test(flavor = "current_thread")]
     async fn a_hold_queued_before_a_timer_keeps_the_engine_until_the_timer_fires() {
         let provider = Arc::new(ScriptedGateProvider {
             replies: std::sync::Mutex::new(std::collections::VecDeque::new()),
