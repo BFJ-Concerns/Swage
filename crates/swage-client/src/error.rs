@@ -76,6 +76,10 @@ pub enum ClientError {
     /// A restart was refused before stopping the live gateway.
     #[error("Gateway restart was not attempted: {reason}")]
     GatewayRestartRefused { reason: String },
+
+    /// A restart was attempted but the gateway did not recover successfully.
+    #[error("Gateway restart failed: {reason}")]
+    GatewayRestartFailed { reason: String },
 }
 
 #[cfg(test)]
