@@ -33,26 +33,29 @@ The workspaces section shows an empty list and a path field. Type the
 path to the repository directory you want this space to work with — for
 example, the project you want agents to know about. The gateway
 canonicalises the path, so a relative path resolves against the gateway
-process's working directory; an absolute path is the safer choice. Click
-**Attach workspace**.
+process's working directory; an absolute path is the safer choice.
+
+**Allow file changes** is selected by default. Leave it selected for coding,
+or clear it for a repository the agent should only read. Select **Trust this
+workspace** if you want to grant that access immediately, then click
+**Attach workspace**. Once trusted, the first attachment becomes the working
+folder for conversations without an explicit workspace selection.
 
 The attachment appears in the list, showing the directory path and a trust
-indicator: `untrusted · read`. The `read` label is the access mode
-configured on the attachment — the permission that activates once the
-workspace is trusted. While untrusted, the attachment carries no active
-grants: the workspace's files are not read, and its `AGENTS.md` is not
-loaded.
+indicator and configured read/write access. Unless you selected trust
+during attachment, the workspace is untrusted; its configured permissions
+activate only when it is trusted. An untrusted attachment grants no file
+access and does not load its `AGENTS.md`.
 
 ## Trust the workspace
 
-Newly attached workspaces start untrusted. An untrusted workspace
-contributes nothing — no file access grants and no guidance. Its
+Workspaces start untrusted unless you choose trust during attachment.
+An untrusted workspace contributes nothing — no file access grants and no guidance. Its
 `AGENTS.md` is not read into agent context until the workspace is trusted.
 
-Click **Trust workspace** on the attachment row. The indicator changes to
-`trusted · read`, and from this point the configured read permission is
-active: the workspace's `AGENTS.md` is folded into agent context for
-sessions in this space. If the repository
+Click **Trust workspace** on an untrusted attachment row. Its configured
+file permissions become active: the workspace's `AGENTS.md` is folded into
+agent context for sessions in this space. If the repository
 carries project-specific instructions or conventions in that file, agents
 will read them alongside the global guidance in `~/.swage/AGENTS.md`.
 
@@ -62,8 +65,8 @@ what happens when multiple workspaces are attached.
 
 ## Revoke trust or detach
 
-Trust is reversible. **Revoke trust** returns the workspace to
-`untrusted · read` — its read grant and guidance drop out of future turns
+Trust is reversible. **Revoke trust** marks the workspace untrusted — its
+file grants and guidance drop out of future turns
 without removing the attachment itself. **Detach** removes the workspace from the
 space entirely.
 

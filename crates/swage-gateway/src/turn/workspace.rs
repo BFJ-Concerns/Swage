@@ -102,14 +102,14 @@ pub(crate) async fn load_trusted_workspace_policy(
             can_read,
             can_write,
         };
+        // Selecting a working folder does not grant access to an untrusted
+        // attachment. Every execution root follows the same trust gate.
+        if !grant.is_trusted || !(can_read || can_write) {
+            continue;
+        }
         if Some(attachment.id) == default_workspace_attachment_id {
             policy.active_workspace = Some(grant);
-            continue;
-        }
-        if !attachment.is_trusted {
-            continue;
-        }
-        if can_read || can_write {
+        } else {
             policy.attachments.push(grant);
         }
     }
