@@ -42,7 +42,7 @@ impl Tool for RunEventPostTool {
                 "action": {"type": "string", "enum": ["post"]},
                 "run_id": {"type": "string", "description": "The target workflow run UUID."},
                 "kind": {"type": "string", "description": "The event kind accepted by the target workflow. To answer an Assembly decision.needed event, use decision.answer."},
-                "payload": {"description": "JSON data matching the workflow's event contract. For an Assembly decision, echo the pending event's nonce and supply one of its offered verdicts, plus any required dispositions."}
+                "payload": {"description": "JSON data matching the workflow's event contract. For an Assembly decision: {nonce, verdict, note?, dispositions?: [{finding: zero-based finding index, disposition: fix|contract-question|accept-with-note, note?: string}]}. Echo the pending nonce and choose an offered verdict. Each accept-with-note disposition requires a non-empty note."}
             },
             "required": ["action", "run_id", "kind", "payload"]
         })
