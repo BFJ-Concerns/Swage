@@ -13,6 +13,7 @@ pub mod run;
 pub mod start;
 pub mod status;
 pub mod stop;
+mod supervisor;
 pub mod tui;
 
 use clap::Parser;

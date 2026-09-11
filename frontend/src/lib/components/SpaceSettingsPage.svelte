@@ -2,6 +2,7 @@
      SettingsPage; this component only reads space-owned data. -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachSpaceWorkspace,
     detachSpaceWorkspace,
@@ -25,6 +26,8 @@
   let error = $state<string | null>(null);
   let workspacePath = $state("");
   let workspaceLabel = $state("");
+  let workspaceCanWrite = $state(true);
+  let workspaceIsTrusted = $state(false);
   let isMutating = $state(false);
 
   onMount(loadSpaceSettings);
@@ -54,6 +57,9 @@
       await attachSpaceWorkspace(space.id, {
         path: workspacePath.trim(),
         label: workspaceLabel.trim() || undefined,
+        permissions: workspaceCanWrite ? ["read", "write"] : ["read"],
+        is_trusted: workspaceIsTrusted,
+        set_as_default: workspaces.length === 0,
       });
       workspacePath = "";
       workspaceLabel = "";
@@ -148,6 +154,7 @@
             Label <span>(optional)</span>
             <input bind:value={workspaceLabel} placeholder="Repository name" disabled={isMutating} />
           </label>
+          <WorkspaceAccessOptions bind:canWrite={workspaceCanWrite} bind:isTrusted={workspaceIsTrusted} disabled={isMutating} />
           <button type="submit" disabled={isMutating || !workspacePath.trim()}>
             {isMutating ? "Saving…" : "Attach workspace"}
           </button>
@@ -157,7 +164,7 @@
             <article class="record-row">
               <strong>{workspace.label}</strong>
               <span>{workspace.path}</span>
-              <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}</span>
+              <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}{workspace.is_default ? " · working folder" : ""}</span>
               <div class="workspace-actions">
                 {#if workspace.is_trusted}
                   <button type="button" onclick={() => void setWorkspaceTrust(workspace, false)} disabled={isMutating}>Revoke trust</button>
