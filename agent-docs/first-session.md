@@ -26,24 +26,25 @@ select **Workspaces** in the settings section navigation.
 The workspace form takes a filesystem path to an existing repository
 directory. The gateway canonicalises whatever it receives, so a relative
 path resolves against the gateway process's working directory — use an
-absolute path to avoid ambiguity. Enter the path and select **Attach
-workspace**.
+absolute path to avoid ambiguity. **Allow file changes** defaults on;
+**Trust this workspace** defaults off. Select the access and trust choices,
+then **Attach workspace**. The first attachment becomes the default working
+folder once trusted, for conversations without an explicit workspace selection.
 
 The attachment appears with its trust state and configured access mode:
-`untrusted · read`. The `read` label is the access mode the attachment was
-created with — the permissions that will take effect once the workspace is
-trusted. While untrusted, the attachment carries no active grants: the
-workspace's files are not read, and its `AGENTS.md` is not loaded.
+read and write access by default, with trust disabled unless selected.
+The access mode describes the permissions that take effect once trusted.
+While untrusted, the attachment grants no file access and does not
+load its `AGENTS.md`.
 
 ## Trust the workspace
 
-A newly attached workspace is untrusted. An untrusted workspace contributes
-nothing — no file access grants and no guidance. Its `AGENTS.md` is not
+Unless trusted during attachment, a newly attached workspace is untrusted.
+An untrusted workspace contributes nothing — no file access grants and no guidance. Its `AGENTS.md` is not
 read into agent context until the workspace is trusted.
 
-Select **Trust workspace** on the attachment. The indicator changes to
-`trusted · read`. The configured read permission is now active: the
-workspace's `AGENTS.md` feeds the agent context for sessions in this
+Select **Trust workspace** on an untrusted attachment. Its configured file
+permissions become active, and the workspace's `AGENTS.md` feeds the agent context for sessions in this
 space.
 
 See [Agents and permissions — Operator guidance](agents-and-permissions.md#operator-guidance-agentsmd)
@@ -67,6 +68,6 @@ for what the registry contains and how definitions shadow.
 
 ## Revoke trust and detach
 
-**Revoke trust** returns the workspace to `untrusted · read` — its
-read grant and guidance are removed from future turns. **Detach** removes the attachment
+**Revoke trust** marks the workspace untrusted — its file grants and
+guidance are removed from future turns without changing its configured access mode. **Detach** removes the attachment
 entirely.
