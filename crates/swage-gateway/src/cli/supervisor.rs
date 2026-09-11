@@ -52,11 +52,13 @@ impl GatewayService {
             .await
             .map_err(|error| refused(error.to_string()))?;
         if !output.status.success() {
-            return Err(refused(format!(
-                "systemd restart of {} failed: {}",
-                self.unit,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            return Err(ClientError::GatewayRestartFailed {
+                reason: format!(
+                    "systemd restart of {} failed: {}",
+                    self.unit,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
         }
         let client = GatewayClient::new(address);
         let ready = async {
@@ -68,7 +70,7 @@ impl GatewayService {
             }
         };
         tokio::time::timeout(Duration::from_secs(30), ready).await.map_err(|_| {
-            refused(format!("{} restarted but the gateway did not become healthy within 30 seconds; inspect the service journal", self.unit))
+            ClientError::GatewayRestartFailed { reason: format!("{} restarted but the gateway did not become healthy within 30 seconds; inspect the service journal", self.unit) }
         })?;
         println!("Gateway restarted through {} and is healthy", self.unit);
         Ok(())
