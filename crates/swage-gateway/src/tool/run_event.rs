@@ -41,8 +41,8 @@ impl Tool for RunEventPostTool {
             "properties": {
                 "action": {"type": "string", "enum": ["post"]},
                 "run_id": {"type": "string", "description": "The target workflow run UUID."},
-                "kind": {"type": "string", "description": "A namespaced event kind such as decision.operator."},
-                "payload": {"description": "JSON data carried by the event."}
+                "kind": {"type": "string", "description": "The event kind accepted by the target workflow. To answer an Assembly decision.needed event, use decision.answer."},
+                "payload": {"description": "JSON data matching the workflow's event contract. For an Assembly decision, echo the pending event's nonce and supply one of its offered verdicts, plus any required dispositions."}
             },
             "required": ["action", "run_id", "kind", "payload"]
         })
