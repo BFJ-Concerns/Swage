@@ -18556,9 +18556,17 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        // The timer is armed before the hold is raised: an armed sibling
+        // timer refuses the hold's park, so the engine stays up and the
+        // script's failure reaches the open decision. Raised the other way
+        // round, a host that drains the hold before the timer command is
+        // queued parks the run on the decision, and the failure never comes.
+        // Both calls are issued in one script tick, so their commands queue
+        // in call order; the timer outlasts that tick by a wide margin.
         let source = r#"
+            const failing = wait({ timerMs: 100 });
             hold({ content: "Ship the release?", verdicts: ["ship", "hold"] });
-            await wait({ timerMs: 10 });
+            await failing;
             throw new Error("the workflow cannot continue");
         "#;
         let Json(started) = start_inline_run(
