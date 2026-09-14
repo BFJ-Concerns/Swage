@@ -30,6 +30,8 @@ CLI flags take precedence over `config.toml`. Both `--host` and `--port` are
 accepted by `gateway start`, `gateway restart`, and `gateway set-defaults`.
 The last command saves lifecycle defaults which `start`, `restart`, `status`,
 and `stop` reuse; `gateway clear-defaults` removes them.
+For systemd-managed gateways, the [service restart rules](../README.md#network-binding)
+apply instead of per-call overrides.
 
 Detached starts write output to the data root's `gateway.log` and print that
 destination after startup. Pass `--log-file PATH` to choose another file, or

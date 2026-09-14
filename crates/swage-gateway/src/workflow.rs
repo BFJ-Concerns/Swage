@@ -18556,9 +18556,17 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
+        // The timer is armed before the hold is raised: an armed sibling
+        // timer refuses the hold's park, so the engine stays up and the
+        // script's failure reaches the open decision. Raised the other way
+        // round, a host that drains the hold before the timer command is
+        // queued parks the run on the decision, and the failure never comes.
+        // Both calls are issued in one script tick, so their commands queue
+        // in call order; the timer outlasts that tick by a wide margin.
         let source = r#"
+            const failing = wait({ timerMs: 100 });
             hold({ content: "Ship the release?", verdicts: ["ship", "hold"] });
-            await wait({ timerMs: 10 });
+            await failing;
             throw new Error("the workflow cannot continue");
         "#;
         let Json(started) = start_inline_run(
@@ -19146,8 +19154,21 @@ mod tests {
         mpsc::UnboundedSender<HostCommand>,
         tokio::task::JoinHandle<()>,
     ) {
+        let (tx, host) = queued_event_loop(state, run_id, space_id, replay);
+        (tx, tokio::spawn(host))
+    }
+
+    fn queued_event_loop(
+        state: AppState,
+        run_id: Uuid,
+        space_id: Uuid,
+        replay: Vec<WorkflowJournalRecord>,
+    ) -> (
+        mpsc::UnboundedSender<HostCommand>,
+        impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(run_host_commands(
+        let host = run_host_commands(
             state,
             run_id,
             space_id,
@@ -19169,8 +19190,8 @@ mod tests {
             CancellationToken::new(),
             PARK_TIMER_THRESHOLD_MS,
             rx,
-        ));
-        (tx, task)
+        );
+        (tx, host)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -19728,7 +19749,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (storage, state, run) = event_gate_fixture(provider).await;
-        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+        let (tx, host) = queued_event_loop(state.clone(), run.id, run.space_id, vec![]);
 
         let (hold_reply, hold_receive) = oneshot::channel();
         tx.send(HostCommand::Hold {
@@ -19746,6 +19767,9 @@ mod tests {
         })
         .expect("queue the sibling timer second");
 
+        // Start the consumer only once both messages are queued. A concurrently
+        // running consumer could legitimately park before the timer is sent.
+        let task = tokio::spawn(host);
         let fired = tokio::time::timeout(std::time::Duration::from_secs(2), timer_receive)
             .await
             .expect("the queued sibling timer fires without a replay")
