@@ -191,8 +191,8 @@ default.
 
 On Linux, when the gateway is the main process of a systemd service,
 `gateway restart` restarts that service and waits up to 30 seconds for the
-health endpoint. Per-call restart overrides are refused; configure the
-service instead. A failed restart reports an error and does not restore
+new process to record its address and answer the health endpoint there.
+Per-call restart overrides are refused; configure the service instead. A failed restart reports an error and does not restore
 the previous executable or data automatically.
 
 The terminal client is `swage chat`. Generate an installation script for
