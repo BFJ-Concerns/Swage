@@ -2,6 +2,7 @@
      SettingsPage; this component only reads space-owned data. -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachSpaceWorkspace,
     detachSpaceWorkspace,
@@ -20,11 +21,17 @@
   let { space, tab = "overview" }: Props = $props();
 
   let workspaces = $state<WorkspaceAttachment[]>([]);
+  // Attaching decides whether the new folder becomes the space's working
+  // folder from this list, so the form waits for a real load rather than
+  // reading an empty placeholder as "no attachments yet".
+  let workspacesLoaded = $state(false);
   let sessions = $state<ConversationSummary[]>([]);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
   let workspacePath = $state("");
   let workspaceLabel = $state("");
+  let workspaceCanWrite = $state(true);
+  let workspaceIsTrusted = $state(false);
   let isMutating = $state(false);
 
   onMount(loadSpaceSettings);
@@ -38,6 +45,7 @@
         listSpaceSessions(space.id),
       ]);
       workspaces = workspaceList;
+      workspacesLoaded = true;
       sessions = sessionList;
       error = null;
     } catch (err) {
@@ -48,15 +56,20 @@
   }
 
   async function attachWorkspace(): Promise<void> {
-    if (!space || !workspacePath.trim()) return;
+    if (!space || !workspacesLoaded || !workspacePath.trim()) return;
     isMutating = true;
     try {
       await attachSpaceWorkspace(space.id, {
         path: workspacePath.trim(),
         label: workspaceLabel.trim() || undefined,
+        permissions: workspaceCanWrite ? ["read", "write"] : ["read"],
+        is_trusted: workspaceIsTrusted,
+        set_as_default: workspaces.length === 0,
       });
       workspacePath = "";
       workspaceLabel = "";
+      workspaceCanWrite = true;
+      workspaceIsTrusted = false;
       await loadSpaceSettings();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to attach workspace.";
@@ -148,7 +161,8 @@
             Label <span>(optional)</span>
             <input bind:value={workspaceLabel} placeholder="Repository name" disabled={isMutating} />
           </label>
-          <button type="submit" disabled={isMutating || !workspacePath.trim()}>
+          <WorkspaceAccessOptions bind:canWrite={workspaceCanWrite} bind:isTrusted={workspaceIsTrusted} disabled={isMutating} />
+          <button type="submit" disabled={isMutating || !workspacesLoaded || !workspacePath.trim()}>
             {isMutating ? "Saving…" : "Attach workspace"}
           </button>
         </form>
@@ -157,7 +171,7 @@
             <article class="record-row">
               <strong>{workspace.label}</strong>
               <span>{workspace.path}</span>
-              <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}</span>
+              <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}{workspace.is_default ? " · working folder" : ""}</span>
               <div class="workspace-actions">
                 {#if workspace.is_trusted}
                   <button type="button" onclick={() => void setWorkspaceTrust(workspace, false)} disabled={isMutating}>Revoke trust</button>

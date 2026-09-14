@@ -107,8 +107,63 @@ describe("SpaceSettingsPage", () => {
     inputs[0].dispatchEvent(new Event("input", { bubbles: true }));
     document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await flushUi();
-    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith("space-1", { path: "/work/new", label: undefined });
+    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith("space-1", { path: "/work/new", label: undefined, permissions: ["read", "write"], is_trusted: false, set_as_default: false });
     expect(spacesApi.listSpaceWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the first attached workspace as the working folder and honours access choices", async () => {
+    vi.mocked(spacesApi.listSpaceWorkspaces).mockResolvedValue([]);
+    component = mount(SpaceSettingsPage, { target: document.body, props: { space, tab: "workspaces" } });
+    await flushUi();
+    const path = document.querySelector("input") as HTMLInputElement;
+    path.value = "/work/first";
+    path.dispatchEvent(new Event("input", { bubbles: true }));
+    const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkboxes[0].checked).toBe(true);
+    expect(checkboxes[1].checked).toBe(false);
+    checkboxes[0].click();
+    checkboxes[1].click();
+    document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith("space-1", {
+      path: "/work/first", label: undefined, permissions: ["read"], is_trusted: true, set_as_default: true,
+    });
+  });
+
+  it("does not attach while the workspace list is unknown, so an existing working folder is never displaced", async () => {
+    vi.mocked(spacesApi.listSpaceWorkspaces).mockRejectedValue(new Error("workspace list unavailable"));
+    component = mount(SpaceSettingsPage, { target: document.body, props: { space, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("workspace list unavailable");
+    const path = document.querySelector("input") as HTMLInputElement;
+    path.value = "/work/orphan";
+    path.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    const attach = document.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(attach.disabled).toBe(true);
+    document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(spacesApi.attachSpaceWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("resets the access and trust choices once a workspace is attached", async () => {
+    vi.mocked(spacesApi.attachSpaceWorkspace).mockResolvedValue({
+      id: "workspace-2", space_id: "space-1", label: "Second", path: "/work/second", canonical_path: "/work/second", is_missing: false, permissions: ["read"], is_trusted: true, is_default: false, created_at: "2026-05-26T10:00:00Z",
+    });
+    component = mount(SpaceSettingsPage, { target: document.body, props: { space, tab: "workspaces" } });
+    await flushUi();
+    const path = document.querySelector("input") as HTMLInputElement;
+    path.value = "/work/second";
+    path.dispatchEvent(new Event("input", { bubbles: true }));
+    const checkboxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    checkboxes[0].click();
+    checkboxes[1].click();
+    document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith("space-1", expect.objectContaining({ permissions: ["read"], is_trusted: true }));
+    const after = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(after[0].checked).toBe(true);
+    expect(after[1].checked).toBe(false);
   });
 
   it("revokes trust through the workspace mutation API and reloads", async () => {

@@ -1,4 +1,4 @@
-//! `swage gateway restart` — stop then start the gateway.
+//! Restart through the gateway's supervisor, or stop and start a standalone daemon.
 
 use swage_client::{error::ClientError, runtime::RuntimeMetadata};
 
@@ -8,6 +8,9 @@ pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
     let stop_args = StopArgs { force: args.force };
     let environment = match running_gateway_metadata(args).await? {
         Some((metadata, metadata_path)) => {
+            if let Some(service) = super::supervisor::gateway_service(metadata.pid).await? {
+                return service.restart(args, &metadata, &metadata_path).await;
+            }
             let environment =
                 super::recovery::recover_gateway_lifecycle_environment(metadata.pid).map_err(
                     |reason| ClientError::GatewayRestartRefused {

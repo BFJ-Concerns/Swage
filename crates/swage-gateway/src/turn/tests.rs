@@ -14511,6 +14511,71 @@ async fn operator_guidance_honours_trust_from_stored_attachments() {
     assert_eq!(rules_by_trust[1][0].content, "STORED GUIDANCE");
 }
 
+#[tokio::test]
+async fn active_workspace_file_access_tracks_trust_and_revocation() {
+    use crate::tool::Tool;
+    let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
+    let workspace = tempfile::tempdir().unwrap();
+    let config_root = tempfile::tempdir().unwrap();
+    let file = workspace.path().join("private.txt");
+    std::fs::write(&file, "workspace-only-content").unwrap();
+    let space_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    let attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            space_id,
+            label: "workspace".into(),
+            path: workspace.path().display().to_string(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: false,
+        })
+        .await
+        .unwrap();
+    storage
+        .set_space_default_workspace(space_id, Some(attachment.id))
+        .await
+        .unwrap();
+
+    for is_trusted in [false, true, false] {
+        let stored = storage
+            .set_workspace_trust(attachment.id, is_trusted)
+            .await
+            .unwrap();
+        assert_eq!(stored.permissions, vec!["read", "write"]);
+        for selected in [None, Some(attachment.id)] {
+            let policy = load_trusted_workspace_policy(&storage, space_id, selected).await;
+            let (root, paths) =
+                agent_workspace_from_policy(config_root.path(), &policy, space_id, session_id);
+            let mut context =
+                swage_tool::context::MockToolContext::new("reader", session_id.to_string());
+            context.working_directory = root;
+            context.allowed_paths = paths;
+            let result = crate::tool::file_read::FileReadTool {
+                max_output_bytes: 1024,
+            }
+            .execute(serde_json::json!({"path": file}), &context)
+            .await;
+            if is_trusted {
+                assert!(
+                    result
+                        .unwrap()
+                        .to_string()
+                        .contains("workspace-only-content")
+                );
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(swage_core::ToolError::RequiresLocationApproval { .. })
+                    ),
+                    "untrusted default or selected workspace must not grant file access: {result:?}"
+                );
+                assert!(policy.active_workspace.is_none());
+            }
+        }
+    }
+}
+
 /// Guidance rules extend the resolved instruction baseline rather than
 /// replacing it: the prompts element carries the resolved instructions
 /// first, then the guidance content, in one system message.

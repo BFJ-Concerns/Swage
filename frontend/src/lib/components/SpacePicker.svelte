@@ -14,6 +14,7 @@
 
 -->
 <script lang="ts">
+  import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachSpaceWorkspace,
     detachSpaceWorkspace,
@@ -43,6 +44,10 @@
   let createError = $state<string | null>(null);
   let isCreating = $state(false);
   let selectedWorkspaces = $state<WorkspaceAttachment[]>([]);
+  // Attaching decides whether the new folder becomes the space's working
+  // folder from this list, so the form waits for a real load rather than
+  // reading an empty placeholder as "no attachments yet".
+  let selectedWorkspacesLoaded = $state(false);
   let selectedConversations = $state<ConversationSummary[]>([]);
   let detailError = $state<string | null>(null);
   let aboutDraft = $state("");
@@ -74,6 +79,7 @@
     const spaceId = selected?.id;
     if (!spaceId) {
       selectedWorkspaces = [];
+      selectedWorkspacesLoaded = false;
       selectedConversations = [];
       detailError = null;
       aboutDraft = "";
@@ -91,6 +97,7 @@
 
   async function loadSpaceDetail(spaceId: string): Promise<void> {
     detailError = null;
+    selectedWorkspacesLoaded = false;
     try {
       const [workspaces, conversations] = await Promise.all([
         listSpaceWorkspaces(spaceId),
@@ -98,6 +105,7 @@
       ]);
       if (selected?.id !== spaceId) return;
       selectedWorkspaces = workspaces;
+      selectedWorkspacesLoaded = true;
       selectedConversations = conversations;
       relinkDrafts = Object.fromEntries(
         workspaces.map((workspace) => [workspace.id, relinkDrafts[workspace.id] ?? ""]),
@@ -163,7 +171,7 @@
 
   async function attachWorkspace(event: Event): Promise<void> {
     event.preventDefault();
-    if (!selected || !workspacePathDraft.trim()) return;
+    if (!selected || !selectedWorkspacesLoaded || !workspacePathDraft.trim()) return;
 
     isAttachingWorkspace = true;
     detailError = null;
@@ -178,6 +186,8 @@
       });
       workspacePathDraft = "";
       workspaceLabelDraft = "";
+      workspaceCanWrite = true;
+      workspaceIsTrusted = false;
       await loadSpaceDetail(selected.id);
       workspaceNotice = "Workspace attached.";
     } catch (error) {
@@ -427,20 +437,11 @@
                   autocomplete="off"
                 />
               </label>
-              <div class="workspace-options">
-                <label>
-                  <input type="checkbox" bind:checked={workspaceCanWrite} />
-                  <span>write access</span>
-                </label>
-                <label>
-                  <input type="checkbox" bind:checked={workspaceIsTrusted} />
-                  <span>trusted</span>
-                </label>
-              </div>
+              <WorkspaceAccessOptions bind:canWrite={workspaceCanWrite} bind:isTrusted={workspaceIsTrusted} />
               <button
                 type="submit"
                 class="save-about"
-                disabled={isAttachingWorkspace || !workspacePathDraft.trim()}
+                disabled={isAttachingWorkspace || !selectedWorkspacesLoaded || !workspacePathDraft.trim()}
               >
                 {isAttachingWorkspace ? "Attaching..." : "Attach folder"}
               </button>
@@ -949,18 +950,6 @@
   .relink-row input:focus {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-  }
-
-  .workspace-options {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-
-  .workspace-options label {
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
   }
 
   .empty-workspace {

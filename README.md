@@ -189,6 +189,12 @@ The `--host` and `--port` flags are accepted by `gateway start`,
 `gateway clear-defaults`; an explicit lifecycle flag overrides its saved
 default.
 
+On Linux, when the gateway is the main process of a systemd service,
+`gateway restart` restarts that service and waits up to 30 seconds for the
+new process to record its address and answer the health endpoint there.
+Per-call restart overrides are refused; configure the service instead. A failed restart reports an error and does not restore
+the previous executable or data automatically.
+
 The terminal client is `swage chat`. Generate an installation script for
 shell completion with `swage generate-completion bash` (or `zsh`/`fish`).
 
