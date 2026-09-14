@@ -1,11 +1,13 @@
 //! Preserve systemd ownership when restarting a supervised gateway.
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
-use swage_client::{error::ClientError, http::GatewayClient};
+use swage_client::{error::ClientError, http::GatewayClient, runtime::RuntimeMetadata};
 use tokio::process::Command;
 
 use super::RestartArgs;
+
+const RESTART_HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct GatewayService {
     unit: String,
@@ -31,7 +33,8 @@ impl GatewayService {
     pub(super) async fn restart(
         &self,
         args: &RestartArgs,
-        address: &str,
+        previous: &RuntimeMetadata,
+        metadata_path: &Path,
     ) -> Result<(), ClientError> {
         if args.port.is_some()
             || args.host.is_some()
@@ -60,20 +63,51 @@ impl GatewayService {
                 ),
             });
         }
-        let client = GatewayClient::new(address);
-        let ready = async {
-            loop {
-                if client.health().await.is_ok() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(30), ready).await.map_err(|_| {
-            ClientError::GatewayRestartFailed { reason: format!("{} restarted but the gateway did not become healthy within 30 seconds; inspect the service journal", self.unit) }
-        })?;
-        println!("Gateway restarted through {} and is healthy", self.unit);
+        let address =
+            wait_for_restarted_gateway(metadata_path, previous.pid, RESTART_HEALTH_TIMEOUT)
+                .await
+                .map_err(|reason| ClientError::GatewayRestartFailed {
+                    reason: format!(
+                        "{} restarted but {reason}; inspect the service journal",
+                        self.unit
+                    ),
+                })?;
+        println!(
+            "Gateway restarted through {} and is healthy on {address}",
+            self.unit
+        );
         Ok(())
+    }
+}
+
+/// The address the restarted gateway is serving, once it is healthy there.
+///
+/// The service configuration may bind the new process somewhere other than
+/// the old one, so the address is read from the runtime metadata the new
+/// process writes rather than carried over from before the restart. A record
+/// still naming the previous process is the old gateway's, not evidence of
+/// the new one, and is skipped: the old process may still be draining, or a
+/// stranger may answer on its former address.
+async fn wait_for_restarted_gateway(
+    metadata_path: &Path,
+    previous_pid: u32,
+    timeout: Duration,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(metadata) = RuntimeMetadata::load_from(metadata_path)
+            && metadata.pid != previous_pid
+            && GatewayClient::new(&metadata.address).health().await.is_ok()
+        {
+            return Ok(metadata.address);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "no new gateway process recorded a healthy address within {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -174,10 +208,59 @@ mod tests {
             foreground: false,
             log_file: None,
         };
+        let previous = RuntimeMetadata::new(1, "http://127.0.0.1:9".into());
         let error = service
-            .restart(&args, "http://127.0.0.1:9")
+            .restart(&args, &previous, Path::new("/nonexistent/metadata.json"))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("without CLI overrides"));
+    }
+
+    async fn serve_health() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new().route(
+            "/api/health",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"status": "ok"})) }),
+        );
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        address
+    }
+
+    #[tokio::test]
+    async fn restart_waits_for_the_new_process_at_the_address_it_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.json");
+        let old_address = serve_health().await;
+        let new_address = serve_health().await;
+        assert_ne!(old_address, new_address);
+        // The old process's record, still healthy on its address, is not
+        // the restarted gateway.
+        RuntimeMetadata::new(1000, old_address.clone())
+            .save_to(&metadata_path)
+            .unwrap();
+        let timed_out =
+            wait_for_restarted_gateway(&metadata_path, 1000, Duration::from_millis(600))
+                .await
+                .unwrap_err();
+        assert!(timed_out.contains("no new gateway process"), "{timed_out}");
+
+        // The new process records a different pid and address; the wait
+        // reports where it is actually serving.
+        let writer = {
+            let metadata_path = metadata_path.clone();
+            let new_address = new_address.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                RuntimeMetadata::new(1001, new_address)
+                    .save_to(&metadata_path)
+                    .unwrap();
+            })
+        };
+        let found = wait_for_restarted_gateway(&metadata_path, 1000, Duration::from_secs(5))
+            .await
+            .unwrap();
+        writer.await.unwrap();
+        assert_eq!(found, new_address);
     }
 }

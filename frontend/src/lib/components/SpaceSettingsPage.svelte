@@ -21,6 +21,10 @@
   let { space, tab = "overview" }: Props = $props();
 
   let workspaces = $state<WorkspaceAttachment[]>([]);
+  // Attaching decides whether the new folder becomes the space's working
+  // folder from this list, so the form waits for a real load rather than
+  // reading an empty placeholder as "no attachments yet".
+  let workspacesLoaded = $state(false);
   let sessions = $state<ConversationSummary[]>([]);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
@@ -41,6 +45,7 @@
         listSpaceSessions(space.id),
       ]);
       workspaces = workspaceList;
+      workspacesLoaded = true;
       sessions = sessionList;
       error = null;
     } catch (err) {
@@ -51,7 +56,7 @@
   }
 
   async function attachWorkspace(): Promise<void> {
-    if (!space || !workspacePath.trim()) return;
+    if (!space || !workspacesLoaded || !workspacePath.trim()) return;
     isMutating = true;
     try {
       await attachSpaceWorkspace(space.id, {
@@ -63,6 +68,8 @@
       });
       workspacePath = "";
       workspaceLabel = "";
+      workspaceCanWrite = true;
+      workspaceIsTrusted = false;
       await loadSpaceSettings();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to attach workspace.";
@@ -155,7 +162,7 @@
             <input bind:value={workspaceLabel} placeholder="Repository name" disabled={isMutating} />
           </label>
           <WorkspaceAccessOptions bind:canWrite={workspaceCanWrite} bind:isTrusted={workspaceIsTrusted} disabled={isMutating} />
-          <button type="submit" disabled={isMutating || !workspacePath.trim()}>
+          <button type="submit" disabled={isMutating || !workspacesLoaded || !workspacePath.trim()}>
             {isMutating ? "Saving…" : "Attach workspace"}
           </button>
         </form>
