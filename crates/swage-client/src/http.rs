@@ -253,7 +253,7 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Fetches a single space by ID.
+    /// Fetches a single topic by ID.
     ///
     /// Calls `GET /api/topics/{id}`. A missing topic answers in the wire
     /// error contract and surfaces as `ClientError::Gateway { code: NotFound, .. }`.

@@ -26,7 +26,7 @@ const topic: Topic = {
   id: "topic-1",
   name: "Research",
   slug: "research",
-  description: "Research space",
+  description: "Research topic",
   is_default: false,
   created_at: "2026-05-26T10:00:00Z",
 };
