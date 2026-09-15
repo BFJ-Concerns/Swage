@@ -60,7 +60,7 @@ pub(crate) fn build_status_line(
     };
 
     // Left section is always shown: " ● topic_name ".
-    // Display width: 1 (leading space) + 1 (●) + 1 (topic) + name + 1 (topic).
+    // Display width: 1 (leading space) + 1 (●) + 1 (space) + name + 1 (space).
     let left_suffix = format!(" {topic_name} ");
     let left_width = 2 + left_suffix.chars().count(); // " " + "●" + " topic_name "
 

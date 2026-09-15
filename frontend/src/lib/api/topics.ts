@@ -76,7 +76,7 @@ export async function createTopic(
   return generated.createTopic({ description: "", ...req });
 }
 
-/** Fetch a single space by ID. */
+/** Fetch a single topic by ID. */
 export async function getTopic(id: string): Promise<Topic> {
   return generated.getTopic(id);
 }

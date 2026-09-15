@@ -201,7 +201,7 @@ pub(crate) fn parse_sse_block(block: &str) -> Option<SseEvent> {
         if let Some(val) = line.strip_prefix("event:") {
             event_type = Some(val.trim_start_matches(' ').to_owned());
         } else if let Some(val) = line.strip_prefix("data:") {
-            // Leading single space is stripped per spec; additional topics are kept.
+            // Leading single space is stripped per spec; additional spaces are kept.
             let content = val.strip_prefix(' ').unwrap_or(val);
             data_lines.push(content.to_owned());
         }
