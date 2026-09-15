@@ -339,7 +339,10 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     })
     .await
     .unwrap();
-    assert_eq!(detail["run"]["final_output"]["subject"], "contract evidence");
+    assert_eq!(
+        detail["run"]["final_output"]["subject"],
+        "contract evidence"
+    );
     assert_eq!(
         detail["run"]["final_output"]["failed_sources"][0]["url"],
         "https://example.test/failed"
