@@ -52,6 +52,30 @@ if (mergePolicy !== "direct-merge" && mergePolicy !== "pr")
 if (mergePolicy === "pr" && !integrationBranch)
   throw new Error('mergePolicy "pr" requires integrationBranch (the structural branch unit PRs target)');
 
+// ------------------------------------------------------- dispatch record
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why. The choice is this script's,
+// made per stage: a later turn that profits from a worker's accumulated
+// context — a fix round after its own build, a re-verification after its
+// own verdict — continues the held worker; a stage whose value is
+// independence, or whose envelope (model, effort, grants, placement) must
+// differ from the worker's, re-briefs. `staleness()` is a journalled
+// reading, so a decision taken on it replays identically.
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
+// A held worker's idle gap against its route's threshold, phrased for the
+// dispatch record: the recorded fact a warm-continue-or-re-brief decision
+// rests on, never a guess.
+const idleReading = async (worker) => {
+  const reading = await staleness(worker);
+  const phrase = reading.stale === true
+    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+    : reading.stale === false
+      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
+  return { ...reading, phrase };
+};
+
 // One nonce PER HOLD, minted inside runHold from a deterministic counter
 // (the sealed context has no clock or randomness, and determinism is what
 // replay needs): reusing a nonce across a correction loop would let a
@@ -93,30 +117,6 @@ const runHold = async (stage, content, verdicts) => {
     await deliverEvents({ event_seq: request.seq });
     return payload;
   }
-};
-
-// ------------------------------------------------------- dispatch record
-// Every dispatch records on the run journal whether it continued a held
-// worker or re-briefed a fresh one, and why. The choice is this script's,
-// made per stage: a later turn that profits from a worker's accumulated
-// context — a fix round after its own build, a re-verification after its
-// own verdict — continues the held worker; a stage whose value is
-// independence, or whose envelope (model, effort, grants, placement) must
-// differ from the worker's, re-briefs. `staleness()` is a journalled
-// reading, so a decision taken on it replays identically.
-const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
-
-// A held worker's idle gap against its route's threshold, phrased for the
-// dispatch record: the recorded fact a warm-continue-or-re-brief decision
-// rests on, never a guess.
-const idleReading = async (worker) => {
-  const reading = await staleness(worker);
-  const phrase = reading.stale === true
-    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
-    : reading.stale === false
-      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
-      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
-  return { ...reading, phrase };
 };
 
 // ---------------------------------------------------------------- restate

@@ -50,6 +50,24 @@ if (mergePolicy === "pr" && !integrationBranch)
 const proofMode = args.proofMode === "mutation" ? "mutation" : "baseline";
 if (proofMode === "baseline" && !baselineRef)
   throw new Error("estate-unit: baseline proof mode needs baselineRef; pass proofMode:'mutation' when no reachable tree lacks the behaviour");
+// ------------------------------------------------------- dispatch record
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// per stage: a later turn that profits from accumulated context continues
+// the held worker; a stage whose value is independence, or whose envelope
+// differs from the worker's, re-briefs. `staleness()` is journalled, so a
+// decision taken on it replays identically.
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+const idleReading = async (worker) => {
+  const reading = await staleness(worker);
+  const phrase = reading.stale === true
+    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+    : reading.stale === false
+      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
+  return { ...reading, phrase };
+};
+
 // One nonce per hold from a deterministic counter (the sealed context has
 // no clock or randomness): a stale decision from an earlier attempt names
 // a different nonce and is ignored. The decision event's payload contract,
@@ -87,24 +105,6 @@ const runHold = async (stage, content, verdicts) => {
     await deliverEvents({ event_seq: request.seq });
     return payload;
   }
-};
-
-// ------------------------------------------------------- dispatch record
-// Every dispatch records on the run journal whether it continued a held
-// worker or re-briefed a fresh one, and why — the choice is this script's,
-// per stage: a later turn that profits from accumulated context continues
-// the held worker; a stage whose value is independence, or whose envelope
-// differs from the worker's, re-briefs. `staleness()` is journalled, so a
-// decision taken on it replays identically.
-const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
-const idleReading = async (worker) => {
-  const reading = await staleness(worker);
-  const phrase = reading.stale === true
-    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
-    : reading.stale === false
-      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
-      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
-  return { ...reading, phrase };
 };
 
 // ---------------------------------------------------------------- restate

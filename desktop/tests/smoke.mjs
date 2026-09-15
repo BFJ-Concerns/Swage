@@ -328,36 +328,36 @@ function createMockGateway() {
   };
 }
 
-async function createConversationAndWaitForReply(surface, expectedRuntimeText) {
-  const defaultTopic = surface.getByRole("article", { name: "Topic Default" });
+async function createConversationAndWaitForReply(page, expectedRuntimeText) {
+  const defaultTopic = page.getByRole("article", { name: "Topic Default" });
   await defaultTopic
     .getByRole("button", { name: "Preview topic Default", exact: true })
     .click();
   await defaultTopic.getByRole("button", { name: "Open", exact: true }).click();
-  await surface.getByRole("button", { name: /\+ new conversation/i }).click();
-  await surface
+  await page.getByRole("button", { name: /\+ new conversation/i }).click();
+  await page
     .getByPlaceholder("Send a message — Shift+Enter for a new line")
     .fill("Hello from smoke");
-  await surface.getByRole("button", { name: /send/i }).click();
-  await surface.waitForURL(/\/conversations\/conv-\d+$/);
-  await surface
+  await page.getByRole("button", { name: /send/i }).click();
+  await page.waitForURL(/\/conversations\/conv-\d+$/);
+  await page
     .getByLabel("Conversation messages")
     .getByText("Desktop shell echoed: Hello from smoke")
     .waitFor();
 
   if (expectedRuntimeText) {
-    await surface.getByText(expectedRuntimeText, { exact: true }).waitFor();
+    await page.getByText(expectedRuntimeText, { exact: true }).waitFor();
   }
 }
 
 async function runBrowserSmoke(baseUrl) {
   console.log("browser smoke: start");
   const browser = await chromium.launch();
-  const surface = await browser.newSurface();
+  const page = await browser.newPage();
 
   try {
-    await surface.goto(baseUrl, { waitUntil: "networkidle" });
-    await createConversationAndWaitForReply(surface, null);
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await createConversationAndWaitForReply(page, null);
   } finally {
     await browser.close();
     console.log("browser smoke: done");
