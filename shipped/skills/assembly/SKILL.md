@@ -143,9 +143,12 @@ dispatch and [references/briefs.md](references/briefs.md) before the first
 brief.
 
 - **Builders** ride the build family's flagship tier at low effort (the
-  brief and exemplar decided the path); fix rounds step the builder up to
-  medium — a verdict that sent the unit back falsifies that ground.
-  **Verifiers** are cross-family,
+  brief and exemplar decided the path), as one held worker from
+  restatement through build, fix rounds and a warm landing — a fix round
+  returns to the worker that holds what it built, at the same pin, since
+  a held worker's effort is fixed at creation and escalation is a park
+  and a re-brief. **Verifiers** are cross-family and held likewise, so a
+  re-verification returns to the reader that derived the claims,
   below their family's top tier, judging brief-fit, commission-fit,
   overbuild, and whether the unit's proof could fail — a test satisfiable
   by a broken product is a severe finding, in the standard pipeline as

@@ -160,6 +160,41 @@ return { reply };
   asked to fix its own build still holds what it built. The token is
   valid only for workers this run created; `tools` and `task` cannot be
   changed on a continued session.
+- **`session(options)`**, **`send(worker, prompt, options)`**,
+  **`staleness(worker)`**, **`close(worker)`** — a **held worker**: the
+  same continuation, kept as a handle the script owns rather than a token
+  it threads by hand. `session()` fixes the worker's envelope at creation
+  — `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`,
+  `effort`, `cwd`, `isolation`, `label` — and spawns nothing until the
+  first `send()`; each `send()` is one sequential turn on the accumulated
+  context, taking only `schema`, `maxAttempts`, `timeoutMs` and `label`
+  (a second `send()` while one is unsettled, or any creation option on a
+  turn, throws `HeldWorkerError` — a bigger model or more effort is a new
+  worker, never a switch). `staleness(worker)` returns a journalled
+  `{ stale, idleMs, thresholdMs, route }`: the idle gap since the last
+  settled turn against the `worker_staleness_threshold_ms` of the
+  provider route the worker's model resolves to; `stale` is `null` when
+  the route declares no threshold, which is unknown, not fresh. `close()`
+  on the success path records intent; a run ending by any path closes
+  every worker it still holds.
+
+  ```js
+  const builder = await session({ cwd: repo, label: "builder" });
+  const plan = await send(builder, "Read src/parser/ and propose a fix plan.", { schema: planSchema });
+  const diff = await send(builder, "Now implement step 1 of your plan.");
+  const reading = await staleness(builder);
+  log(`[dispatch] verify: ${reading.stale === false ? "continued — warm" : "re-briefed — cold or unknown"}`);
+  await close(builder);
+  ```
+
+  Choose per stage, and record the choice: continue a held worker where
+  a later turn profits from what it already holds — a fix round after its
+  own build, a re-verification after its own verdict, a refinement after
+  a proposal; re-brief a fresh worker where independence is the point (a
+  blind verifier, a fan-out of unrelated briefs) or where the envelope
+  must differ. Write a `log()` line at every dispatch naming which and
+  why — the shipped development-process pipelines do, as `[dispatch]`
+  lines, and the run journal is where the reason is read back.
 
 ### Racing handles against a timer
 

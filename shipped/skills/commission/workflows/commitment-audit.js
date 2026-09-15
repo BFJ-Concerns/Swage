@@ -291,6 +291,13 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 // presumed a mining failure — the leg is retried once, and a second zero is
 // recorded as a gap for the adjudicating session to confirm, never flowed
 // silently into the diff as a vacuous clean pool.
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("mine");
 log(`mining ${transcripts.length} transcript file(s) with both families`);
 const mineLegs = [];
@@ -299,17 +306,20 @@ for (const path of transcripts) {
     mineLegs.push({ path, family });
   }
 }
-const runMineLegs = (legs) =>
+const runMineLegs = (legs, retry) =>
   parallel(
-    legs.map((leg) => () =>
-      agent(minePrompt(leg.path), {
+    legs.map((leg) => () => {
+      dispatching(`mine:${leg.family}`, "re-briefed", retry
+        ? "a zero-want read is presumed a mining failure, so the retry is a fresh read of the transcript rather than a continuation that would re-affirm the empty result"
+        : "each transcript is read independently by both families; a miner sharing another's context would inherit the drops the other family's read makes");
+      return agent(minePrompt(leg.path), {
         ...FAMILY[leg.family],
         schema: mineSchema,
         label: `mine:${leg.family}`,
-      }).then((r) => ({ ...leg, result: r })),
-    ),
+      }).then((r) => ({ ...leg, result: r }));
+    }),
   );
-const mined = await runMineLegs(mineLegs);
+const mined = await runMineLegs(mineLegs, false);
 const mining_gaps = [];
 const minedWants = [];
 const zeroWantLegs = [];
@@ -331,7 +341,7 @@ mined.forEach((m, i) => {
 });
 if (zeroWantLegs.length) {
   log(`${zeroWantLegs.length} zero-want leg(s) — retrying once before recording a gap`);
-  const retried = await runMineLegs(zeroWantLegs);
+  const retried = await runMineLegs(zeroWantLegs, true);
   retried.forEach((m, i) => {
     const leg = (m && { path: m.path, family: m.family }) || zeroWantLegs[i];
     const r = m && m.result;
@@ -378,14 +388,15 @@ if (minedWants.length === 0) {
   log("diff skipped: no mined wants — recorded as a gap, not a clean diff");
 } else {
   const diffResults = await parallel(
-    ["gpt", "claude"].map((family) => () =>
-      agent(diffPrompt(minedWants, commitments), {
+    ["gpt", "claude"].map((family) => () => {
+      dispatching(`diff:${family}`, "re-briefed", "the differ sees only the two bare lists by design: a miner continuing into the diff would carry the reasoning that rationalises a mismatch");
+      return agent(diffPrompt(minedWants, commitments), {
         ...FAMILY[family],
         ...DIFF_OPTS[family],
         schema: diffSchema,
         label: `diff:${family}`,
-      }).then((r) => ({ family, result: r })),
-    ),
+      }).then((r) => ({ family, result: r }));
+    }),
   );
   diffResults.forEach((d, i) => {
     const family = d ? d.family : ["gpt", "claude"][i];
@@ -425,14 +436,15 @@ for (const line of hollowScope) {
   }
 }
 const hollowResults = await parallel(
-  hollowLegs.map((leg) => () =>
-    agent(hollowPrompt(leg.line, commitments), {
+  hollowLegs.map((leg) => () => {
+    dispatching(`hollow:${leg.family}:${leg.line.id}`, "re-briefed", "each line is judged fresh by both families against the whole register; the hollow test runs on a stronger tier than the mining, so no miner could continue into it");
+    return agent(hollowPrompt(leg.line, commitments), {
       ...FAMILY[leg.family],
       ...HOLLOW_OPTS[leg.family],
       schema: hollowSchema,
       label: `hollow:${leg.family}:${leg.line.id}`,
-    }).then((r) => ({ ...leg, verdict: r })),
-  ),
+    }).then((r) => ({ ...leg, verdict: r }));
+  }),
 );
 // One entry per line×family; a null verdict is a check still owed, never a
 // pass — the session treats a one-family line as degraded and a no-family

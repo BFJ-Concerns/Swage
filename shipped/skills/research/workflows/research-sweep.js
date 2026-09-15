@@ -59,9 +59,22 @@ const synthesistBrief =
   "citation id it returns.\n\n";
 const synthesistTools = ["knowledge_search", "knowledge_cite"];
 
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
+// Every stage here re-briefs: each role's grant is its whole tool set, and
+// a held worker's grants are fixed when it opens, so a scout cannot become
+// an organiser or a synthesist without a fresh dispatch — and the
+// synthesist's independence from the gathering is the citation contract.
+
 phase("Scope: choose sources");
 // The scout's grants exclude knowledge_record; recording waits for the
 // gather wave, so a crash here costs nothing.
+dispatching("Scope sources", "re-briefed", "the sweep's first worker; its grants (search and fetch, no recording) differ from every later role's, so no later stage can continue it");
 const plan = await agent(
   researcherBrief +
     `You are scoping a research sweep.\n` +
@@ -114,8 +127,9 @@ phase(`Gather: ${plan.sources.length} sources`);
 // the raw body, origin, and extraction land as an immutable observation.
 const gathered = await pipeline(
   plan.sources,
-  (source) =>
-    agent(
+  (source) => {
+    dispatching(`Gather ${source.url}`, "re-briefed", "one independent gatherer per source: a failed fetch collapses only its own slot, and no source's worker profits from another's context");
+    return agent(
       researcherBrief +
         `Gather one source for the research sweep on "${topic}".\n` +
         `Source: ${source.url}\n` +
@@ -140,7 +154,8 @@ const gathered = await pipeline(
           },
         },
       },
-    ),
+    );
+  },
 );
 
 const captured = await capturedSources();
@@ -164,6 +179,7 @@ phase("Organise: orientation and curation");
 // One organising pass over what this sweep added, in the context of the
 // whole corpus: author orientation, assert duplicates/supersessions. The
 // organiser judges through its tools; the script hands it ids, not content.
+dispatching("Organise corpus", "re-briefed", "the organiser's grants are the curation tools alone, an envelope no gatherer holds; it reads what this sweep recorded through the corpus, not through a gatherer's memory of fetching it");
 const organised = await agent(
   organiserBrief +
     `A research sweep on "${topic}" just recorded these observations:\n` +
@@ -217,6 +233,7 @@ phase("Synthesise: findings against the purpose");
 // The synthesist reads through search over the accumulated corpus - not this
 // sweep's pocket - and validates quotes through cite before reporting them,
 // so cross-sweep synthesis is the default shape without bypassing citations.
+dispatching("Synthesise findings", "re-briefed", "independence is the point: the synthesist works only from the knowledge base through search and cite, with no memory of gathering, so every claim is traceable to the corpus rather than to a worker's recollection");
 const findings = await agent(
   synthesistBrief +
     `Deliver research findings.\n` +
