@@ -6,10 +6,15 @@
 // triage hold. Acceptance is inverted: the tests are the deliverable.
 
 export const defaults = {
-  // Builders ride the flagship GPT tier at low effort; fix rounds override
-  // the builder's effort to medium — a verdict that sent the unit back
-  // falsifies the low pin's decided-path ground. Claude legs are the
-  // cross-family verifiers, pinned per call.
+  // Builders ride the flagship GPT tier at low effort. The builder is one
+  // held worker — restatement, build, fix rounds and a warm landing are
+  // turns of a single session — and a held worker's effort is fixed when it
+  // opens, so fix rounds run at the build pin: the context the worker
+  // carries into a fix round substitutes for the search a higher effort
+  // would buy, and escalation is a park and a fresh re-brief. Claude legs
+  // are the cross-family verifiers, pinned per call; the verifier is held
+  // too, so every re-verification returns to the reader that ran the
+  // estate demonstration.
   model: "gpt-5.6-sol",
   effort: "low",
 };
@@ -84,6 +89,24 @@ const runHold = async (stage, content, verdicts) => {
   }
 };
 
+// ------------------------------------------------------- dispatch record
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// per stage: a later turn that profits from accumulated context continues
+// the held worker; a stage whose value is independence, or whose envelope
+// differs from the worker's, re-briefs. `staleness()` is journalled, so a
+// decision taken on it replays identically.
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+const idleReading = async (worker) => {
+  const reading = await staleness(worker);
+  const phrase = reading.stale === true
+    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+    : reading.stale === false
+      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
+  return { ...reading, phrase };
+};
+
 // ---------------------------------------------------------------- restate
 phase("restate");
 
@@ -103,14 +126,24 @@ const restatePrompt = (correction) => `Read the brief at ${briefPath}. FIRST, th
 
 Reply with: admission ("ok"/"refused"), restatement (the obligation in your own words), journeys (the concrete journey list you intend to cover, each naming the ladder rung it exercises), disputes ("" if none). Reply with the JSON last.`;
 
+// The builder is one held worker from restatement onward: the journeys it
+// planned against the ladder are the context the build turn starts from.
+const builder = await session({ cwd: worktree, label: "builder" });
 let plan = null;
 let hold = null;
 // Hold-decision notes — restate and triage alike — carried forward to every
 // later verification: a ruling may supersede write-once brief text.
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
-  plan = await agent(restatePrompt(hold && hold.note), {
-    schema: restatementSchema, cwd: worktree, label: `restate:${attempt}`,
+  dispatching(
+    `restate:${attempt}`,
+    attempt === 0 ? "re-briefed" : "continued",
+    attempt === 0
+      ? "the builder's held session opens on the brief; the build and its fix rounds continue this worker"
+      : "the orchestrator corrected this worker's own plan — it refines the journeys it proposed rather than re-deriving them"
+  );
+  plan = await send(builder, restatePrompt(hold && hold.note), {
+    schema: restatementSchema, label: `restate:${attempt}`,
   });
   if (!plan) throw new Error("restatement stage returned nothing usable");
   hold = await runHold("restate", plan, ["accept", "correct", "kill"]);
@@ -126,8 +159,10 @@ if (plan.admission === "refused")
 // ---------------------------------------------------------------- build
 phase("build");
 
-const report = await agent(
-  `Build the estate this accepted plan describes:
+dispatching("build", "continued", "the build starts from the plan this worker made: the ladder rungs and journeys it chose are already in its context");
+const report = await send(
+  builder,
+  `Build the estate this accepted plan describes — your own plan, as the orchestrator accepted it:
 
 <accepted-plan>
 ${JSON.stringify(plan)}
@@ -139,7 +174,7 @@ The estate property is the acceptance bar, and its mechanics matter. ${proofMode
   ? `To show a test FAILS against the baseline, create a separate checkout of ${baselineRef} (git worktree add <tmp> ${baselineRef}), copy the NEW test files into it, and run them there — never check the baseline out in your own worktree, which would delete the tests you are proving. Each new journey test must fail in that baseline checkout and pass in ${worktree}.`
   : `No reachable tree lacks this behaviour, so fail-before is proved by MUTATION: in a scratch checkout of the current tree (git worktree add <tmp> HEAD), deliberately break the behaviour under proof (name the exact break in the report), run the new tests there and watch them fail, then discard the scratch checkout. Each new journey test must fail under the mutation and pass in ${worktree}.`
 } Record the exact commands and their output for both directions in ${unitDir}/report.md, alongside what you did not cover and your confidence. Remove the temporary checkout when done. Reply with a two-sentence summary and the head commit.`,
-  { cwd: worktree, label: "build", timeoutMs: 14400000 }
+  { label: "build", timeoutMs: 14400000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -188,9 +223,14 @@ Every command your verdict leans on is evidenced by the command line as executed
 
 Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
-let verdict = await agent(verifyPrompt(null, null), {
-  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify",
+// The verifier is a held worker of the opposite family: opened blind to the
+// builder's session, then continued for every re-verification, so the
+// estate demonstration it ran is what it re-runs against the fix delta.
+const verifier = await session({
+  model: "claude-opus-5", effort: "medium", cwd: worktree, label: "verifier",
 });
+dispatching("verify", "re-briefed", "cross-family verification is independent by design: a fresh reader of the opposite family, sharing nothing with the builder's session; its re-verifications continue this worker");
+let verdict = await send(verifier, verifyPrompt(null, null), { schema: findingsSchema, label: "verify" });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
   throw new Error("verifier examined-account empty — invalid, re-run");
@@ -238,14 +278,17 @@ while (severesIn(verdict).length) {
     handover = "autonomous round limit reached with severe findings open";
     break;
   }
-  const autoFix = await agent(autoFixPrompt(rounds), {
-    effort: "medium", schema: autoFixSchema,
-    cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000,
+  const builderIdle = await idleReading(builder);
+  dispatching(`fix:${rounds}`, "continued", `a fix round after its own build: the worker holds the journeys it wrote and how it demonstrated them, so the findings land on context (${builderIdle.phrase}; continued regardless — the context is worth more than the cache)`);
+  const autoFix = await send(builder, autoFixPrompt(rounds), {
+    schema: autoFixSchema, label: `fix:${rounds}`, timeoutMs: 7200000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
-  verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
+  const verifierIdle = await idleReading(verifier);
+  dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict: the reader repeats its estate demonstration over the fix delta against what it already saw (${verifierIdle.phrase}; continued regardless)`);
+  verdict = await send(verifier, verifyPrompt(rounds, "autonomous"), {
+    schema: findingsSchema, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable");
   if (!verdict.examined || !verdict.examined.trim())
@@ -338,12 +381,17 @@ while (true) {
   for (const d of dispositions)
     if (d.note && d.note.trim())
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
-  fixReport = await agent(
+  const builderIdle = await idleReading(builder);
+  dispatching(`fix:${rounds}`, "continued", `a directed fix round after its own build: the dispositions name findings against tests this worker holds in context (${builderIdle.phrase}; continued regardless — the context is worth more than the cache)`);
+  fixReport = await send(
+    builder,
     `The verifier raised findings (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}); the orchestrator's fix dispositions by index: ${JSON.stringify(fixList)}, note: "${triage.note || ""}". Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; tests exercise the ladder's rung, never a stand-in. Apply exactly those dispositions — no more. A disposition you cannot apply honestly as written — it would need manufactured state or an untrue assertion — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. Re-demonstrate the estate property both directions (the same proof-mode mechanics as before — baseline checkout, or mutation), then make the whole of ${unitDir}/report.md true about the current tree — not just the lines a finding quoted. Reply with a summary and the new head commit.`,
-    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000 }
+    { label: `fix:${rounds}`, timeoutMs: 7200000 }
   );
-  verdict = await agent(verifyPrompt(rounds, "directed"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
+  const verifierIdle = await idleReading(verifier);
+  dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict, over the delta the orchestrator's dispositions authorised (${verifierIdle.phrase}; continued regardless)`);
+  verdict = await send(verifier, verifyPrompt(rounds, "directed"), {
+    schema: findingsSchema, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable");
   if (!verdict.examined || !verdict.examined.trim())
@@ -368,12 +416,28 @@ const landingSchema = {
   },
 };
 
-const landing = await agent(
+const landPrompt =
   mergePolicy === "direct-merge"
     ? `Land the finished estate unit. Read ${annexeConfigPath} for push_policy first. From ${worktree}, merge the unit branch into main. A conflicted merge is yours to resolve: keep both sides' behaviour, then run the project's full gate on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction the sides cannot both keep, or a resolution whose gate stays red; abort the merge before reporting. Push main only under push_policy "push-on-land". Reply {landed, detail, merge_commit}, landed true only if the merge commit exists on main (verify with git log). JSON last.`
-    : `Publish the finished estate unit as a blocked PR. Read ${annexeConfigPath} for push_policy first: under "hold-for-user" do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail: why the push is held}. Otherwise write ${unitDir}/pr.md whole from the report (What changed / Why / What must be true / Known gaps), push the branch, open the PR "WIP:"-prefixed via the forge API, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later, or main itself for a Lane: main unit) (tokens under ~/.config/forgejo/; refs/for/* AGit pushes forbidden; auth failure → {landed:false, blocked_on:"forge auth", detail: what failed}). Confirm by API read that the PR exists with a non-empty body; landed true only on that confirmation. Reply {landed, detail, pr_number, pr_url}. JSON last.`,
-  { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
-);
+    : `Publish the finished estate unit as a blocked PR. Read ${annexeConfigPath} for push_policy first: under "hold-for-user" do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail: why the push is held}. Otherwise write ${unitDir}/pr.md whole from the report (What changed / Why / What must be true / Known gaps), push the branch, open the PR "WIP:"-prefixed via the forge API, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later, or main itself for a Lane: main unit) (tokens under ~/.config/forgejo/; refs/for/* AGit pushes forbidden; auth failure → {landed:false, blocked_on:"forge auth", detail: what failed}). Confirm by API read that the PR exists with a non-empty body; landed true only on that confirmation. Reply {landed, detail, pr_number, pr_url}. JSON last.`;
+
+// The landing continues the builder while its session is warm and re-briefs
+// a fresh worker once the triage hold has outlived the route's cache: the
+// landing is mechanical, and report.md carries what a fresh worker needs.
+// The reading decides; the reason records it.
+const builderIdle = await idleReading(builder);
+let landing;
+if (builderIdle.stale === false) {
+  dispatching("land", "continued", `the builder publishes its own unit while its session is warm (${builderIdle.phrase})`);
+  landing = await send(builder, landPrompt, { schema: landingSchema, label: "land", timeoutMs: 1800000 });
+} else {
+  dispatching("land", "re-briefed", `the landing is mechanical and ${unitDir}/report.md carries what it needs; ${builderIdle.stale === true ? "the builder's session is cold" : "the route declares no staleness threshold, so warmth is unknown"} (${builderIdle.phrase})`);
+  landing = await agent(landPrompt, { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 });
+}
+// Closed on the success path so the journal records intent; a run ending
+// by any other path closes every worker it still holds.
+await close(builder);
+await close(verifier);
 
 // issues_findings — sub-severe findings accepted by default at the land —
 // are the orchestrator's to file to the annexe issue log.

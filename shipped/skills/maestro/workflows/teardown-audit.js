@@ -60,6 +60,13 @@ const ADJ_OPTS = auditFamily === "gpt"
   : { model: "claude-opus-5", effort: "medium" };
 const sweeps = Number(args.sweeps) || 3;
 
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("blind-sweep");
 
 const capabilitySchema = {
@@ -95,14 +102,15 @@ Reply with a single JSON value conforming to the schema. Reason first if you nee
 
 const sweepsOut = (
   await parallel(
-    Array.from({ length: sweeps }, (_, i) => () =>
-      agent(sweepPrompt(i + 1, sweeps), {
+    Array.from({ length: sweeps }, (_, i) => () => {
+      dispatching(`sweep:${i + 1}`, "re-briefed", "blind by construction: each sweeper reads only the repo and the window, never the records or another sweeper's list");
+      return agent(sweepPrompt(i + 1, sweeps), {
         ...SWEEP_OPTS,
         schema: capabilitySchema,
         cwd: repo,
         label: `sweep:${i + 1}`,
-      })
-    )
+      });
+    })
   )
 ).filter(Boolean);
 
@@ -116,6 +124,7 @@ if (sweepsOut.length === 0)
     `teardown-audit: all ${sweeps} blind-sweep workers failed or returned nothing usable — the audit cannot run; rerun rather than handing over on silence`
   );
 if (sweepsOut.every((s) => s.capabilities.length === 0)) {
+  dispatching("empty-probe", "re-briefed", "a one-line mechanical read of the diff summary; nothing a sweeper knows would help it, and a sweeper vouching for its own empty account is what the probe exists to avoid");
   const probe = await agent(
     `Run: git -C ${repo} diff --stat ${baseCommit}..${headCommit} | tail -1 — reply with that summary line only.`,
     { ...SWEEP_OPTS, label: "empty-probe" }
@@ -178,6 +187,7 @@ const adjudicationSchema = {
   },
 };
 
+dispatching("adjudicate", "re-briefed", "the adjudicator compares the blind lists against the records on a stronger tier than any sweeper; continuing a sweeper would let it grade its own claims");
 const adjudication = await agent(
   `You are adjudicating a teardown audit for the window ${baseCommit}..${headCommit} in ${repo}. The restructuring session kept records of what its removals displaced; independent sweepers have re-derived the removed capabilities blind. Compare all the accounts.
 
@@ -214,6 +224,7 @@ if (!adjudication)
 
 // The report file is the durable artefact the ledger points at; a returned
 // JSON with no file behind it would leave the handover citing nothing.
+dispatching("report-check", "re-briefed", "the check exists so the report's existence does not rest on the adjudicator's own word; a fresh cheap worker reads the file");
 const reportCheck = await agent(
   `If the file ${reportPath} exists and contains the exact string "${baseCommit}..${headCommit}", reply with the single word OK. Otherwise reply MISSING.`,
   { ...SWEEP_OPTS, label: "report-check" }

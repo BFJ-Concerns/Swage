@@ -243,6 +243,13 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 // Every lens attacked by BOTH families, so no lens is seen by only one kind. No barrier
 // before the per-lens attacks; the merge collects them all, then feeds its workers in
 // size-bounded batches (see the fan-in guard above) rather than as one raw union.
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("attack");
 const lensRuns = [];
 for (let i = 0; i < lenses.length; i++) {
@@ -254,13 +261,14 @@ log(`${lensRuns.length} attacks: ${lenses.length} lens(es) x 2 families`);
 
 const raw = (
   await parallel(
-    lensRuns.map((r) => () =>
-      agent(attackPrompt(r.lens), {
+    lensRuns.map((r) => () => {
+      dispatching(`attack:${r.family}:${r.i}`, "re-briefed", "one fresh attacker per lens and family: an attacker sharing another lens's context would attack through that lens too, and the per-lens performance the reconciliation reads would blur");
+      return agent(attackPrompt(r.lens), {
         ...FAMILY[r.family],
         schema: findingSchema,
         label: `attack:${r.family}:${r.i}`,
-      }).then((res) => (res ? { family: r.family, lens: r.lens, ...res } : null)),
-    ),
+      }).then((res) => (res ? { family: r.family, lens: r.lens, ...res } : null));
+    }),
   )
 ).filter(Boolean);
 
@@ -295,13 +303,14 @@ const treeMerge = async (family) => {
   if (batches.length > 1) log(`merge:${family} tree-reducing in ${batches.length} batches`);
   let level = (
     await parallel(
-      batches.map((batch, k) => () =>
-        agent(mergePrompt(batch), {
+      batches.map((batch, k) => () => {
+        dispatching(`merge:${family}:${k}`, "re-briefed", "the merge consolidates a given finding set on a fresh worker: an attacker curating its own findings would keep them");
+        return agent(mergePrompt(batch), {
           ...FAMILY[family],
           schema: mergeSchema,
           label: `merge:${family}:${k}`,
-        }),
-      ),
+        });
+      }),
     )
   ).filter(Boolean);
   // Reduce the partials in bounded rounds too — one giant re-merge would just
@@ -313,15 +322,15 @@ const treeMerge = async (family) => {
     const groups = batchBySize(level, MERGE_INPUT_BOUND);
     level = (
       await parallel(
-        groups.map((group, k) => () =>
-          group.length === 1
-            ? Promise.resolve(group[0])
-            : agent(remergePrompt(group), {
-                ...FAMILY[family],
-                schema: mergeSchema,
-                label: `remerge:${family}:${round}:${k}`,
-              }),
-        ),
+        groups.map((group, k) => () => {
+          if (group.length === 1) return Promise.resolve(group[0]);
+          dispatching(`remerge:${family}:${round}:${k}`, "re-briefed", "a re-merge combines partials each of which a different worker produced; no single merger holds more than its own batch");
+          return agent(remergePrompt(group), {
+            ...FAMILY[family],
+            schema: mergeSchema,
+            label: `remerge:${family}:${round}:${k}`,
+          });
+        }),
       )
     ).filter(Boolean);
     if (level.length === groups.length && groups.length > 1 && groups.every((g) => g.length === 1)) {

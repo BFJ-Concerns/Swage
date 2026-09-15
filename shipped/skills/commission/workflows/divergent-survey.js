@@ -442,16 +442,24 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 // Stage 0: survey the theory before any approach exists. A researcher that
 // collapses to null after retries degrades gracefully to a smaller digest;
 // both collapsing degrades every proposer to blank-slate.
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("research");
 const research = (
   await parallel(
-    RESEARCH_QUESTIONS.map(({ kind, question }) => () =>
-      agent(researchPrompt(question), {
+    RESEARCH_QUESTIONS.map(({ kind, question }) => () => {
+      dispatching(`research:${kind}`, "re-briefed", "each survey question is bounded retrieval on its own; the two questions deliberately look in opposite directions");
+      return agent(researchPrompt(question), {
         ...FAMILY.gpt,
         schema: researchSchema,
         label: `research:${kind}`,
-      }).then((r) => (r ? r.findings.map((f) => ({ kind, ...f })) : [])),
-    ),
+      }).then((r) => (r ? r.findings.map((f) => ({ kind, ...f })) : []));
+    }),
   )
 ).flat();
 log(`${research.length} research findings gathered`);
@@ -487,16 +495,19 @@ const items = Array.from({ length: count }, (_, i) => ({
 
 const pairs = await pipeline(
   items,
-  (item) =>
-    agent(proposePrompt(item.angle, item.findings), {
+  (item) => {
+    dispatching(`propose:${item.family}:${item.i}`, "re-briefed", "every proposer is an independent angle by design — a research-seeded or blank-slate worker that shares no other proposer's context, so the pool diverges");
+    return agent(proposePrompt(item.angle, item.findings), {
       ...FAMILY[item.family],
       ...PROPOSE_OPTS[item.family],
       schema: approachSchema,
       label: `propose:${item.family}:${item.i}`,
-    }),
+    });
+  },
   (approach, item) => {
     if (!approach) return null; // proposer collapsed after retries; drop this slot
     const critic = opposite(item.family);
+    dispatching(`critique:${critic}:${item.i}`, "re-briefed", "the critic is the opposite family by design: a proposer continuing into its own critique would judge its own kind's work");
     // The critic sees the same findings slice the proposer had, so research-backed
     // evidence is checkable rather than waved through on the citation's say-so.
     return agent(critiquePrompt(approach, item.findings), {
@@ -536,16 +547,17 @@ let table = valid;
 if (JSON.stringify(valid).length > SYNTHESIS_INPUT_BOUND) {
   log(`pairs exceed ${SYNTHESIS_INPUT_BOUND} chars serialised — distilling before synthesis`);
   const synopses = await parallel(
-    valid.map((pair, k) => () =>
-      agent(synopsisPrompt(pair), {
+    valid.map((pair, k) => () => {
+      dispatching(`distil:${k}`, "re-briefed", "distillation compresses one decided pair; a fresh worker on an alternating family keeps neither family's compression the only view");
+      return agent(synopsisPrompt(pair), {
         // Distillation is compression of a single decided pair, not judgement over
         // the table — but alternate the family per pair so neither family's
         // compression is the only view the rankers ever see.
         ...FAMILY[k % 2 === 0 ? "gpt" : "claude"],
         schema: synopsisSchema,
         label: `distil:${k}`,
-      }),
-    ),
+      });
+    }),
   );
   // A collapsed distiller must not restore its full oversized pair (that would
   // resurrect the very input the bound exists to prevent); project the pair's
@@ -573,13 +585,14 @@ if (JSON.stringify(valid).length > SYNTHESIS_INPUT_BOUND) {
 
 const syntheses = (
   await parallel(
-    ["gpt", "claude"].map((family) => () =>
-      agent(synthesisPrompt(table), {
+    ["gpt", "claude"].map((family) => () => {
+      dispatching(`synthesise:${family}`, "re-briefed", "both families rank the whole table fresh, so the ranking is not one proposer's or critic's read of its own entries");
+      return agent(synthesisPrompt(table), {
         ...FAMILY[family],
         schema: synthesisSchema,
         label: `synthesise:${family}`,
-      }).then((s) => (s ? { family, ...s } : null)),
-    ),
+      }).then((s) => (s ? { family, ...s } : null));
+    }),
   )
 ).filter(Boolean);
 

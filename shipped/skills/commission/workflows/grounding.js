@@ -179,6 +179,13 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 // One pipeline per candidate: find → (conditionally) cross-family verify. pipeline keeps a
 // fast candidate moving to verification while a slow one is still being investigated, and
 // items are independent — there is no cross-candidate barrier to wait on.
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("ground");
 const items = candidates.map((c, i) => ({ ...c, i }));
 log(`grounding ${items.length} candidate(s) against ${repo}`);
@@ -188,6 +195,7 @@ const results = await pipeline(
   // Stage 1 — FIND. Load-balanced across both families; each candidate found by one.
   (item) => {
     const finder = finderFamily(item.i);
+    dispatching(`find:${finder}:${item.i}`, "re-briefed", "each candidate is found blind by one family; a finder sharing another candidate's context would read the code with expectations");
     return agent(findPrompt(item), {
       ...FAMILY[finder],
       cwd: repo,
@@ -222,6 +230,7 @@ const results = await pipeline(
       };
     }
     const verifier = opposite(prev.finder);
+    dispatching(`verify:${verifier}:${item.i}`, "re-briefed", "the verifier is the opposite family by design and reads the code itself: a finder continuing into its own verification would confirm its own call");
     return agent(verifyPrompt(item, finding), {
       ...FAMILY[verifier],
       ...VERIFY_OPTS[verifier],
