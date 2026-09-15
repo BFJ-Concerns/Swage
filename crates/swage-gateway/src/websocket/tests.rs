@@ -590,10 +590,7 @@ async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStora
     let storage = Arc::new(MockStorage::new());
     let session_id = Uuid::new_v4();
 
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
 
     storage.db.lock().await.sessions.insert(
         session_id,

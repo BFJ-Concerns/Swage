@@ -1046,16 +1046,20 @@
           ]
         },
         "topic_id": {
-          "type": "string",
+          "description": "Absent for a session in the general scope.",
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "uuid"
         },
         "topic_name": {
+          "description": "The topic's name, or \"General\" for a session without one.",
           "type": "string"
         }
       },
       "required": [
         "id",
-        "topic_id",
         "topic_name",
         "created_at",
         "last_activity",

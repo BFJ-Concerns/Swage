@@ -96,7 +96,7 @@ pub async fn recover_orphaned_turns(
 ) -> Result<usize, StorageError> {
     let mut recovered_turn_ids = HashSet::new();
 
-    for topic in topic_store.list_all().await? {
+    for topic in topic_store.list_scopes().await? {
         for session in storage.list_by_topic(topic.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
@@ -318,7 +318,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
 
         // Create the topic → session → thread hierarchy required for FK integrity.
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -466,7 +466,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_marks_pending_turns_interrupted() {
         let storage = Arc::new(MockStorage::new());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -508,7 +508,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_interrupts_orphaned_turns_for_non_gateway_agents() {
         let storage = Arc::new(MockStorage::new());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -550,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_interrupts_detached_child_turn_left_in_flight() {
         let storage = Arc::new(MockStorage::new());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -609,7 +609,7 @@ mod tests {
         use swage_storage::store::{SessionStore, TopicStore};
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

@@ -734,13 +734,16 @@
             ]
           },
           "topic_id": {
+            "description": "The topic the session runs under; absent for a session in the\ngeneral scope.",
             "format": "uuid",
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "id",
-          "topic_id",
           "created_at",
           "last_activity",
           "messages"
@@ -782,13 +785,16 @@
             ]
           },
           "topic_id": {
+            "description": "The topic the session runs under; absent for a session started\nwithout one, which runs in the general scope.",
             "format": "uuid",
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "id",
-          "topic_id",
           "created_at",
           "last_activity"
         ],
@@ -4854,6 +4860,7 @@
         "type": "object"
       },
       "TopicResponse": {
+        "description": "A topic the user can choose. The general scope — the scope of a session\nstarted without a topic — is never listed here: it is not a topic, and a\nsession in it carries no `topic_id` on the wire.",
         "properties": {
           "created_at": {
             "format": "date-time",
@@ -4866,9 +4873,6 @@
             "format": "uuid",
             "type": "string"
           },
-          "is_default": {
-            "type": "boolean"
-          },
           "name": {
             "type": "string"
           },
@@ -4880,7 +4884,6 @@
           "id",
           "name",
           "description",
-          "is_default",
           "slug",
           "created_at"
         ],
@@ -7732,6 +7735,58 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/conversations": {
+      "get": {
+        "operationId": "list_conversations",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List the conversations that run in the general scope — started without a topic."
+      },
+      "post": {
+        "operationId": "create_conversation",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConversationRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a conversation without a topic: a general assistant in the general scope."
+      }
+    },
     "/api/conversations/{id}": {
       "delete": {
         "operationId": "delete_conversation",

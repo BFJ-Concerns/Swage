@@ -81,9 +81,12 @@ pub(crate) async fn apply_approval_scope(
             match scope {
                 ApprovalDecisionScope::Permanent => {
                     let topic = approval_topic(state, approval).await?;
-                    let config =
-                        crate::turn::load_session_config(state, &topic.slug, &approval.agent_id)
-                            .map_err(ApiError::from)?;
+                    let config = crate::turn::load_session_config(
+                        state,
+                        &topic.location(),
+                        &approval.agent_id,
+                    )
+                    .map_err(ApiError::from)?;
                     state
                         .session_approval_grants
                         .lock()
@@ -195,12 +198,13 @@ async fn persist_location_grant_globally(
     path: &str,
     access: &str,
 ) -> Result<(), ApiError> {
-    let topics = state
+    // A global grant reaches every scope, the general scope included.
+    let scopes = state
         .topic_store
-        .list_all()
+        .list_scopes()
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    for topic in topics {
+    for topic in scopes {
         persist_location_grant_for_topic(state, &topic, path, access).await?;
     }
     Ok(())

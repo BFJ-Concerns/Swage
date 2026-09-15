@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use swage_core::ScopeLocation;
 
 use tokio::fs;
 use uuid::Uuid;
@@ -268,7 +269,7 @@ async fn resolve_scope(
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!("topic {} not found", session.topic_id))
                 })?;
-            let topic_root = topic_data_root(&state.config_root, &topic.slug);
+            let topic_root = topic_data_root(&state.config_root, &topic.location());
             Ok(MaterialScope {
                 scope_kind,
                 session_id: Some(session_id),
@@ -292,7 +293,7 @@ async fn resolve_scope(
             let topic = state.topic_store.get(topic_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("topic {topic_id} not found"))
             })?;
-            let topic_root = topic_data_root(&state.config_root, &topic.slug);
+            let topic_root = topic_data_root(&state.config_root, &topic.location());
             Ok(MaterialScope {
                 scope_kind,
                 session_id: None,
@@ -307,8 +308,8 @@ async fn resolve_scope(
     }
 }
 
-fn topic_data_root(config_root: &Path, topic_slug: &str) -> PathBuf {
-    config_root.join("topics").join(topic_slug)
+fn topic_data_root(config_root: &Path, scope: &ScopeLocation) -> PathBuf {
+    scope.data_dir(config_root)
 }
 
 fn validate_material_relative_path(
@@ -394,7 +395,7 @@ async fn scope_root_for_material(
             let topic = state.topic_store.get(topic_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("topic {topic_id} not found"))
             })?;
-            Ok(topic_data_root(&state.config_root, &topic.slug)
+            Ok(topic_data_root(&state.config_root, &topic.location())
                 .join(".swage")
                 .join("materials")
                 .join("sessions")
@@ -410,7 +411,7 @@ async fn scope_root_for_material(
             let topic = state.topic_store.get(topic_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("topic {topic_id} not found"))
             })?;
-            Ok(topic_data_root(&state.config_root, &topic.slug)
+            Ok(topic_data_root(&state.config_root, &topic.location())
                 .join(".swage")
                 .join("materials")
                 .join("topics")

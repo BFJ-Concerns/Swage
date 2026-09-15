@@ -1187,8 +1187,11 @@ pub async fn list_skills(
     // Skill discovery is best-effort beneath the root retained by this gateway.
     let root = state.config_root.clone();
 
-    let skills =
-        crate::skill::discover_available_for_scope(&root, &topic.slug, params.agent_id.as_deref());
+    let skills = crate::skill::discover_available_for_scope(
+        &root,
+        &topic.location(),
+        params.agent_id.as_deref(),
+    );
 
     let skill_items: Vec<SkillItem> = skills
         .into_iter()
@@ -1587,9 +1590,12 @@ async fn execute_external_delegate_message(
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("topic", topic_id))?;
 
-    let target_resolved =
-        crate::turn::load_session_config(&state, &topic.slug, &delegate_msg.recipient_agent_id)
-            .map_err(|error| ApiError::internal(error.to_string()))?;
+    let target_resolved = crate::turn::load_session_config(
+        &state,
+        &topic.location(),
+        &delegate_msg.recipient_agent_id,
+    )
+    .map_err(|error| ApiError::internal(error.to_string()))?;
     let mut bound_agent_ids = match sender_turn_id {
         Some(turn_id) => crate::turn::dispatch_bound_agent_ids_for_turn(&state, turn_id)
             .await
@@ -1605,7 +1611,7 @@ async fn execute_external_delegate_message(
     };
     let effective_target_resolved = crate::turn::apply_dispatch_bounds(
         &state,
-        &topic.slug,
+        &topic.location(),
         topic_id,
         target_resolved.clone(),
         &bound_agent_ids,
@@ -2400,10 +2406,7 @@ mod tests {
         );
         assert_eq!(turn_rows[0]["turn_id"], turn_id.to_string());
 
-        let default_topic = storage
-            .get_or_create_default()
-            .await
-            .expect("get default topic");
+        let default_topic = storage.general_scope().await.expect("get default topic");
         let sent_message = client
             .send_agent_message_in_topic(
                 default_topic.id,
@@ -2669,10 +2672,7 @@ mod tests {
             spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
 
         let client = GatewayClient::new(&base_url);
-        let default_topic = storage
-            .get_or_create_default()
-            .await
-            .expect("get default topic");
+        let default_topic = storage.general_scope().await.expect("get default topic");
         let sent_message = client
             .send_agent_message_in_topic(
                 default_topic.id,
@@ -2713,7 +2713,7 @@ mod tests {
         use swage_storage::Storage;
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
@@ -2832,10 +2832,7 @@ mod tests {
             ],
         ]);
         let storage = Arc::new(MockStorage::new());
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("create default topic");
+        let topic = storage.general_scope().await.expect("create default topic");
         let executions = Arc::new(AtomicUsize::new(0));
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.require_approval =
@@ -2926,10 +2923,7 @@ mod tests {
         ]]);
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("get default topic");
+        let topic = storage.general_scope().await.expect("get default topic");
         let swage_home = SwageHomeGuard::new();
         let target_skill_dir = swage_home
             .path()
@@ -3093,10 +3087,7 @@ mod tests {
         ]);
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("get default topic");
+        let topic = storage.general_scope().await.expect("get default topic");
         let swage_home = SwageHomeGuard::new();
         for (agent_id, allowed_tools) in [
             ("agent-a", "[\"shared\"]"),
@@ -4244,7 +4235,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             std::path::PathBuf::from(".swage"),
         );
-        let default_topic = svc.topic_store.get_or_create_default().await.unwrap();
+        let default_topic = svc.topic_store.general_scope().await.unwrap();
         let id = default_topic.id;
 
         let resp = router
@@ -4678,7 +4669,7 @@ mod tests {
         use swage_storage::store::{AuditStore, ContextSnapshotStore, TurnStore};
 
         let (router, storage) = make_router();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

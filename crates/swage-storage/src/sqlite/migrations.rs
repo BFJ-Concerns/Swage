@@ -841,14 +841,14 @@ const COMPLETE_SCHEMA: &str = "
         name           TEXT NOT NULL UNIQUE,
         description    TEXT NOT NULL DEFAULT '',
         slug           TEXT NOT NULL DEFAULT '',
-        is_default     INTEGER NOT NULL DEFAULT 0,
+        is_general     INTEGER NOT NULL DEFAULT 0,
         created_at     TEXT NOT NULL,
         updated_at     TEXT NOT NULL
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_slug ON topics(slug);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_single_default
-        ON topics(is_default) WHERE is_default = 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_slug ON topics(slug);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_single_general
+        ON topics(is_general) WHERE is_general = 1;
 
     -- Devices: local or paired devices available for tool execution.
     CREATE TABLE IF NOT EXISTS devices (
@@ -1324,9 +1324,6 @@ const ADD_TURN_INBOUND_AUDIT: &str = "
     ALTER TABLE turns ADD COLUMN inbound_audit TEXT;
 ";
 
-/// Structural default-topic identity.
-///
-/// The default topic is no longer identified by the mutable display name.
 /// Delegation chain tracking — nullable parent reference on turns.
 const ADD_TURN_PARENT_TURN_ID: &str = "
     ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
@@ -1741,8 +1738,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
-    // Seed the default topic if it does not already exist.
-    seed_default_topic(conn)
+    // Seed the general scope if it does not already exist.
+    seed_general_scope(conn)
 }
 
 fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
@@ -1802,14 +1799,15 @@ fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError>
     Ok(())
 }
 
-/// Insert the default topic on first run. Idempotent via INSERT OR IGNORE.
-fn seed_default_topic(conn: &Connection) -> Result<(), StorageError> {
+/// Insert the general scope on first run — the scope of every session
+/// started without a topic. Idempotent via INSERT OR IGNORE.
+fn seed_general_scope(conn: &Connection) -> Result<(), StorageError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT OR IGNORE INTO topics (id, name, is_default, slug, created_at, updated_at)
-         VALUES (?1, 'default', 1, 'default', ?2, ?2)",
+        "INSERT OR IGNORE INTO topics (id, name, is_general, slug, created_at, updated_at)
+         VALUES (?1, 'general', 1, 'general', ?2, ?2)",
         params![id, now],
     )
     .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
@@ -1861,7 +1859,7 @@ mod tests {
             .expect("record applied migration");
         }
 
-        super::seed_default_topic(&conn).expect("seed default topic");
+        super::seed_general_scope(&conn).expect("seed general scope");
         conn
     }
 
@@ -1902,10 +1900,10 @@ mod tests {
     }
 
     fn default_topic_id(conn: &Connection) -> String {
-        conn.query_row("SELECT id FROM topics WHERE name='default'", [], |r| {
+        conn.query_row("SELECT id FROM topics WHERE is_general = 1", [], |r| {
             r.get(0)
         })
-        .expect("default topic")
+        .expect("general scope")
     }
 
     // ---------------------------------------------------------------------------
@@ -2057,14 +2055,14 @@ mod tests {
     }
 
     #[test]
-    fn default_topic_has_slug_default() {
+    fn general_scope_is_seeded_with_its_slug() {
         let conn = open_migrated();
         let slug: String = conn
-            .query_row("SELECT slug FROM topics WHERE name = 'default'", [], |r| {
+            .query_row("SELECT slug FROM topics WHERE is_general = 1", [], |r| {
                 r.get(0)
             })
-            .expect("default topic should exist with slug");
-        assert_eq!(slug, "default", "default topic slug should be 'default'");
+            .expect("the general scope should be seeded");
+        assert_eq!(slug, "general");
     }
 
     #[test]

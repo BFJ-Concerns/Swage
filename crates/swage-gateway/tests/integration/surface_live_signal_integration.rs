@@ -128,7 +128,7 @@ async fn a_surface_update_inside_the_upgrade_handshake_window_reaches_the_surfac
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,

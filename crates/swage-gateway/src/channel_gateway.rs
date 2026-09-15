@@ -319,7 +319,7 @@ async fn ensure_session_for_origin(
         )));
     }
 
-    let topic = state.topic_store.get_or_create_default().await?;
+    let topic = state.topic_store.general_scope().await?;
     let session = state
         .storage
         .create_session(NewSession {
@@ -929,10 +929,7 @@ mod tests {
     async fn channel_status_counts_only_sent_deliveries() {
         let (mut state, _) = make_state_with_session(vec![]).await;
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("default topic");
+        let topic = storage.general_scope().await.expect("default topic");
         let session_id = storage
             .create_session(NewSession {
                 topic_id: topic.id,

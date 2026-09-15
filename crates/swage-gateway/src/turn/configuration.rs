@@ -3,6 +3,7 @@ use super::{
     load_trusted_workspace_policy,
 };
 use swage_config::RESERVED_WORKFLOW_AGENT_ID;
+use swage_core::ScopeLocation;
 
 /// Host-only session metadata carrying every agent context whose effective
 /// grants bound a worker. The lineage is ordered outermost to innermost and is
@@ -206,19 +207,18 @@ pub(crate) async fn dispatch_bound_task_definition_ids_for_turn(
 
 pub(crate) async fn apply_dispatch_bounds(
     state: &AppState,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     topic_id: Uuid,
     mut config: swage_config::ResolvedConfig,
     bound_agent_ids: &[String],
     subject: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     for bound_agent_id in bound_agent_ids {
-        let bound =
-            super::load_session_config(state, topic_slug, bound_agent_id).map_err(|error| {
-                GatewayError::ConfigError(format!(
-                    "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
-                ))
-            })?;
+        let bound = super::load_session_config(state, scope, bound_agent_id).map_err(|error| {
+            GatewayError::ConfigError(format!(
+                "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
+            ))
+        })?;
         let bound = match crate::service::resolve_effective_agent_definition(
             state.storage.as_ref(),
             bound_agent_id,
@@ -412,37 +412,30 @@ pub(crate) fn worker_placement_metadata_present(
 
 pub(crate) fn load_session_config(
     state: &AppState,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    load_session_config_from_root(
-        &state.config_root,
-        state.active_config(),
-        topic_slug,
-        agent_id,
-    )
+    load_session_config_from_root(&state.config_root, state.active_config(), scope, agent_id)
 }
 
 pub(crate) fn load_session_config_from_root(
     root: &Path,
     active_config: swage_config::ResolvedConfig,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let topic_dir = root.join("topics").join(topic_slug);
-    let topic_config_exists = topic_dir.join("config.toml").exists();
+    // The general scope has no scope-level layer; a topic's is its own
+    // config.toml. Either may carry an agent overlay beneath it.
+    let scope_config_exists =
+        !scope.is_general() && scope.data_dir(root).join("config.toml").exists();
     let agent_config_exists = agent_id != RESERVED_WORKFLOW_AGENT_ID
-        && topic_dir
-            .join("agents")
-            .join(agent_id)
-            .join("config.toml")
-            .exists();
+        && scope.agent_dir(root, agent_id).join("config.toml").exists();
 
-    if !topic_config_exists && !agent_config_exists {
+    if !scope_config_exists && !agent_config_exists {
         return Ok(active_config);
     }
 
-    swage_config::load_resolved_config_from(root, topic_slug, agent_id)
+    swage_config::load_resolved_config_from(root, scope, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
@@ -912,12 +905,17 @@ mod tests {
         let reserved = load_session_config_from_root(
             root.path(),
             active.clone(),
-            "dispatch",
+            &ScopeLocation::topic("dispatch"),
             RESERVED_WORKFLOW_AGENT_ID,
         )
         .expect("reserved worker config");
-        let ordinary = load_session_config_from_root(root.path(), active, "dispatch", "reviewer")
-            .expect("ordinary agent config");
+        let ordinary = load_session_config_from_root(
+            root.path(),
+            active,
+            &ScopeLocation::topic("dispatch"),
+            "reviewer",
+        )
+        .expect("ordinary agent config");
 
         assert!(
             reserved.instructions.contains(&runtime_instructions),

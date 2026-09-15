@@ -127,10 +127,7 @@ mod approval_tests {
         registrar: ApprovalChannelRegistrar,
     ) -> (Agent, TurnExecutionContext) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("default topic");
+        let topic = storage.general_scope().await.expect("default topic");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -432,10 +429,7 @@ mod compaction_caller_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn provider_without_native_counting_can_still_compact() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("default topic");
+        let topic = storage.general_scope().await.expect("default topic");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

@@ -842,7 +842,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_session_defaults_to_the_calling_sessions_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -934,7 +934,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_session_defaults_null_and_blank_spaces_to_the_calling_session() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

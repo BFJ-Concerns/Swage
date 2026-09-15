@@ -68,7 +68,7 @@ async fn gateway_boot_recovers_and_wakes_runs_left_running_by_a_crash() {
     let root = scratch_tempdir();
     let runtime = scratch_tempdir();
     let storage = Arc::new(SqliteStorage::open(&root.path().join("swage.db")).unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let replayable = storage
         .create_workflow_run(crashed_workflow_run(
             topic.id,
@@ -223,7 +223,7 @@ impl LlmProvider for InterruptedKnowledgeProvider {
 async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_over_http() {
     let root = scratch_tempdir();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let provider = Arc::new(InterruptedKnowledgeProvider {
         rounds: AtomicUsize::new(0),
     });

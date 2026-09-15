@@ -1050,13 +1050,16 @@
           ]
         },
         "topic_id": {
-          "type": "string",
+          "description": "The topic the session runs under; absent for a session in the\ngeneral scope.",
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "uuid"
         }
       },
       "required": [
         "id",
-        "topic_id",
         "created_at",
         "last_activity",
         "messages"
@@ -1098,13 +1101,16 @@
           ]
         },
         "topic_id": {
-          "type": "string",
+          "description": "The topic the session runs under; absent for a session started\nwithout one, which runs in the general scope.",
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "uuid"
         }
       },
       "required": [
         "id",
-        "topic_id",
         "created_at",
         "last_activity"
       ]
@@ -5169,6 +5175,7 @@
       ]
     },
     "TopicResponse": {
+      "description": "A topic the user can choose. The general scope — the scope of a session\nstarted without a topic — is never listed here: it is not a topic, and a\nsession in it carries no `topic_id` on the wire.",
       "type": "object",
       "properties": {
         "created_at": {
@@ -5182,9 +5189,6 @@
           "type": "string",
           "format": "uuid"
         },
-        "is_default": {
-          "type": "boolean"
-        },
         "name": {
           "type": "string"
         },
@@ -5196,7 +5200,6 @@
         "id",
         "name",
         "description",
-        "is_default",
         "slug",
         "created_at"
       ]

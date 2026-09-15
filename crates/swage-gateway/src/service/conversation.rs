@@ -1,4 +1,5 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use swage_core::ScopeLocation;
 
 use uuid::Uuid;
 
@@ -63,7 +64,7 @@ impl ConversationService {
     async fn resolved_effort(
         &self,
         topic_id: Uuid,
-        topic_slug: &str,
+        scope: &ScopeLocation,
         agent_id: &str,
         selected_model_id: Option<&str>,
         requested: Option<swage_protocol::client::settings::Effort>,
@@ -77,7 +78,7 @@ impl ConversationService {
         let config = crate::turn::load_session_config_from_root(
             config_root,
             active_config.clone(),
-            topic_slug,
+            scope,
             agent_id,
         )?;
         let config = match crate::service::resolve_effective_agent_definition(
@@ -138,13 +139,13 @@ impl ConversationService {
         &self,
         request: CreateConversationRequest,
     ) -> Result<ConversationResponse, GatewayError> {
-        let topic = self.topic_store.get_or_create_default().await?;
+        let topic = self.topic_store.general_scope().await?;
         let agent_id = self.validated_agent_id(topic.id, request.agent_id).await?;
         let selected_model_id = normalise_selected_model_id(request.selected_model_id);
         let effort = self
             .resolved_effort(
                 topic.id,
-                &topic.slug,
+                &topic.location(),
                 &agent_id,
                 selected_model_id.as_deref(),
                 request.effort,
@@ -178,7 +179,7 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            topic_id: session.topic_id,
+            topic_id: topic.client_topic_id(),
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -226,7 +227,7 @@ impl ConversationService {
 
     /// List all conversations in the default topic, ordered by most-recent activity.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
-        let topic = self.topic_store.get_or_create_default().await?;
+        let topic = self.topic_store.general_scope().await?;
         let sessions = self.storage.list_by_topic(topic.id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
@@ -322,9 +323,16 @@ impl ConversationService {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let topic =
+            self.topic_store
+                .get(session.topic_id)
+                .await?
+                .ok_or(GatewayError::TopicNotFound {
+                    id: session.topic_id,
+                })?;
         Ok(ConversationDetail {
             id: session.id,
-            topic_id: session.topic_id,
+            topic_id: topic.client_topic_id(),
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -411,7 +419,7 @@ impl ConversationService {
         let effort = self
             .resolved_effort(
                 topic_id,
-                &topic.slug,
+                &topic.location(),
                 &agent_id,
                 selected_model_id.as_deref(),
                 request.effort,
@@ -454,7 +462,8 @@ impl ConversationService {
         effort: Option<swage_protocol::client::settings::Effort>,
     ) -> Result<ConversationResponse, GatewayError> {
         // Verify the topic exists — return 404 rather than a FK constraint error.
-        self.topic_store
+        let topic = self
+            .topic_store
             .get(topic_id)
             .await?
             .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
@@ -486,7 +495,7 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            topic_id: session.topic_id,
+            topic_id: topic.client_topic_id(),
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,

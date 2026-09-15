@@ -191,16 +191,13 @@ mod tests {
 
     fn write_agent_workflow(
         root: &std::path::Path,
-        topic_slug: &str,
+        scope: &swage_core::ScopeLocation,
         agent_id: &str,
         skill_name: &str,
         workflow_name: &str,
     ) {
-        let skill_dir = root
-            .join("topics")
-            .join(topic_slug)
-            .join("agents")
-            .join(agent_id)
+        let skill_dir = scope
+            .agent_dir(root, agent_id)
             .join("skills")
             .join(skill_name);
         std::fs::create_dir_all(skill_dir.join("workflows")).expect("workflow directory");
@@ -301,7 +298,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn lists_shipped_and_saved_workflows_for_the_calling_session() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .create_workflow_script(NewWorkflowScript {
                 topic_id: topic.id,
@@ -352,7 +349,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn listing_projects_declared_and_unconstrained_argument_contracts() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .create_workflow_script(NewWorkflowScript {
                 topic_id: topic.id,
@@ -409,7 +406,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn listing_uses_the_callers_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let first_topic = storage.get_or_create_default().await.expect("first topic");
+        let first_topic = storage.general_scope().await.expect("first topic");
         let second_topic = TopicStore::create(
             &*storage,
             NewTopic {
@@ -471,19 +468,19 @@ mod tests {
     async fn listing_uses_the_callers_agent_skills() {
         let root = tempfile::tempdir().expect("skill root");
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         store_test_agent(&storage, topic.id, "agent-one").await;
         store_test_agent(&storage, topic.id, "agent-two").await;
         write_agent_workflow(
             root.path(),
-            &topic.slug,
+            &topic.location(),
             "agent-one",
             "one-workflows",
             "only-agent-one",
         );
         write_agent_workflow(
             root.path(),
-            &topic.slug,
+            &topic.location(),
             "agent-two",
             "two-workflows",
             "only-agent-two",

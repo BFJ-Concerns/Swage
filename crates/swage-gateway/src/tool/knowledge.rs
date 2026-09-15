@@ -1,10 +1,10 @@
-//! Knowledge-base tools — the agent's hands on the topic's gathered
+//! Knowledge-base tools — the agent's hands on the session's scope's gathered
 //! external evidence.
 //!
 //! Six tools, separately grantable so read access never implies any kind
 //! of write:
 //!
-//! - **`knowledge_search`** — full-text search over the topic's knowledge
+//! - **`knowledge_search`** — full-text search over the scope's knowledge
 //!   base; each hit carries the source it came from and the pinned
 //!   derivation version and offsets a citation needs.
 //! - **`knowledge_record`** — capture content into the knowledge base as a
@@ -17,7 +17,7 @@
 //! - **`knowledge_curate_orientation`** — author and maintain those cards.
 //!
 //! All six are host-only (`requires_device_execution`): they reach live gateway
-//! state and the topic's body files. Knowledge content returns as tool
+//! state and the scope's body files. Knowledge content returns as tool
 //! results only — it is gathered external data, never instructions.
 
 use async_trait::async_trait;
@@ -25,7 +25,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use swage_core::ToolError;
+use swage_core::{ScopeLocation, ToolError};
 use swage_protocol::client::knowledge::{
     KnowledgeSearchResponse, KnowledgeSearchResult, OrientationCardResult, OrientationFindResponse,
 };
@@ -86,15 +86,16 @@ fn required_str<'p>(tool: &str, params: &'p Value, key: &str) -> Result<&'p str,
         .ok_or_else(|| invalid(tool, format!("'{key}' is required")))
 }
 
-/// Resolve the calling session's topic: the knowledge base is per topic, and
-/// the session the tool call belongs to says which one. The third element is
-/// the session's journalled-call scope — retry identity for idempotent
-/// writes — absent on anything but a workflow agent-call worker.
+/// Resolve the calling session's scope: the knowledge base is per scope — a
+/// topic's, or the general knowledge base for a session without one — and
+/// the session the tool call belongs to says which. The third element is the
+/// session's journalled-call scope — retry identity for idempotent writes —
+/// absent on anything but a workflow agent-call worker.
 async fn session_topic(
     tool: &str,
     state: &AppState,
     ctx: &dyn ToolContext,
-) -> Result<(Uuid, String, Option<String>), ToolError> {
+) -> Result<(Uuid, ScopeLocation, Option<String>), ToolError> {
     let session_id = ctx
         .session_id()
         .parse::<Uuid>()
@@ -112,7 +113,7 @@ async fn session_topic(
         .map_err(|error| failed(tool, error))?
         .ok_or_else(|| failed(tool, "the session's topic no longer exists"))?;
     let capture_scope = crate::turn::agent_call_scope(session.metadata.as_ref());
-    Ok((topic.id, topic.slug.to_string(), capture_scope))
+    Ok((topic.id, topic.location(), capture_scope))
 }
 
 // ---------------------------------------------------------------------------
@@ -128,14 +129,14 @@ impl Tool for KnowledgeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Find evidence for a question in this topic's gathered external material by \
+        "Find evidence for a question in this session's knowledge base — its topic's gathered external material, or the general knowledge base when no topic is selected — by \
          full text. Use knowledge_orient first when you do not yet know what the corpus \
          contains or which vocabulary it uses. Each result here is a passage with the source it came from and a \
          pinned observation and version; record a citation with the knowledge_cite \
          tool, passing those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
          (for what you know about your own work, use agent_memory for your \
-         private records or memory for the topic's shared notes)."
+         private records or memory for the shared notes of this session's topic or general scope)."
     }
 
     fn parameters(&self) -> Value {
@@ -218,7 +219,7 @@ impl Tool for KnowledgeRecordTool {
     }
 
     fn description(&self) -> &str {
-        "Capture an external source into this topic's knowledge base as a \
+        "Capture an external source into this session's knowledge base (its topic's, or the general knowledge base when no topic is selected) as a \
          permanent, citable observation. Supply the source (its URL, a local \
          path, or both), the raw content, and the readable text extracted from \
          it. The capture is immutable: recording the same content twice \
@@ -289,9 +290,9 @@ impl Tool for KnowledgeRecordTool {
             .unwrap_or("text/plain");
 
         let state = gateway_state(RECORD_TOOL, ctx)?;
-        let (topic_id, topic_slug, capture_scope) = session_topic(RECORD_TOOL, state, ctx).await?;
+        let (topic_id, scope, capture_scope) = session_topic(RECORD_TOOL, state, ctx).await?;
 
-        let body = knowledge::write_body(&state.config_root, &topic_slug, content.as_bytes())
+        let body = knowledge::write_body(&state.config_root, &scope, content.as_bytes())
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
         let captured_body_sha256 = body.sha256;
@@ -383,7 +384,7 @@ impl Tool for KnowledgeCurateTool {
     }
 
     fn description(&self) -> &str {
-        "Record a judgement about an observation in this topic's knowledge base. \
+        "Record a judgement about an observation in this session's knowledge base (its topic's, or the general one). \
          Mark it as a duplicate of another observation, superseded by another \
          observation, or stale. Judgements are permanent history: a later \
          judgement becomes current without changing either observation."
@@ -485,7 +486,7 @@ impl Tool for KnowledgeCiteTool {
     }
 
     fn description(&self) -> &str {
-        "Record an exact quoted passage from this topic's knowledge base as a \
+        "Record an exact quoted passage from this session's knowledge base (its topic's, or the general one) as a \
          durable citation. Supply the observation and version returned by \
          search plus the exact quote. The platform locates and verifies the \
          quote; paraphrased or absent text is refused."
@@ -567,7 +568,7 @@ impl Tool for KnowledgeOrientTool {
     }
 
     fn description(&self) -> &str {
-        "Discover this topic's evidence-backed orientation cards before choosing corpus vocabulary. Call without a query on first contact; once useful terms are known, an optional query searches cards. Cards are derived signposts, not evidence: use knowledge_search independently to inspect and cite the underlying observations."
+        "Discover the evidence-backed orientation cards of this session's knowledge base (its topic's, or the general one) before choosing corpus vocabulary. Call without a query on first contact; once useful terms are known, an optional query searches cards. Cards are derived signposts, not evidence: use knowledge_search independently to inspect and cite the underlying observations."
     }
 
     fn parameters(&self) -> Value {
@@ -628,7 +629,7 @@ impl Tool for KnowledgeCurateOrientationTool {
     }
 
     fn description(&self) -> &str {
-        "Maintain this topic's evidence-backed orientation cards. Author creates an immutable card grounded in source observations. Supersede and retire append terminal lifecycle records; use supersede when another active card should replace the old signpost."
+        "Maintain the evidence-backed orientation cards of this session's knowledge base (its topic's, or the general one). Author creates an immutable card grounded in source observations. Supersede and retire append terminal lifecycle records; use supersede when another active card should replace the old signpost."
     }
 
     fn parameters(&self) -> Value {
@@ -806,7 +807,7 @@ mod tests {
     async fn record_dedups_retries_through_the_sessions_call_scope() {
         let root = tempfile::tempdir().unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         // A workflow agent-call worker: the dispatch stamped the journalled
         // call's identity into the session metadata.
         let session = storage
@@ -1032,7 +1033,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn orientation_tools_run_the_scoped_lifecycle_and_record_the_session() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let other_topic = storage
             .create(NewTopic {
                 name: "Other knowledge".into(),
@@ -1260,7 +1261,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cite_delegates_to_host_storage_and_refuses_fabricated_quotes() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -1349,7 +1350,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn supersession_retires_the_subject_and_preserves_the_preferred_target() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

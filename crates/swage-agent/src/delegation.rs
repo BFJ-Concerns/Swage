@@ -812,10 +812,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_construction_failure_marks_precreated_child_turn_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("default topic");
+        let topic = storage.general_scope().await.expect("default topic");
         let storage_trait: Arc<dyn Storage> = storage.clone();
         let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
         let delegate_message = router
@@ -895,10 +892,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delegated_task_record_failure_stops_before_provider_execution() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("default topic");
+        let topic = storage.general_scope().await.expect("default topic");
         let storage_trait: Arc<dyn Storage> = storage.clone();
         let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
         let delegate_message = router

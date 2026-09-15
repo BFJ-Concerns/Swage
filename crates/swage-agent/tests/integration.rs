@@ -365,7 +365,7 @@ impl Hook for AppendAfterResponseHook {
 
 async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Topic, Session, Thread) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let topic = TopicStore::get_or_create_default(storage.as_ref())
+    let topic = TopicStore::general_scope(storage.as_ref())
         .await
         .expect("default topic");
     let session = storage

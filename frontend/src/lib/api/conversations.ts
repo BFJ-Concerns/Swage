@@ -20,16 +20,26 @@ export function setBaseUrl(url: string): void {
 // API functions
 // ---------------------------------------------------------------------------
 
-/** Fetch all conversations belonging to the given topic. */
+/**
+ * Fetch the conversations of the given topic, or — with no topic — those of
+ * the general scope.
+ */
 export async function listConversations(
-  topicId: string,
+  topicId: string | null,
 ): Promise<ConversationSummary[]> {
-  return (await generated.listTopicSessions(topicId)).conversations;
+  const response = topicId
+    ? await generated.listTopicSessions(topicId)
+    : await generated.listConversations();
+  return response.conversations;
 }
 
-/** Create a new conversation in the given topic and return its metadata. */
+/**
+ * Create a new conversation and return its metadata: in the given topic, or —
+ * with no topic — as a general assistant in the general scope, which the
+ * gateway reports as an absent `topic_id`.
+ */
 export async function createConversation(
-  topicId: string,
+  topicId: string | null,
   selectedModelId?: string | null,
   agentId?: string | null,
   effort?: Effort | null,
@@ -39,10 +49,10 @@ export async function createConversation(
     ...(agentId ? { agent_id: agentId } : {}),
     ...(effort ? { effort } : {}),
   };
-  return generated.createTopicSession(
-    topicId,
-    Object.keys(body).length > 0 ? body : undefined,
-  );
+  const payload = Object.keys(body).length > 0 ? body : undefined;
+  return topicId
+    ? generated.createTopicSession(topicId, payload)
+    : generated.createConversation(payload);
 }
 
 /** Fetch a conversation's full detail, including its message history. */

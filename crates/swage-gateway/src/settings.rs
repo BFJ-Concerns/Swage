@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use swage_core::ScopeLocation;
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -315,7 +316,7 @@ pub(crate) async fn persist_permanent_tool_approval_for_topic(
     topic: &swage_storage::model::Topic,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = topic_config_path(config_root, &topic.slug);
+    let path = scope_config_path(config_root, &topic.location());
     persist_permanent_tool_approval_to_path(config, tool_name, path).await
 }
 
@@ -349,11 +350,8 @@ async fn persist_permanent_tool_approval_to_path(
     Ok(())
 }
 
-fn topic_config_path(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
-    config_root
-        .join("topics")
-        .join(topic_slug)
-        .join("config.toml")
+fn scope_config_path(config_root: &std::path::Path, scope: &ScopeLocation) -> PathBuf {
+    scope.data_dir(config_root).join("config.toml")
 }
 
 fn require_approval_entries_without_tool(
@@ -1514,9 +1512,12 @@ mod tests {
         );
         assert!(changes[0].metadata["prior_state"]["providers"].is_object());
 
-        let reloaded =
-            swage_config::load_resolved_config_from(swage_home.path(), "default", "default")
-                .expect("saved settings should reload from durable configuration");
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("saved settings should reload from durable configuration");
         assert_eq!(
             reloaded.models.entries["local:fast"].default_effort,
             Some(swage_protocol::client::settings::Effort::High)
@@ -1608,9 +1609,12 @@ mod tests {
             Some(600_000),
             "a settings save must not erase a configured route threshold"
         );
-        let reloaded =
-            swage_config::load_resolved_config_from(swage_home.path(), "default", "default")
-                .expect("saved settings reload from durable configuration");
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("saved settings reload from durable configuration");
         assert_eq!(
             reloaded.providers.entries["patient"].worker_staleness_threshold_ms,
             Some(600_000)

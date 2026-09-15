@@ -331,7 +331,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unknown_agent_resolves_to_none() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
 
         let resolved = storage
             .resolve_agent_definition("nobody", topic.id)
@@ -375,7 +375,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_removes_only_the_addressed_definition() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
 
         storage
             .upsert_agent_definition(definition("assistant", None, "global"))

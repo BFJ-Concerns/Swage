@@ -30,9 +30,7 @@ use swage_storage::store::{
 /// Create a minimal storage with a session, thread, and turn for an agent.
 async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = TopicStore::get_or_create_default(storage.as_ref())
-        .await
-        .unwrap();
+    let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -146,9 +144,7 @@ async fn delegation_creates_child_turn_with_parent() {
     assert!(root_turn.parent_turn_id.is_none());
 
     // Create a child turn for agent-b with parent_turn_id = sender's turn.
-    let topic = TopicStore::get_or_create_default(storage.as_ref())
-        .await
-        .unwrap();
+    let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
     let child_session = storage
         .create_session(NewSession {
             topic_id: topic.id,

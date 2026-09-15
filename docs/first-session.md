@@ -14,15 +14,17 @@ without either.
 ## Open a topic
 
 Opening the web UI presents the topic picker — a grid of the topics this
-gateway knows about. A fresh install has one topic, `default`, labelled
-**Default**. Click a card to preview it (its name, last-opened time,
-conversation count, and any attached workspaces appear below the grid),
-then click **Open** to enter it.
+gateway knows about. A fresh install has no topics: a conversation started
+without one runs as a general assistant in the general scope, with general
+memory and the general knowledge base, and inherits nothing from any topic.
+Create a topic from the picker when work should keep its own memory,
+attached workspaces and configuration; click its card to preview it (its
+name, last-opened time, conversation count, and any attached workspaces
+appear below the grid), then click **Open** to enter it.
 
 A topic is an isolated working area: it holds its own conversations,
-agents, instructions, skills, and workspace attachments. You can create
-more topics from the picker later; for a first session the default topic
-is enough.
+agents, instructions, skills, and workspace attachments. The general scope
+is not a topic — it is never listed, and cannot be opened or deleted.
 
 ## Attach a workspace
 

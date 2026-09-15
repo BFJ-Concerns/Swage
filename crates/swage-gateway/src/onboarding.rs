@@ -102,7 +102,7 @@ pub struct RecoveryTopicRecord {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
-    pub is_default: bool,
+    pub is_general: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,7 +234,7 @@ pub async fn create_channel_link(
             Some(topic_id) => state.topic_store.get(topic_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("topic {topic_id} not found"))
             })?,
-            None => state.topic_store.get_or_create_default().await?,
+            None => state.topic_store.general_scope().await?,
         };
     let agent_id = request.agent_id.unwrap_or_else(|| "gateway".to_string());
     let metadata = serde_json::json!({
@@ -378,7 +378,7 @@ pub async fn redeem_device_pairing_code(
 pub async fn export_gateway_recovery_bundle(
     state: &AppState,
 ) -> Result<GatewayRecoveryBundle, GatewayError> {
-    let topics = state.topic_store.list_all().await?;
+    let topics = state.topic_store.list_scopes().await?;
     let mut workspaces = Vec::new();
     let mut sessions = Vec::new();
     for topic in &topics {
@@ -404,7 +404,7 @@ pub async fn export_gateway_recovery_bundle(
                 id: topic.id,
                 name: topic.name,
                 slug: topic.slug.to_string(),
-                is_default: topic.is_default,
+                is_general: topic.is_general,
             })
             .collect(),
         workspaces: workspaces
@@ -739,19 +739,11 @@ pub async fn import_gateway_recovery_bundle(
 }
 
 async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError> {
-    let topics = state.topic_store.list_all().await?;
-    let has_non_default_topics = topics.iter().any(|topic| !topic.is_default);
-    let default_topic = topics
-        .iter()
-        .find(|topic| topic.is_default)
-        .cloned()
-        .or_else(|| topics.first().cloned());
-    let has_sessions = if let Some(topic) = default_topic {
-        !state.storage.list_by_topic(topic.id).await?.is_empty()
-    } else {
-        false
-    };
-    if has_non_default_topics
+    let scopes = state.topic_store.list_scopes().await?;
+    let has_topics = scopes.iter().any(|topic| !topic.is_general);
+    let general = state.topic_store.general_scope().await?;
+    let has_sessions = !state.storage.list_by_topic(general.id).await?.is_empty();
+    if has_topics
         || has_sessions
         || !state.storage.list_channel_links().await?.is_empty()
         || !state.storage.list_devices().await?.is_empty()
@@ -766,11 +758,11 @@ async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError
 
 async fn import_topic(state: &AppState, topic: RecoveryTopicRecord) -> Result<Topic, GatewayError> {
     let slug = TopicSlug::new(topic.slug).map_err(GatewayError::ValidationError)?;
-    if topic.is_default {
-        let default_topic = state.topic_store.get_or_create_default().await?;
+    if topic.is_general {
+        let general = state.topic_store.general_scope().await?;
         state
             .topic_store
-            .update(default_topic.id, Some(topic.name), None, Some(slug))
+            .update(general.id, Some(topic.name), None, Some(slug))
             .await
             .map_err(Into::into)
     } else {

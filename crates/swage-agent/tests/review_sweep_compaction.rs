@@ -76,7 +76,7 @@ impl LlmProvider for CountingProvider {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_caller_compacts_with_the_counting_and_summarising_provider() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,

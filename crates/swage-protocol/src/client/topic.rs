@@ -23,11 +23,13 @@ pub struct UpdateTopicRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+/// A topic the user can choose. The general scope — the scope of a session
+/// started without a topic — is never listed here: it is not a topic, and a
+/// session in it carries no `topic_id` on the wire.
 pub struct TopicResponse {
     pub id: Uuid,
     pub name: String,
     pub description: String,
-    pub is_default: bool,
     pub slug: String,
     pub created_at: DateTime<Utc>,
 }

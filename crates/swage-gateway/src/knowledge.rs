@@ -9,6 +9,7 @@
 //! text never becomes the only copy.
 
 use std::path::PathBuf;
+use swage_core::ScopeLocation;
 
 use sha2::{Digest, Sha256};
 use swage_core::GatewayError;
@@ -21,10 +22,9 @@ pub struct StoredBody {
     pub byte_count: u64,
 }
 
-fn bodies_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
-    config_root
-        .join("topics")
-        .join(topic_slug)
+fn bodies_root(config_root: &std::path::Path, scope: &ScopeLocation) -> PathBuf {
+    scope
+        .data_dir(config_root)
         .join(".swage")
         .join("knowledge")
         .join("bodies")
@@ -32,7 +32,7 @@ fn bodies_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
 
 fn body_path(
     config_root: &std::path::Path,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     sha256: &str,
 ) -> Result<PathBuf, GatewayError> {
     // Addresses come from our own hasher or a validated observation row, but
@@ -43,7 +43,7 @@ fn body_path(
         )));
     }
     let sha256 = sha256.to_ascii_lowercase();
-    Ok(bodies_root(config_root, topic_slug)
+    Ok(bodies_root(config_root, scope)
         .join(&sha256[..2])
         .join(sha256))
 }
@@ -52,14 +52,14 @@ fn body_path(
 /// hash to the same path, and an existing file is left untouched.
 pub async fn write_body(
     config_root: &std::path::Path,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     bytes: &[u8],
 ) -> Result<StoredBody, GatewayError> {
     let sha256: String = Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let path = body_path(config_root, topic_slug, &sha256)?;
+    let path = body_path(config_root, scope, &sha256)?;
 
     if tokio::fs::try_exists(&path)
         .await
@@ -98,10 +98,10 @@ pub async fn write_body(
 /// Read a stored body back by address.
 pub async fn read_body(
     config_root: &std::path::Path,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     sha256: &str,
 ) -> Result<Vec<u8>, GatewayError> {
-    let path = body_path(config_root, topic_slug, sha256)?;
+    let path = body_path(config_root, scope, sha256)?;
     tokio::fs::read(&path).await.map_err(|error| {
         GatewayError::ValidationError(format!("body {sha256} is not readable: {error}"))
     })
@@ -124,17 +124,29 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn write_is_idempotent_and_read_round_trips() {
         let root = pin_root();
-        let first = write_body(root.path(), "research", b"captured surface")
-            .await
-            .unwrap();
-        let second = write_body(root.path(), "research", b"captured surface")
-            .await
-            .unwrap();
+        let first = write_body(
+            root.path(),
+            &ScopeLocation::topic("research"),
+            b"captured surface",
+        )
+        .await
+        .unwrap();
+        let second = write_body(
+            root.path(),
+            &ScopeLocation::topic("research"),
+            b"captured surface",
+        )
+        .await
+        .unwrap();
         assert_eq!(first.sha256, second.sha256);
 
-        let bytes = read_body(root.path(), "research", &first.sha256)
-            .await
-            .unwrap();
+        let bytes = read_body(
+            root.path(),
+            &ScopeLocation::topic("research"),
+            &first.sha256,
+        )
+        .await
+        .unwrap();
         assert_eq!(bytes, b"captured surface");
     }
 
@@ -142,7 +154,12 @@ mod tests {
     async fn invalid_address_is_rejected_not_resolved() {
         let root = pin_root();
 
-        let result = read_body(root.path(), "research", "../../../etc/passwd").await;
+        let result = read_body(
+            root.path(),
+            &ScopeLocation::topic("research"),
+            "../../../etc/passwd",
+        )
+        .await;
         assert!(matches!(result, Err(GatewayError::ValidationError(_))));
     }
 }

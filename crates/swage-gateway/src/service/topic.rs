@@ -190,7 +190,6 @@ fn topic_to_response(p: swage_storage::model::Topic) -> TopicResponse {
         id: p.id,
         name: p.name,
         description: p.description,
-        is_default: p.is_default,
         slug: p.slug.to_string(),
         created_at: p.created_at,
     }

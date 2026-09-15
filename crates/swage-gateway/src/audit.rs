@@ -142,7 +142,7 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
     variant_selections.sort_by_key(|entry| std::cmp::Reverse(entry.recorded_at));
 
     let mut assembly_reports = Vec::new();
-    for topic in state.topic_store.list_all().await? {
+    for topic in state.topic_store.list_scopes().await? {
         for snapshot in state
             .storage
             .list_snapshots_by_topic(topic.id, OPERATOR_HISTORY_SNAPSHOTS_PER_TOPIC)
@@ -200,7 +200,7 @@ pub async fn operator_search(
     let session_filter = query.session_id;
     let limit = query.limit.unwrap_or(50);
 
-    let topics = state.topic_store.list_all().await?;
+    let topics = state.topic_store.list_scopes().await?;
     let topic_names: HashMap<Uuid, String> = topics
         .iter()
         .map(|topic| (topic.id, topic.name.clone()))
@@ -513,7 +513,7 @@ pub async fn list_agent_memories(
             );
         }
     } else {
-        for topic in state.topic_store.list_all().await? {
+        for topic in state.topic_store.list_scopes().await? {
             memories.extend(
                 state
                     .storage

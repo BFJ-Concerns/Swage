@@ -148,7 +148,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_and_lists_by_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -189,7 +189,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_schedule_run_and_turn_attribution() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

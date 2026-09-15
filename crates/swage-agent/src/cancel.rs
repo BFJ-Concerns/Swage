@@ -492,9 +492,7 @@ mod tests {
 
     async fn setup_with_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = TopicStore::get_or_create_default(storage.as_ref())
-            .await
-            .unwrap();
+        let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -596,9 +594,7 @@ mod tests {
         // Set up two threads for agent-b — the annotation should scope
         // interruption to only the annotated thread.
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = TopicStore::get_or_create_default(storage.as_ref())
-            .await
-            .unwrap();
+        let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
 
         let session = storage
             .create_session(NewSession {
@@ -737,9 +733,7 @@ mod tests {
         // Set up TWO agents with the same ID in different sessions/threads
         // to verify that scoped cancel only interrupts the targeted delegation.
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = TopicStore::get_or_create_default(storage.as_ref())
-            .await
-            .unwrap();
+        let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
 
         // First delegation — the one we'll cancel.
         let session_a = storage

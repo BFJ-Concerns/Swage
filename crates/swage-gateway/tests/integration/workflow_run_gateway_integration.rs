@@ -188,7 +188,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
     git(&repo, &["add", "seed"]).await;
     git(&repo, &["commit", "-m", "seed"]).await;
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             topic_id: topic.id,
@@ -278,7 +278,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let provider = Arc::new(ResearchSweepProvider {
         stage_prompts: Mutex::new(vec![]),
     });

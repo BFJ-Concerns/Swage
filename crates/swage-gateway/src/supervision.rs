@@ -77,7 +77,7 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
     let mut session_topics = HashMap::new();
     let mut runs = Vec::new();
 
-    for topic in state.topic_store.list_all().await? {
+    for topic in state.topic_store.list_scopes().await? {
         topic_names.insert(topic.id, topic.name.clone());
         for session in state.storage.list_by_topic(topic.id).await? {
             session_topics.insert(session.id, topic.id);

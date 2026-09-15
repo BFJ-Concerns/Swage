@@ -267,7 +267,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_sees_open_runs_with_the_decisions_they_await_and_not_ended_ones() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let holding = run_in(&storage, topic.id, "build-verify").await;
         post(
             &storage,
@@ -318,7 +318,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_in_another_topic_reads_as_absent() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let mine = storage.get_or_create_default().await.expect("topic");
+        let mine = storage.general_scope().await.expect("topic");
         let theirs = TopicStore::create(
             storage.as_ref(),
             NewTopic {

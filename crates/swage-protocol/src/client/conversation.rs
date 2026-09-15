@@ -44,7 +44,11 @@ pub struct CreateConversationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct ConversationResponse {
     pub id: Uuid,
-    pub topic_id: Uuid,
+    /// The topic the session runs under; absent for a session started
+    /// without one, which runs in the general scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,
@@ -67,7 +71,11 @@ pub struct ConversationSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct ConversationDetail {
     pub id: Uuid,
-    pub topic_id: Uuid,
+    /// The topic the session runs under; absent for a session in the
+    /// general scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,

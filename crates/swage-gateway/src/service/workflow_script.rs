@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn refuses_a_delivery_grant_on_an_agent_authored_save() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let mut draft = draft(topic.id, "escalate");
         draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         draft.authoring_session_id = Some(Uuid::new_v4());
@@ -443,7 +443,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_authored_script_resolves_no_delivery_grant() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let session = session(&state, topic.id).await;
         let mut draft = draft(topic.id, "authored");
         draft.authoring_session_id = Some(session);
@@ -480,7 +480,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_operator_script_keeps_its_delivery_grant() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let mut draft = draft(topic.id, "operator-authored");
         draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         let change = save_workflow_script(&state, draft, "operator_http", None)
@@ -498,7 +498,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_save_appends_a_version_rather_than_a_row() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let first = save_workflow_script(&state, draft(topic.id, "sweep"), "workflow_save", None)
             .await
             .unwrap();
@@ -537,7 +537,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_meta_header_names_the_saved_script() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let mut draft = draft(topic.id, "ignored");
         draft.source =
             "export const meta = { name: \"declared\", description: \"From the header.\" };\n\nreturn 1;"
@@ -558,7 +558,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_update_uses_the_source_header_description_over_the_request_field() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let change =
             save_workflow_script(&state, draft(topic.id, "described"), "operator_http", None)
                 .await
@@ -593,7 +593,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn rejects_a_name_that_is_not_a_workflow_name() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let error =
             save_workflow_script(&state, draft(topic.id, "not a name"), "workflow_save", None)
                 .await
@@ -604,7 +604,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_save_records_a_configuration_change_naming_the_session() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let session = session(&state, topic.id).await;
         let mut draft = draft(topic.id, "recorded");
         draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
@@ -636,7 +636,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saving_over_an_operator_script_makes_it_the_conversation_s_own() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let session = session(&state, topic.id).await;
         let operator =
             save_workflow_script(&state, draft(topic.id, "sweep"), "operator_http", None)
@@ -713,7 +713,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_conversation_cannot_save_over_a_delivering_script() {
         let state = state();
-        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.general_scope().await.unwrap();
         let session = session(&state, topic.id).await;
         let mut operator = draft(topic.id, "delivering");
         operator.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));

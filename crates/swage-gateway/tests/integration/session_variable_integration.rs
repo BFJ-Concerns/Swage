@@ -152,7 +152,7 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
         ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let session = ConversationService::new(state.storage.clone(), state.topic_store.clone())
         .create_session_in_topic_for_agent(topic.id, "gateway", None)
         .await
@@ -720,7 +720,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
     environment.set_swage_home(swage_home.path());
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let state = AppState::new(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),

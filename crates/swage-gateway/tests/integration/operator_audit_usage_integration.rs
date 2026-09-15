@@ -117,7 +117,7 @@ async fn post_json(router: &Router, uri: &str, body: Value) -> (StatusCode, Valu
 }
 
 async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,

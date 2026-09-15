@@ -8,6 +8,7 @@ use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
 };
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
+use swage_core::ScopeLocation;
 
 #[cfg(test)]
 use swage_config::RESERVED_WORKFLOW_AGENT_ID;
@@ -176,12 +177,18 @@ pub(crate) fn build_session_environment(
         });
 
     SessionEnvironment {
-        topic_name: if topic.is_default {
+        // The general scope is the absence of a topic, and the orientation
+        // says so rather than naming the scope row.
+        topic_name: if topic.is_general {
             String::new()
         } else {
             topic.name.clone()
         },
-        topic_description: topic.description.clone(),
+        topic_description: if topic.is_general {
+            String::new()
+        } else {
+            topic.description.clone()
+        },
         working_directory,
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the
@@ -195,14 +202,14 @@ pub(crate) fn build_session_environment(
 /// orientation element, distinct from the active set whose instructions the
 /// skills element carries.
 pub(crate) fn available_skills_for_agent(
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: &str,
     swage_root: Option<&Path>,
 ) -> Vec<AvailableSkill> {
     let Some(root) = swage_root else {
         return vec![];
     };
-    crate::skill::discover_available_for_scope(root, topic_slug, Some(agent_id))
+    crate::skill::discover_available_for_scope(root, scope, Some(agent_id))
         .into_iter()
         .map(|skill| AvailableSkill {
             name: skill.name,
@@ -233,7 +240,7 @@ fn active_skill_from_definition(
 /// the interactive skill catalogue. Unlike declarative configuration, an
 /// unavailable dispatch request is an admission failure.
 pub(crate) fn resolve_requested_skills_for_agent(
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: &str,
     swage_root: Option<&Path>,
     requested_skills: &[String],
@@ -247,7 +254,7 @@ pub(crate) fn resolve_requested_skills_for_agent(
             requested_skills[0]
         ));
     };
-    let available = crate::skill::discover_available_for_scope(root, topic_slug, Some(agent_id));
+    let available = crate::skill::discover_available_for_scope(root, scope, Some(agent_id));
     requested_skills
         .iter()
         .enumerate()
@@ -261,32 +268,34 @@ pub(crate) fn resolve_requested_skills_for_agent(
         .collect()
 }
 
-/// Construct the shared global → topic → optional-agent config hierarchy.
+/// Construct the shared config hierarchy for a scope and an optional agent:
+/// Global → Topic → Agent for a topic, Global → Agent for the general scope.
 ///
 /// The workflow-ephemeral agent is a dispatch-only identity, not an
-/// operator-configurable agent. Its hierarchy stops at the topic level so no
+/// operator-configurable agent. Its hierarchy carries no agent level so no
 /// filesystem content can join its assembled context.
 pub(crate) fn configuration_hierarchy(
     root: &Path,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
-    swage_config::configuration_hierarchy(root, topic_slug, agent_id)
+    swage_config::configuration_hierarchy(root, scope, agent_id)
 }
 
-/// Load topic memory content by reading all `.md` files from the topic's
-/// memory directory (`{swage_root}/topics/{topic_slug}/memory/`).
+/// Load a scope's shared memory by reading all `.md` files from its memory
+/// directory (`memory/` beneath the scope's data directory — a topic's under
+/// `topics/<slug>/`, the general scope's under `general/`).
 ///
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-pub(crate) async fn load_topic_memory(swage_root: &Path, topic_slug: &str) -> String {
+pub(crate) async fn load_topic_memory(swage_root: &Path, scope: &ScopeLocation) -> String {
     #[cfg(test)]
     TOPIC_MEMORY_LOAD_COUNT
         .try_with(|count| count.set(count.get() + 1))
         .ok();
 
-    let memory_dir = swage_root.join("topics").join(topic_slug).join("memory");
+    let memory_dir = scope.data_dir(swage_root).join("memory");
 
     let mut entries = match tokio::fs::read_dir(&memory_dir).await {
         Ok(rd) => rd,
@@ -363,7 +372,7 @@ pub(crate) fn resolve_swage_root(state: &AppState) -> &Path {
 pub(crate) async fn load_active_skills_for_agent(
     state: &AppState,
     session_id: Uuid,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: &str,
     swage_root: Option<&Path>,
     include_user_activated: bool,
@@ -371,14 +380,9 @@ pub(crate) async fn load_active_skills_for_agent(
     requested_skills: &[String],
 ) -> Result<Vec<ActiveSkill>, String> {
     let Some(root) = swage_root else {
-        return resolve_requested_skills_for_agent(
-            topic_slug,
-            agent_id,
-            swage_root,
-            requested_skills,
-        );
+        return resolve_requested_skills_for_agent(scope, agent_id, swage_root, requested_skills);
     };
-    let available = crate::skill::discover_available_for_scope(root, topic_slug, Some(agent_id));
+    let available = crate::skill::discover_available_for_scope(root, scope, Some(agent_id));
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is
@@ -437,7 +441,7 @@ pub(crate) async fn load_active_skills_for_agent(
     }
 
     for requested in
-        resolve_requested_skills_for_agent(topic_slug, agent_id, Some(root), requested_skills)?
+        resolve_requested_skills_for_agent(scope, agent_id, Some(root), requested_skills)?
     {
         if !active.iter().any(|skill| skill.name == requested.name) {
             active.push(ActiveSkill {
@@ -454,10 +458,38 @@ pub(crate) async fn load_active_skills_for_agent(
 mod shipped_skill_tests {
     use super::*;
 
+    /// The one seam a builder learns: every on-disk scope path comes from the
+    /// scope's location, and the general scope's tree sits beside `topics/`,
+    /// never inside it — so nothing a topic writes can be read as general
+    /// and nothing general can be mistaken for a topic's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn general_memory_lives_beside_the_topics_not_inside_them() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let general_dir = ScopeLocation::General.data_dir(root.path()).join("memory");
+        let topic_dir = ScopeLocation::topic("alloys")
+            .data_dir(root.path())
+            .join("memory");
+        std::fs::create_dir_all(&general_dir).expect("general memory");
+        std::fs::create_dir_all(&topic_dir).expect("topic memory");
+        std::fs::write(general_dir.join("a.md"), "general note").expect("write");
+        std::fs::write(topic_dir.join("a.md"), "alloys note").expect("write");
+
+        assert_eq!(
+            load_topic_memory(root.path(), &ScopeLocation::General).await,
+            "general note"
+        );
+        assert_eq!(
+            load_topic_memory(root.path(), &ScopeLocation::topic("alloys")).await,
+            "alloys note"
+        );
+        assert!(!general_dir.starts_with(root.path().join("topics")));
+    }
+
     #[test]
     fn fresh_orientation_catalogue_contains_all_shipped_skills() {
         let root = tempfile::tempdir().expect("temporary root");
-        let available = available_skills_for_agent("default", "gateway", Some(root.path()));
+        let available =
+            available_skills_for_agent(&ScopeLocation::General, "gateway", Some(root.path()));
         assert_eq!(available.len(), 7);
         assert_eq!(
             available
@@ -488,7 +520,7 @@ mod shipped_skill_tests {
         .expect("write skill");
 
         let resolved = resolve_requested_skills_for_agent(
-            "default",
+            &ScopeLocation::General,
             "worker",
             Some(root.path()),
             &["dispatch-proof".into()],
@@ -498,7 +530,7 @@ mod shipped_skill_tests {
         assert_eq!(resolved[0].instructions, "Use the dispatch proof skill.");
 
         let error = resolve_requested_skills_for_agent(
-            "default",
+            &ScopeLocation::General,
             "worker",
             Some(root.path()),
             &["absent-skill".into()],
@@ -540,9 +572,16 @@ mod shipped_skill_tests {
             .expect("write assembly");
         }
 
-        let reserved_hierarchy =
-            configuration_hierarchy(root.path(), "dispatch", Some(RESERVED_WORKFLOW_AGENT_ID));
-        let ordinary_hierarchy = configuration_hierarchy(root.path(), "dispatch", Some("reviewer"));
+        let reserved_hierarchy = configuration_hierarchy(
+            root.path(),
+            &ScopeLocation::topic("dispatch"),
+            Some(RESERVED_WORKFLOW_AGENT_ID),
+        );
+        let ordinary_hierarchy = configuration_hierarchy(
+            root.path(),
+            &ScopeLocation::topic("dispatch"),
+            Some("reviewer"),
+        );
         assert!(
             reserved_hierarchy
                 .iter()
@@ -555,9 +594,16 @@ mod shipped_skill_tests {
             "ordinary agents must retain their agent-level filesystem path"
         );
 
-        let reserved_skills =
-            available_skills_for_agent("dispatch", RESERVED_WORKFLOW_AGENT_ID, Some(root.path()));
-        let ordinary_skills = available_skills_for_agent("dispatch", "reviewer", Some(root.path()));
+        let reserved_skills = available_skills_for_agent(
+            &ScopeLocation::topic("dispatch"),
+            RESERVED_WORKFLOW_AGENT_ID,
+            Some(root.path()),
+        );
+        let ordinary_skills = available_skills_for_agent(
+            &ScopeLocation::topic("dispatch"),
+            "reviewer",
+            Some(root.path()),
+        );
         assert!(
             reserved_skills
                 .iter()

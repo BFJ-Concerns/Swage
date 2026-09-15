@@ -256,7 +256,7 @@ fn provider_facing_schedule_schema_preserves_delivery_target_vocabulary() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_routing_keeps_strict_local_target_validation() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
     let over_specified_webhook = json!({
@@ -303,7 +303,7 @@ async fn schedule_routing_keeps_strict_local_target_validation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_can_create_schedules_with_each_delivery_route() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
 
@@ -379,7 +379,7 @@ async fn agent_can_create_schedules_with_each_delivery_route() {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_can_update_schedules_to_each_delivery_route() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
     let created = dispatcher
@@ -466,7 +466,7 @@ async fn agent_can_update_schedules_to_each_delivery_route() {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_created_schedule_is_attributed_and_fires() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["*"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
 
@@ -523,7 +523,7 @@ async fn agent_created_schedule_is_attributed_and_fires() {
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduling_bundle_can_pause_and_resume_a_schedule_through_the_tool() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
 
@@ -572,7 +572,7 @@ async fn scheduling_bundle_can_pause_and_resume_a_schedule_through_the_tool() {
 #[tokio::test(flavor = "multi_thread")]
 async fn model_schedule_mutations_record_prior_and_new_state_and_provenance() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let session_id = tool_session(&state, topic.id).await;
     let ctx = host_context(&state, "researcher", session_id);
@@ -694,7 +694,7 @@ async fn model_schedule_mutations_record_prior_and_new_state_and_provenance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_schedule_is_rejected_before_any_write() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
 
@@ -727,7 +727,7 @@ async fn invalid_schedule_is_rejected_before_any_write() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ordinary_schedule_edit_preserves_a_concurrent_tick_lifecycle() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let session_id = tool_session(&state, topic.id).await;
     let ctx = host_context(&state, "researcher", session_id);
@@ -795,7 +795,7 @@ async fn ordinary_schedule_edit_preserves_a_concurrent_tick_lifecycle() {
 #[tokio::test(flavor = "multi_thread")]
 async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let session = ConversationService::new(state.storage.clone(), state.topic_store.clone())
         .create_session_in_topic_for_agent(topic.id, "gateway", None)
         .await
@@ -858,7 +858,7 @@ async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session()
 #[tokio::test(flavor = "multi_thread")]
 async fn scheduling_bundle_is_the_grant_unit() {
     let state = test_state();
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
 
     // Granting only the scheduling bundle reaches both tools and nothing else.

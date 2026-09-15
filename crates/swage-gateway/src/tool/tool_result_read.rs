@@ -151,7 +151,7 @@ mod tests {
 
     async fn test_turns() -> (Arc<SqliteStorage>, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_branch_local_copied_tool_result_reference() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

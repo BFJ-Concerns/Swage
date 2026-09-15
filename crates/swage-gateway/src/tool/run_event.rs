@@ -112,7 +112,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn tool_derives_agent_attribution_from_its_context() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,

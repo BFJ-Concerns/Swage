@@ -35,10 +35,15 @@ pub trait TopicStore: Send + Sync {
     async fn create(&self, topic: NewTopic) -> Result<Topic, StorageError>;
     async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError>;
     async fn get_by_name(&self, name: &str) -> Result<Option<Topic>, StorageError>;
-    /// Get the default topic, creating it if it does not exist.
-    async fn get_or_create_default(&self) -> Result<Topic, StorageError>;
-    /// Return all topics ordered by created_at ascending.
+    /// The general scope — the scope of sessions started without a topic.
+    /// Seeded by migration; created here only for a store that predates it.
+    async fn general_scope(&self) -> Result<Topic, StorageError>;
+    /// The topics a user can choose, ordered by created_at ascending. Never
+    /// includes the general scope.
     async fn list_all(&self) -> Result<Vec<Topic>, StorageError>;
+    /// Every scope — the general scope first, then the topics — for callers
+    /// that enumerate scope-owned records (audit, operator views, recovery).
+    async fn list_scopes(&self) -> Result<Vec<Topic>, StorageError>;
     /// Look up a topic by its slug.
     async fn get_by_slug(&self, slug: &str) -> Result<Option<Topic>, StorageError>;
     /// Partially update a topic. Only `Some` fields are changed.
@@ -1515,10 +1520,13 @@ mod tests {
         async fn get_by_name(&self, _: &str) -> Result<Option<Topic>, StorageError> {
             unimplemented!()
         }
-        async fn get_or_create_default(&self) -> Result<Topic, StorageError> {
+        async fn general_scope(&self) -> Result<Topic, StorageError> {
             unimplemented!()
         }
         async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_scopes(&self) -> Result<Vec<Topic>, StorageError> {
             unimplemented!()
         }
         async fn get_by_slug(&self, _: &str) -> Result<Option<Topic>, StorageError> {

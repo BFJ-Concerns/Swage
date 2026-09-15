@@ -234,6 +234,36 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
+            operation_id: "list_conversations",
+            method: Method::Get,
+            path: "/api/conversations",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List the conversations that run in the general scope — started without a topic.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ConversationListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "create_conversation",
+            method: Method::Post,
+            path: "/api/conversations",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Create a conversation without a topic: a general assistant in the general scope.",
+            request_optional: true,
+
+            request: schema::<CreateConversationRequest>(),
+            response: Response {
+                status: 201,
+                body: schema::<ConversationResponse>(),
+            },
+        },
+        Route {
             operation_id: "list_topic_sessions",
             method: Method::Get,
             path: "/api/topics/{topic_id}/sessions",

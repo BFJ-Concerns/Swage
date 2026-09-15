@@ -130,7 +130,7 @@
   // ---------------------------------------------------------------------------
 
   // The label to show on the selector button.
-  const currentName = $derived(topicStore?.currentTopic?.name ?? "default");
+  const currentName = $derived(topicStore?.currentTopic?.name ?? "No topic");
 </script>
 
 <!--
@@ -155,7 +155,6 @@
       <ul class="topic-list">
         {#each topicStore.topics as topic (topic.id)}
           {@const isActive = topicStore.currentTopic?.id === topic.id}
-          {@const isDefault = topic.name === "default"}
           {@const isPendingDelete = pendingDelete === topic.id}
 
           <li
@@ -180,8 +179,7 @@
                   Cancel
                 </button>
               </span>
-            {:else if !isDefault}
-              <!-- Default topic cannot be deleted. -->
+            {:else}
               <button
                 class="delete-topic-btn"
                 title="Delete topic"

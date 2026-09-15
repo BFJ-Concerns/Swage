@@ -152,7 +152,6 @@ function makeTopic(overrides: Partial<Topic> = {}): Topic {
     name: "default",
     description: "",
     slug: "default",
-    is_default: true,
     created_at: "2026-04-07T12:00:00Z",
     ...overrides,
   };

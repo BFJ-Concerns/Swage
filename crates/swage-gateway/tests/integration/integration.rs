@@ -512,7 +512,7 @@ async fn startup_recovery_marks_orphaned_turns() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
     // Get the default topic (seeded by migration).
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
 
     // Session 1: an orphaned Processing turn (simulates a crash mid-turn).
     let session_orphan = storage

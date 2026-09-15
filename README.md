@@ -150,6 +150,10 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   built-in orientation: every session already knows what it is running on,
   where it is, and what tools it has.
 - `skills/<name>/` — global skills, one directory per skill with frontmatter.
+- `general/` — the general scope: where a session started without a topic
+  keeps its memory, knowledge-base bodies and `agents/<agent>/` overlays. It
+  has no scope-level `config.toml` or `instructions/` — its cascade is
+  Global → Agent.
 - `topics/<topic>/` — each topic's world: its own `instructions/`,
   `skills/`, `agents/<agent>/` (per-agent `instructions/` and `skills/`),
   memory, and knowledge-base bodies. The agent directory name
@@ -159,8 +163,9 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   knowledge base, workflow runs. The one local record everything is
   reconstructable from.
 
-The configuration cascade is Global → Topic → Agent: the more specific
-level extends or shadows the more general one. `AGENTS.md` extends the
+The configuration cascade is Global → Topic → Agent for a session in a
+topic and Global → Agent for one without: the more specific level extends
+or shadows the more general one. `AGENTS.md` extends the
 cascade (global then workspace) rather than participating in the shadowing
 — both levels are always additive.
 

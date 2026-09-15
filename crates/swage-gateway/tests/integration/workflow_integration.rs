@@ -80,7 +80,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -201,7 +201,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -252,7 +252,7 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
 #[tokio::test(flavor = "multi_thread")]
 async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -293,7 +293,7 @@ async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,

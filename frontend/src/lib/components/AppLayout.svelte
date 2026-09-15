@@ -31,6 +31,7 @@
     streamingStore: StreamingStore;
     topicStore?: TopicStore;
     onTopicChange?: () => void;
+    onStartWithoutTopic?: () => void;
     onRetry: () => void;
     activeSurface: Surface;
     surfacesStore?: SurfacesStore;
@@ -55,6 +56,7 @@
     streamingStore,
     topicStore,
     onTopicChange,
+    onStartWithoutTopic,
     onRetry,
     activeSurface,
     surfacesStore,
@@ -75,6 +77,9 @@
 
   const currentTopic = $derived(topicStore?.currentTopic ?? null);
   const activeConversation = $derived(conversationStore.activeConversation);
+  // The shell is in scope with a topic open or with a general-scope
+  // conversation active; only with neither does the picker own the body.
+  const inScope = $derived(currentTopic !== null || activeConversation !== null);
   let selectedAgentId = $state("");
   let selectedAgentTopicId = $state<string | null | undefined>(undefined);
   $effect(() => {
@@ -142,7 +147,7 @@
   }
 </script>
 
-{#if currentTopic}
+{#if inScope}
   <header class="topbar">
     <TopicSelector {topicStore} {onTopicChange} />
     <nav aria-label="Surface">
@@ -194,9 +199,9 @@
       <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} {onSettingsSaved} />
     {/if}
   </div>
-{:else if !currentTopic}
+{:else if !inScope}
   <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
-  <TopicPicker {topicStore} {onTopicChange} />
+  <TopicPicker {topicStore} {onTopicChange} {onStartWithoutTopic} />
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
 {:else if activeSurface === "surfaces"}

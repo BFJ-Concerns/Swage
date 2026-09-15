@@ -192,23 +192,46 @@ impl PartialEq<&str> for TopicSlug {
     }
 }
 
-/// A topic groups conversations and provides configuration scope.
+/// A scope sessions belong to: a topic the user chose, or the general scope.
+///
+/// Every session has exactly one. A topic groups conversations and supplies
+/// memory, attached workspaces and a configuration layer; the **general
+/// scope** is the one row with `is_general` set — the scope of every session
+/// started without a topic. It owns general memory and the general knowledge
+/// base like any topic, but it is never listed or chosen as a topic, has no
+/// scope-level configuration layer, and lives at `~/.swage/general/` rather
+/// than under `topics/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Topic {
     pub id: Uuid,
     pub name: String,
     /// Short operator-authored summary shown in topic pickers and previews.
     pub description: String,
-    /// True for the single built-in fallback topic.
-    ///
-    /// This is structural identity, not presentation. The topic may be
-    /// renamed without ceasing to be the default topic.
-    pub is_default: bool,
-    /// Filesystem-safe identifier used for the topic's directory under
-    /// `~/.swage/topics/{slug}/`.
+    /// True for the single general scope. Structural identity, never
+    /// presentation: the general scope is not a topic the user can pick.
+    pub is_general: bool,
+    /// Filesystem-safe identifier used for a topic's directory under
+    /// `~/.swage/topics/{slug}/`; the general scope's slug is `general`.
     pub slug: TopicSlug,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Topic {
+    /// Where this scope keeps its files and which configuration layers apply.
+    pub fn location(&self) -> swage_core::ScopeLocation {
+        if self.is_general {
+            swage_core::ScopeLocation::General
+        } else {
+            swage_core::ScopeLocation::topic(self.slug.as_str())
+        }
+    }
+
+    /// The topic id a client sees: `None` for the general scope, which is
+    /// projected as the absence of a topic.
+    pub fn client_topic_id(&self) -> Option<Uuid> {
+        (!self.is_general).then_some(self.id)
+    }
 }
 
 /// External resource attached to a topic.
@@ -2548,7 +2571,7 @@ mod tests {
             id,
             name: "my-topic".to_string(),
             description: String::new(),
-            is_default: false,
+            is_general: false,
             slug: "my-topic".into(),
             created_at: now,
             updated_at: now,

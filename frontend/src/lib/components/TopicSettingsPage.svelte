@@ -135,10 +135,6 @@
             <span class="shell-value">{topic.slug}</span>
           </div>
           <div class="shell-row">
-            <span class="shell-label">Default topic</span>
-            <span class="shell-value">{topic.is_default ? "Yes" : "No"}</span>
-          </div>
-          <div class="shell-row">
             <span class="shell-label">Workspaces</span>
             <span class="shell-value">{workspaces.length}</span>
           </div>
