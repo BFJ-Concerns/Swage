@@ -275,7 +275,7 @@ section owns the floor rule; state it nowhere else in fuller form:
   instrument proposal that was declined — or the admission that none
   was made.
 
-Deliver the report to the user — a page in the topic, or the
+Deliver the report to the user — a surface in the topic, or the
 conversation when one is open; the annexe copy remains the artefact of
 record.
 

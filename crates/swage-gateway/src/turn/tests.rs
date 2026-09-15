@@ -28,9 +28,9 @@ use swage_storage::{
         Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
         NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial,
         NewMessage, NewSchedule, NewScheduleRun, NewSession, NewThread, NewToolCall, NewTopic,
-        NewTurn, NewWorkspaceAttachment, PageAnnotation, Schedule, ScheduleRun, ScheduleRunState,
-        ScheduleRunUpdate, ScheduleStatus, Session, Thread, ThreadState, ToolCallRecord, Topic,
-        TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
+        NewTurn, NewWorkspaceAttachment, Schedule, ScheduleRun, ScheduleRunState,
+        ScheduleRunUpdate, ScheduleStatus, Session, SurfaceAnnotation, Thread, ThreadState,
+        ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
@@ -3159,107 +3159,110 @@ impl ThreadStore for MockStorage {
 }
 
 #[async_trait]
-impl swage_storage::PageStore for MockStorage {
+impl swage_storage::SurfaceStore for MockStorage {
     async fn create_page(
         &self,
-        _: swage_storage::NewPage,
-    ) -> Result<swage_storage::Page, StorageError> {
+        _: swage_storage::NewSurface,
+    ) -> Result<swage_storage::Surface, StorageError> {
         unimplemented!()
     }
-    async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Page>, StorageError> {
+    async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Surface>, StorageError> {
         unimplemented!()
     }
-    async fn list_pages_by_topic(&self, _: Uuid) -> Result<Vec<swage_storage::Page>, StorageError> {
-        unimplemented!()
-    }
-    async fn create_page_module(
-        &self,
-        _: swage_storage::NewPageModule,
-    ) -> Result<swage_storage::PageModule, StorageError> {
-        unimplemented!()
-    }
-    async fn get_page_module(
+    async fn list_pages_by_topic(
         &self,
         _: Uuid,
-    ) -> Result<Option<swage_storage::PageModule>, StorageError> {
+    ) -> Result<Vec<swage_storage::Surface>, StorageError> {
         unimplemented!()
     }
-    async fn list_page_modules(
+    async fn create_surface_module(
+        &self,
+        _: swage_storage::NewSurfaceModule,
+    ) -> Result<swage_storage::SurfaceModule, StorageError> {
+        unimplemented!()
+    }
+    async fn get_surface_module(
         &self,
         _: Uuid,
-    ) -> Result<Vec<swage_storage::PageModule>, StorageError> {
+    ) -> Result<Option<swage_storage::SurfaceModule>, StorageError> {
         unimplemented!()
     }
-    async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
-        unimplemented!()
-    }
-    async fn create_page_template(
-        &self,
-        _: swage_storage::NewPageTemplate,
-    ) -> Result<swage_storage::PageTemplate, StorageError> {
-        unimplemented!()
-    }
-    async fn create_page_template_with_modules(
-        &self,
-        _: swage_storage::NewPageTemplate,
-        _: Vec<swage_storage::NewPageTemplateModuleInput>,
-    ) -> Result<swage_storage::PageTemplate, StorageError> {
-        unimplemented!()
-    }
-    async fn get_page_template(
+    async fn list_surface_modules(
         &self,
         _: Uuid,
-    ) -> Result<Option<swage_storage::PageTemplate>, StorageError> {
+    ) -> Result<Vec<swage_storage::SurfaceModule>, StorageError> {
         unimplemented!()
     }
-    async fn list_page_templates_by_topic(
+    async fn update_surface_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn create_surface_template(
+        &self,
+        _: swage_storage::NewSurfaceTemplate,
+    ) -> Result<swage_storage::SurfaceTemplate, StorageError> {
+        unimplemented!()
+    }
+    async fn create_surface_template_with_modules(
+        &self,
+        _: swage_storage::NewSurfaceTemplate,
+        _: Vec<swage_storage::NewSurfaceTemplateModuleInput>,
+    ) -> Result<swage_storage::SurfaceTemplate, StorageError> {
+        unimplemented!()
+    }
+    async fn get_surface_template(
         &self,
         _: Uuid,
-    ) -> Result<Vec<swage_storage::PageTemplate>, StorageError> {
+    ) -> Result<Option<swage_storage::SurfaceTemplate>, StorageError> {
         unimplemented!()
     }
-    async fn create_page_template_module(
-        &self,
-        _: swage_storage::NewPageTemplateModule,
-    ) -> Result<swage_storage::PageTemplateModule, StorageError> {
-        unimplemented!()
-    }
-    async fn list_page_template_modules(
+    async fn list_surface_templates_by_topic(
         &self,
         _: Uuid,
-    ) -> Result<Vec<swage_storage::PageTemplateModule>, StorageError> {
+    ) -> Result<Vec<swage_storage::SurfaceTemplate>, StorageError> {
         unimplemented!()
     }
-    async fn create_page_from_template(
+    async fn create_surface_template_module(
         &self,
-        _: swage_storage::NewPage,
+        _: swage_storage::NewSurfaceTemplateModule,
+    ) -> Result<swage_storage::SurfaceTemplateModule, StorageError> {
+        unimplemented!()
+    }
+    async fn list_surface_template_modules(
+        &self,
         _: Uuid,
-    ) -> Result<swage_storage::Page, StorageError> {
+    ) -> Result<Vec<swage_storage::SurfaceTemplateModule>, StorageError> {
+        unimplemented!()
+    }
+    async fn create_surface_from_template(
+        &self,
+        _: swage_storage::NewSurface,
+        _: Uuid,
+    ) -> Result<swage_storage::Surface, StorageError> {
         unimplemented!()
     }
 }
 
 #[async_trait]
-impl swage_storage::PageAnnotationStore for MockStorage {
-    async fn create_page_annotation(
+impl swage_storage::SurfaceAnnotationStore for MockStorage {
+    async fn create_surface_annotation(
         &self,
-        _: swage_storage::NewPageAnnotation,
-    ) -> Result<swage_storage::PageAnnotation, StorageError> {
+        _: swage_storage::NewSurfaceAnnotation,
+    ) -> Result<swage_storage::SurfaceAnnotation, StorageError> {
         unimplemented!()
     }
-    async fn get_page_annotation(
-        &self,
-        _: Uuid,
-    ) -> Result<Option<swage_storage::PageAnnotation>, StorageError> {
-        unimplemented!()
-    }
-    async fn list_page_annotations(
+    async fn get_surface_annotation(
         &self,
         _: Uuid,
-    ) -> Result<Vec<swage_storage::PageAnnotation>, StorageError> {
+    ) -> Result<Option<swage_storage::SurfaceAnnotation>, StorageError> {
         unimplemented!()
     }
-    async fn update_page_annotation(
+    async fn list_surface_annotations(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::SurfaceAnnotation>, StorageError> {
+        unimplemented!()
+    }
+    async fn update_surface_annotation(
         &self,
         _: Uuid,
         _: &str,
@@ -3267,9 +3270,9 @@ impl swage_storage::PageAnnotationStore for MockStorage {
     ) -> Result<(), StorageError> {
         unimplemented!()
     }
-    async fn delete_page_annotation_with_audit(
+    async fn delete_surface_annotation_with_audit(
         &self,
-        _: PageAnnotation,
+        _: SurfaceAnnotation,
         _: NewAuditEvent,
     ) -> Result<bool, StorageError> {
         unimplemented!()

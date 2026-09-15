@@ -171,7 +171,7 @@ never a quiet extension. Every close writes the closing report
 (`build/qa/report.md`), which leads with the **merge recommendation**
 under the floor rule — no Critical or High finding unresolved means
 merge-ready by default, and the seat deviates only with recorded
-reasoning — and is delivered to the user (a page in the topic, or the
+reasoning — and is delivered to the user (a surface in the topic, or the
 conversation), the annexe copy remaining the artefact of record. Under PR
 mode, a merge-ready close also releases the promotion PR — its body
 brought current first — and merges it only with fully green CI; any

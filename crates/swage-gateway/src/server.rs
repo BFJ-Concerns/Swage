@@ -11,7 +11,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::{assets, handlers, knowledge_mirror, page, state::AppState, websocket, workflow};
+use crate::{assets, handlers, knowledge_mirror, state::AppState, surface, websocket, workflow};
 
 // ---------------------------------------------------------------------------
 // Request ID correlation middleware
@@ -221,29 +221,34 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_effective_agent_definitions),
         )
         .route(
-            "/api/topics/{topic_id}/pages",
-            get(page::list_pages_handler).post(page::create_page_handler),
+            "/api/topics/{topic_id}/surfaces",
+            get(surface::list_pages_handler).post(surface::create_surface_handler),
         )
         .route(
-            "/api/topics/{topic_id}/page-templates",
-            get(page::list_page_templates_handler).post(page::create_page_template_handler),
+            "/api/topics/{topic_id}/surface-templates",
+            get(surface::list_surface_templates_handler)
+                .post(surface::create_surface_template_handler),
         )
         .route(
-            "/api/page-templates/{template_id}",
-            get(page::get_page_template_handler),
-        )
-        .route("/api/pages/{page_id}", get(page::get_page_handler))
-        .route(
-            "/api/pages/{page_id}/modules",
-            post(page::write_page_module_handler),
+            "/api/surface-templates/{template_id}",
+            get(surface::get_surface_template_handler),
         )
         .route(
-            "/api/pages/{page_id}/annotations",
-            post(page::create_page_annotation_handler),
+            "/api/surfaces/{surface_id}",
+            get(surface::get_surface_handler),
         )
         .route(
-            "/api/page-annotations/{annotation_id}",
-            post(page::update_page_annotation_handler).delete(page::delete_page_annotation_handler),
+            "/api/surfaces/{surface_id}/modules",
+            post(surface::write_surface_module_handler),
+        )
+        .route(
+            "/api/surfaces/{surface_id}/annotations",
+            post(surface::create_surface_annotation_handler),
+        )
+        .route(
+            "/api/surface-annotations/{annotation_id}",
+            post(surface::update_surface_annotation_handler)
+                .delete(surface::delete_surface_annotation_handler),
         )
         .route(
             "/api/operator/agent-definitions",

@@ -11,19 +11,19 @@ use crate::model::{
     Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
     NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
-    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
-    NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput, NewSchedule,
-    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewTaskDefinition,
-    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
-    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page, PageAnnotation,
-    PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin, ProviderRoundRecord,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable,
-    SourceCapture, SourceObservation, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun,
+    NewSecretRecord, NewSession, NewSourceObservation, NewSurface, NewSurfaceAnnotation,
+    NewSurfaceModule, NewSurfaceTemplate, NewSurfaceTemplateModule, NewSurfaceTemplateModuleInput,
+    NewTaskDefinition, NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
+    PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate,
+    SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation, Surface,
+    SurfaceAnnotation, SurfaceModule, SurfaceTemplate, SurfaceTemplateModule, TaskDefinition,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnState,
+    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -1283,8 +1283,8 @@ pub trait WorkflowStore: Send + Sync {
 ///
 /// `TopicStore` is not included — it is independently available and consumers
 /// that need topic operations import it separately.
-/// Pages: agent-run tabs on a topic assembled from module instances. The
-/// database is authoritative for page content; renderings derive from it.
+/// Surfaces: agent-run tabs on a topic assembled from module instances. The
+/// database is authoritative for surface content; renderings derive from it.
 #[async_trait]
 pub trait ProviderRoundStore: Send + Sync {
     async fn open_provider_round(
@@ -1311,88 +1311,102 @@ pub trait ProviderRoundStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait PageStore: Send + Sync {
-    async fn create_page(&self, page: NewPage) -> Result<Page, StorageError>;
-    async fn get_page(&self, id: Uuid) -> Result<Option<Page>, StorageError>;
-    /// All pages of a topic, oldest first.
-    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Page>, StorageError>;
-    async fn create_page_module(&self, module: NewPageModule) -> Result<PageModule, StorageError>;
-    async fn get_page_module(&self, id: Uuid) -> Result<Option<PageModule>, StorageError>;
-    /// A page's module instances in position order.
-    async fn list_page_modules(&self, page_id: Uuid) -> Result<Vec<PageModule>, StorageError>;
-    /// Replace a module instance's source, advancing the owning page's
-    /// updated_at in the same write.
-    async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError>;
-    async fn create_page_template(
+pub trait SurfaceStore: Send + Sync {
+    async fn create_page(&self, surface: NewSurface) -> Result<Surface, StorageError>;
+    async fn get_page(&self, id: Uuid) -> Result<Option<Surface>, StorageError>;
+    /// All surfaces of a topic, oldest first.
+    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Surface>, StorageError>;
+    async fn create_surface_module(
         &self,
-        template: NewPageTemplate,
-    ) -> Result<PageTemplate, StorageError>;
+        module: NewSurfaceModule,
+    ) -> Result<SurfaceModule, StorageError>;
+    async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError>;
+    /// A surface's module instances in position order.
+    async fn list_surface_modules(
+        &self,
+        surface_id: Uuid,
+    ) -> Result<Vec<SurfaceModule>, StorageError>;
+    /// Replace a module instance's source, advancing the owning surface's
+    /// updated_at in the same write.
+    async fn update_surface_module_source(
+        &self,
+        id: Uuid,
+        source: &str,
+    ) -> Result<(), StorageError>;
+    async fn create_surface_template(
+        &self,
+        template: NewSurfaceTemplate,
+    ) -> Result<SurfaceTemplate, StorageError>;
     /// Create a template and every module it seeds in one transaction, so a
     /// reader can never observe a partially configured template.
-    async fn create_page_template_with_modules(
+    async fn create_surface_template_with_modules(
         &self,
-        template: NewPageTemplate,
-        modules: Vec<NewPageTemplateModuleInput>,
-    ) -> Result<PageTemplate, StorageError>;
-    async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError>;
+        template: NewSurfaceTemplate,
+        modules: Vec<NewSurfaceTemplateModuleInput>,
+    ) -> Result<SurfaceTemplate, StorageError>;
+    async fn get_surface_template(&self, id: Uuid)
+    -> Result<Option<SurfaceTemplate>, StorageError>;
     /// A topic's templates, oldest first.
-    async fn list_page_templates_by_topic(
+    async fn list_surface_templates_by_topic(
         &self,
         topic_id: Uuid,
-    ) -> Result<Vec<PageTemplate>, StorageError>;
-    async fn create_page_template_module(
+    ) -> Result<Vec<SurfaceTemplate>, StorageError>;
+    async fn create_surface_template_module(
         &self,
-        module: NewPageTemplateModule,
-    ) -> Result<PageTemplateModule, StorageError>;
+        module: NewSurfaceTemplateModule,
+    ) -> Result<SurfaceTemplateModule, StorageError>;
     /// A template's module rows in position order.
-    async fn list_page_template_modules(
+    async fn list_surface_template_modules(
         &self,
         template_id: Uuid,
-    ) -> Result<Vec<PageTemplateModule>, StorageError>;
-    /// Create a page seeded from a template's modules, recording the fork's
-    /// origin on the page. The page row and its seeded modules land in one
-    /// write, so a half-seeded page cannot be observed. The copied rows are
-    /// the page's own from birth — later edits on either side do not cross.
-    async fn create_page_from_template(
+    ) -> Result<Vec<SurfaceTemplateModule>, StorageError>;
+    /// Create a surface seeded from a template's modules, recording the fork's
+    /// origin on the surface. The surface row and its seeded modules land in one
+    /// write, so a half-seeded surface cannot be observed. The copied rows are
+    /// the surface's own from birth — later edits on either side do not cross.
+    async fn create_surface_from_template(
         &self,
-        page: NewPage,
+        surface: NewSurface,
         template_id: Uuid,
-    ) -> Result<Page, StorageError>;
+    ) -> Result<Surface, StorageError>;
 }
 
-/// Annotations on a page's modules: the notes a user and an agent both hang
+/// Annotations on a surface's modules: the notes a user and an agent both hang
 /// on the same module rather than describing a location to each other.
 ///
 /// Anchoring is at module grain — an annotation names the module it is about,
-/// or none for a note on the page as a whole. Rows carry current truth only;
+/// or none for a note on the surface as a whole. Rows carry current truth only;
 /// a superseded body survives in the audit trail, not in a version row.
 #[async_trait]
-pub trait PageAnnotationStore: Send + Sync {
-    async fn create_page_annotation(
+pub trait SurfaceAnnotationStore: Send + Sync {
+    async fn create_surface_annotation(
         &self,
-        annotation: NewPageAnnotation,
-    ) -> Result<PageAnnotation, StorageError>;
-    async fn get_page_annotation(&self, id: Uuid) -> Result<Option<PageAnnotation>, StorageError>;
-    /// Every annotation on a page — module notes and page-level notes alike —
+        annotation: NewSurfaceAnnotation,
+    ) -> Result<SurfaceAnnotation, StorageError>;
+    async fn get_surface_annotation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<SurfaceAnnotation>, StorageError>;
+    /// Every annotation on a surface — module notes and surface-level notes alike —
     /// oldest first.
-    async fn list_page_annotations(
+    async fn list_surface_annotations(
         &self,
-        page_id: Uuid,
-    ) -> Result<Vec<PageAnnotation>, StorageError>;
+        surface_id: Uuid,
+    ) -> Result<Vec<SurfaceAnnotation>, StorageError>;
     /// Replace an annotation's body and tags together: the note as its author
     /// now states it, with no version row left behind.
-    async fn update_page_annotation(
+    async fn update_surface_annotation(
         &self,
         id: Uuid,
         body: &str,
         tags: &[String],
     ) -> Result<(), StorageError>;
-    /// Delete an annotation, advance its page timestamp, and append its
+    /// Delete an annotation, advance its surface timestamp, and append its
     /// provenance event in one transaction. `false` means another writer
     /// removed the annotation first, so no audit event was written.
-    async fn delete_page_annotation_with_audit(
+    async fn delete_surface_annotation_with_audit(
         &self,
-        annotation: PageAnnotation,
+        annotation: SurfaceAnnotation,
         audit_event: NewAuditEvent,
     ) -> Result<bool, StorageError>;
 }
@@ -1428,8 +1442,8 @@ pub trait Storage:
     + ChannelQueueStore
     + WorkflowStore
     + ProviderRoundStore
-    + PageStore
-    + PageAnnotationStore
+    + SurfaceStore
+    + SurfaceAnnotationStore
     + Send
     + Sync
 {
@@ -1467,8 +1481,8 @@ impl<T> Storage for T where
         + ChannelQueueStore
         + WorkflowStore
         + ProviderRoundStore
-        + PageStore
-        + PageAnnotationStore
+        + SurfaceStore
+        + SurfaceAnnotationStore
         + Send
         + Sync
 {
@@ -2173,92 +2187,98 @@ mod tests {
     }
 
     #[async_trait]
-    impl PageStore for StubStorage {
-        async fn create_page(&self, _: NewPage) -> Result<Page, StorageError> {
+    impl SurfaceStore for StubStorage {
+        async fn create_page(&self, _: NewSurface) -> Result<Surface, StorageError> {
             unimplemented!()
         }
-        async fn get_page(&self, _: Uuid) -> Result<Option<Page>, StorageError> {
+        async fn get_page(&self, _: Uuid) -> Result<Option<Surface>, StorageError> {
             unimplemented!()
         }
-        async fn list_pages_by_topic(&self, _: Uuid) -> Result<Vec<Page>, StorageError> {
+        async fn list_pages_by_topic(&self, _: Uuid) -> Result<Vec<Surface>, StorageError> {
             unimplemented!()
         }
-        async fn create_page_module(&self, _: NewPageModule) -> Result<PageModule, StorageError> {
-            unimplemented!()
-        }
-        async fn get_page_module(&self, _: Uuid) -> Result<Option<PageModule>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_page_modules(&self, _: Uuid) -> Result<Vec<PageModule>, StorageError> {
-            unimplemented!()
-        }
-        async fn update_page_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
-            unimplemented!()
-        }
-        async fn create_page_template(
+        async fn create_surface_module(
             &self,
-            _: NewPageTemplate,
-        ) -> Result<PageTemplate, StorageError> {
+            _: NewSurfaceModule,
+        ) -> Result<SurfaceModule, StorageError> {
             unimplemented!()
         }
-        async fn create_page_template_with_modules(
+        async fn get_surface_module(&self, _: Uuid) -> Result<Option<SurfaceModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_surface_modules(&self, _: Uuid) -> Result<Vec<SurfaceModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_surface_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn create_surface_template(
             &self,
-            _: NewPageTemplate,
-            _: Vec<NewPageTemplateModuleInput>,
-        ) -> Result<PageTemplate, StorageError> {
+            _: NewSurfaceTemplate,
+        ) -> Result<SurfaceTemplate, StorageError> {
             unimplemented!()
         }
-        async fn get_page_template(&self, _: Uuid) -> Result<Option<PageTemplate>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_page_templates_by_topic(
+        async fn create_surface_template_with_modules(
             &self,
-            _: Uuid,
-        ) -> Result<Vec<PageTemplate>, StorageError> {
+            _: NewSurfaceTemplate,
+            _: Vec<NewSurfaceTemplateModuleInput>,
+        ) -> Result<SurfaceTemplate, StorageError> {
             unimplemented!()
         }
-        async fn create_page_template_module(
-            &self,
-            _: NewPageTemplateModule,
-        ) -> Result<PageTemplateModule, StorageError> {
-            unimplemented!()
-        }
-        async fn list_page_template_modules(
+        async fn get_surface_template(
             &self,
             _: Uuid,
-        ) -> Result<Vec<PageTemplateModule>, StorageError> {
+        ) -> Result<Option<SurfaceTemplate>, StorageError> {
             unimplemented!()
         }
-        async fn create_page_from_template(
+        async fn list_surface_templates_by_topic(
             &self,
-            _: NewPage,
             _: Uuid,
-        ) -> Result<Page, StorageError> {
+        ) -> Result<Vec<SurfaceTemplate>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_surface_template_module(
+            &self,
+            _: NewSurfaceTemplateModule,
+        ) -> Result<SurfaceTemplateModule, StorageError> {
+            unimplemented!()
+        }
+        async fn list_surface_template_modules(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<SurfaceTemplateModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn create_surface_from_template(
+            &self,
+            _: NewSurface,
+            _: Uuid,
+        ) -> Result<Surface, StorageError> {
             unimplemented!()
         }
     }
 
     #[async_trait]
-    impl PageAnnotationStore for StubStorage {
-        async fn create_page_annotation(
+    impl SurfaceAnnotationStore for StubStorage {
+        async fn create_surface_annotation(
             &self,
-            _: NewPageAnnotation,
-        ) -> Result<PageAnnotation, StorageError> {
+            _: NewSurfaceAnnotation,
+        ) -> Result<SurfaceAnnotation, StorageError> {
             unimplemented!()
         }
-        async fn get_page_annotation(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<PageAnnotation>, StorageError> {
-            unimplemented!()
-        }
-        async fn list_page_annotations(
+        async fn get_surface_annotation(
             &self,
             _: Uuid,
-        ) -> Result<Vec<PageAnnotation>, StorageError> {
+        ) -> Result<Option<SurfaceAnnotation>, StorageError> {
             unimplemented!()
         }
-        async fn update_page_annotation(
+        async fn list_surface_annotations(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<SurfaceAnnotation>, StorageError> {
+            unimplemented!()
+        }
+        async fn update_surface_annotation(
             &self,
             _: Uuid,
             _: &str,
@@ -2266,9 +2286,9 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn delete_page_annotation_with_audit(
+        async fn delete_surface_annotation_with_audit(
             &self,
-            _: PageAnnotation,
+            _: SurfaceAnnotation,
             _: NewAuditEvent,
         ) -> Result<bool, StorageError> {
             unimplemented!()

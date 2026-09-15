@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::Value;
-use swage_protocol::client::page::WritePageModuleRequest;
+use swage_protocol::client::surface::WriteSurfaceModuleRequest;
 use swage_storage::Storage;
 use swage_workflow::{EffectKind, EffectPayload, EffectReceipt};
 use tokio_util::sync::CancellationToken;
@@ -44,8 +44,8 @@ pub(crate) async fn capability_from_grant(
         .and_then(Value::as_array)
         .ok_or_else(|| "DeliveryNotGrantedError: script has no delivery targets".to_string())?;
     // Untargeted workflow delivery historically selects the webhook capability.
-    // A page is therefore opt-in through its named grant, rather than changing
-    // what an existing workflow does merely because a page grant is added first.
+    // A surface is therefore opt-in through its named grant, rather than changing
+    // what an existing workflow does merely because a surface grant is added first.
     let target = targets
         .iter()
         .find(|target| match requested_target {
@@ -59,9 +59,9 @@ pub(crate) async fn capability_from_grant(
         Some("webhook") => Ok(Arc::new(
             WebhookDeliveryCapability::from_grant(storage, target).await?,
         )),
-        Some("page") => Ok(Arc::new(
-            PageDeliveryCapability::from_grant(
-                state.ok_or_else(|| "page delivery needs gateway state".to_string())?,
+        Some("surface") => Ok(Arc::new(
+            SurfaceDeliveryCapability::from_grant(
+                state.ok_or_else(|| "surface delivery needs gateway state".to_string())?,
                 topic_id,
                 target,
             )
@@ -71,36 +71,36 @@ pub(crate) async fn capability_from_grant(
     }
 }
 
-struct PageDeliveryCapability {
+struct SurfaceDeliveryCapability {
     state: AppState,
-    page_id: Uuid,
+    surface_id: Uuid,
 }
 
-impl PageDeliveryCapability {
+impl SurfaceDeliveryCapability {
     async fn from_grant(state: AppState, topic_id: Uuid, target: &Value) -> Result<Self, String> {
-        let page_id = target
-            .get("page_id")
+        let surface_id = target
+            .get("surface_id")
             .and_then(Value::as_str)
-            .ok_or_else(|| "page grant is missing page_id".to_string())?
+            .ok_or_else(|| "surface grant is missing surface_id".to_string())?
             .parse()
-            .map_err(|_| "page grant has an invalid page_id".to_string())?;
-        let page = state
+            .map_err(|_| "surface grant has an invalid surface_id".to_string())?;
+        let surface = state
             .storage
-            .get_page(page_id)
+            .get_page(surface_id)
             .await
             .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("no page with id {page_id}"))?;
-        if page.topic_id != topic_id {
-            return Err("page delivery target is not in the workflow's topic".into());
+            .ok_or_else(|| format!("no surface with id {surface_id}"))?;
+        if surface.topic_id != topic_id {
+            return Err("surface delivery target is not in the workflow's topic".into());
         }
-        Ok(Self { state, page_id })
+        Ok(Self { state, surface_id })
     }
 }
 
 #[async_trait]
-impl DeliveryCapability for PageDeliveryCapability {
+impl DeliveryCapability for SurfaceDeliveryCapability {
     fn kind(&self) -> &'static str {
-        "page"
+        "surface"
     }
 
     fn effect_kind(&self) -> EffectKind {
@@ -115,10 +115,10 @@ impl DeliveryCapability for PageDeliveryCapability {
         cancellation: CancellationToken,
     ) -> Result<EffectReceipt, String> {
         tokio::select! {
-            result = crate::page::write_page_module(
+            result = crate::surface::write_surface_module(
                 &self.state,
-                self.page_id,
-                WritePageModuleRequest {
+                self.surface_id,
+                WriteSurfaceModuleRequest {
                     module_id: None,
                     kind: Some("document".into()),
                     source: payload.content,
@@ -243,8 +243,8 @@ mod tests {
     use std::sync::Mutex;
 
     use axum::{Router, http::HeaderMap, routing::post};
-    use swage_protocol::client::{page::CreatePageRequest, websocket::ServerEvent};
-    use swage_storage::{NewTopic, PageStore, SqliteStorage, Storage, TopicStore};
+    use swage_protocol::client::{surface::CreateSurfaceRequest, websocket::ServerEvent};
+    use swage_storage::{NewTopic, SqliteStorage, Storage, SurfaceStore, TopicStore};
 
     use super::*;
     use crate::secret::CreateSecretRequest;
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn page_delivery_writes_a_page_module_and_announces_its_location() {
+    async fn surface_delivery_writes_a_surface_module_and_announces_its_location() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let topic = TopicStore::create(
             storage.as_ref(),
@@ -342,10 +342,10 @@ mod tests {
         .await
         .unwrap();
         let state = state(Arc::clone(&storage));
-        let page = crate::page::create_page(
+        let surface = crate::surface::create_page(
             &state,
             topic.id,
-            CreatePageRequest {
+            CreateSurfaceRequest {
                 title: "Daily delivery".into(),
                 template_id: None,
             },
@@ -354,21 +354,21 @@ mod tests {
         .unwrap();
         let mut events = state.broadcast.subscribe();
         let grant = serde_json::json!([{
-            "kind": "page",
-            "name": "daily-page",
-            "page_id": page.id,
+            "kind": "surface",
+            "name": "daily-surface",
+            "surface_id": surface.id,
         }]);
         let capability = capability_from_grant(
             Some(state.clone()),
             topic.id,
             Arc::clone(&storage) as Arc<dyn Storage>,
             Some(&grant),
-            Some("daily-page"),
+            Some("daily-surface"),
         )
         .await
         .unwrap();
 
-        assert_eq!(capability.kind(), "page");
+        assert_eq!(capability.kind(), "surface");
         assert_eq!(capability.effect_kind(), EffectKind::CheckBeforeRedo);
         let receipt = capability
             .deliver(
@@ -376,34 +376,34 @@ mod tests {
                 EffectPayload {
                     content: "# Delivered\n\nThe scheduled result".into(),
                     metadata: None,
-                    target: Some("daily-page".into()),
+                    target: Some("daily-surface".into()),
                 },
                 7,
                 CancellationToken::new(),
             )
             .await
             .unwrap();
-        assert_eq!(receipt.target, "page");
+        assert_eq!(receipt.target, "surface");
         assert_eq!(receipt.effect_seq, 7);
 
-        let modules = storage.list_page_modules(page.id).await.unwrap();
+        let modules = storage.list_surface_modules(surface.id).await.unwrap();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].source, "# Delivered\n\nThe scheduled result");
         let event = events
             .recv()
             .await
-            .expect("page delivery broadcasts a refetch signal");
+            .expect("surface delivery broadcasts a refetch signal");
         assert!(matches!(
             event,
-            ServerEvent::PageUpdated {
-                page_id,
+            ServerEvent::SurfaceUpdated {
+                surface_id,
                 module_id: Some(_),
-            } if page_id == page.id
+            } if surface_id == surface.id
         ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn page_delivery_refuses_a_page_outside_the_workflow_topic() {
+    async fn surface_delivery_refuses_a_surface_outside_the_workflow_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let workflow_topic = TopicStore::create(
             storage.as_ref(),
@@ -424,20 +424,20 @@ mod tests {
         .await
         .unwrap();
         let state = state(Arc::clone(&storage));
-        let page = crate::page::create_page(
+        let surface = crate::surface::create_page(
             &state,
             other_topic.id,
-            CreatePageRequest {
-                title: "Other page".into(),
+            CreateSurfaceRequest {
+                title: "Other surface".into(),
                 template_id: None,
             },
         )
         .await
         .unwrap();
         let grant = serde_json::json!([{
-            "kind": "page",
-            "name": "other-page",
-            "page_id": page.id,
+            "kind": "surface",
+            "name": "other-surface",
+            "surface_id": surface.id,
         }]);
 
         let result = capability_from_grant(
@@ -445,11 +445,11 @@ mod tests {
             workflow_topic.id,
             Arc::clone(&storage) as Arc<dyn Storage>,
             Some(&grant),
-            Some("other-page"),
+            Some("other-surface"),
         )
         .await;
         let error = match result {
-            Ok(_) => panic!("a workflow cannot deliver to another topic's page"),
+            Ok(_) => panic!("a workflow cannot deliver to another topic's surface"),
             Err(error) => error,
         };
         assert!(error.contains("workflow's topic"));
@@ -460,9 +460,9 @@ mod tests {
         let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
         let grant = serde_json::json!([
             {
-                "kind": "page",
-                "name": "first-page",
-                "page_id": Uuid::new_v4(),
+                "kind": "surface",
+                "name": "first-surface",
+                "surface_id": Uuid::new_v4(),
             },
             {
                 "kind": "webhook",

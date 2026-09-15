@@ -18,7 +18,7 @@
       :root {
         color-scheme: light;
       }
-      .page {
+      .surface {
         fill: #f8fafc;
       }
       .title {
@@ -143,7 +143,7 @@
     </style>
   </defs>
 
-  <rect class="page" width="1800" height="1250"/>
+  <rect class="surface" width="1800" height="1250"/>
   <text class="title" x="70" y="70">Swage architecture and runtime flow</text>
   <text class="subtitle" x="70" y="104">Axum gateway, Svelte UI, Electron shell, streaming agent runtime, sandboxed tools, Python workers, SQLite, and provider integrations.</text>
 

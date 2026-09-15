@@ -28,11 +28,11 @@ use tokio::sync::oneshot;
 
 use swage_gateway::{schedule, server::build_router, state::AppState};
 use swage_protocol::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
-use swage_protocol::client::page::CreatePageRequest;
 use swage_protocol::client::schedule::{
     CreateScheduleRequest, GateConfig, GateVerdict, ScheduleCreator, ScheduleSpec, ScheduleStatus,
     SessionPolicy, SkipReason, UpdateScheduleRequest,
 };
+use swage_protocol::client::surface::CreateSurfaceRequest;
 use swage_provider::LlmProvider;
 use swage_storage::{
     NewScheduleRun, NewTopic, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
@@ -1434,19 +1434,19 @@ async fn completed_runs_deliver_to_local_and_channel_targets() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completed_runs_deliver_to_a_page_through_the_page_substrate() {
+async fn completed_runs_deliver_to_a_surface_through_the_surface_substrate() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
-        &dir.path().join("page-delivery.db"),
-        MockProvider::new(vec![MockProvider::text_round("scheduled page output")]),
+        &dir.path().join("surface-delivery.db"),
+        MockProvider::new(vec![MockProvider::text_round("scheduled surface output")]),
     );
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let topic = state.topic_store.get_or_create_default().await.unwrap();
-    let page = swage_gateway::page::create_page(
+    let surface = swage_gateway::surface::create_page(
         &state,
         topic.id,
-        CreatePageRequest {
+        CreateSurfaceRequest {
             title: "Schedule output".into(),
             template_id: None,
         },
@@ -1461,7 +1461,9 @@ async fn completed_runs_deliver_to_a_page_through_the_page_substrate() {
             routing: Some(DeliveryRoutingRequest {
                 deliver_to_origin: false,
                 home_target: None,
-                explicit_targets: vec![DeliveryTarget::Page { page_id: page.id }],
+                explicit_targets: vec![DeliveryTarget::Surface {
+                    surface_id: surface.id,
+                }],
                 store_local_output: false,
             }),
             ..create_request(
@@ -1479,24 +1481,28 @@ async fn completed_runs_deliver_to_a_page_through_the_page_substrate() {
 
     tick_to_completion(&state, created.next_run_at.unwrap()).await;
 
-    let modules = state.storage.list_page_modules(page.id).await.unwrap();
+    let modules = state
+        .storage
+        .list_surface_modules(surface.id)
+        .await
+        .unwrap();
     assert_eq!(modules.len(), 1);
-    assert_eq!(modules[0].source, "scheduled page output");
+    assert_eq!(modules[0].source, "scheduled surface output");
     let event = events.recv().await.unwrap();
     assert!(matches!(
         event,
-        swage_protocol::client::websocket::ServerEvent::PageUpdated {
-            page_id,
+        swage_protocol::client::websocket::ServerEvent::SurfaceUpdated {
+            surface_id,
             module_id: Some(_),
-        } if page_id == page.id
+        } if surface_id == surface.id
     ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn page_delivery_rejects_a_page_outside_the_schedules_topic() {
+async fn surface_delivery_rejects_a_surface_outside_the_schedules_topic() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
-        &dir.path().join("cross-topic-page.db"),
+        &dir.path().join("cross-topic-surface.db"),
         MockProvider::new(vec![]),
     );
     let default = state.topic_store.get_or_create_default().await.unwrap();
@@ -1508,10 +1514,10 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_topic() {
         })
         .await
         .unwrap();
-    let page = swage_gateway::page::create_page(
+    let surface = swage_gateway::surface::create_page(
         &state,
         other.id,
-        CreatePageRequest {
+        CreateSurfaceRequest {
             title: "Other topic".into(),
             template_id: None,
         },
@@ -1533,7 +1539,9 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_topic() {
             routing: Some(DeliveryRoutingRequest {
                 deliver_to_origin: false,
                 home_target: None,
-                explicit_targets: vec![DeliveryTarget::Page { page_id: page.id }],
+                explicit_targets: vec![DeliveryTarget::Surface {
+                    surface_id: surface.id,
+                }],
                 store_local_output: false,
             }),
             gate: None,
@@ -1541,7 +1549,7 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_topic() {
         ScheduleCreator::User,
     )
     .await
-    .expect_err("cross-topic page delivery must be refused at schedule creation");
+    .expect_err("cross-topic surface delivery must be refused at schedule creation");
     assert!(error.to_string().contains("schedule's topic"));
 }
 

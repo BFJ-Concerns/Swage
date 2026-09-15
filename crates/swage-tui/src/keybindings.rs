@@ -24,11 +24,11 @@ pub enum AppAction {
     ToggleMultiLine,
     /// Scroll conversation history up by one line.
     ScrollUp,
-    /// Scroll conversation history up by one page.
+    /// Scroll conversation history up by one surface.
     ScrollPageUp,
     /// Scroll conversation history down by one line.
     ScrollDown,
-    /// Scroll conversation history down by one page.
+    /// Scroll conversation history down by one surface.
     ScrollPageDown,
     /// Open the topic selector overlay.
     OpenTopicSelector,

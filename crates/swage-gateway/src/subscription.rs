@@ -134,9 +134,9 @@ impl SubscriptionState {
                 self.is_subscribed(ObservabilityChannel::Tools)
             }
 
-            // Page updates are primary UI signals for the work surfaces,
+            // Surface updates are primary UI signals for the work surfaces,
             // not observability: always delivered.
-            ServerEvent::PageUpdated { .. } => true,
+            ServerEvent::SurfaceUpdated { .. } => true,
 
             // Retry progress is observability noise — only deliver to subscribers.
             ServerEvent::OutputSchemaRetry { .. } => {

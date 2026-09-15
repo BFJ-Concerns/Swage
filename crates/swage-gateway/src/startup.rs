@@ -671,12 +671,11 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         file_write::FileWriteTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
         knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
         knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
-        knowledge::KnowledgeSearchTool, memory::MemoryTool, page::PageReadTool,
-        page::PageWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        session_variable::SessionVariableTool, shell::ShellTool,
-        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
-        url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
+        schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
+        surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
+        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -705,8 +704,8 @@ pub(crate) fn build_tool_dispatcher_with_browser(
             max_output_bytes: max_output,
         }),
         Arc::new(swage_tool::delegate::DelegateTool),
-        Arc::new(PageReadTool),
-        Arc::new(PageWriteTool),
+        Arc::new(SurfaceReadTool),
+        Arc::new(SurfaceWriteTool),
         Arc::new(crate::tool::workflow_list::WorkflowListTool),
         Arc::new(crate::tool::workflow_run::WorkflowRunTool),
         Arc::new(crate::tool::workflow_run_account::WorkflowRunAccountTool),

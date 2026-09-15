@@ -1,5 +1,5 @@
-// Pages store — list/open behaviour and the live-refresh contract: a
-// page_updated signal is a signal only, answered by refetching the page
+// Surfaces store — list/open behaviour and the live-refresh contract: a
+// surface_updated signal is a signal only, answered by refetching the surface
 // through the authoritative read path.
 //
 // Signals are delivered the way the product delivers them — through the
@@ -8,7 +8,7 @@
 // store stopped subscribing, every live test here would fail.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createPagesStore } from "../stores/pages";
+import { createSurfacesStore } from "../stores/surfaces";
 import type { WorkSurfaceChannel } from "../api/work-surface";
 import type { ServerEvent } from "../types";
 
@@ -59,7 +59,7 @@ function annotationBody(body: string, author: string) {
   };
 }
 
-function pageBody(source: string, annotations: unknown[] = []) {
+function surfaceBody(source: string, annotations: unknown[] = []) {
   return {
     id: PAGE_ID,
     topic_id: TOPIC_ID,
@@ -80,7 +80,7 @@ function pageBody(source: string, annotations: unknown[] = []) {
 }
 
 const listBody = {
-  pages: [
+  surfaces: [
     { id: PAGE_ID, title: "Planning", updated_at: "2026-08-28T00:00:00Z" },
   ],
 };
@@ -94,7 +94,7 @@ const templateListBody = {
 };
 
 const otherListBody = {
-  pages: [
+  surfaces: [
     { id: "77777777-7777-4777-8777-777777777777", title: "Other planning", updated_at: "2026-08-28T00:00:00Z" },
   ],
 };
@@ -110,129 +110,129 @@ function requestBody(call: unknown[]): Record<string, unknown> {
   return JSON.parse(init.body as string) as Record<string, unknown>;
 }
 
-describe("pages store", () => {
+describe("surfaces store", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("loads the topic's pages and opens one", async () => {
+  it("loads the topic's surfaces and opens one", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody))
-      .mockResolvedValueOnce(jsonResponse(pageBody("# Hello")));
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Hello")));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore({ channelFactory: fakeChannel });
-    await store.loadPages(TOPIC_ID);
-    expect(store.pages).toHaveLength(1);
-    expect(store.pages[0].title).toBe("Planning");
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(TOPIC_ID);
+    expect(store.surfaces).toHaveLength(1);
+    expect(store.surfaces[0].title).toBe("Planning");
 
-    await store.openPage(PAGE_ID);
-    expect(store.activePage?.modules[0].source).toBe("# Hello");
+    await store.openSurface(PAGE_ID);
+    expect(store.activeSurface?.modules[0].source).toBe("# Hello");
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/topics/${TOPIC_ID}/pages`,
+      `/api/topics/${TOPIC_ID}/surfaces`,
       expect.anything(),
     );
   });
 
-  it("keeps the current topic's pages and templates when a previous template load finishes late", async () => {
+  it("keeps the current topic's surfaces and templates when a previous template load finishes late", async () => {
     let resolvePreviousTemplates: (response: Response) => void;
     let previousTemplateRequests = 0;
     const previousTemplates = new Promise<Response>((resolve) => {
       resolvePreviousTemplates = resolve;
     });
     const fetchMock = vi.fn((url: string) => {
-      if (url === `/api/topics/${TOPIC_ID}/pages`) {
+      if (url === `/api/topics/${TOPIC_ID}/surfaces`) {
         return Promise.resolve(jsonResponse(listBody));
       }
-      if (url === `/api/topics/${TOPIC_ID}/page-templates`) {
+      if (url === `/api/topics/${TOPIC_ID}/surface-templates`) {
         previousTemplateRequests += 1;
         return previousTemplateRequests === 1
           ? Promise.resolve(jsonResponse(templateListBody))
           : previousTemplates;
       }
-      if (url === `/api/topics/${OTHER_TOPIC_ID}/pages`) {
+      if (url === `/api/topics/${OTHER_TOPIC_ID}/surfaces`) {
         return Promise.resolve(jsonResponse(otherListBody));
       }
-      if (url === `/api/topics/${OTHER_TOPIC_ID}/page-templates`) {
+      if (url === `/api/topics/${OTHER_TOPIC_ID}/surface-templates`) {
         return Promise.resolve(jsonResponse(otherTemplateListBody));
       }
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore({ channelFactory: fakeChannel });
-    await store.loadPages(TOPIC_ID);
-    const previousLoad = store.loadPages(TOPIC_ID);
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(TOPIC_ID);
+    const previousLoad = store.loadSurfaces(TOPIC_ID);
     await vi.waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        `/api/topics/${TOPIC_ID}/page-templates`,
+        `/api/topics/${TOPIC_ID}/surface-templates`,
         expect.anything(),
       );
     });
 
-    const currentLoad = store.loadPages(OTHER_TOPIC_ID);
+    const currentLoad = store.loadSurfaces(OTHER_TOPIC_ID);
     // A visible previous-topic picker is cleared before B's response settles.
     expect(store.templates).toEqual([]);
     await currentLoad;
-    expect(store.pages.map((page) => page.title)).toEqual(["Other planning"]);
+    expect(store.surfaces.map((surface) => surface.title)).toEqual(["Other planning"]);
     expect(store.templates.map((template) => template.name)).toEqual([
       "Retrospective",
     ]);
 
     resolvePreviousTemplates!(jsonResponse(templateListBody));
     await previousLoad;
-    expect(store.pages.map((page) => page.title)).toEqual(["Other planning"]);
+    expect(store.surfaces.map((surface) => surface.title)).toEqual(["Other planning"]);
     expect(store.templates.map((template) => template.name)).toEqual([
       "Retrospective",
     ]);
   });
 
-  it("refetches the open page when its page_updated signal arrives", async () => {
+  it("refetches the open surface when its surface_updated signal arrives", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody))
-      .mockResolvedValueOnce(jsonResponse(pageBody("before")))
-      // The event answers with a refetch of the page and the list.
-      .mockResolvedValueOnce(jsonResponse(pageBody("after")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("before")))
+      // The event answers with a refetch of the surface and the list.
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("after")))
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
     const channel = fakeChannel();
-    const store = createPagesStore({ channelFactory: () => channel });
-    await store.loadPages(TOPIC_ID);
-    await store.openPage(PAGE_ID);
-    expect(store.activePage?.modules[0].source).toBe("before");
+    const store = createSurfacesStore({ channelFactory: () => channel });
+    await store.loadSurfaces(TOPIC_ID);
+    await store.openSurface(PAGE_ID);
+    expect(store.activeSurface?.modules[0].source).toBe("before");
 
     channel.emit({
-      type: "page_updated",
-      page_id: PAGE_ID,
+      type: "surface_updated",
+      surface_id: PAGE_ID,
       module_id: MODULE_ID,
     });
     await vi.waitFor(() => {
-      expect(store.activePage?.modules[0].source).toBe("after");
+      expect(store.activeSurface?.modules[0].source).toBe("after");
     });
   });
 
-  it("refetches the open page after reconnecting, even when no page signal arrived", async () => {
+  it("refetches the open surface after reconnecting, even when no surface signal arrived", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody))
-      .mockResolvedValueOnce(jsonResponse(pageBody("before disconnect")))
-      .mockResolvedValueOnce(jsonResponse(pageBody("written while disconnected")));
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("before disconnect")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("written while disconnected")));
     vi.stubGlobal("fetch", fetchMock);
 
     const channel = fakeChannel();
-    const store = createPagesStore({ channelFactory: () => channel });
-    await store.loadPages(TOPIC_ID);
-    await store.openPage(PAGE_ID);
+    const store = createSurfacesStore({ channelFactory: () => channel });
+    await store.loadSurfaces(TOPIC_ID);
+    await store.openSurface(PAGE_ID);
 
     channel.reconnect();
     await vi.waitFor(() => {
-      expect(store.activePage?.modules[0].source).toBe("written while disconnected");
+      expect(store.activeSurface?.modules[0].source).toBe("written while disconnected");
     });
   });
 
@@ -241,12 +241,12 @@ describe("pages store", () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody))
-      .mockResolvedValueOnce(jsonResponse(pageBody("# Draft")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
       // The signal answers with a refetch: the note the agent left arrives
       // on the module it names, through the authoritative read path.
       .mockResolvedValueOnce(
         jsonResponse(
-          pageBody("# Draft", [
+          surfaceBody("# Draft", [
             annotationBody("this claim needs a source", "assistant"),
           ]),
         ),
@@ -255,14 +255,14 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const channel = fakeChannel();
-    const store = createPagesStore({ channelFactory: () => channel });
-    await store.loadPages(TOPIC_ID);
-    await store.openPage(PAGE_ID);
-    expect(store.activePage?.modules[0].annotations).toEqual([]);
+    const store = createSurfacesStore({ channelFactory: () => channel });
+    await store.loadSurfaces(TOPIC_ID);
+    await store.openSurface(PAGE_ID);
+    expect(store.activeSurface?.modules[0].annotations).toEqual([]);
 
     channel.emit({
-      type: "page_updated",
-      page_id: PAGE_ID,
+      type: "surface_updated",
+      surface_id: PAGE_ID,
       module_id: MODULE_ID,
       // A payload the store must never render: content comes from the
       // refetch, so nothing shaped like this may reach the surface.
@@ -270,13 +270,13 @@ describe("pages store", () => {
     });
 
     await vi.waitFor(() => {
-      expect(store.activePage?.modules[0].annotations).toHaveLength(1);
+      expect(store.activeSurface?.modules[0].annotations).toHaveLength(1);
     });
-    const note = store.activePage!.modules[0].annotations[0];
+    const note = store.activeSurface!.modules[0].annotations[0];
     expect(note.body).toBe("this claim needs a source");
     expect(note.author).toBe("assistant");
     expect(note.module_id).toBe(MODULE_ID);
-    expect(JSON.stringify(store.activePage)).not.toContain("smuggled");
+    expect(JSON.stringify(store.activeSurface)).not.toContain("smuggled");
   });
 
   it("posts a user note against the module it hangs on, then refetches", async () => {
@@ -284,53 +284,53 @@ describe("pages store", () => {
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody))
-      .mockResolvedValueOnce(jsonResponse(pageBody("# Draft")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
       .mockResolvedValueOnce(
         jsonResponse(annotationBody("mine, on this module", "user")),
       )
       .mockResolvedValueOnce(
         jsonResponse(
-          pageBody("# Draft", [annotationBody("mine, on this module", "user")]),
+          surfaceBody("# Draft", [annotationBody("mine, on this module", "user")]),
         ),
       );
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore({ channelFactory: fakeChannel });
-    await store.loadPages(TOPIC_ID);
-    await store.openPage(PAGE_ID);
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(TOPIC_ID);
+    await store.openSurface(PAGE_ID);
 
     await store.annotate(PAGE_ID, MODULE_ID, "mine, on this module");
 
     const [url, init] = fetchMock.mock.calls[3];
-    expect(url).toBe(`/api/pages/${PAGE_ID}/annotations`);
+    expect(url).toBe(`/api/surfaces/${PAGE_ID}/annotations`);
     expect(JSON.parse(init.body as string)).toEqual({
       module_id: MODULE_ID,
       body: "mine, on this module",
       tags: [],
     });
-    expect(store.activePage?.modules[0].annotations[0].body).toBe(
+    expect(store.activeSurface?.modules[0].annotations[0].body).toBe(
       "mine, on this module",
     );
   });
 
-  it("ignores page_updated for a page that is not open", async () => {
+  it("ignores surface_updated for a surface that is not open", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
     const channel = fakeChannel();
-    const store = createPagesStore({ channelFactory: () => channel });
+    const store = createSurfacesStore({ channelFactory: () => channel });
     channel.emit({
-      type: "page_updated",
-      page_id: PAGE_ID,
+      type: "surface_updated",
+      surface_id: PAGE_ID,
       module_id: MODULE_ID,
     });
     // No topic loaded, nothing open: the signal is inert.
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(store.activePage).toBeNull();
+    expect(store.activeSurface).toBeNull();
   });
-  it("offers the topic's templates and forks a page from the chosen one", async () => {
+  it("offers the topic's templates and forks a surface from the chosen one", async () => {
     const forked = {
-      ...pageBody("## Yesterday"),
+      ...surfaceBody("## Yesterday"),
       forked_from_template_id: TEMPLATE_ID,
       forked_at: "2026-08-28T00:00:00Z",
     };
@@ -343,34 +343,34 @@ describe("pages store", () => {
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
-    await store.loadPages(TOPIC_ID);
+    const store = createSurfacesStore();
+    await store.loadSurfaces(TOPIC_ID);
     expect(store.templates.map((template) => template.name)).toEqual([
       "Standup",
     ]);
 
-    await store.createPage(TOPIC_ID, "Monday standup", TEMPLATE_ID);
+    await store.createSurface(TOPIC_ID, "Monday standup", TEMPLATE_ID);
     const createCall = fetchMock.mock.calls[2];
-    expect(createCall[0]).toBe(`/api/topics/${TOPIC_ID}/pages`);
+    expect(createCall[0]).toBe(`/api/topics/${TOPIC_ID}/surfaces`);
     expect(requestBody(createCall)).toEqual({
       title: "Monday standup",
       template_id: TEMPLATE_ID,
     });
-    // The seeded modules and the recorded origin come back on the page the
+    // The seeded modules and the recorded origin come back on the surface the
     // create returned — the surface reads lineage from there.
-    expect(store.activePage?.modules[0].source).toBe("## Yesterday");
-    expect(store.activePage?.forked_from_template_id).toBe(TEMPLATE_ID);
+    expect(store.activeSurface?.modules[0].source).toBe("## Yesterday");
+    expect(store.activeSurface?.forked_from_template_id).toBe(TEMPLATE_ID);
   });
 
-  it("names the template a forked page came from, and yields nothing for one that is gone", async () => {
+  it("names the template a forked surface came from, and yields nothing for one that is gone", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
-    await store.loadPages(TOPIC_ID);
+    const store = createSurfacesStore();
+    await store.loadSurfaces(TOPIC_ID);
 
     expect(store.templateName(TEMPLATE_ID)).toBe("Standup");
     // A template deleted since the fork resolves to nothing, so the surface
@@ -378,18 +378,18 @@ describe("pages store", () => {
     expect(store.templateName("55555555-5555-4555-8555-555555555555")).toBeNull();
   });
 
-  it("creates a blank page when no template is chosen", async () => {
+  it("creates a blank surface when no template is chosen", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
       .mockResolvedValueOnce(jsonResponse(templateListBody))
-      .mockResolvedValueOnce(jsonResponse(pageBody("")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("")))
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createPagesStore();
-    await store.loadPages(TOPIC_ID);
-    await store.createPage(TOPIC_ID, "Scratch");
+    const store = createSurfacesStore();
+    await store.loadSurfaces(TOPIC_ID);
+    await store.createSurface(TOPIC_ID, "Scratch");
     expect(requestBody(fetchMock.mock.calls[2]).template_id).toBeUndefined();
   });
 });

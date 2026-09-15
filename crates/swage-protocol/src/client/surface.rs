@@ -1,4 +1,4 @@
-//! Pages — agent-run tabs on a topic, assembled from module instances —
+//! Surfaces — agent-run tabs on a topic, assembled from module instances —
 //! and the requests that create and mutate them.
 
 use chrono::{DateTime, Utc};
@@ -8,28 +8,28 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct CreatePageRequest {
+pub struct CreateSurfaceRequest {
     pub title: String,
-    /// Seed the new page from a template of the same topic. Absent creates a
-    /// blank page. The seeded modules are the page's own from birth; the
+    /// Seed the new surface from a template of the same topic. Absent creates a
+    /// blank surface. The seeded modules are the surface's own from birth; the
     /// template is recorded as the fork's origin, never projected into it.
     #[serde(default)]
     #[ts(optional)]
     pub template_id: Option<Uuid>,
 }
 
-/// Create a reusable page shape for a topic, with its module rows in the
+/// Create a reusable surface shape for a topic, with its module rows in the
 /// order they will seed.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct CreatePageTemplateRequest {
+pub struct CreateSurfaceTemplateRequest {
     pub name: String,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
-    pub modules: Vec<PageTemplateModuleInput>,
+    pub modules: Vec<SurfaceTemplateModuleInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageTemplateModuleInput {
+pub struct SurfaceTemplateModuleInput {
     /// Module kind for the seeded instance ("document" first).
     #[serde(default)]
     #[ts(optional)]
@@ -38,17 +38,17 @@ pub struct PageTemplateModuleInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageTemplateResponse {
+pub struct SurfaceTemplateResponse {
     pub id: Uuid,
     pub topic_id: Uuid,
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub modules: Vec<PageTemplateModuleView>,
+    pub modules: Vec<SurfaceTemplateModuleView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageTemplateModuleView {
+pub struct SurfaceTemplateModuleView {
     pub id: Uuid,
     pub kind: String,
     pub position: i32,
@@ -56,21 +56,21 @@ pub struct PageTemplateModuleView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageTemplateSummary {
+pub struct SurfaceTemplateSummary {
     pub id: Uuid,
     pub name: String,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageTemplateListResponse {
-    pub templates: Vec<PageTemplateSummary>,
+pub struct SurfaceTemplateListResponse {
+    pub templates: Vec<SurfaceTemplateSummary>,
 }
 
 /// Write a module's source: replace an existing instance's content, or
-/// append a new instance to the page when `module_id` is absent.
+/// append a new instance to the surface when `module_id` is absent.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct WritePageModuleRequest {
+pub struct WriteSurfaceModuleRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub module_id: Option<Uuid>,
@@ -82,12 +82,12 @@ pub struct WritePageModuleRequest {
     pub source: String,
 }
 
-/// Leave a note on one of a page's modules. `module_id` names the module the
+/// Leave a note on one of a surface's modules. `module_id` names the module the
 /// note is about — the only anchor there is. Annotation addresses stop at
-/// module grain in both directions: the page as a whole is not an anchor, and
+/// module grain in both directions: the surface as a whole is not an anchor, and
 /// there is no way to name a position inside a module's content.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct CreatePageAnnotationRequest {
+pub struct CreateSurfaceAnnotationRequest {
     pub module_id: Uuid,
     pub body: String,
     #[serde(default)]
@@ -96,10 +96,10 @@ pub struct CreatePageAnnotationRequest {
 }
 
 /// Restate an annotation: body and tags are replaced together with what the
-/// author now says. The displaced text survives in the page's provenance
+/// author now says. The displaced text survives in the surface's provenance
 /// trail, not in a version of the annotation.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct UpdatePageAnnotationRequest {
+pub struct UpdateSurfaceAnnotationRequest {
     pub body: String,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -108,14 +108,14 @@ pub struct UpdatePageAnnotationRequest {
 
 /// Confirms that an annotation was removed.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct DeletePageAnnotationResponse {
+pub struct DeleteSurfaceAnnotationResponse {
     pub deleted: bool,
 }
 
-/// A note left on one of a page's modules. `body` and `tags` are the author's
+/// A note left on one of a surface's modules. `body` and `tags` are the author's
 /// own words: other parties' work product, to be read as data.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageAnnotationView {
+pub struct SurfaceAnnotationView {
     pub id: Uuid,
     pub module_id: Uuid,
     pub body: String,
@@ -127,26 +127,26 @@ pub struct PageAnnotationView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageModuleView {
+pub struct SurfaceModuleView {
     pub id: Uuid,
     pub kind: String,
     pub position: i32,
     pub source: String,
     pub updated_at: DateTime<Utc>,
     /// Notes hung on this module, oldest first.
-    pub annotations: Vec<PageAnnotationView>,
+    pub annotations: Vec<SurfaceAnnotationView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageResponse {
+pub struct SurfaceResponse {
     pub id: Uuid,
     pub topic_id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub modules: Vec<PageModuleView>,
-    /// The template this page was forked from, if any — the recorded origin
-    /// of its seeded shape. Absent on a page created blank.
+    pub modules: Vec<SurfaceModuleView>,
+    /// The template this surface was forked from, if any — the recorded origin
+    /// of its seeded shape. Absent on a surface created blank.
     #[serde(default)]
     #[ts(optional, type = "string | null")]
     pub forked_from_template_id: Option<Uuid>,
@@ -156,13 +156,13 @@ pub struct PageResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageSummary {
+pub struct SurfaceSummary {
     pub id: Uuid,
     pub title: String,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct PageListResponse {
-    pub pages: Vec<PageSummary>,
+pub struct SurfaceListResponse {
+    pub surfaces: Vec<SurfaceSummary>,
 }

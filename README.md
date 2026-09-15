@@ -230,7 +230,7 @@ gateway; point it at a non-default port with
 
 ## Going deeper
 
-The [`docs/`](docs/) pages cover the parts of the system a newcomer meets
+The [`docs/`](docs/) surfaces cover the parts of the system a newcomer meets
 first:
 
 - [First session](docs/first-session.md) — opening a topic, attaching a
@@ -244,7 +244,7 @@ first:
   definitions, operator guidance (`AGENTS.md`), effort resolution, what a
   tool call is allowed to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
-  turn context inspector, image attachments, pages, delivery targets, the
+  turn context inspector, image attachments, surfaces, delivery targets, the
   API error contract, the wire contract and its projections, the
   verification gate, and the gateway's built-in tool inventory.
 

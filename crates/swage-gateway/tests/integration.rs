@@ -33,10 +33,6 @@ mod operator_audit_usage_integration;
 mod operator_control_integration;
 #[path = "integration/output_schema_validation_integration.rs"]
 mod output_schema_validation_integration;
-#[path = "integration/page_live_signal_integration.rs"]
-mod page_live_signal_integration;
-#[path = "integration/page_template_integration.rs"]
-mod page_template_integration;
 #[path = "integration/presence_liveness_integration.rs"]
 mod presence_liveness_integration;
 #[path = "integration/provider_tool_schema_gateway_integration.rs"]
@@ -51,6 +47,10 @@ mod sandbox_entrypoint_integration;
 mod sandbox_observability_integration;
 #[path = "integration/schedule_integration.rs"]
 mod schedule_integration;
+#[path = "integration/surface_live_signal_integration.rs"]
+mod surface_live_signal_integration;
+#[path = "integration/surface_template_integration.rs"]
+mod surface_template_integration;
 #[path = "integration/workflow_metadata_gateway_integration.rs"]
 mod workflow_metadata_gateway_integration;
 #[path = "integration/workflow_resume_gateway_integration.rs"]

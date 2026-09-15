@@ -1,25 +1,25 @@
 <!--
-  Pages — the topic's agent-run work surfaces. A page is a stack of module
+  Surfaces — the topic's agent-run work surfaces. A surface is a stack of module
   instances; the document module renders markdown source. Each module carries
   the notes hung on it — the shared reference the user and the agent both
   point at instead of describing a location to each other. Agents mutate
-  pages through their tools and the surface refreshes live off the
-  page_updated signal (the store refetches; nothing renders from events).
+  surfaces through their tools and the surface refreshes live off the
+  surface_updated signal (the store refetches; nothing renders from events).
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
   import { marked } from "marked";
-  import type { PagesStore } from "../stores/pages";
+  import type { SurfacesStore } from "../stores/surfaces";
 
   interface Props {
-    store: PagesStore;
+    store: SurfacesStore;
     topicId: string;
   }
 
   let { store, topicId }: Props = $props();
 
   let newTitle = $state("");
-  // The template a new page is forked from, "" for a blank page. The picker
+  // The template a new surface is forked from, "" for a blank surface. The picker
   // reads the topic's templates; it never mutates them.
   let newTemplateId = $state("");
   // The module currently being edited by the user, if any.
@@ -33,7 +33,7 @@
     // A template belongs to one topic: switching topics must not carry a
     // selection the new topic's picker never offered into the next create.
     newTemplateId = "";
-    void store.loadPages(topicId);
+    void store.loadSurfaces(topicId);
   });
 
   function renderDocument(source: string): string {
@@ -43,13 +43,13 @@
     return DOMPurify.sanitize(raw);
   }
 
-  async function createPage(): Promise<void> {
+  async function createSurface(): Promise<void> {
     const title = newTitle.trim();
     if (!title) return;
     const templateId = newTemplateId;
     newTitle = "";
     newTemplateId = "";
-    await store.createPage(topicId, title, templateId || undefined);
+    await store.createSurface(topicId, title, templateId || undefined);
   }
 
   function startEditing(moduleId: string, source: string): void {
@@ -58,16 +58,16 @@
   }
 
   async function saveEdit(): Promise<void> {
-    const page = store.activePage;
-    if (!page || editingModuleId === null) return;
-    await store.writeModule(page.id, editingModuleId, editingSource);
+    const surface = store.activeSurface;
+    if (!surface || editingModuleId === null) return;
+    await store.writeModule(surface.id, editingModuleId, editingSource);
     editingModuleId = null;
   }
 
   async function appendModule(): Promise<void> {
-    const page = store.activePage;
-    if (!page) return;
-    await store.writeModule(page.id, null, "");
+    const surface = store.activeSurface;
+    if (!surface) return;
+    await store.writeModule(surface.id, null, "");
   }
 
   function startAnnotating(moduleId: string): void {
@@ -76,28 +76,28 @@
   }
 
   async function saveAnnotation(): Promise<void> {
-    const page = store.activePage;
+    const surface = store.activeSurface;
     const body = annotationBody.trim();
-    if (!page || annotatingModuleId === null || !body) return;
+    if (!surface || annotatingModuleId === null || !body) return;
     const moduleId = annotatingModuleId;
     annotatingModuleId = null;
     annotationBody = "";
-    await store.annotate(page.id, moduleId, body);
+    await store.annotate(surface.id, moduleId, body);
   }
 </script>
 
-<div class="pages">
-  <aside aria-label="Pages">
+<div class="surfaces">
+  <aside aria-label="Surfaces">
     <form
       onsubmit={(event) => {
         event.preventDefault();
-        void createPage();
+        void createSurface();
       }}
     >
-      <input placeholder="New page title" bind:value={newTitle} />
+      <input placeholder="New surface title" bind:value={newTitle} />
       {#if store.templates.length > 0}
         <select aria-label="Template" bind:value={newTemplateId}>
-          <option value="">Blank page</option>
+          <option value="">Blank surface</option>
           {#each store.templates as template (template.id)}
             <option value={template.id}>{template.name}</option>
           {/each}
@@ -106,32 +106,32 @@
       <button type="submit">Create</button>
     </form>
     <ul>
-      {#each store.pages as page (page.id)}
+      {#each store.surfaces as surface (surface.id)}
         <li>
           <button
-            class:active={store.activePage?.id === page.id}
-            onclick={() => void store.openPage(page.id)}
+            class:active={store.activeSurface?.id === surface.id}
+            onclick={() => void store.openSurface(surface.id)}
           >
-            {page.title}
+            {surface.title}
           </button>
         </li>
       {/each}
     </ul>
   </aside>
 
-  <section aria-label="Page">
-    {#if store.activePage}
-      <h2>{store.activePage.title}</h2>
-      {#if store.activePage.forked_from_template_id}
-        {@const originId = store.activePage.forked_from_template_id}
+  <section aria-label="Surface">
+    {#if store.activeSurface}
+      <h2>{store.activeSurface.title}</h2>
+      {#if store.activeSurface.forked_from_template_id}
+        {@const originId = store.activeSurface.forked_from_template_id}
         <p class="lineage">
           Forked from <strong
             >{store.templateName(originId) ?? originId}</strong
-          > — this page's modules are its own; the template is unaffected by
+          > — this surface's modules are its own; the template is unaffected by
           edits here.
         </p>
       {/if}
-      {#each store.activePage.modules as module (module.id)}
+      {#each store.activeSurface.modules as module (module.id)}
         <article class="module" data-kind={module.kind}>
           {#if editingModuleId === module.id}
             <textarea bind:value={editingSource} rows="8"></textarea>
@@ -170,7 +170,7 @@
                     class="annotation-remove"
                     onclick={() =>
                       void store.removeAnnotation(
-                        store.activePage!.id,
+                        store.activeSurface!.id,
                         annotation.id,
                       )}
                   >
@@ -205,13 +205,13 @@
         Add module
       </button>
     {:else}
-      <p class="empty">Open a page, or create one — agents can write here too.</p>
+      <p class="empty">Open a surface, or create one — agents can write here too.</p>
     {/if}
   </section>
 </div>
 
 <style>
-  .pages {
+  .surfaces {
     display: grid;
     grid-template-columns: 220px 1fr;
     gap: 16px;

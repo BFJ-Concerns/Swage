@@ -6,18 +6,12 @@ import type { ConversationDetail } from "./ConversationDetail";
 import type { ConversationListResponse } from "./ConversationListResponse";
 import type { ConversationResponse } from "./ConversationResponse";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
-import type { CreatePageAnnotationRequest } from "./CreatePageAnnotationRequest";
-import type { CreatePageRequest } from "./CreatePageRequest";
-import type { CreatePageTemplateRequest } from "./CreatePageTemplateRequest";
+import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
+import type { CreateSurfaceRequest } from "./CreateSurfaceRequest";
+import type { CreateSurfaceTemplateRequest } from "./CreateSurfaceTemplateRequest";
 import type { CreateTopicRequest } from "./CreateTopicRequest";
-import type { DeletePageAnnotationResponse } from "./DeletePageAnnotationResponse";
+import type { DeleteSurfaceAnnotationResponse } from "./DeleteSurfaceAnnotationResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
-import type { PageAnnotationView } from "./PageAnnotationView";
-import type { PageListResponse } from "./PageListResponse";
-import type { PageModuleView } from "./PageModuleView";
-import type { PageResponse } from "./PageResponse";
-import type { PageTemplateListResponse } from "./PageTemplateListResponse";
-import type { PageTemplateResponse } from "./PageTemplateResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
@@ -25,12 +19,18 @@ import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
+import type { SurfaceAnnotationView } from "./SurfaceAnnotationView";
+import type { SurfaceListResponse } from "./SurfaceListResponse";
+import type { SurfaceModuleView } from "./SurfaceModuleView";
+import type { SurfaceResponse } from "./SurfaceResponse";
+import type { SurfaceTemplateListResponse } from "./SurfaceTemplateListResponse";
+import type { SurfaceTemplateResponse } from "./SurfaceTemplateResponse";
 import type { TopicListResponse } from "./TopicListResponse";
 import type { TopicResponse } from "./TopicResponse";
 import type { TurnContextResponse } from "./TurnContextResponse";
-import type { UpdatePageAnnotationRequest } from "./UpdatePageAnnotationRequest";
+import type { UpdateSurfaceAnnotationRequest } from "./UpdateSurfaceAnnotationRequest";
 import type { UpdateTopicRequest } from "./UpdateTopicRequest";
-import type { WritePageModuleRequest } from "./WritePageModuleRequest";
+import type { WriteSurfaceModuleRequest } from "./WriteSurfaceModuleRequest";
 import { ApiError } from "../api/error";
 
 let baseUrl = "";
@@ -110,54 +110,54 @@ export async function getTurnContext(id: string): Promise<TurnContextResponse> {
   return request<TurnContextResponse>("GET", `/api/turns/${encodeURIComponent(id)}/context`);
 }
 
-/** List pages in a topic. */
-export async function listPages(topicId: string): Promise<PageListResponse> {
-  return request<PageListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/pages`);
+/** List surfaces in a topic. */
+export async function listSurfaces(topicId: string): Promise<SurfaceListResponse> {
+  return request<SurfaceListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/surfaces`);
 }
 
-/** Create a page in a topic. */
-export async function createPage(topicId: string, body: CreatePageRequest): Promise<PageResponse> {
-  return request<PageResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/pages`, body);
+/** Create a surface in a topic. */
+export async function createSurface(topicId: string, body: CreateSurfaceRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/surfaces`, body);
 }
 
-/** List page templates in a topic. */
-export async function listPageTemplates(topicId: string): Promise<PageTemplateListResponse> {
-  return request<PageTemplateListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/page-templates`);
+/** List surface templates in a topic. */
+export async function listSurfaceTemplates(topicId: string): Promise<SurfaceTemplateListResponse> {
+  return request<SurfaceTemplateListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/surface-templates`);
 }
 
-/** Create a page template in a topic. */
-export async function createPageTemplate(topicId: string, body: CreatePageTemplateRequest): Promise<PageTemplateResponse> {
-  return request<PageTemplateResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/page-templates`, body);
+/** Create a surface template in a topic. */
+export async function createSurfaceTemplate(topicId: string, body: CreateSurfaceTemplateRequest): Promise<SurfaceTemplateResponse> {
+  return request<SurfaceTemplateResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/surface-templates`, body);
 }
 
-/** Read a page template. */
-export async function getPageTemplate(templateId: string): Promise<PageTemplateResponse> {
-  return request<PageTemplateResponse>("GET", `/api/page-templates/${encodeURIComponent(templateId)}`);
+/** Read a surface template. */
+export async function getSurfaceTemplate(templateId: string): Promise<SurfaceTemplateResponse> {
+  return request<SurfaceTemplateResponse>("GET", `/api/surface-templates/${encodeURIComponent(templateId)}`);
 }
 
-/** Read a page. */
-export async function getPage(pageId: string): Promise<PageResponse> {
-  return request<PageResponse>("GET", `/api/pages/${encodeURIComponent(pageId)}`);
+/** Read a surface. */
+export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("GET", `/api/surfaces/${encodeURIComponent(surfaceId)}`);
 }
 
-/** Write a page module. */
-export async function writePageModule(pageId: string, body: WritePageModuleRequest): Promise<PageModuleView> {
-  return request<PageModuleView>("POST", `/api/pages/${encodeURIComponent(pageId)}/modules`, body);
+/** Write a surface module. */
+export async function writeSurfaceModule(surfaceId: string, body: WriteSurfaceModuleRequest): Promise<SurfaceModuleView> {
+  return request<SurfaceModuleView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules`, body);
 }
 
-/** Create a page annotation. */
-export async function createPageAnnotation(pageId: string, body: CreatePageAnnotationRequest): Promise<PageAnnotationView> {
-  return request<PageAnnotationView>("POST", `/api/pages/${encodeURIComponent(pageId)}/annotations`, body);
+/** Create a surface annotation. */
+export async function createSurfaceAnnotation(surfaceId: string, body: CreateSurfaceAnnotationRequest): Promise<SurfaceAnnotationView> {
+  return request<SurfaceAnnotationView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/annotations`, body);
 }
 
-/** Update a page annotation. */
-export async function updatePageAnnotation(annotationId: string, body: UpdatePageAnnotationRequest): Promise<PageAnnotationView> {
-  return request<PageAnnotationView>("POST", `/api/page-annotations/${encodeURIComponent(annotationId)}`, body);
+/** Update a surface annotation. */
+export async function updateSurfaceAnnotation(annotationId: string, body: UpdateSurfaceAnnotationRequest): Promise<SurfaceAnnotationView> {
+  return request<SurfaceAnnotationView>("POST", `/api/surface-annotations/${encodeURIComponent(annotationId)}`, body);
 }
 
-/** Delete a page annotation. */
-export async function deletePageAnnotation(annotationId: string): Promise<DeletePageAnnotationResponse> {
-  return request<DeletePageAnnotationResponse>("DELETE", `/api/page-annotations/${encodeURIComponent(annotationId)}`);
+/** Delete a surface annotation. */
+export async function deleteSurfaceAnnotation(annotationId: string): Promise<DeleteSurfaceAnnotationResponse> {
+  return request<DeleteSurfaceAnnotationResponse>("DELETE", `/api/surface-annotations/${encodeURIComponent(annotationId)}`);
 }
 
 /** Read gateway settings. */

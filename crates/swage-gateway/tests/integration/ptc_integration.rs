@@ -616,7 +616,7 @@ x = 1 / 0  # ZeroDivisionError
 ///
 /// Proves: after a turn with python_execute, the HTTP conversation detail
 /// API returns tool_calls with parent_call_id — so the frontend can render
-/// nested sub-tool calls on page reload, not just from live WebSocket events.
+/// nested sub-tool calls on surface reload, not just from live WebSocket events.
 ///
 #[tokio::test(flavor = "multi_thread")]
 async fn ptc_sub_tool_calls_persist_with_parent_id() {

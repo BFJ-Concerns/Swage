@@ -1,8 +1,8 @@
-//! Pages — agent-run tabs on a topic, assembled from module instances.
+//! Surfaces — agent-run tabs on a topic, assembled from module instances.
 //!
-//! The database is authoritative for page content; every mutation lands an
-//! audit event (the page's provenance trail) and broadcasts a live
-//! `PageUpdated` signal so open surfaces refetch rather than poll. Module
+//! The database is authoritative for surface content; every mutation lands an
+//! audit event (the surface's provenance trail) and broadcasts a live
+//! `SurfaceUpdated` signal so open surfaces refetch rather than poll. Module
 //! kinds are compiled-in until module authoring lands; `document` (markdown
 //! source, client-rendered) is the first.
 
@@ -11,35 +11,36 @@ use serde_json::json;
 use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
-use swage_protocol::client::page::{
-    CreatePageAnnotationRequest, CreatePageRequest, CreatePageTemplateRequest,
-    DeletePageAnnotationResponse, PageAnnotationView, PageListResponse, PageModuleView,
-    PageResponse, PageSummary, PageTemplateListResponse, PageTemplateModuleView,
-    PageTemplateResponse, PageTemplateSummary, UpdatePageAnnotationRequest, WritePageModuleRequest,
+use swage_protocol::client::surface::{
+    CreateSurfaceAnnotationRequest, CreateSurfaceRequest, CreateSurfaceTemplateRequest,
+    DeleteSurfaceAnnotationResponse, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
+    SurfaceResponse, SurfaceSummary, SurfaceTemplateListResponse, SurfaceTemplateModuleView,
+    SurfaceTemplateResponse, SurfaceTemplateSummary, UpdateSurfaceAnnotationRequest,
+    WriteSurfaceModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
-    NewAuditEvent, NewPage, NewPageAnnotation, NewPageModule, NewPageTemplate,
-    NewPageTemplateModuleInput, PageAnnotation, PageModule,
+    NewAuditEvent, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewSurfaceTemplate,
+    NewSurfaceTemplateModuleInput, SurfaceAnnotation, SurfaceModule,
 };
 
 use crate::error::{ApiError, Json, Path};
 use crate::state::AppState;
 
 /// The module kinds the client can render. A write naming any other kind is
-/// rejected before anything lands — an unrenderable module would be a page
+/// rejected before anything lands — an unrenderable module would be a surface
 /// the user cannot see.
 const MODULE_KINDS: &[&str] = &["document"];
 
 pub async fn create_page(
     state: &AppState,
     topic_id: Uuid,
-    request: CreatePageRequest,
-) -> Result<PageResponse, GatewayError> {
+    request: CreateSurfaceRequest,
+) -> Result<SurfaceResponse, GatewayError> {
     let title = request.title.trim();
     if title.is_empty() {
         return Err(GatewayError::ValidationError(
-            "a page needs a non-empty title".into(),
+            "a surface needs a non-empty title".into(),
         ));
     }
     state
@@ -48,19 +49,19 @@ pub async fn create_page(
         .await?
         .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
 
-    // A template seeds the page; everything is validated before anything
-    // lands, so a rejected fork leaves no page behind.
+    // A template seeds the surface; everything is validated before anything
+    // lands, so a rejected fork leaves no surface behind.
     let template = match request.template_id {
         Some(template_id) => Some(resolve_template(state, topic_id, template_id).await?),
         None => None,
     };
 
-    let page = match &template {
+    let surface = match &template {
         Some(template) => {
             state
                 .storage
-                .create_page_from_template(
-                    NewPage {
+                .create_surface_from_template(
+                    NewSurface {
                         topic_id,
                         title: title.to_string(),
                     },
@@ -71,7 +72,7 @@ pub async fn create_page(
         None => {
             state
                 .storage
-                .create_page(NewPage {
+                .create_page(NewSurface {
                     topic_id,
                     title: title.to_string(),
                 })
@@ -87,40 +88,40 @@ pub async fn create_page(
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
             session_id: None,
-            entity_kind: "page".into(),
-            entity_id: page.id.to_string(),
-            event_kind: "page_created".into(),
+            entity_kind: "surface".into(),
+            entity_id: surface.id.to_string(),
+            event_kind: "surface_created".into(),
             summary: match &template {
                 Some(template) => {
-                    format!("page created from template '{}': {title}", template.name)
+                    format!("surface created from template '{}': {title}", template.name)
                 }
-                None => format!("page created: {title}"),
+                None => format!("surface created: {title}"),
             },
             metadata: json!({
-                "topic_id": page.topic_id,
+                "topic_id": surface.topic_id,
                 "title": title,
                 "forked_from": template_metadata,
             }),
         })
         .await?;
-    // Creation is a page-level change: open surfaces refetch their list.
-    let _ = state.broadcast.send(ServerEvent::PageUpdated {
-        page_id: page.id,
+    // Creation is a surface-level change: open surfaces refetch their list.
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: surface.id,
         module_id: None,
     });
-    let modules = state.storage.list_page_modules(page.id).await?;
-    Ok(PageResponse {
-        id: page.id,
-        topic_id: page.topic_id,
-        title: page.title,
-        created_at: page.created_at,
-        updated_at: page.updated_at,
+    let modules = state.storage.list_surface_modules(surface.id).await?;
+    Ok(SurfaceResponse {
+        id: surface.id,
+        topic_id: surface.topic_id,
+        title: surface.title,
+        created_at: surface.created_at,
+        updated_at: surface.updated_at,
         modules: modules
             .into_iter()
             .map(|module| module_view(module, Vec::new()))
             .collect(),
-        forked_from_template_id: page.forked_from_template_id,
-        forked_at: page.forked_at,
+        forked_from_template_id: surface.forked_from_template_id,
+        forked_at: surface.forked_at,
     })
 }
 
@@ -130,10 +131,10 @@ async fn resolve_template(
     state: &AppState,
     topic_id: Uuid,
     template_id: Uuid,
-) -> Result<swage_storage::PageTemplate, GatewayError> {
+) -> Result<swage_storage::SurfaceTemplate, GatewayError> {
     state
         .storage
-        .get_page_template(template_id)
+        .get_surface_template(template_id)
         .await?
         .filter(|template| template.topic_id == topic_id)
         .ok_or_else(|| {
@@ -141,14 +142,14 @@ async fn resolve_template(
         })
 }
 
-/// Create a topic's reusable page shape. A template is inert: it seeds
-/// pages at their creation and is never projected into pages already
+/// Create a topic's reusable surface shape. A template is inert: it seeds
+/// surfaces at their creation and is never projected into surfaces already
 /// forked from it.
-pub async fn create_page_template(
+pub async fn create_surface_template(
     state: &AppState,
     topic_id: Uuid,
-    request: CreatePageTemplateRequest,
-) -> Result<PageTemplateResponse, GatewayError> {
+    request: CreateSurfaceTemplateRequest,
+) -> Result<SurfaceTemplateResponse, GatewayError> {
     let name = request.name.trim();
     if name.is_empty() {
         return Err(GatewayError::ValidationError(
@@ -161,7 +162,7 @@ pub async fn create_page_template(
         .await?
         .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
     // Validate every module kind before the first write: a template that
-    // seeds an unrenderable module is a page the user cannot see.
+    // seeds an unrenderable module is a surface the user cannot see.
     for module in &request.modules {
         let kind = module.kind.as_deref().unwrap_or("document");
         if !MODULE_KINDS.contains(&kind) {
@@ -174,8 +175,8 @@ pub async fn create_page_template(
 
     let template = state
         .storage
-        .create_page_template_with_modules(
-            NewPageTemplate {
+        .create_surface_template_with_modules(
+            NewSurfaceTemplate {
                 topic_id,
                 name: name.to_string(),
             },
@@ -183,7 +184,7 @@ pub async fn create_page_template(
                 .modules
                 .iter()
                 .enumerate()
-                .map(|(position, module)| NewPageTemplateModuleInput {
+                .map(|(position, module)| NewSurfaceTemplateModuleInput {
                     kind: module.kind.clone().unwrap_or_else(|| "document".into()),
                     position: position as i32,
                     source: module.source.clone(),
@@ -197,10 +198,10 @@ pub async fn create_page_template(
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
             session_id: None,
-            entity_kind: "page_template".into(),
+            entity_kind: "surface_template".into(),
             entity_id: template.id.to_string(),
-            event_kind: "page_template_created".into(),
-            summary: format!("page template created: {name}"),
+            event_kind: "surface_template_created".into(),
+            summary: format!("surface template created: {name}"),
             metadata: json!({
                 "topic_id": template.topic_id,
                 "name": name,
@@ -220,19 +221,19 @@ pub async fn create_page_template(
 pub async fn template_response(
     state: &AppState,
     template_id: Uuid,
-) -> Result<PageTemplateResponse, GatewayError> {
+) -> Result<SurfaceTemplateResponse, GatewayError> {
     let template = state
         .storage
-        .get_page_template(template_id)
+        .get_surface_template(template_id)
         .await?
         .ok_or_else(|| {
             GatewayError::ValidationError(format!("no template with id {template_id}"))
         })?;
     let modules = state
         .storage
-        .list_page_template_modules(template.id)
+        .list_surface_template_modules(template.id)
         .await?;
-    Ok(PageTemplateResponse {
+    Ok(SurfaceTemplateResponse {
         id: template.id,
         topic_id: template.topic_id,
         name: template.name,
@@ -240,7 +241,7 @@ pub async fn template_response(
         updated_at: template.updated_at,
         modules: modules
             .into_iter()
-            .map(|module| PageTemplateModuleView {
+            .map(|module| SurfaceTemplateModuleView {
                 id: module.id,
                 kind: module.kind,
                 position: module.position,
@@ -254,39 +255,38 @@ pub async fn template_response(
 /// append a new instance when the request names none. `author` names who
 /// made the change in the provenance record (an agent id, or "user" for the
 /// web surface).
-pub async fn write_page_module(
+pub async fn write_surface_module(
     state: &AppState,
-    page_id: Uuid,
-    request: WritePageModuleRequest,
+    surface_id: Uuid,
+    request: WriteSurfaceModuleRequest,
     author: &str,
-) -> Result<PageModuleView, GatewayError> {
-    let page = state
-        .storage
-        .get_page(page_id)
-        .await?
-        .ok_or_else(|| GatewayError::ValidationError(format!("no page with id {page_id}")))?;
+) -> Result<SurfaceModuleView, GatewayError> {
+    let surface =
+        state.storage.get_page(surface_id).await?.ok_or_else(|| {
+            GatewayError::ValidationError(format!("no surface with id {surface_id}"))
+        })?;
 
     let (module, prior_source) = match request.module_id {
         Some(module_id) => {
             let existing = state
                 .storage
-                .get_page_module(module_id)
+                .get_surface_module(module_id)
                 .await?
-                .filter(|module| module.page_id == page.id)
+                .filter(|module| module.surface_id == surface.id)
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "no module {module_id} on page {page_id}"
+                        "no module {module_id} on surface {surface_id}"
                     ))
                 })?;
             state
                 .storage
-                .update_page_module_source(existing.id, &request.source)
+                .update_surface_module_source(existing.id, &request.source)
                 .await?;
             // Read the row back rather than patching a copy: the store
             // stamped updated_at, and the view must carry the stored truth.
             let updated = state
                 .storage
-                .get_page_module(existing.id)
+                .get_surface_module(existing.id)
                 .await?
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!(
@@ -303,11 +303,11 @@ pub async fn write_page_module(
                     MODULE_KINDS.join(", ")
                 )));
             }
-            let position = state.storage.list_page_modules(page.id).await?.len() as i32;
+            let position = state.storage.list_surface_modules(surface.id).await?.len() as i32;
             let created = state
                 .storage
-                .create_page_module(NewPageModule {
-                    page_id: page.id,
+                .create_surface_module(NewSurfaceModule {
+                    surface_id: surface.id,
                     kind: kind.to_string(),
                     position,
                     source: request.source.clone(),
@@ -318,7 +318,7 @@ pub async fn write_page_module(
     };
 
     // Provenance: who changed what, with the displaced content retained —
-    // the page row holds only current truth, so the trail is where a
+    // the surface row holds only current truth, so the trail is where a
     // superseded source survives. Recording failure propagates AFTER the
     // mutation landed — a loud applied-but-unrecorded error, the platform's
     // decided posture (see record_config_change) — never a success report
@@ -328,10 +328,10 @@ pub async fn write_page_module(
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
             session_id: None,
-            entity_kind: "page".into(),
-            entity_id: page.id.to_string(),
-            event_kind: "page_module_written".into(),
-            summary: format!("module written on page: {}", page.title),
+            entity_kind: "surface".into(),
+            entity_id: surface.id.to_string(),
+            event_kind: "surface_module_written".into(),
+            summary: format!("module written on surface: {}", surface.title),
             metadata: json!({
                 "module_id": module.id,
                 "kind": module.kind,
@@ -342,16 +342,16 @@ pub async fn write_page_module(
         })
         .await?;
 
-    // The live signal: open surfaces refetch the page. Content rides the
+    // The live signal: open surfaces refetch the surface. Content rides the
     // fetch, not the event.
-    let _ = state.broadcast.send(ServerEvent::PageUpdated {
-        page_id: page.id,
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: surface.id,
         module_id: Some(module.id),
     });
 
     let annotations = state
         .storage
-        .list_page_annotations(page.id)
+        .list_surface_annotations(surface.id)
         .await?
         .into_iter()
         .filter(|annotation| annotation.module_id == module.id)
@@ -360,38 +360,37 @@ pub async fn write_page_module(
     Ok(module_view(module, annotations))
 }
 
-/// Leave a note on one of a page's modules. `author` names who left it in the
+/// Leave a note on one of a surface's modules. `author` names who left it in the
 /// provenance record (an agent id, or "user" for the web surface).
 ///
 /// A note carries no authority: it is one party's words recorded against a
 /// stable id, and nothing keys any permission off it.
-pub async fn create_page_annotation(
+pub async fn create_surface_annotation(
     state: &AppState,
-    page_id: Uuid,
-    request: CreatePageAnnotationRequest,
+    surface_id: Uuid,
+    request: CreateSurfaceAnnotationRequest,
     author: &str,
-) -> Result<PageAnnotationView, GatewayError> {
-    let page = state
-        .storage
-        .get_page(page_id)
-        .await?
-        .ok_or_else(|| GatewayError::ValidationError(format!("no page with id {page_id}")))?;
+) -> Result<SurfaceAnnotationView, GatewayError> {
+    let surface =
+        state.storage.get_page(surface_id).await?.ok_or_else(|| {
+            GatewayError::ValidationError(format!("no surface with id {surface_id}"))
+        })?;
     let body = request.body.trim();
     if body.is_empty() {
         return Err(GatewayError::ValidationError(
             "an annotation needs a non-empty body".into(),
         ));
     }
-    // The anchor must be real and must be on this page: a note addressed to
-    // another page's module would name a location neither party can see.
+    // The anchor must be real and must be on this surface: a note addressed to
+    // another surface's module would name a location neither party can see.
     let module_id = request.module_id;
     state
         .storage
-        .get_page_module(module_id)
+        .get_surface_module(module_id)
         .await?
-        .filter(|module| module.page_id == page.id)
+        .filter(|module| module.surface_id == surface.id)
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no module {module_id} on page {page_id}"))
+            GatewayError::ValidationError(format!("no module {module_id} on surface {surface_id}"))
         })?;
     let tags: Vec<String> = request
         .tags
@@ -402,8 +401,8 @@ pub async fn create_page_annotation(
 
     let annotation = state
         .storage
-        .create_page_annotation(NewPageAnnotation {
-            page_id: page.id,
+        .create_surface_annotation(NewSurfaceAnnotation {
+            surface_id: surface.id,
             module_id,
             body: body.to_string(),
             tags,
@@ -413,17 +412,17 @@ pub async fn create_page_annotation(
 
     record_annotation_change(
         state,
-        &page.title,
-        page.id,
+        &surface.title,
+        surface.id,
         &annotation,
-        "page_annotation_created",
+        "surface_annotation_created",
         None,
         author,
     )
     .await?;
 
-    let _ = state.broadcast.send(ServerEvent::PageUpdated {
-        page_id: page.id,
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: surface.id,
         module_id: Some(annotation.module_id),
     });
 
@@ -433,15 +432,15 @@ pub async fn create_page_annotation(
 /// Replace an annotation's body and tags. The displaced text survives in the
 /// provenance trail, which is the whole of the history — there is no version
 /// row and no undo.
-pub async fn update_page_annotation(
+pub async fn update_surface_annotation(
     state: &AppState,
     annotation_id: Uuid,
-    request: UpdatePageAnnotationRequest,
+    request: UpdateSurfaceAnnotationRequest,
     author: &str,
-) -> Result<PageAnnotationView, GatewayError> {
+) -> Result<SurfaceAnnotationView, GatewayError> {
     let existing = state
         .storage
-        .get_page_annotation(annotation_id)
+        .get_surface_annotation(annotation_id)
         .await?
         .ok_or_else(|| {
             GatewayError::ValidationError(format!("no annotation with id {annotation_id}"))
@@ -461,13 +460,13 @@ pub async fn update_page_annotation(
 
     state
         .storage
-        .update_page_annotation(existing.id, body, &tags)
+        .update_surface_annotation(existing.id, body, &tags)
         .await?;
     // Read the row back rather than patching a copy: the store stamped
     // updated_at, and the view must carry the stored truth.
     let updated = state
         .storage
-        .get_page_annotation(existing.id)
+        .get_surface_annotation(existing.id)
         .await?
         .ok_or_else(|| {
             GatewayError::ValidationError(format!(
@@ -475,21 +474,21 @@ pub async fn update_page_annotation(
             ))
         })?;
 
-    let page = state.storage.get_page(updated.page_id).await?;
-    let title = page.map(|page| page.title).unwrap_or_default();
+    let surface = state.storage.get_page(updated.surface_id).await?;
+    let title = surface.map(|surface| surface.title).unwrap_or_default();
     record_annotation_change(
         state,
         &title,
-        updated.page_id,
+        updated.surface_id,
         &updated,
-        "page_annotation_updated",
+        "surface_annotation_updated",
         Some(&existing),
         author,
     )
     .await?;
 
-    let _ = state.broadcast.send(ServerEvent::PageUpdated {
-        page_id: updated.page_id,
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: updated.surface_id,
         module_id: Some(updated.module_id),
     });
 
@@ -498,57 +497,57 @@ pub async fn update_page_annotation(
 
 /// Remove an annotation. The trail retains what it said, so the deletion is
 /// recoverable by re-writing the note, never by an undo mechanism.
-pub async fn delete_page_annotation(
+pub async fn delete_surface_annotation(
     state: &AppState,
     annotation_id: Uuid,
     author: &str,
 ) -> Result<(), GatewayError> {
     let existing = state
         .storage
-        .get_page_annotation(annotation_id)
+        .get_surface_annotation(annotation_id)
         .await?
         .ok_or_else(|| {
             GatewayError::Storage(StorageError::NotFound {
-                entity: "page annotation".into(),
+                entity: "surface annotation".into(),
                 id: annotation_id.to_string(),
             })
         })?;
-    delete_page_annotation_after_read(state, annotation_id, existing, author).await
+    delete_surface_annotation_after_read(state, annotation_id, existing, author).await
 }
 
 /// Finish an annotation deletion after its caller has read the note. The
 /// storage operation remains the authority for a race with another deleter:
 /// its zero-row result is the typed not-found response, not a second audit.
-async fn delete_page_annotation_after_read(
+async fn delete_surface_annotation_after_read(
     state: &AppState,
     annotation_id: Uuid,
-    existing: PageAnnotation,
+    existing: SurfaceAnnotation,
     author: &str,
 ) -> Result<(), GatewayError> {
-    let page = state.storage.get_page(existing.page_id).await?;
-    let title = page.map(|page| page.title).unwrap_or_default();
+    let surface = state.storage.get_page(existing.surface_id).await?;
+    let title = surface.map(|surface| surface.title).unwrap_or_default();
     let audit_event = annotation_change_event(
         &title,
-        existing.page_id,
+        existing.surface_id,
         &existing,
-        "page_annotation_deleted",
+        "surface_annotation_deleted",
         Some(&existing),
         None,
         author,
     );
     if !state
         .storage
-        .delete_page_annotation_with_audit(existing.clone(), audit_event)
+        .delete_surface_annotation_with_audit(existing.clone(), audit_event)
         .await?
     {
         return Err(GatewayError::Storage(StorageError::NotFound {
-            entity: "page annotation".into(),
+            entity: "surface annotation".into(),
             id: annotation_id.to_string(),
         }));
     }
 
-    let _ = state.broadcast.send(ServerEvent::PageUpdated {
-        page_id: existing.page_id,
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: existing.surface_id,
         module_id: Some(existing.module_id),
     });
     Ok(())
@@ -557,23 +556,23 @@ async fn delete_page_annotation_after_read(
 /// Provenance for an annotation mutation: who changed what, with the
 /// displaced body and tags retained — the row holds only current truth, so
 /// the trail is where a superseded note survives. Recording failure
-/// propagates AFTER the mutation landed, matching write_page_module: a loud
+/// propagates AFTER the mutation landed, matching write_surface_module: a loud
 /// applied-but-unrecorded error, never a success report on an unrecorded
 /// change.
 async fn record_annotation_change(
     state: &AppState,
-    page_title: &str,
-    page_id: Uuid,
-    annotation: &PageAnnotation,
+    surface_title: &str,
+    surface_id: Uuid,
+    annotation: &SurfaceAnnotation,
     event_kind: &str,
-    prior: Option<&PageAnnotation>,
+    prior: Option<&SurfaceAnnotation>,
     author: &str,
 ) -> Result<(), GatewayError> {
     state
         .storage
         .create_audit_event(annotation_change_event(
-            page_title,
-            page_id,
+            surface_title,
+            surface_id,
             annotation,
             event_kind,
             prior,
@@ -585,21 +584,21 @@ async fn record_annotation_change(
 }
 
 fn annotation_change_event(
-    page_title: &str,
-    page_id: Uuid,
-    annotation: &PageAnnotation,
+    surface_title: &str,
+    surface_id: Uuid,
+    annotation: &SurfaceAnnotation,
     event_kind: &str,
-    prior: Option<&PageAnnotation>,
-    current: Option<&PageAnnotation>,
+    prior: Option<&SurfaceAnnotation>,
+    current: Option<&SurfaceAnnotation>,
     author: &str,
 ) -> NewAuditEvent {
     NewAuditEvent {
         id: Uuid::new_v4().to_string(),
         session_id: None,
-        entity_kind: "page".into(),
-        entity_id: page_id.to_string(),
+        entity_kind: "surface".into(),
+        entity_id: surface_id.to_string(),
         event_kind: event_kind.into(),
-        summary: format!("annotation change on page: {page_title}"),
+        summary: format!("annotation change on surface: {surface_title}"),
         metadata: json!({
             "annotation_id": annotation.id,
             "module_id": annotation.module_id,
@@ -613,22 +612,24 @@ fn annotation_change_event(
     }
 }
 
-pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageResponse, GatewayError> {
-    let page = state
-        .storage
-        .get_page(page_id)
-        .await?
-        .ok_or_else(|| GatewayError::ValidationError(format!("no page with id {page_id}")))?;
-    let modules = state.storage.list_page_modules(page.id).await?;
-    let annotations = state.storage.list_page_annotations(page.id).await?;
+pub async fn surface_response(
+    state: &AppState,
+    surface_id: Uuid,
+) -> Result<SurfaceResponse, GatewayError> {
+    let surface =
+        state.storage.get_page(surface_id).await?.ok_or_else(|| {
+            GatewayError::ValidationError(format!("no surface with id {surface_id}"))
+        })?;
+    let modules = state.storage.list_surface_modules(surface.id).await?;
+    let annotations = state.storage.list_surface_annotations(surface.id).await?;
     // Each note travels with the module it hangs on, so the reader finds it
     // where the location is rather than having to match ids by hand.
-    Ok(PageResponse {
-        id: page.id,
-        topic_id: page.topic_id,
-        title: page.title,
-        created_at: page.created_at,
-        updated_at: page.updated_at,
+    Ok(SurfaceResponse {
+        id: surface.id,
+        topic_id: surface.topic_id,
+        title: surface.title,
+        created_at: surface.created_at,
+        updated_at: surface.updated_at,
         modules: modules
             .into_iter()
             .map(|module| {
@@ -641,13 +642,16 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
                 module_view(module, hung_here)
             })
             .collect(),
-        forked_from_template_id: page.forked_from_template_id,
-        forked_at: page.forked_at,
+        forked_from_template_id: surface.forked_from_template_id,
+        forked_at: surface.forked_at,
     })
 }
 
-fn module_view(module: PageModule, annotations: Vec<PageAnnotationView>) -> PageModuleView {
-    PageModuleView {
+fn module_view(
+    module: SurfaceModule,
+    annotations: Vec<SurfaceAnnotationView>,
+) -> SurfaceModuleView {
+    SurfaceModuleView {
         id: module.id,
         kind: module.kind,
         position: module.position,
@@ -657,8 +661,8 @@ fn module_view(module: PageModule, annotations: Vec<PageAnnotationView>) -> Page
     }
 }
 
-fn annotation_view(annotation: PageAnnotation) -> PageAnnotationView {
-    PageAnnotationView {
+fn annotation_view(annotation: SurfaceAnnotation) -> SurfaceAnnotationView {
+    SurfaceAnnotationView {
         id: annotation.id,
         module_id: annotation.module_id,
         body: annotation.body,
@@ -676,90 +680,90 @@ fn annotation_view(annotation: PageAnnotation) -> PageAnnotationView {
 pub async fn list_pages_handler(
     State(state): State<AppState>,
     Path(topic_id): Path<Uuid>,
-) -> Result<Json<PageListResponse>, ApiError> {
-    let pages = state
+) -> Result<Json<SurfaceListResponse>, ApiError> {
+    let surfaces = state
         .storage
         .list_pages_by_topic(topic_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(PageListResponse {
-        pages: pages
+    Ok(Json(SurfaceListResponse {
+        surfaces: surfaces
             .into_iter()
-            .map(|page| PageSummary {
-                id: page.id,
-                title: page.title,
-                updated_at: page.updated_at,
+            .map(|surface| SurfaceSummary {
+                id: surface.id,
+                title: surface.title,
+                updated_at: surface.updated_at,
             })
             .collect(),
     }))
 }
 
-pub async fn create_page_handler(
+pub async fn create_surface_handler(
     State(state): State<AppState>,
     Path(topic_id): Path<Uuid>,
-    Json(request): Json<CreatePageRequest>,
-) -> Result<Json<PageResponse>, ApiError> {
+    Json(request): Json<CreateSurfaceRequest>,
+) -> Result<Json<SurfaceResponse>, ApiError> {
     Ok(Json(create_page(&state, topic_id, request).await?))
 }
 
-pub async fn get_page_handler(
+pub async fn get_surface_handler(
     State(state): State<AppState>,
-    Path(page_id): Path<Uuid>,
-) -> Result<Json<PageResponse>, ApiError> {
-    Ok(Json(page_response(&state, page_id).await?))
+    Path(surface_id): Path<Uuid>,
+) -> Result<Json<SurfaceResponse>, ApiError> {
+    Ok(Json(surface_response(&state, surface_id).await?))
 }
 
-pub async fn write_page_module_handler(
+pub async fn write_surface_module_handler(
     State(state): State<AppState>,
-    Path(page_id): Path<Uuid>,
-    Json(request): Json<WritePageModuleRequest>,
-) -> Result<Json<PageModuleView>, ApiError> {
+    Path(surface_id): Path<Uuid>,
+    Json(request): Json<WriteSurfaceModuleRequest>,
+) -> Result<Json<SurfaceModuleView>, ApiError> {
     Ok(Json(
-        write_page_module(&state, page_id, request, "user").await?,
+        write_surface_module(&state, surface_id, request, "user").await?,
     ))
 }
 
-pub async fn create_page_annotation_handler(
+pub async fn create_surface_annotation_handler(
     State(state): State<AppState>,
-    Path(page_id): Path<Uuid>,
-    Json(request): Json<CreatePageAnnotationRequest>,
-) -> Result<Json<PageAnnotationView>, ApiError> {
+    Path(surface_id): Path<Uuid>,
+    Json(request): Json<CreateSurfaceAnnotationRequest>,
+) -> Result<Json<SurfaceAnnotationView>, ApiError> {
     Ok(Json(
-        create_page_annotation(&state, page_id, request, "user").await?,
+        create_surface_annotation(&state, surface_id, request, "user").await?,
     ))
 }
 
-pub async fn update_page_annotation_handler(
+pub async fn update_surface_annotation_handler(
     State(state): State<AppState>,
     Path(annotation_id): Path<Uuid>,
-    Json(request): Json<UpdatePageAnnotationRequest>,
-) -> Result<Json<PageAnnotationView>, ApiError> {
+    Json(request): Json<UpdateSurfaceAnnotationRequest>,
+) -> Result<Json<SurfaceAnnotationView>, ApiError> {
     Ok(Json(
-        update_page_annotation(&state, annotation_id, request, "user").await?,
+        update_surface_annotation(&state, annotation_id, request, "user").await?,
     ))
 }
 
-pub async fn delete_page_annotation_handler(
+pub async fn delete_surface_annotation_handler(
     State(state): State<AppState>,
     Path(annotation_id): Path<Uuid>,
-) -> Result<Json<DeletePageAnnotationResponse>, ApiError> {
-    delete_page_annotation(&state, annotation_id, "user").await?;
-    Ok(Json(DeletePageAnnotationResponse { deleted: true }))
+) -> Result<Json<DeleteSurfaceAnnotationResponse>, ApiError> {
+    delete_surface_annotation(&state, annotation_id, "user").await?;
+    Ok(Json(DeleteSurfaceAnnotationResponse { deleted: true }))
 }
 
-pub async fn list_page_templates_handler(
+pub async fn list_surface_templates_handler(
     State(state): State<AppState>,
     Path(topic_id): Path<Uuid>,
-) -> Result<Json<PageTemplateListResponse>, ApiError> {
+) -> Result<Json<SurfaceTemplateListResponse>, ApiError> {
     let templates = state
         .storage
-        .list_page_templates_by_topic(topic_id)
+        .list_surface_templates_by_topic(topic_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(PageTemplateListResponse {
+    Ok(Json(SurfaceTemplateListResponse {
         templates: templates
             .into_iter()
-            .map(|template| PageTemplateSummary {
+            .map(|template| SurfaceTemplateSummary {
                 id: template.id,
                 name: template.name,
                 updated_at: template.updated_at,
@@ -768,18 +772,20 @@ pub async fn list_page_templates_handler(
     }))
 }
 
-pub async fn create_page_template_handler(
+pub async fn create_surface_template_handler(
     State(state): State<AppState>,
     Path(topic_id): Path<Uuid>,
-    Json(request): Json<CreatePageTemplateRequest>,
-) -> Result<Json<PageTemplateResponse>, ApiError> {
-    Ok(Json(create_page_template(&state, topic_id, request).await?))
+    Json(request): Json<CreateSurfaceTemplateRequest>,
+) -> Result<Json<SurfaceTemplateResponse>, ApiError> {
+    Ok(Json(
+        create_surface_template(&state, topic_id, request).await?,
+    ))
 }
 
-pub async fn get_page_template_handler(
+pub async fn get_surface_template_handler(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-) -> Result<Json<PageTemplateResponse>, ApiError> {
+) -> Result<Json<SurfaceTemplateResponse>, ApiError> {
     Ok(Json(template_response(&state, template_id).await?))
 }
 
@@ -788,7 +794,8 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::{
-        AuditStore, NewTopic, PageAnnotationStore, PageStore, SqliteStorage, Storage, TopicStore,
+        AuditStore, NewTopic, SqliteStorage, Storage, SurfaceAnnotationStore, SurfaceStore,
+        TopicStore,
     };
 
     use super::*;
@@ -804,8 +811,8 @@ mod tests {
         )
     }
 
-    /// A page with one module, and a second page with its own module — the
-    /// second is what a cross-page anchor would wrongly reach.
+    /// A surface with one module, and a second surface with its own module — the
+    /// second is what a cross-surface anchor would wrongly reach.
     async fn seeded() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let topic = TopicStore::create(
@@ -818,20 +825,20 @@ mod tests {
         .await
         .unwrap();
         let state = state(Arc::clone(&storage));
-        let page = create_page(
+        let surface = create_page(
             &state,
             topic.id,
-            CreatePageRequest {
+            CreateSurfaceRequest {
                 title: "Planning".into(),
                 template_id: None,
             },
         )
         .await
         .unwrap();
-        let module = write_page_module(
+        let module = write_surface_module(
             &state,
-            page.id,
-            WritePageModuleRequest {
+            surface.id,
+            WriteSurfaceModuleRequest {
                 module_id: None,
                 kind: None,
                 source: "# Draft".into(),
@@ -843,17 +850,17 @@ mod tests {
         let other = create_page(
             &state,
             topic.id,
-            CreatePageRequest {
+            CreateSurfaceRequest {
                 title: "Elsewhere".into(),
                 template_id: None,
             },
         )
         .await
         .unwrap();
-        let other_module = write_page_module(
+        let other_module = write_surface_module(
             &state,
             other.id,
-            WritePageModuleRequest {
+            WriteSurfaceModuleRequest {
                 module_id: None,
                 kind: None,
                 source: "# Other".into(),
@@ -862,11 +869,11 @@ mod tests {
         )
         .await
         .unwrap();
-        (state, storage, page.id, module.id, other_module.id)
+        (state, storage, surface.id, module.id, other_module.id)
     }
 
-    fn annotation(module_id: Uuid, body: &str) -> CreatePageAnnotationRequest {
-        CreatePageAnnotationRequest {
+    fn annotation(module_id: Uuid, body: &str) -> CreateSurfaceAnnotationRequest {
+        CreateSurfaceAnnotationRequest {
             module_id,
             body: body.into(),
             tags: Vec::new(),
@@ -875,31 +882,31 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_annotation_reaches_the_reader_at_the_module_it_names() {
-        let (state, _storage, page_id, module_id, other_module_id) = seeded().await;
+        let (state, _storage, surface_id, module_id, other_module_id) = seeded().await;
 
-        create_page_annotation(
+        create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(module_id, "the second claim needs a source"),
             "user",
         )
         .await
         .unwrap();
-        create_page_annotation(
+        create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(other_module_id, "needs a second pass"),
             "user",
         )
         .await
-        .expect_err("a module on another page is not an anchor");
+        .expect_err("a module on another surface is not an anchor");
 
-        let response = page_response(&state, page_id).await.unwrap();
+        let response = surface_response(&state, surface_id).await.unwrap();
         let module = response
             .modules
             .iter()
             .find(|module| module.id == module_id)
-            .expect("the module is on the page");
+            .expect("the module is on the surface");
         assert_eq!(
             module
                 .annotations
@@ -913,15 +920,16 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn an_empty_body_is_refused_before_anything_lands() {
-        let (state, storage, page_id, module_id, _) = seeded().await;
+        let (state, storage, surface_id, module_id, _) = seeded().await;
 
-        let error = create_page_annotation(&state, page_id, annotation(module_id, "   "), "user")
-            .await
-            .expect_err("an empty note names no reference");
+        let error =
+            create_surface_annotation(&state, surface_id, annotation(module_id, "   "), "user")
+                .await
+                .expect_err("an empty note names no reference");
         assert!(error.to_string().contains("non-empty"), "{error}");
         assert!(
             storage
-                .list_page_annotations(page_id)
+                .list_surface_annotations(surface_id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -930,24 +938,24 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_module_on_another_page_is_not_an_anchor() {
-        let (state, storage, page_id, _module_id, other_module_id) = seeded().await;
+    async fn a_module_on_another_surface_is_not_an_anchor() {
+        let (state, storage, surface_id, _module_id, other_module_id) = seeded().await;
 
-        let error = create_page_annotation(
+        let error = create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(other_module_id, "hangs nowhere either party can see"),
             "user",
         )
         .await
-        .expect_err("the anchor must be on the named page");
+        .expect_err("the anchor must be on the named surface");
         assert!(
             error.to_string().contains(&other_module_id.to_string()),
             "{error}"
         );
         assert!(
             storage
-                .list_page_annotations(page_id)
+                .list_surface_annotations(surface_id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -957,11 +965,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn restating_a_note_leaves_the_displaced_words_in_the_trail() {
-        let (state, storage, page_id, module_id, _) = seeded().await;
-        let created = create_page_annotation(
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let created = create_surface_annotation(
             &state,
-            page_id,
-            CreatePageAnnotationRequest {
+            surface_id,
+            CreateSurfaceAnnotationRequest {
                 module_id,
                 body: "first reading".into(),
                 tags: vec!["draft".into()],
@@ -971,10 +979,10 @@ mod tests {
         .await
         .unwrap();
 
-        update_page_annotation(
+        update_surface_annotation(
             &state,
             created.id,
-            UpdatePageAnnotationRequest {
+            UpdateSurfaceAnnotationRequest {
                 body: "second reading".into(),
                 tags: vec!["settled".into()],
             },
@@ -984,7 +992,7 @@ mod tests {
         .unwrap();
 
         let stored = storage
-            .get_page_annotation(created.id)
+            .get_surface_annotation(created.id)
             .await
             .unwrap()
             .unwrap();
@@ -996,8 +1004,8 @@ mod tests {
         let events = storage.list_audit_events().await.unwrap();
         let recorded = events
             .iter()
-            .find(|event| event.event_kind == "page_annotation_updated")
-            .expect("the restatement is in the page's trail");
+            .find(|event| event.event_kind == "surface_annotation_updated")
+            .expect("the restatement is in the surface's trail");
         assert_eq!(
             recorded.metadata["prior_body"], "first reading",
             "the displaced words survive where the row does not"
@@ -1013,34 +1021,39 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn deleting_a_note_retains_what_it_said() {
-        let (state, storage, page_id, module_id, _) = seeded().await;
-        let created = create_page_annotation(
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let created = create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(module_id, "withdrawn on reflection"),
             "user",
         )
         .await
         .unwrap();
-        let before_delete = storage.get_page(page_id).await.unwrap().unwrap().updated_at;
+        let before_delete = storage
+            .get_page(surface_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .updated_at;
 
-        delete_page_annotation(&state, created.id, "user")
+        delete_surface_annotation(&state, created.id, "user")
             .await
             .unwrap();
 
         assert!(
             storage
-                .get_page_annotation(created.id)
+                .get_surface_annotation(created.id)
                 .await
                 .unwrap()
                 .is_none(),
-            "the note is gone from the page"
+            "the note is gone from the surface"
         );
         let events = storage.list_audit_events().await.unwrap();
         let recorded = events
             .iter()
-            .find(|event| event.event_kind == "page_annotation_deleted")
-            .expect("the removal is in the page's trail");
+            .find(|event| event.event_kind == "surface_annotation_deleted")
+            .expect("the removal is in the surface's trail");
         assert_eq!(
             recorded.metadata["prior_body"], "withdrawn on reflection",
             "recovery is re-writing the note, informed by the trail"
@@ -1049,17 +1062,23 @@ mod tests {
         assert!(recorded.metadata["new_body"].is_null());
         assert!(recorded.metadata["new_tags"].is_null());
         assert!(
-            storage.get_page(page_id).await.unwrap().unwrap().updated_at > before_delete,
-            "deleting a note advances the page's freshness marker"
+            storage
+                .get_page(surface_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at
+                > before_delete,
+            "deleting a note advances the surface's freshness marker"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_annotation_deletes_leave_one_audit_event() {
-        let (state, storage, page_id, module_id, _) = seeded().await;
-        let created = create_page_annotation(
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let created = create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(module_id, "only one removal is recorded"),
             "user",
         )
@@ -1067,8 +1086,8 @@ mod tests {
         .unwrap();
 
         let (first, second) = tokio::join!(
-            delete_page_annotation(&state, created.id, "user"),
-            delete_page_annotation(&state, created.id, "user"),
+            delete_surface_annotation(&state, created.id, "user"),
+            delete_surface_annotation(&state, created.id, "user"),
         );
         assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
         let failure = first
@@ -1085,7 +1104,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .filter(|event| event.event_kind == "page_annotation_deleted")
+                .filter(|event| event.event_kind == "surface_annotation_deleted")
                 .count(),
             1,
             "the losing delete must not append a second audit event"
@@ -1094,24 +1113,24 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_delete_that_loses_after_reading_the_note_returns_not_found_without_an_audit() {
-        let (state, storage, page_id, module_id, _) = seeded().await;
-        let created = create_page_annotation(
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let created = create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(module_id, "both requests read this note first"),
             "user",
         )
         .await
         .unwrap();
         let existing = storage
-            .get_page_annotation(created.id)
+            .get_surface_annotation(created.id)
             .await
             .unwrap()
             .expect("both concurrent requests read the note before either deletes it");
 
         let (first, second) = tokio::join!(
-            delete_page_annotation_after_read(&state, created.id, existing.clone(), "user"),
-            delete_page_annotation_after_read(&state, created.id, existing, "user"),
+            delete_surface_annotation_after_read(&state, created.id, existing.clone(), "user"),
+            delete_surface_annotation_after_read(&state, created.id, existing, "user"),
         );
 
         assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
@@ -1129,7 +1148,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .filter(|event| event.event_kind == "page_annotation_deleted")
+                .filter(|event| event.event_kind == "surface_annotation_deleted")
                 .count(),
             1,
             "the zero-row loser must not append an audit event"
@@ -1138,10 +1157,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_deletion_audit_rolls_back_the_annotation_removal() {
-        let (state, storage, page_id, module_id, _) = seeded().await;
-        let annotation = create_page_annotation(
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let annotation = create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(module_id, "the row must survive a failed audit"),
             "user",
         )
@@ -1161,15 +1180,15 @@ mod tests {
             .await
             .unwrap();
         let existing = storage
-            .get_page_annotation(annotation.id)
+            .get_surface_annotation(annotation.id)
             .await
             .unwrap()
             .unwrap();
         let audit = annotation_change_event(
             "Planning",
-            page_id,
+            surface_id,
             &existing,
-            "page_annotation_deleted",
+            "surface_annotation_deleted",
             None,
             None,
             "user",
@@ -1181,13 +1200,13 @@ mod tests {
 
         assert!(
             storage
-                .delete_page_annotation_with_audit(existing, audit,)
+                .delete_surface_annotation_with_audit(existing, audit,)
                 .await
                 .is_err()
         );
         assert!(
             storage
-                .get_page_annotation(annotation.id)
+                .get_surface_annotation(annotation.id)
                 .await
                 .unwrap()
                 .is_some()
@@ -1196,12 +1215,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_live_signal_names_the_annotated_module_and_carries_no_words() {
-        let (state, _storage, page_id, module_id, _) = seeded().await;
+        let (state, _storage, surface_id, module_id, _) = seeded().await;
         let mut events = state.broadcast.subscribe();
 
-        create_page_annotation(
+        create_surface_annotation(
             &state,
-            page_id,
+            surface_id,
             annotation(module_id, "secret words that must not ride the wire"),
             "user",
         )
@@ -1210,18 +1229,18 @@ mod tests {
 
         let event = events.recv().await.expect("the annotation broadcasts");
         match &event {
-            ServerEvent::PageUpdated {
-                page_id: signalled_page,
+            ServerEvent::SurfaceUpdated {
+                surface_id: signalled_page,
                 module_id: signalled_module,
             } => {
-                assert_eq!(*signalled_page, page_id);
+                assert_eq!(*signalled_page, surface_id);
                 assert_eq!(
                     *signalled_module,
                     Some(module_id),
                     "the signal names where to look"
                 );
             }
-            other => panic!("expected a page_updated signal, got {other:?}"),
+            other => panic!("expected a surface_updated signal, got {other:?}"),
         }
         let serialised = serde_json::to_string(&event).unwrap();
         assert!(

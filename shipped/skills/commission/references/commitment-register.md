@@ -184,7 +184,7 @@ register depends on:
 
 ```markdown
 > **Reader protocol.** The numbered commitment and goal lines are the binding
-> destination, wherever they sit on the page; no heading narrows their scope,
+> destination, wherever they sit on the surface; no heading narrows their scope,
 > and a milestone's name resolves to its goal line, never to a heading. A
 > reader deriving work maps every commitment ID to owned work or names the
 > unmapped remainder explicitly. A reader judging completion produces evidence

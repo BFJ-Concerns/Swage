@@ -181,7 +181,7 @@ makes that visible and expensive rather than silent.
 An anomaly is a finding until positively attributed. Classifying one as
 a tooling error is a falsifiable claim: it requires reproducing the
 tooling fault on a known-good input — showing the capture pipeline also
-distorts a page known to render correctly — never an assertion that it
+distorts a surface known to render correctly — never an assertion that it
 "looks like a rendering artefact". No agent both raises and dismisses
 the same anomaly.
 

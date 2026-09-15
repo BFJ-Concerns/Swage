@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, image attachments and reference admission, page templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
+description: Turn context inspector, image attachments and reference admission, surface templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -49,7 +49,7 @@ The `turn_complete` WebSocket event carries the turn's `turn_id`
 `conversationStore.appendAssistantMessage` at turn-complete
 (`streaming.ts:256`), which merges it into the persisted message object
 (`conversations.ts:90`). This lets the context-inspector button appear on a
-just-completed message without a page reload — the `turn_id` guard at
+just-completed message without a surface reload — the `turn_id` guard at
 `MessageDisplay.svelte:273` matches live messages and API-loaded messages
 alike.
 
@@ -202,40 +202,40 @@ re-pointed at the current path. Registration precedes sign-in, so the file
 need not exist yet. Both tokens resolve, audit, and redact through the
 governed system.
 
-## Pages
+## Surfaces
 
-Pages are agent-run work surfaces inside a topic, assembled from ordered
-module instances. Each page belongs to one topic and carries its own module
+Surfaces are agent-run work surfaces inside a topic, assembled from ordered
+module instances. Each surface belongs to one topic and carries its own module
 list, annotations, and provenance.
 
 ### Templates
 
-A page template is a reusable shape for a topic: a named list of module
+A surface template is a reusable shape for a topic: a named list of module
 rows in a fixed order. Templates are created through
-`POST /api/topics/{topic_id}/page-templates` (`CreatePageTemplateRequest`
-in `swage-protocol::client::page`). Each module input carries an optional
+`POST /api/topics/{topic_id}/surface-templates` (`CreateSurfaceTemplateRequest`
+in `swage-protocol::client::surface`). Each module input carries an optional
 `kind` (defaults to `"document"`) and a `source` string.
 
-Creating a page with `template_id` set forks the template's modules into
-the new page as its own from birth. The template is recorded as the fork's
-origin (`forked_from_template_id` and `forked_at` on `PageResponse`) but
-is never projected into the page — later template changes do not propagate.
+Creating a surface with `template_id` set forks the template's modules into
+the new surface as its own from birth. The template is recorded as the fork's
+origin (`forked_from_template_id` and `forked_at` on `SurfaceResponse`) but
+is never projected into the surface — later template changes do not propagate.
 
 ### Annotations
 
-Annotations are notes hung on individual modules of a page, anchored at
-module grain — there is no per-page or intra-module positioning.
-`CreatePageAnnotationRequest` takes `module_id`, `body`, and optional
-`tags`. `UpdatePageAnnotationRequest` replaces body and tags together; the
-displaced text survives in the page's provenance trail.
+Annotations are notes hung on individual modules of a surface, anchored at
+module grain — there is no per-surface or intra-module positioning.
+`CreateSurfaceAnnotationRequest` takes `module_id`, `body`, and optional
+`tags`. `UpdateSurfaceAnnotationRequest` replaces body and tags together; the
+displaced text survives in the surface's provenance trail.
 
-Deleting an annotation returns `DeletePageAnnotationResponse { deleted:
+Deleting an annotation returns `DeleteSurfaceAnnotationResponse { deleted:
 true }`. The delete is permanent — there is no soft-delete or archive.
 
 ### Work-surface reconnect
 
-When a WebSocket connection to a page's work surface drops and reconnects,
-the frontend refetches the page state to pick up any writes that landed
+When a WebSocket connection to a surface's work surface drops and reconnects,
+the frontend refetches the surface state to pick up any writes that landed
 while disconnected.
 
 ## Delivery targets
@@ -248,7 +248,7 @@ target kinds:
 |---|---|---|
 | `channel` | `integration`, `account`, `conversation` | An external channel (Telegram, dev DM/thread) |
 | `local_storage` | — | The gateway's local store, as a log record |
-| `page` | `page_id` | A page in the run's own topic |
+| `surface` | `surface_id` | A surface in the run's own topic |
 | `webhook` | `url` | An HTTP endpoint |
 
 `store_local_output` on the routing request adds a `local_storage` target
@@ -449,7 +449,7 @@ disconnects the WebSocket before clearing the store, preventing orphaned
 connections.
 
 Route changes propagate `notFound` state to the UI, so the "conversation not
-found" notice appears for `popstate`-triggered navigations and initial page
+found" notice appears for `popstate`-triggered navigations and initial surface
 loads alike.
 
 ## Gateway tools
@@ -507,12 +507,12 @@ two sandbox-eligible tools.
 | `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session topic; a run in another topic reads as absent. |
 | `workflow_run_status` | `workflow_run_status.rs` — lists the topic's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same topic scoping as `workflow_run_account`. |
 
-### Pages and delivery
+### Surfaces and delivery
 
 | Tool | Source |
 |---|---|
-| `page_read` | `page.rs` |
-| `page_write` | `page.rs` |
+| `surface_read` | `surface.rs` |
+| `surface_write` | `surface.rs` |
 | `run_event_post` | `run_event.rs` |
 
 ### Scheduling

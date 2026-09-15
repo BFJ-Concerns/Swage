@@ -1,8 +1,8 @@
-//! Page templates and fork-with-lineage, over the gateway's own routes.
+//! Surface templates and fork-with-lineage, over the gateway's own routes.
 //!
-//! A template seeds a new page's modules and is recorded as its origin. The
-//! fork is a real page from birth: what the fork does to its modules never
-//! reaches the template, and the template is never projected into pages
+//! A template seeds a new surface's modules and is recorded as its origin. The
+//! fork is a real surface from birth: what the fork does to its modules never
+//! reaches the template, and the template is never projected into surfaces
 //! already forked from it. Templates are topic-local, so a template of
 //! another topic is not a template this topic can fork from.
 
@@ -19,7 +19,7 @@ use tower::ServiceExt;
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
 use swage_storage::SqliteStorage;
-use swage_storage::store::PageStore;
+use swage_storage::store::SurfaceStore;
 
 fn router_over(storage: Arc<SqliteStorage>) -> Router {
     let state = AppState::new(
@@ -59,21 +59,21 @@ impl swage_provider::LlmProvider for StubProvider {
         &self,
         _request: swage_core::CompletionRequest,
     ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
-        unimplemented!("not used in page template tests")
+        unimplemented!("not used in surface template tests")
     }
 
     async fn complete_with_tools(
         &self,
         _request: swage_core::ToolCompletionRequest,
     ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
-        unimplemented!("not used in page template tests")
+        unimplemented!("not used in surface template tests")
     }
 
     fn stream(
         &self,
         _request: swage_core::CompletionRequest,
     ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
-        unimplemented!("not used in page template tests")
+        unimplemented!("not used in surface template tests")
     }
 }
 
@@ -121,7 +121,7 @@ async fn make_template(router: &Router, topic_id: &str) -> String {
     let (status, template) = http_json(
         router,
         "POST",
-        &format!("/api/topics/{topic_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/surface-templates"),
         Some(json!({
             "name": "Standup",
             "modules": [
@@ -136,21 +136,21 @@ async fn make_template(router: &Router, topic_id: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_page_created_from_a_template_is_seeded_and_records_its_origin() {
+async fn a_surface_created_from_a_template_is_seeded_and_records_its_origin() {
     let (router, _storage) = make_test_router();
     let topic_id = make_topic(&router, "fork-seed").await;
     let template_id = make_template(&router, &topic_id).await;
 
-    let (status, page) = http_json(
+    let (status, surface) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/pages"),
+        &format!("/api/topics/{topic_id}/surfaces"),
         Some(json!({ "title": "Monday standup", "template_id": template_id })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "fork: {page}");
+    assert_eq!(status, StatusCode::OK, "fork: {surface}");
 
-    let sources: Vec<&str> = page["modules"]
+    let sources: Vec<&str> = surface["modules"]
         .as_array()
         .unwrap()
         .iter()
@@ -162,14 +162,15 @@ async fn a_page_created_from_a_template_is_seeded_and_records_its_origin() {
         "the create response carries the seeded modules in template order"
     );
     assert_eq!(
-        page["forked_from_template_id"].as_str(),
+        surface["forked_from_template_id"].as_str(),
         Some(template_id.as_str()),
-        "the page records what it was forked from"
+        "the surface records what it was forked from"
     );
 
     // The recorded origin survives the read path, not just the create.
-    let page_id = page["id"].as_str().unwrap();
-    let (status, reread) = http_json(&router, "GET", &format!("/api/pages/{page_id}"), None).await;
+    let surface_id = surface["id"].as_str().unwrap();
+    let (status, reread) =
+        http_json(&router, "GET", &format!("/api/surfaces/{surface_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         reread["forked_from_template_id"].as_str(),
@@ -180,27 +181,27 @@ async fn a_page_created_from_a_template_is_seeded_and_records_its_origin() {
 
 /// The same fork journey over a database file on disk, then read back from a
 /// connection opened after the writing one is gone: what a restarted gateway
-/// would find. The seeded rows have to be durably in `page_modules`, not
+/// would find. The seeded rows have to be durably in `surface_modules`, not
 /// merely in the create response.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("swage.db");
 
-    let (page_id, template_id, seeded_module_id) = {
+    let (surface_id, template_id, seeded_module_id) = {
         let (router, _storage) = make_file_backed_router(&db_path);
         let topic_id = make_topic(&router, "fork-seed-on-disk").await;
         let template_id = make_template(&router, &topic_id).await;
 
-        let (status, page) = http_json(
+        let (status, surface) = http_json(
             &router,
             "POST",
-            &format!("/api/topics/{topic_id}/pages"),
+            &format!("/api/topics/{topic_id}/surfaces"),
             Some(json!({ "title": "Monday standup", "template_id": template_id })),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "fork: {page}");
-        let sources: Vec<&str> = page["modules"]
+        assert_eq!(status, StatusCode::OK, "fork: {surface}");
+        let sources: Vec<&str> = surface["modules"]
             .as_array()
             .unwrap()
             .iter()
@@ -214,12 +215,12 @@ async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
 
         // Edit a seeded copy, not a module added afterwards: the discriminating
         // case is whether a copy is the fork's own from birth.
-        let seeded_module_id = page["modules"][0]["id"].as_str().unwrap().to_string();
-        let page_id = page["id"].as_str().unwrap().to_string();
+        let seeded_module_id = surface["modules"][0]["id"].as_str().unwrap().to_string();
+        let surface_id = surface["id"].as_str().unwrap().to_string();
         let (status, _) = http_json(
             &router,
             "POST",
-            &format!("/api/pages/{page_id}/modules"),
+            &format!("/api/surfaces/{surface_id}/modules"),
             Some(json!({
                 "module_id": seeded_module_id,
                 "source": "## Yesterday: shipped the fork"
@@ -227,31 +228,31 @@ async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        (page_id, template_id, seeded_module_id)
+        (surface_id, template_id, seeded_module_id)
     };
 
     // The writing connection is gone; open the file again.
     let reopened = SqliteStorage::open(&db_path).unwrap();
-    let page_uuid: uuid::Uuid = page_id.parse().unwrap();
-    let modules = reopened.list_page_modules(page_uuid).await.unwrap();
+    let surface_uuid: uuid::Uuid = surface_id.parse().unwrap();
+    let modules = reopened.list_surface_modules(surface_uuid).await.unwrap();
     assert_eq!(
         modules
             .iter()
             .map(|module| (module.position, module.source.as_str()))
             .collect::<Vec<_>>(),
         vec![(0, "## Yesterday: shipped the fork"), (1, "## Blockers")],
-        "the seeded rows are on disk under the forked page, the edit among them"
+        "the seeded rows are on disk under the forked surface, the edit among them"
     );
 
-    let page = reopened.get_page(page_uuid).await.unwrap().unwrap();
+    let surface = reopened.get_page(surface_uuid).await.unwrap().unwrap();
     assert_eq!(
-        page.forked_from_template_id.map(|id| id.to_string()),
+        surface.forked_from_template_id.map(|id| id.to_string()),
         Some(template_id.clone()),
         "the recorded origin is on disk too"
     );
 
     let template_modules = reopened
-        .list_page_template_modules(template_id.parse().unwrap())
+        .list_surface_template_modules(template_id.parse().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -271,20 +272,20 @@ async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_page_created_without_a_template_is_blank_and_has_no_lineage() {
+async fn a_surface_created_without_a_template_is_blank_and_has_no_lineage() {
     let (router, _storage) = make_test_router();
-    let topic_id = make_topic(&router, "blank-page").await;
+    let topic_id = make_topic(&router, "blank-surface").await;
 
-    let (status, page) = http_json(
+    let (status, surface) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/pages"),
+        &format!("/api/topics/{topic_id}/surfaces"),
         Some(json!({ "title": "Scratch" })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "blank create: {page}");
-    assert!(page["modules"].as_array().unwrap().is_empty());
-    assert!(page["forked_from_template_id"].is_null());
+    assert_eq!(status, StatusCode::OK, "blank create: {surface}");
+    assert!(surface["modules"].as_array().unwrap().is_empty());
+    assert!(surface["forked_from_template_id"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -302,7 +303,7 @@ async fn listing_templates_returns_only_the_requested_spaces_summaries() {
         let (status, body) = http_json(
             &router,
             "GET",
-            &format!("/api/topics/{topic_id}/page-templates"),
+            &format!("/api/topics/{topic_id}/surface-templates"),
             None,
         )
         .await;
@@ -319,25 +320,25 @@ async fn listing_templates_returns_only_the_requested_spaces_summaries() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
+async fn editing_a_forked_surface_leaves_the_template_it_came_from_untouched() {
     let (router, _storage) = make_test_router();
     let topic_id = make_topic(&router, "fork-divergence").await;
     let template_id = make_template(&router, &topic_id).await;
 
-    let (_, page) = http_json(
+    let (_, surface) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/pages"),
+        &format!("/api/topics/{topic_id}/surfaces"),
         Some(json!({ "title": "Monday standup", "template_id": template_id })),
     )
     .await;
-    let page_id = page["id"].as_str().unwrap().to_string();
-    let module_id = page["modules"][0]["id"].as_str().unwrap().to_string();
+    let surface_id = surface["id"].as_str().unwrap().to_string();
+    let module_id = surface["modules"][0]["id"].as_str().unwrap().to_string();
 
     let (status, _) = http_json(
         &router,
         "POST",
-        &format!("/api/pages/{page_id}/modules"),
+        &format!("/api/surfaces/{surface_id}/modules"),
         Some(json!({ "module_id": module_id, "source": "## Yesterday: shipped it" })),
     )
     .await;
@@ -346,7 +347,7 @@ async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
     let (status, template) = http_json(
         &router,
         "GET",
-        &format!("/api/page-templates/{template_id}"),
+        &format!("/api/surface-templates/{template_id}"),
         None,
     )
     .await;
@@ -360,15 +361,15 @@ async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
     assert_eq!(
         sources,
         vec!["## Yesterday", "## Blockers"],
-        "the template is not mutated by an edit to a page forked from it"
+        "the template is not mutated by an edit to a surface forked from it"
     );
 
-    // And nothing flows the other way either: a page already forked keeps
+    // And nothing flows the other way either: a surface already forked keeps
     // its own modules when the template grows a new one.
     let (status, _) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/surface-templates"),
         Some(json!({
             "name": "Standup v2",
             "modules": [{ "kind": "document", "source": "## Today" }]
@@ -376,7 +377,7 @@ async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (_, reread) = http_json(&router, "GET", &format!("/api/pages/{page_id}"), None).await;
+    let (_, reread) = http_json(&router, "GET", &format!("/api/surfaces/{surface_id}"), None).await;
     assert_eq!(
         reread["modules"][0]["source"].as_str(),
         Some("## Yesterday: shipped it"),
@@ -386,7 +387,7 @@ async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_template_from_another_topic_is_rejected_before_a_page_lands() {
+async fn a_template_from_another_topic_is_rejected_before_a_surface_lands() {
     let (router, _storage) = make_test_router();
     let owner = make_topic(&router, "template-owner").await;
     let other = make_topic(&router, "template-outsider").await;
@@ -395,7 +396,7 @@ async fn a_template_from_another_topic_is_rejected_before_a_page_lands() {
     let (status, body) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{other}/pages"),
+        &format!("/api/topics/{other}/surfaces"),
         Some(json!({ "title": "Borrowed", "template_id": template_id })),
     )
     .await;
@@ -405,22 +406,28 @@ async fn a_template_from_another_topic_is_rejected_before_a_page_lands() {
         "templates are topic-local: {body}"
     );
 
-    let (_, pages) = http_json(&router, "GET", &format!("/api/topics/{other}/pages"), None).await;
+    let (_, surfaces) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{other}/surfaces"),
+        None,
+    )
+    .await;
     assert!(
-        pages["pages"].as_array().unwrap().is_empty(),
-        "the rejected fork left no page behind"
+        surfaces["surfaces"].as_array().unwrap().is_empty(),
+        "the rejected fork left no surface behind"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_template_is_rejected_before_a_page_lands() {
+async fn an_unknown_template_is_rejected_before_a_surface_lands() {
     let (router, _storage) = make_test_router();
     let topic_id = make_topic(&router, "unknown-template").await;
 
     let (status, body) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/pages"),
+        &format!("/api/topics/{topic_id}/surfaces"),
         Some(json!({
             "title": "Nowhere",
             "template_id": "99999999-9999-4999-8999-999999999999"
@@ -429,14 +436,14 @@ async fn an_unknown_template_is_rejected_before_a_page_lands() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 
-    let (_, pages) = http_json(
+    let (_, surfaces) = http_json(
         &router,
         "GET",
-        &format!("/api/topics/{topic_id}/pages"),
+        &format!("/api/topics/{topic_id}/surfaces"),
         None,
     )
     .await;
-    assert!(pages["pages"].as_array().unwrap().is_empty());
+    assert!(surfaces["surfaces"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -447,7 +454,7 @@ async fn a_template_seeding_an_unrenderable_module_kind_is_rejected() {
     let (status, body) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/surface-templates"),
         Some(json!({
             "name": "Broken",
             "modules": [{ "kind": "spreadsheet", "source": "" }]
@@ -459,7 +466,7 @@ async fn a_template_seeding_an_unrenderable_module_kind_is_rejected() {
     let (_, templates) = http_json(
         &router,
         "GET",
-        &format!("/api/topics/{topic_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/surface-templates"),
         None,
     )
     .await;
@@ -477,22 +484,22 @@ async fn template_creation_and_the_fork_each_land_an_audit_event() {
     let topic_id = make_topic(&router, "fork-provenance").await;
     let template_id = make_template(&router, &topic_id).await;
 
-    let (_, page) = http_json(
+    let (_, surface) = http_json(
         &router,
         "POST",
-        &format!("/api/topics/{topic_id}/pages"),
+        &format!("/api/topics/{topic_id}/surfaces"),
         Some(json!({ "title": "Monday standup", "template_id": template_id })),
     )
     .await;
-    let page_id = page["id"].as_str().unwrap().to_string();
+    let surface_id = surface["id"].as_str().unwrap().to_string();
 
     let events = storage.list_audit_events().await.unwrap();
     let template_created = events
         .iter()
         .find(|event| {
-            event.entity_kind == "page_template"
+            event.entity_kind == "surface_template"
                 && event.entity_id == template_id
-                && event.event_kind == "page_template_created"
+                && event.event_kind == "surface_template_created"
         })
         .expect("the template creation is recorded");
     assert_eq!(template_created.metadata["name"].as_str(), Some("Standup"));
@@ -507,13 +514,13 @@ async fn template_creation_and_the_fork_each_land_an_audit_event() {
 
     let created = events
         .iter()
-        .filter(|event| event.entity_kind == "page" && event.entity_id == page_id)
-        .find(|event| event.event_kind == "page_created")
+        .filter(|event| event.entity_kind == "surface" && event.entity_id == surface_id)
+        .find(|event| event.event_kind == "surface_created")
         .expect("the fork is recorded");
     assert_eq!(
         created.metadata["forked_from"]["template_id"].as_str(),
         Some(template_id.as_str()),
-        "the trail carries which template the page came from"
+        "the trail carries which template the surface came from"
     );
     assert_eq!(
         created.metadata["forked_from"]["template_name"].as_str(),

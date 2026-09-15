@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, image attachments and reference admission, pages, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
+description: Network binding, the web UI's context inspector, image attachments and reference admission, surfaces, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -85,7 +85,7 @@ to show):
 
 The "context" link appears as soon as a streamed message finishes — the
 streaming store exposes the turn ID when the turn completes, so there is
-no need to reload the page for the link to appear. The terminal UI has a
+no need to reload the surface for the link to appear. The terminal UI has a
 comparable inspector toggled by a keybinding, showing a proportional fill bar
 per element.
 
@@ -193,42 +193,42 @@ gateway registers the Codex access and refresh tokens as file-backed secrets
 pointing into that document, so they resolve, audit, and redact through the
 governed system without being copied out of the CLI's own store.
 
-## Pages
+## Surfaces
 
-Pages are work surfaces inside a topic, assembled from ordered module
-instances. An agent or workflow can write to a page's modules, and users
+Surfaces are work surfaces inside a topic, assembled from ordered module
+instances. An agent or workflow can write to a surface's modules, and users
 can annotate individual modules with notes.
 
 ### Templates
 
-A page template is a reusable shape — a named list of module rows in a
-fixed order. Creating a page with `template_id` set seeds the new page's
-modules from the template. The seeded modules belong to the page from that
+A surface template is a reusable shape — a named list of module rows in a
+fixed order. Creating a surface with `template_id` set seeds the new surface's
+modules from the template. The seeded modules belong to the surface from that
 point on: the template is recorded as the fork's origin (visible as
-`forked_from_template_id` on the page), but later template edits do not
-propagate to pages that were forked from it.
+`forked_from_template_id` on the surface), but later template edits do not
+propagate to surfaces that were forked from it.
 
 ### Annotations
 
-Annotations are notes attached to individual modules of a page. Each note
+Annotations are notes attached to individual modules of a surface. Each note
 carries a body and optional tags. Updating an annotation replaces its body
-and tags together; the prior text is preserved in the page's provenance
+and tags together; the prior text is preserved in the surface's provenance
 trail. Deleting an annotation removes it permanently.
 
 Annotation addresses stop at module grain: there is no way to annotate the
-page as a whole or a position inside a module's content.
+surface as a whole or a position inside a module's content.
 
 ### Work-surface reconnect
 
-When a WebSocket connection to a page's work surface drops and reconnects,
-the page state is refetched to pick up any writes that landed while
+When a WebSocket connection to a surface's work surface drops and reconnects,
+the surface state is refetched to pick up any writes that landed while
 disconnected.
 
 ## Delivery targets
 
 A run's output can be routed to one or more destinations. The four target
 kinds are: an external channel (Telegram, dev DM or thread), the gateway's
-local store (as a log record), a page in the run's own topic, and a
+local store (as a log record), a surface in the run's own topic, and a
 webhook URL. Setting `store_local_output` on the routing request adds a
 local-storage target alongside any explicit targets.
 
@@ -461,7 +461,7 @@ account — see
 `workflow_run_status` and `workflow_run_account` are scoped to the caller's
 session topic: a run in another topic reads as absent rather than forbidden.
 
-**Pages and delivery** — `page_read`, `page_write`, and `run_event_post`.
+**Surfaces and delivery** — `surface_read`, `surface_write`, and `run_event_post`.
 
 **Scheduling** — `schedule` and `wake_me_later`.
 

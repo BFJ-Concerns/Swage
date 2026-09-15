@@ -1,9 +1,9 @@
 //! Live signal channel for the work surfaces, independent of any conversation.
 //!
 //! The conversation socket carries a turn: it needs a conversation id, and the
-//! gateway admits only one connection per conversation. Page signals are not
-//! turn events — a page changes whenever anyone writes to it, and the user
-//! watching a page may have no conversation selected at all. This channel is
+//! gateway admits only one connection per conversation. Surface signals are not
+//! turn events — a surface changes whenever anyone writes to it, and the user
+//! watching a surface may have no conversation selected at all. This channel is
 //! how an open work surface hears about that: a listen-only socket that any
 //! client may open, carrying the server-wide signals a work surface refetches
 //! on.
@@ -25,26 +25,26 @@ use super::ServerEvent;
 
 /// Whether a broadcast event is a work-surface signal.
 ///
-/// `PageUpdated` tells an open surface that a page it may be showing has
+/// `SurfaceUpdated` tells an open surface that a surface it may be showing has
 /// changed; `Shutdown` tells it the gateway is going away. Everything else on
 /// the broadcast channel belongs to a conversation or to observability.
 pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
     matches!(
         event,
-        ServerEvent::PageUpdated { .. } | ServerEvent::Shutdown { .. }
+        ServerEvent::SurfaceUpdated { .. } | ServerEvent::Shutdown { .. }
     )
 }
 
 /// Axum route handler for `GET /api/work-surface/ws`.
 ///
 /// Takes no identity and rejects nothing: an open surface is entitled to hear
-/// that its page changed regardless of what else the client has open.
+/// that its surface changed regardless of what else the client has open.
 pub async fn work_surface_ws_handler(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> Response {
     // The upgrade future runs only after the handshake. Subscribe now so a
-    // page update that immediately follows the request is buffered for the
+    // surface update that immediately follows the request is buffered for the
     // connection task instead of disappearing in that window.
     let receiver = state.broadcast.subscribe();
     ws.on_upgrade(move |socket| handle_connection(socket, receiver))

@@ -375,7 +375,7 @@ mod tests {
             .unwrap();
         let next_offset = first["next_offset_bytes"]
             .as_u64()
-            .expect("first page should be truncated");
+            .expect("first surface should be truncated");
 
         let second = tool_with_limit(&dir, 40)
             .execute(

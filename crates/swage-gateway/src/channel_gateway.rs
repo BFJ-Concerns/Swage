@@ -47,7 +47,7 @@ fn webhook_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> 
 pub use swage_protocol::client::delivery::{
     DeliveryRoutingRequest, DeliveryTarget, ExternalChannelIntegration,
 };
-use swage_protocol::client::page::WritePageModuleRequest;
+use swage_protocol::client::surface::WriteSurfaceModuleRequest;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOrigin {
@@ -677,24 +677,24 @@ async fn deliver_to_target(
             ..
         } => Ok(DeliveryOutcome::NotSent),
         DeliveryTarget::LocalStorage => Ok(DeliveryOutcome::Sent),
-        DeliveryTarget::Page { page_id } => {
+        DeliveryTarget::Surface { surface_id } => {
             let session = state
                 .storage
                 .get_session(session_id)
                 .await?
                 .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
-            let page = state.storage.get_page(*page_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("no page with id {page_id}"))
+            let surface = state.storage.get_page(*surface_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("no surface with id {surface_id}"))
             })?;
-            if page.topic_id != session.topic_id {
+            if surface.topic_id != session.topic_id {
                 return Err(GatewayError::ValidationError(format!(
-                    "page delivery target {page_id} is not in the session's topic"
+                    "surface delivery target {surface_id} is not in the session's topic"
                 )));
             }
-            crate::page::write_page_module(
+            crate::surface::write_surface_module(
                 state,
-                *page_id,
-                WritePageModuleRequest {
+                *surface_id,
+                WriteSurfaceModuleRequest {
                     module_id: None,
                     kind: Some("document".into()),
                     source: content.to_string(),

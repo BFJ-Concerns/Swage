@@ -1,11 +1,11 @@
-//! The live direction of page annotation: an agent's note reaches a user's
+//! The live direction of surface annotation: an agent's note reaches a user's
 //! open work surface without a reload.
 //!
 //! The discriminating shape is a surface with *no conversation selected* —
-//! the ordinary case of someone reading a page while an agent works. The
+//! the ordinary case of someone reading a surface while an agent works. The
 //! conversation socket cannot serve it (it needs a conversation id, and one
 //! connection per conversation), so this test opens the work-surface channel
-//! and drives an agent-authored annotation through the real `page_write`
+//! and drives an agent-authored annotation through the real `surface_write`
 //! tool, asserting the signal arrives over the wire and carries identity
 //! only — never the note's text.
 
@@ -60,8 +60,8 @@ impl swage_provider::LlmProvider for StubProvider {
     }
 }
 
-/// Read frames until one is a `page_updated` signal, or the wait runs out.
-async fn next_page_signal(
+/// Read frames until one is a `surface_updated` signal, or the wait runs out.
+async fn next_surface_signal(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
@@ -70,12 +70,12 @@ async fn next_page_signal(
     loop {
         let frame = tokio::time::timeout_at(deadline, socket.next())
             .await
-            .expect("a page_updated signal should arrive on the work-surface channel")
+            .expect("a surface_updated signal should arrive on the work-surface channel")
             .expect("the channel should stay open")
             .expect("frame");
         if let tungstenite::Message::Text(text) = frame {
             let value: Value = serde_json::from_str(&text).expect("json frame");
-            if value["type"] == "page_updated" {
+            if value["type"] == "surface_updated" {
                 return value;
             }
         }
@@ -83,7 +83,7 @@ async fn next_page_signal(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface() {
+async fn a_surface_update_inside_the_upgrade_handshake_window_reaches_the_surface() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
@@ -93,7 +93,7 @@ async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface()
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let page_id = Uuid::new_v4();
+    let surface_id = Uuid::new_v4();
     let broadcast = state.broadcast.clone();
     let router = build_router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -102,8 +102,8 @@ async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface()
                 let response = next.run(request).await;
                 // The handler has built the upgrade response, but Hyper cannot
                 // complete the handshake until this middleware returns it.
-                let _ = broadcast.send(ServerEvent::PageUpdated {
-                    page_id,
+                let _ = broadcast.send(ServerEvent::SurfaceUpdated {
+                    surface_id,
                     module_id: None,
                 });
                 response
@@ -121,8 +121,8 @@ async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface()
         tokio_tungstenite::connect_async(format!("ws://{addr}/api/work-surface/ws"))
             .await
             .expect("work-surface handshake");
-    let signal = next_page_signal(&mut socket).await;
-    assert_eq!(signal["page_id"], page_id.to_string());
+    let signal = next_surface_signal(&mut socket).await;
+    assert_eq!(signal["surface_id"], surface_id.to_string());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -166,31 +166,31 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
     let ctx = GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
         .with_app_state(Some(state.clone()));
 
-    let write = swage_gateway::tool::page::PageWriteTool;
-    let page = write
+    let write = swage_gateway::tool::surface::SurfaceWriteTool;
+    let surface = write
         .execute(json!({ "title": "Release checklist" }), &ctx)
         .await
-        .expect("the agent creates the page");
-    let page_id = page["id"].as_str().expect("page id").to_string();
-    let creation = next_page_signal(&mut socket).await;
-    assert_eq!(creation["page_id"], page_id);
+        .expect("the agent creates the surface");
+    let surface_id = surface["id"].as_str().expect("surface id").to_string();
+    let creation = next_surface_signal(&mut socket).await;
+    assert_eq!(creation["surface_id"], surface_id);
 
     let module = write
         .execute(
-            json!({ "page_id": page_id, "source": "Publish the changelog." }),
+            json!({ "surface_id": surface_id, "source": "Publish the changelog." }),
             &ctx,
         )
         .await
         .expect("the agent writes a module");
     let module_id = module["id"].as_str().expect("module id").to_string();
-    let written = next_page_signal(&mut socket).await;
+    let written = next_surface_signal(&mut socket).await;
     assert_eq!(written["module_id"], module_id);
 
     // The note itself: authored by the agent, hung on that module.
     write
         .execute(
             json!({
-                "page_id": page_id,
+                "surface_id": surface_id,
                 "module_id": module_id,
                 "annotation": "checked this against the tag",
             }),
@@ -199,8 +199,8 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
         .await
         .expect("the agent leaves a note");
 
-    let signal = next_page_signal(&mut socket).await;
-    assert_eq!(signal["page_id"], page_id);
+    let signal = next_surface_signal(&mut socket).await;
+    assert_eq!(signal["surface_id"], surface_id);
     assert_eq!(
         signal["module_id"], module_id,
         "the signal names the module the note hangs on"
@@ -209,6 +209,6 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
     assert!(
         !frame.contains("checked this against the tag"),
         "the signal carries identity only — the surface reads the note through \
-         the page, never off the event: {frame}"
+         the surface, never off the event: {frame}"
     );
 }

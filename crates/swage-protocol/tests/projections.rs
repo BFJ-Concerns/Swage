@@ -37,19 +37,22 @@ fn typescript_bindings_are_regenerated() {
     client::topic::CreateTopicRequest::export_all(&cfg).expect("export create topic");
     client::topic::UpdateTopicRequest::export_all(&cfg).expect("export update topic");
     client::topic::TopicListResponse::export_all(&cfg).expect("export topics");
-    client::page::CreatePageRequest::export_all(&cfg).expect("export create page");
-    client::page::WritePageModuleRequest::export_all(&cfg).expect("export write page module");
-    client::page::PageResponse::export_all(&cfg).expect("export page");
-    client::page::PageListResponse::export_all(&cfg).expect("export pages");
-    client::page::CreatePageAnnotationRequest::export_all(&cfg)
-        .expect("export create page annotation");
-    client::page::UpdatePageAnnotationRequest::export_all(&cfg)
-        .expect("export update page annotation");
-    client::page::DeletePageAnnotationResponse::export_all(&cfg)
-        .expect("export delete page annotation");
-    client::page::CreatePageTemplateRequest::export_all(&cfg).expect("export create page template");
-    client::page::PageTemplateResponse::export_all(&cfg).expect("export page template");
-    client::page::PageTemplateListResponse::export_all(&cfg).expect("export page templates");
+    client::surface::CreateSurfaceRequest::export_all(&cfg).expect("export create surface");
+    client::surface::WriteSurfaceModuleRequest::export_all(&cfg)
+        .expect("export write surface module");
+    client::surface::SurfaceResponse::export_all(&cfg).expect("export surface");
+    client::surface::SurfaceListResponse::export_all(&cfg).expect("export surfaces");
+    client::surface::CreateSurfaceAnnotationRequest::export_all(&cfg)
+        .expect("export create surface annotation");
+    client::surface::UpdateSurfaceAnnotationRequest::export_all(&cfg)
+        .expect("export update surface annotation");
+    client::surface::DeleteSurfaceAnnotationResponse::export_all(&cfg)
+        .expect("export delete surface annotation");
+    client::surface::CreateSurfaceTemplateRequest::export_all(&cfg)
+        .expect("export create surface template");
+    client::surface::SurfaceTemplateResponse::export_all(&cfg).expect("export surface template");
+    client::surface::SurfaceTemplateListResponse::export_all(&cfg)
+        .expect("export surface templates");
     client::topic::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");

@@ -30,9 +30,9 @@ status: string, duration_ms: number, truncated: boolean, total_bytes: number | n
  *
  * Omitted from the serialised JSON when None.
  */
-parent_call_id?: string, } | { "type": "page_updated", page_id: string,
+parent_call_id?: string, } | { "type": "surface_updated", surface_id: string,
 /**
- * The module written; absent for page-level changes (creation).
+ * The module written; absent for surface-level changes (creation).
  */
 module_id?: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
 /**

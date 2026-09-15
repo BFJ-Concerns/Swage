@@ -3,7 +3,7 @@
 // Manages browser history and maps URLs to active conversation state.
 // This is a minimal SPA router — no framework dependency needed.
 
-// Settings sub-pages reachable from the overlay nav. Providers, agents,
+// Settings sub-surfaces reachable from the overlay nav. Providers, agents,
 // generation presets, automation, recovery, and display are wired; the
 // remainder are rendered as non-functional shells until backends exist.
 export type SettingsTab =
@@ -231,7 +231,7 @@ export function createRouter(options?: RouterOptions): Router {
       });
 
       // Apply the initial URL — this kicks off conversation selection if
-      // the URL contains an ID (e.g. on page refresh or direct navigation).
+      // the URL contains an ID (e.g. on surface refresh or direct navigation).
       await applyLocation(++navigationGeneration);
     },
   };

@@ -686,7 +686,7 @@ async fn reject_message_during_active_turn() {
 ///
 /// Proves: the HTTP API response for conversation detail includes a tool_calls
 /// field on assistant messages. This is the persistence half of the activity
-/// display — after a page refresh, tool calls must be visible from the HTTP
+/// display — after a surface refresh, tool calls must be visible from the HTTP
 /// response, not just from live WebSocket events.
 ///
 /// Verifies that assistant messages always include the tool_calls field.
@@ -750,7 +750,7 @@ async fn conversation_history_includes_tool_calls_field() {
 /// the turn processor executes the tool via the registry, tool_start and
 /// tool_end events appear on the WebSocket (for live activity display),
 /// tool calls are stored in the database, and the HTTP conversation detail
-/// returns them (for page-refresh persistence).
+/// returns them (for surface-refresh persistence).
 ///
 /// This test uses a ChannelProvider to simulate a tool-using conversation:
 /// Round 1: model emits text + tool_use → tool executes → tool results sent back

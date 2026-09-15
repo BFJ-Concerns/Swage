@@ -14,11 +14,11 @@
     },
     channels: {
       title: "Delivery channels",
-      body: "Channel management is read-only via the operator API; this page will configure them once a CRUD endpoint exists.",
+      body: "Channel management is read-only via the operator API; this surface will configure them once a CRUD endpoint exists.",
     },
     devices: {
       title: "Attached devices",
-      body: "Device listing will mirror /api/operator/overview.devices once this page is wired.",
+      body: "Device listing will mirror /api/operator/overview.devices once this surface is wired.",
     },
     voice: {
       title: "Voice capabilities",

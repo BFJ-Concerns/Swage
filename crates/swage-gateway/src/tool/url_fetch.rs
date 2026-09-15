@@ -1,4 +1,4 @@
-//! URL fetch tool — fetches web page content and extracts readable text.
+//! URL fetch tool — fetches web surface content and extracts readable text.
 //!
 //! HTML responses are converted to plain text. JSON and plain text are
 //! returned as-is. Binary content types are rejected. Output is truncated
@@ -151,7 +151,7 @@ impl Tool for UrlFetchTool {
             });
         }
 
-        // Stream the response body with a running byte counter. Store the page
+        // Stream the response body with a running byte counter. Store the surface
         // needed for the requested offset, but keep draining under the request
         // timeout so returned metadata can say that bytes were omitted.
         let capture_limit = if is_html {

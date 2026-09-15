@@ -3,7 +3,7 @@
 //! In production, the compiled Svelte SPA is embedded in the binary via
 //! `rust-embed`. This module provides the axum route handler that serves
 //! those assets, with SPA fallback so that direct navigation to any UI
-//! path (e.g. a conversation URL on page refresh) loads the application.
+//! path (e.g. a conversation URL on surface refresh) loads the application.
 
 use axum::{
     body::Body,
@@ -103,7 +103,7 @@ fn serve_static_file(path: &str, file: rust_embed::EmbeddedFile) -> Response {
 /// Serve index.html with no-cache headers.
 ///
 /// Used both for direct requests to the SPA root and as the fallback for any
-/// path that the frontend router handles (URL-based navigation, page refresh).
+/// path that the frontend router handles (URL-based navigation, surface refresh).
 fn serve_index(file: rust_embed::EmbeddedFile) -> Response {
     Response::builder()
         .status(StatusCode::OK)

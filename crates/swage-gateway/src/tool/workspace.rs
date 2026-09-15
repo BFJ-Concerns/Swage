@@ -245,7 +245,7 @@ pub fn truncated_output_value(content: &str, max_bytes: usize) -> Value {
 /// Builds JSON output for a textual result that can be continued by calling a
 /// follow-up tool with a byte offset.
 ///
-/// Small first-page results keep the historical `{ "output": ... }` shape.
+/// Small first-surface results keep the historical `{ "output": ... }` shape.
 /// Offset or truncated results include the offset, total byte count, and a
 /// ready-to-use follow-up invocation when more content remains.
 pub fn continuable_output_value(
