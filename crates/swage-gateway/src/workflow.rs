@@ -10137,7 +10137,7 @@ mod tests {
             child
                 .error_message
                 .as_deref()
-                .is_some_and(|message| message.contains("args.topic"))
+                .is_some_and(|message| message.contains("args.subject"))
         );
     }
 

@@ -1389,14 +1389,17 @@ impl WorkflowEngine {
                             validateAgentPrompt(prompt, "send");
                             for (const key of Object.keys(options)) {
                                 if (options[key] === undefined) continue;
+                                // A turn option is admitted even where creation
+                                // accepts the same key: a label names the turn
+                                // in the record without touching the worker's
+                                // envelope.
+                                if (workerTurnOptions.has(key)) continue;
                                 if (workerCreationOptions.has(key)) {
                                     throw heldWorkerError(
                                         `'${key}' is fixed when a worker is created; open a new worker instead of changing it mid-session`
                                     );
                                 }
-                                if (!workerTurnOptions.has(key)) {
-                                    throw heldWorkerError(`unknown send() option '${key}'`);
-                                }
+                                throw heldWorkerError(`unknown send() option '${key}'`);
                             }
                             if (state.closed) {
                                 throw heldWorkerError("this worker is closed; open a new one to keep working");
@@ -2232,6 +2235,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn held_worker_turns_take_their_own_label_without_touching_the_envelope() {
+        let host = Arc::new(SurfaceHost::new());
+        host.agent_outputs
+            .lock()
+            .unwrap()
+            .extend([Ok(json!("restated")), Ok(json!("built"))]);
+        WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const builder = await session({ label: "builder", model: "careful" });
+                await send(builder, "restate", { label: "restate:0" });
+                await send(builder, "build", { label: "build", timeoutMs: 60000 });
+                await close(builder);
+                return null;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("per-turn labels are turn options, not envelope changes");
+
+        let requests = host.agent_requests.lock().unwrap();
+        assert_eq!(requests[0].label.as_deref(), Some("restate:0"));
+        assert_eq!(requests[1].label.as_deref(), Some("build"));
+        assert_eq!(requests[1].timeout_ms, Some(60_000));
+        assert_eq!(requests[0].model.as_deref(), Some("careful"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn held_worker_refuses_mid_session_escalation_and_use_after_close() {
         let host = Arc::new(SurfaceHost::new());
         host.agent_outputs.lock().unwrap().extend([Ok(json!("ok"))]);
@@ -2719,8 +2753,8 @@ mod tests {
             meta.argument_schema,
             Some(json!({
                 "type": "object",
-                "required": ["topic"],
-                "properties": {"topic": {"type": "string"}}
+                "required": ["subject"],
+                "properties": {"subject": {"type": "string"}}
             }))
         );
     }
