@@ -25208,7 +25208,15 @@ protocol = "openai"
         )
         .expect("topic config");
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.general_scope().await.expect("topic");
+        let topic = TopicStore::create(
+            storage.as_ref(),
+            swage_storage::NewTopic {
+                name: "research".into(),
+                slug: "research".into(),
+            },
+        )
+        .await
+        .expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output_with_usage("must not run", 1, 0),

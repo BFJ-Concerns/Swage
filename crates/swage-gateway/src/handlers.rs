@@ -1056,7 +1056,7 @@ pub async fn update_topic(
 /// `DELETE /api/topics/:id` — delete a topic.
 ///
 /// Returns 204 No Content on success, 404 if not found, or 409 if refusing
-/// to delete the default topic.
+/// to delete the general scope.
 pub async fn delete_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -3036,7 +3036,7 @@ mod tests {
             "external delegated provider request should include platform identity: {request_text}"
         );
         assert!(
-            request_text.contains("Topic: the default topic")
+            request_text.contains("Topic: none — this session was started without a topic")
                 && request_text.contains("Working directory:")
                 && request_text.contains("Session started:"),
             "external delegated provider request should include the child session's place: {request_text}"

@@ -510,7 +510,7 @@ mod tests {
     /// Create an in-memory storage instance with a session, returning `(storage, session_id)`.
     async fn make_storage_with_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().expect("in-memory storage");
-        let topic = storage.general_scope().await.expect("default topic");
+        let topic = storage.general_scope().await.expect("general scope");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

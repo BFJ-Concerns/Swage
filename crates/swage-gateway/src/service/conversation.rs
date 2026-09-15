@@ -114,7 +114,7 @@ impl ConversationService {
         effort.map(|effort| serde_json::json!({"effort": effort}))
     }
 
-    /// Create a new conversation in the default topic.
+    /// Create a new conversation without a topic, in the general scope.
     ///
     /// Also creates a default thread for the session so that process_turn has
     /// a thread_id to attach turns and messages to.
@@ -225,7 +225,7 @@ impl ConversationService {
         Ok(agent_id)
     }
 
-    /// List all conversations in the default topic, ordered by most-recent activity.
+    /// List the conversations of the general scope, ordered by most-recent activity.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
         let topic = self.topic_store.general_scope().await?;
         let sessions = self.storage.list_by_topic(topic.id).await?;
