@@ -57,6 +57,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export attach workspace");
     client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
+    client::conversation::RecentSessionsResponse::export_all(&cfg).expect("export recent sessions");
     client::conversation::ConversationResponse::export_all(&cfg)
         .expect("export conversation response");
     client::conversation::CreateConversationRequest::export_all(&cfg)

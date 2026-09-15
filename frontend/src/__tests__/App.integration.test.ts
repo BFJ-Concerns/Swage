@@ -19,6 +19,7 @@ import * as agentDefinitionsApi from "../lib/api/agent-definitions";
 import * as conversationsApi from "../lib/api/conversations";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
+import * as sessionsApi from "../lib/api/sessions";
 import * as settingsApi from "../lib/api/settings";
 import * as topicsApi from "../lib/api/topics";
 import type { EffectiveAgentDefinitionResponse } from "../lib/protocol/EffectiveAgentDefinitionResponse";
@@ -124,6 +125,10 @@ vi.mock("../lib/api/materials", () => ({
   listTopicMaterials: vi.fn(),
   listSessionMaterials: vi.fn(),
   createMaterial: vi.fn(),
+}));
+
+vi.mock("../lib/api/sessions", () => ({
+  listRecentSessions: vi.fn(async () => []),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -247,6 +252,7 @@ function makeSettings(models: SettingsResponse["models"] = {}): SettingsResponse
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
+    sessions: { archive_after_days: 7 },
     restart_required: false,
     can_restart: false,
   };
@@ -423,6 +429,54 @@ describe("App", () => {
     await waitForText("Restored work");
 
     expect(conversationsApi.listConversations).toHaveBeenCalledWith("proj-restored");
+    expect(document.body.textContent).not.toContain("Choose where to work");
+  });
+
+  it("opens to the recent-sessions list and resumes a session from it", async () => {
+    const defaultTopic = makeTopic();
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([
+      {
+        source: {
+          kind: "conversation",
+          session: {
+            id: "conv-recent",
+            topic_id: defaultTopic.id,
+            topic_name: defaultTopic.name,
+            agent_id: "gateway",
+            origin: { kind: "direct" },
+            created_at: "2026-09-15T08:00:00Z",
+            last_activity: "2026-09-15T09:00:00Z",
+            message_preview: "Pick up where we left off",
+            has_interrupted_turn: false,
+            has_running_turn: false,
+          },
+        },
+        last_activity: "2026-09-15T09:00:00Z",
+        automated: [],
+      },
+    ]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: "conv-recent", topic_id: defaultTopic.id }),
+    );
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      makeConversationSummary({ id: "conv-recent", message_preview: "Pick up where we left off" }),
+    ]);
+
+    component = mount(App, { target: document.body });
+    await waitForText("Pick up where we left off");
+    expect(sessionsApi.listRecentSessions).toHaveBeenCalledWith(null, false);
+    // Both the recent list and the topic cards are on the front door.
+    expect(document.body.textContent).toContain("Choose where to work");
+
+    const row = document.querySelector<HTMLButtonElement>(".recent-sessions .row.source");
+    if (!row) throw new Error("recent session row missing");
+    flushSync(() => row.click());
+    await settleUi();
+
+    expect(window.location.pathname).toBe("/conversations/conv-recent");
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-recent");
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultTopic.id);
     expect(document.body.textContent).not.toContain("Choose where to work");
   });
 

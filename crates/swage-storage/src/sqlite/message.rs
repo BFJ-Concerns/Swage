@@ -266,6 +266,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "test-agent".to_string(),
+                origin: crate::model::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -546,6 +547,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "a".to_string(),
+                origin: crate::model::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

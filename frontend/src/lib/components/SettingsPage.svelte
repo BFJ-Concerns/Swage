@@ -120,6 +120,7 @@
       pricing: settings.pricing,
       observability: settings.observability,
       communication: settings.communication,
+      sessions: settings.sessions,
     });
   }
 
@@ -141,6 +142,7 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
+    settings.sessions.archive_after_days = Math.max(1, nullableNumber(settings.sessions.archive_after_days) ?? 7);
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
     try {

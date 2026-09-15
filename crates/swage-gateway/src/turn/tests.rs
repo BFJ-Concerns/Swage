@@ -1879,6 +1879,8 @@ impl SessionStore for MockStorage {
             id: Uuid::new_v4(),
             topic_id: session.topic_id,
             agent_id: session.agent_id,
+            origin: session.origin,
+            archived_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             metadata: session.metadata,
@@ -1887,6 +1889,109 @@ impl SessionStore for MockStorage {
         };
         self.db.lock().await.sessions.insert(s.id, s.clone());
         Ok(s)
+    }
+
+    async fn list_recent_sessions(
+        &self,
+        listing: swage_storage::SessionListing,
+    ) -> Result<Vec<swage_storage::SessionActivity>, StorageError> {
+        let db = self.db.lock().await;
+        let mut activities: Vec<swage_storage::SessionActivity> = db
+            .sessions
+            .values()
+            .filter(|session| {
+                listing
+                    .topic_id
+                    .is_none_or(|topic| session.topic_id == topic)
+            })
+            .filter(|session| session.archived_at.is_some() == listing.archived)
+            .map(|session| {
+                let thread_ids: Vec<Uuid> = db
+                    .threads
+                    .values()
+                    .filter(|thread| thread.session_id == session.id)
+                    .map(|thread| thread.id)
+                    .collect();
+                let latest = db
+                    .messages
+                    .iter()
+                    .filter(|message| thread_ids.contains(&message.thread_id))
+                    .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+                    .max_by_key(|message| (message.created_at, message.position));
+                let has_interrupted_turn = db.turns.values().any(|turn| {
+                    thread_ids.contains(&turn.thread_id) && turn.state == TurnState::Interrupted
+                });
+                swage_storage::SessionActivity {
+                    last_activity: latest.map_or(session.created_at, |message| message.created_at),
+                    latest_message: latest.map(|message| message.content.clone()),
+                    has_interrupted_turn,
+                    session: session.clone(),
+                }
+            })
+            .collect();
+        activities.sort_by(|a, b| {
+            b.last_activity
+                .cmp(&a.last_activity)
+                .then(b.session.created_at.cmp(&a.session.created_at))
+        });
+        Ok(activities)
+    }
+
+    async fn get_session_activity(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<swage_storage::SessionActivity>, StorageError> {
+        let archived = self
+            .db
+            .lock()
+            .await
+            .sessions
+            .get(&id)
+            .map(|session| session.archived_at.is_some());
+        let Some(archived) = archived else {
+            return Ok(None);
+        };
+        Ok(self
+            .list_recent_sessions(swage_storage::SessionListing {
+                topic_id: None,
+                archived,
+            })
+            .await?
+            .into_iter()
+            .find(|activity| activity.session.id == id))
+    }
+
+    async fn archive_inactive_sessions(
+        &self,
+        inactive_before: chrono::DateTime<chrono::Utc>,
+        exempt: &[Uuid],
+    ) -> Result<Vec<Uuid>, StorageError> {
+        let inactive: Vec<Uuid> = self
+            .list_recent_sessions(swage_storage::SessionListing::default())
+            .await?
+            .into_iter()
+            .filter(|activity| activity.last_activity < inactive_before)
+            .map(|activity| activity.session.id)
+            .filter(|id| !exempt.contains(id))
+            .collect();
+        let mut db = self.db.lock().await;
+        for id in &inactive {
+            if let Some(session) = db.sessions.get_mut(id) {
+                session.archived_at = Some(chrono::Utc::now());
+            }
+        }
+        Ok(inactive)
+    }
+
+    async fn unarchive_session(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut db = self.db.lock().await;
+        match db.sessions.get_mut(&id) {
+            Some(session) if session.archived_at.is_some() => {
+                session.archived_at = None;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
@@ -4617,6 +4722,7 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -4723,6 +4829,7 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: agent_id.to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4826,6 +4933,7 @@ async fn make_state_with_storage_and_root(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -4894,6 +5002,7 @@ async fn make_state_with_config_and_storage(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -5210,6 +5319,47 @@ async fn full_turn_stores_messages_and_completes() {
 }
 
 #[tokio::test]
+async fn a_turn_on_an_archived_session_returns_it_to_the_recent_list() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(
+        vec![StreamChunk::Done {
+            finish_reason: None,
+        }],
+        Arc::clone(&storage),
+    )
+    .await;
+    // Archive it the way the sweep would: every session, none exempt.
+    let archived = storage
+        .archive_inactive_sessions(chrono::Utc::now() + chrono::Duration::days(1), &[])
+        .await
+        .expect("archive");
+    assert_eq!(archived, vec![session_id]);
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Back again".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn should complete");
+
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("get session")
+        .expect("session exists");
+    assert_eq!(
+        session.archived_at, None,
+        "a turn is active execution: it unarchives"
+    );
+}
+
+#[tokio::test]
 async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let storage = Arc::new(MockStorage::new());
 
@@ -5219,6 +5369,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -5322,6 +5473,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -6622,6 +6774,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -6667,6 +6820,7 @@ pub(crate) async fn make_state_with_capturing_tools(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -6927,6 +7081,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -7397,6 +7552,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -7569,6 +7725,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -7727,6 +7884,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -7915,6 +8073,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
 
             active_workspace_attachment_id: None,
@@ -8593,6 +8752,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: dispatch_bound_metadata(&["upstream".to_string()]),
             active_workspace_attachment_id: None,
         })
@@ -9325,6 +9485,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "agent-a".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -9538,6 +9699,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -9753,6 +9915,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -9913,6 +10076,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "agent-a".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -10263,6 +10427,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "agent-a".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(serde_json::json!({
                 WORKFLOW_CALL_TOOLS_METADATA_KEY: ["delegate"],
             })),
@@ -10429,6 +10594,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -10545,6 +10711,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -10722,6 +10889,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: Some(default_attachment.id),
         })
@@ -10883,6 +11051,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: Some(repo_attachment.id),
         })
@@ -11208,6 +11377,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -11548,6 +11718,7 @@ async fn make_storage_with_session_metadata(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata,
             active_workspace_attachment_id: None,
         })
@@ -11968,6 +12139,7 @@ async fn process_turn_resolves_config_per_topic_and_completes_turn() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -12989,6 +13161,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -14150,6 +14323,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "delegate".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -16174,6 +16348,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })

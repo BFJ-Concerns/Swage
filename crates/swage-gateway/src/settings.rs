@@ -136,6 +136,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         pricing: config.pricing.clone(),
         observability: config.observability.clone(),
         communication: try_wire_from_config(config.communication)?,
+        sessions: try_wire_from_config(config.sessions)?,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
     })
@@ -161,12 +162,14 @@ pub async fn save_settings(
         pricing,
         observability,
         communication,
+        sessions,
     } = request;
 
     let tool_permissions: Option<swage_config::ToolPermissionConfig> =
         config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
+    let sessions: Option<swage_config::SessionsConfig> = config_from_wire(sessions)?;
 
     let mut providers = HashMap::new();
     for (provider_id, provider) in requested_providers {
@@ -236,6 +239,7 @@ pub async fn save_settings(
         pricing.clone(),
         observability.clone(),
         communication.clone(),
+        sessions.clone(),
     )?;
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
@@ -281,6 +285,7 @@ pub async fn save_settings(
         observability.unwrap_or_else(|| runtime_config.observability.clone());
     runtime_config.communication =
         communication.unwrap_or_else(|| runtime_config.communication.clone());
+    runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
     let tool_dispatcher = crate::startup::build_tool_dispatcher(
@@ -584,6 +589,7 @@ fn settings_response_from_saved_config(
         pricing: wire_from_config(active_config.pricing),
         observability: wire_from_config(active_config.observability),
         communication: wire_from_config(active_config.communication),
+        sessions: wire_from_config(active_config.sessions),
         restart_required: true,
         can_restart: state.managed_gateway,
     }
@@ -698,6 +704,13 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
             "communication TTL and expiry interval must be positive".to_string(),
         ));
     }
+    if let Some(sessions) = &request.sessions
+        && sessions.archive_after_days == 0
+    {
+        return Err(ApiError::validation(
+            "sessions archive delay must be at least one day".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -711,7 +724,13 @@ fn apply_runtime_settings_to_partial(
     pricing: Option<swage_config::PricingConfig>,
     observability: Option<swage_config::ObservabilityConfig>,
     communication: Option<swage_config::CommunicationConfig>,
+    sessions: Option<swage_config::SessionsConfig>,
 ) -> Result<(), ApiError> {
+    if let Some(sessions) = sessions {
+        partial.sessions = Some(swage_config::merge::PartialSessionsConfig {
+            archive_after_days: Some(sessions.archive_after_days),
+        });
+    }
     if let Some(tool_runtime) = tool_runtime {
         let tools = partial.tools.get_or_insert_with(Default::default);
         tools.shell_timeout_secs = Some(tool_runtime.shell_timeout_secs);
@@ -1468,6 +1487,7 @@ mod tests {
             pricing: None,
             observability: None,
             communication: None,
+            sessions: None,
         };
 
         let response = save_settings(&state, request)
@@ -1599,6 +1619,7 @@ mod tests {
             pricing: None,
             observability: None,
             communication: None,
+            sessions: None,
         };
         save_settings(&state, request)
             .await
@@ -1741,6 +1762,7 @@ mod tests {
             pricing: None,
             observability: None,
             communication: None,
+            sessions: None,
         };
 
         let response = save_settings(&state, request)
@@ -1863,6 +1885,7 @@ mod tests {
             pricing: Some(wire_from_config(pricing)),
             observability: Some(wire_from_config(observability)),
             communication: Some(wire_from_config(communication.clone())),
+            sessions: None,
         };
 
         let response = save_settings(&state, request)
@@ -1907,6 +1930,7 @@ mod tests {
             pricing: None,
             observability: None,
             communication: None,
+            sessions: None,
         };
 
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
@@ -2003,6 +2027,7 @@ mod tests {
                 timeout: 10,
                 budget: Some(8192),
             }),
+            None,
             None,
             None,
             None,

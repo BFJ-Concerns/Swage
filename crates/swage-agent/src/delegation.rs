@@ -177,8 +177,10 @@ impl DelegationExecutor {
     /// Execute a delegation: instantiate the target agent, run it, and deliver
     /// the result back to the sender.
     ///
-    /// `topic_id` is the topic the child session should belong to (inherited
-    /// from the parent session). `target_config` and `target_tool_dispatcher`
+    /// `sender_session_id` is the parent session when the delegation comes
+    /// from a turn; a fresh child records it as its origin. `topic_id` is the
+    /// topic the child session should belong to (inherited from the parent
+    /// session). `target_config` and `target_tool_dispatcher`
     /// are resolved by the caller (gateway) from the config cascade.
     /// `cancel_token` is a child token for this delegation: cancelling the
     /// parent turn cascades into the delegate, while delegate-specific cancel
@@ -188,6 +190,7 @@ impl DelegationExecutor {
         &self,
         delegate_msg: &AgentMessage,
         sender_turn_id: Option<Uuid>,
+        sender_session_id: Option<Uuid>,
         topic_id: Uuid,
         target_config: AgentConfig,
         target_context_transfer_config: swage_config::ContextTransferConfig,
@@ -240,6 +243,15 @@ impl DelegationExecutor {
                     .create_session(NewSession {
                         topic_id,
                         agent_id: target_agent_id.clone(),
+                        // A child opened from a session sits beneath it in the
+                        // recent list; one opened from outside any session
+                        // (the delegation API) is a top-level entry.
+                        origin: sender_session_id.map_or(
+                            swage_storage::SessionOrigin::Direct,
+                            |parent_session_id| swage_storage::SessionOrigin::Delegation {
+                                parent_session_id,
+                            },
+                        ),
                         metadata: Some(session_metadata),
                         active_workspace_attachment_id: None,
                     })
@@ -846,6 +858,7 @@ mod tests {
             .execute_delegation(
                 &delegate_message,
                 None,
+                None,
                 topic.id,
                 config,
                 swage_config::ContextTransferConfig::default(),
@@ -930,6 +943,7 @@ mod tests {
         let error = executor
             .execute_delegation(
                 &delegate_message,
+                None,
                 None,
                 topic.id,
                 AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]),

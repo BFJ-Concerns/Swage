@@ -114,6 +114,10 @@
     if (conv?.topic_id && topicStore.currentTopic?.id !== conv.topic_id) {
       await topicStore.selectTopic(conv.topic_id);
       await conversationStore.loadConversations(conv.topic_id);
+    } else if (conv && !conv.topic_id && !topicStore.currentTopic) {
+      // Resuming a general-scope session from the recent list: the sidebar
+      // shows the general scope's conversations beside it.
+      await conversationStore.loadConversations(null);
     }
 
     connectionStore.connectTo(id);
@@ -376,6 +380,15 @@
     void createAndNavigate();
   }
 
+  // Back to the front door: no topic open, no conversation selected, so the
+  // recent-sessions list owns the body again.
+  function showRecentSessions(): void {
+    connectionStore.disconnect();
+    conversationStore.clearActiveConversation();
+    topicStore.closeTopic();
+    router.navigate("/");
+  }
+
   // Called by TopicSelector when the user switches topics.
   // Reloads the conversation list for the newly active topic and clears
   // any cross-topic UI state (active conversation, WebSocket connection).
@@ -475,6 +488,7 @@
     {topicStore}
     onTopicChange={handleTopicChange}
     onStartWithoutTopic={startWithoutTopic}
+    onOpenSessions={showRecentSessions}
     onRetry={handleRetry}
     {activeSurface}
     {surfacesStore}

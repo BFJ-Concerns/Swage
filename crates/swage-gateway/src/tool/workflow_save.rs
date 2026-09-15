@@ -324,6 +324,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "current-agent".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

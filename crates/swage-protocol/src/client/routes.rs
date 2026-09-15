@@ -17,7 +17,7 @@ use super::{
     context::TurnContextResponse,
     conversation::{
         ConversationDetail, ConversationListResponse, ConversationResponse,
-        CreateConversationRequest,
+        CreateConversationRequest, RecentSessionsResponse,
     },
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
@@ -261,6 +261,32 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 201,
                 body: schema::<ConversationResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_recent_sessions",
+            method: Method::Get,
+            path: "/api/sessions",
+            path_parameters: vec![],
+            query_parameters: vec![
+                QueryParameter {
+                    name: "topic_id",
+                    kind: ParameterType::Uuid,
+                    required: false,
+                },
+                QueryParameter {
+                    name: "archived",
+                    kind: ParameterType::String,
+                    required: false,
+                },
+            ],
+            summary: "The recent-sessions list across every scope, newest activity first, automated sessions grouped beneath their source; `topic_id` narrows to a topic and `archived=true` lists the archived sessions instead.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<RecentSessionsResponse>(),
             },
         },
         Route {

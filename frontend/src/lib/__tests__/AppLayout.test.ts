@@ -14,6 +14,10 @@ import type { ConversationDetail, ConversationSummary, MessageView } from "../ty
 
 import * as operatorApi from "../api/operator";
 
+vi.mock("../api/sessions", () => ({
+  listRecentSessions: vi.fn(async () => []),
+}));
+
 vi.mock("../api/operator", () => ({
   fetchOperatorOverview: vi.fn(),
   approvePendingAction: vi.fn(),

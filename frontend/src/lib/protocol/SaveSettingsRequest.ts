@@ -8,7 +8,8 @@ import type { ObservabilityConfig } from "./ObservabilityConfig";
 import type { PricingConfig } from "./PricingConfig";
 import type { SandboxConfig } from "./SandboxConfig";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
+import type { SessionsConfig } from "./SessionsConfig";
 import type { ToolPermissionConfig } from "./ToolPermissionConfig";
 import type { ToolRuntimeSettings } from "./ToolRuntimeSettings";
 
-export type SaveSettingsRequest = { default_provider: string, providers: { [key in string]: SaveProviderSettings }, default_model: string, models: { [key in string]: ModelSettings }, generation_presets?: { [key in string]: GenerationPresetConfig }, tool_runtime?: ToolRuntimeSettings | null, tool_permissions?: ToolPermissionConfig | null, hitl?: HitlConfig | null, sandbox?: SandboxConfig | null, context?: ContextConfig | null, pricing?: PricingConfig | null, observability?: ObservabilityConfig | null, communication?: CommunicationConfig | null, };
+export type SaveSettingsRequest = { default_provider: string, providers: { [key in string]: SaveProviderSettings }, default_model: string, models: { [key in string]: ModelSettings }, generation_presets?: { [key in string]: GenerationPresetConfig }, tool_runtime?: ToolRuntimeSettings | null, tool_permissions?: ToolPermissionConfig | null, hitl?: HitlConfig | null, sandbox?: SandboxConfig | null, context?: ContextConfig | null, pricing?: PricingConfig | null, observability?: ObservabilityConfig | null, communication?: CommunicationConfig | null, sessions?: SessionsConfig | null, };

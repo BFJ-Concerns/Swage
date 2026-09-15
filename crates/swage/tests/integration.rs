@@ -147,6 +147,7 @@ async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "agent-a".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
         })
         .await
@@ -433,6 +434,7 @@ async fn facade_storage_round_trips_session_metadata() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "agent-a".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(metadata.clone()),
         })
         .await

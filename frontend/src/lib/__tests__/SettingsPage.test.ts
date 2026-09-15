@@ -148,6 +148,7 @@ function emptySettings(): SettingsResponse {
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
+    sessions: { archive_after_days: 7 },
     restart_required: false,
     can_restart: false,
   };
@@ -182,6 +183,7 @@ describe("SettingsPage", () => {
       pricing: payload.pricing ?? emptySettings().pricing,
       observability: payload.observability ?? emptySettings().observability,
       communication: payload.communication ?? emptySettings().communication,
+      sessions: payload.sessions ?? emptySettings().sessions,
       restart_required: true,
       can_restart: false,
     }));
@@ -494,6 +496,26 @@ describe("SettingsPage", () => {
       gate: null,
     });
     expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
+  });
+
+  it("saves the session archive delay from the automation tab", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    const delay = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    );
+    if (!delay) throw new Error("Archive delay input was not rendered");
+    expect(delay.value).toBe("7");
+    delay.value = "14";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+
+    const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
+    expect(payload.sessions).toEqual({ archive_after_days: 14 });
   });
 
   it("blocks fresh schedule creation when no topic is selected", async () => {

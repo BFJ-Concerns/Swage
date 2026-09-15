@@ -13,14 +13,28 @@ without either.
 
 ## Open a topic
 
-Opening the web UI presents the topic picker — a grid of the topics this
-gateway knows about. A fresh install has no topics: a conversation started
-without one runs as a general assistant in the general scope, with general
-memory and the general knowledge base, and inherits nothing from any topic.
-Create a topic from the picker when work should keep its own memory,
-attached workspaces and configuration; click its card to preview it (its
-name, last-opened time, conversation count, and any attached workspaces
-appear below the grid), then click **Open** to enter it.
+Opening the web UI presents the recent-sessions list — every session across
+every topic and the general scope, newest message first — with the topic
+cards beneath it. **All sessions** is the default view; the topic buttons
+narrow the list to one topic without opening it, and **Archived** shows the
+sessions the inactivity sweep has hidden. Automated sessions (a schedule's
+runs, a workflow's workers, delegated children) sit beneath the conversation
+or schedule that caused them, each still its own session. Select any entry
+to resume it; **All sessions** in the top bar returns here.
+
+A fresh install has no topics: a conversation started without one runs as a
+general assistant in the general scope, with general memory and the general
+knowledge base, and inherits nothing from any topic. Create a topic from the
+cards when work should keep its own memory, attached workspaces and
+configuration; click a card to preview it (its name, last-opened time,
+conversation count, and any attached workspaces appear below the grid), then
+click **Open** to enter it.
+
+Sessions nobody has spoken in for seven days leave the recent list. The
+delay is set under **Settings → Automation → Session archiving**. Only a
+session with a turn executing stays regardless of age; a new turn on an
+archived session brings it back, and archiving cancels nothing and blocks no
+scheduled continuation.
 
 A topic is an isolated working area: it holds its own conversations,
 agents, instructions, skills, and workspace attachments. The general scope

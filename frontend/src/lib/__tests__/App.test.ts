@@ -89,6 +89,10 @@ vi.mock("../api/conversations", () => ({
   deleteConversation: vi.fn(),
 }));
 
+vi.mock("../api/sessions", () => ({
+  listRecentSessions: vi.fn(async () => []),
+}));
+
 vi.mock("../api/settings", () => ({
   fetchSettings: vi.fn(async () => ({ models: {}, default_model: null })),
 }));

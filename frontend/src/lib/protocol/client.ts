@@ -13,6 +13,7 @@ import type { CreateTopicRequest } from "./CreateTopicRequest";
 import type { DeleteSurfaceAnnotationResponse } from "./DeleteSurfaceAnnotationResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
+import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
@@ -93,6 +94,15 @@ export async function listConversations(): Promise<ConversationListResponse> {
 /** Create a conversation without a topic: a general assistant in the general scope. */
 export async function createConversation(body?: CreateConversationRequest): Promise<ConversationResponse> {
   return request<ConversationResponse>("POST", `/api/conversations`, body);
+}
+
+/** The recent-sessions list across every scope, newest activity first, automated sessions grouped beneath their source; `topic_id` narrows to a topic and `archived=true` lists the archived sessions instead. */
+export async function listRecentSessions(topicId?: string, archived?: string): Promise<RecentSessionsResponse> {
+  const query = new URLSearchParams();
+  if (topicId !== undefined) query.set("topic_id", topicId);
+  if (archived !== undefined) query.set("archived", archived);
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<RecentSessionsResponse>("GET", `/api/sessions${suffix}`);
 }
 
 /** List conversations in a topic. */

@@ -25,6 +25,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "hitl",
     "communication",
     "scheduling",
+    "sessions",
     "channels",
 ];
 
@@ -73,6 +74,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "expiry_interval_secs",
         ],
         "scheduling" => &["run_history_max_age_days", "run_history_max_per_schedule"],
+        "sessions" => &["archive_after_days"],
         // telegram has a fixed nested schema validated by
         // `validate_channels_telegram_table`.
         "channels" => &["telegram"],
@@ -182,6 +184,7 @@ fn check_field_type(
         ("scheduling", "run_history_max_per_schedule") => {
             ("integer", matches!(value, Value::Integer(_)))
         }
+        ("sessions", "archive_after_days") => ("integer", matches!(value, Value::Integer(_))),
         ("channels", "telegram") => ("table", matches!(value, Value::Table(_))),
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
@@ -388,6 +391,21 @@ fn check_field_semantics(
                     ConfigProblemKind::SemanticError {
                         message: format!(
                             "scheduling.run_history_max_per_schedule must be a positive integer, got {t}"
+                        ),
+                    },
+                ));
+            }
+        }
+        ("sessions", "archive_after_days") => {
+            if let Value::Integer(t) = value
+                && *t < 1
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "sessions.archive_after_days must be a positive integer, got {t}"
                         ),
                     },
                 ));
@@ -1888,6 +1906,26 @@ allowed_fields = ["user"]
             problems.is_empty(),
             "valid [communication] should produce no errors, got: {problems:?}"
         );
+    }
+
+    #[test]
+    fn sessions_section_validates_and_rejects_a_zero_delay() {
+        let problems = validate_toml_string(
+            "[sessions]\narchive_after_days = 14\n",
+            &path("config.toml"),
+        );
+        assert!(
+            problems.is_empty(),
+            "valid [sessions] should pass, got: {problems:?}"
+        );
+
+        let problems =
+            validate_toml_string("[sessions]\narchive_after_days = 0\n", &path("config.toml"));
+        assert_eq!(problems.len(), 1, "zero days is not a delay: {problems:?}");
+        assert!(matches!(
+            problems[0].kind,
+            ConfigProblemKind::SemanticError { .. }
+        ));
     }
 
     #[test]

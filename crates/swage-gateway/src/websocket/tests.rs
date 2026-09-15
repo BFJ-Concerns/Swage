@@ -598,6 +598,8 @@ async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStora
             id: session_id,
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
+            archived_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             metadata: None,

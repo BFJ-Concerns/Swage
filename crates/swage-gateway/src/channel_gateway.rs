@@ -273,6 +273,7 @@ async fn ensure_session_for_origin(
             .create_session(NewSession {
                 topic_id: link.topic_id,
                 agent_id: link.agent_id.clone(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
                         "integration": origin.integration,
@@ -325,6 +326,7 @@ async fn ensure_session_for_origin(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(serde_json::json!({
                 "channel_origin": {
                     "integration": origin.integration,
@@ -934,6 +936,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

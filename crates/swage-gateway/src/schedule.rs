@@ -1092,7 +1092,14 @@ async fn run_body(
             let service =
                 ConversationService::new(state.storage.clone(), state.topic_store.clone());
             let conversation = service
-                .create_session_in_topic_for_agent(*topic_id, agent_id, None)
+                .create_session_in_topic_for_agent(
+                    *topic_id,
+                    agent_id,
+                    swage_storage::SessionOrigin::ScheduleRun {
+                        schedule_id: schedule.id,
+                    },
+                    None,
+                )
                 .await?;
             let input = compose_fresh_opening(&schedule.message, previous_outcome.as_deref());
             (conversation.id, agent_id.clone(), input)
@@ -1870,6 +1877,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -2021,6 +2029,7 @@ mod tests {
             topic_id: topic.id,
             parent_run_id: None,
             parent_seq: None,
+            dispatching_session_id: None,
             script_version_id: None,
             inline_workflow_id: None,
             inline_workflow_name: Some(name.into()),

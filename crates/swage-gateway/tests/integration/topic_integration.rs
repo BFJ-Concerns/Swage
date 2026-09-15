@@ -592,3 +592,80 @@ async fn deleting_topic_does_not_affect_other_topics() {
         http_json(&router, "GET", &format!("/api/topics/{topic_b_id}"), None).await;
     assert_eq!(get_status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// The recent-sessions list over HTTP
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recent_list_spans_topics_and_the_general_scope_and_narrows_by_topic() {
+    let (router, _storage) = make_test_router();
+
+    let (_, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({ "name": "Alpha" })),
+    )
+    .await;
+    let topic_id = topic["id"].as_str().expect("topic id");
+    let (_, in_topic) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let (_, in_general) = http_json(&router, "POST", "/api/conversations", None).await;
+
+    let (status, everywhere) = http_json(&router, "GET", "/api/sessions", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = everywhere["entries"].as_array().expect("entries");
+    let mut ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| {
+            entry["source"]["session"]["id"]
+                .as_str()
+                .expect("session id")
+        })
+        .collect();
+    ids.sort_unstable();
+    let mut expected = vec![
+        in_topic["id"].as_str().expect("id"),
+        in_general["id"].as_str().expect("id"),
+    ];
+    expected.sort_unstable();
+    assert_eq!(ids, expected, "the default list spans every scope");
+    for entry in entries {
+        assert_eq!(entry["source"]["kind"], "conversation");
+        assert_eq!(entry["source"]["session"]["origin"]["kind"], "direct");
+        assert_eq!(entry["automated"], json!([]));
+    }
+    let general_entry = entries
+        .iter()
+        .find(|entry| entry["source"]["session"]["id"] == in_general["id"])
+        .expect("general entry");
+    assert!(general_entry["source"]["session"].get("topic_id").is_none());
+    assert_eq!(general_entry["source"]["session"]["topic_name"], "General");
+
+    let (status, narrowed) = http_json(
+        &router,
+        "GET",
+        &format!("/api/sessions?topic_id={topic_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let narrowed = narrowed["entries"].as_array().expect("entries");
+    assert_eq!(narrowed.len(), 1);
+    assert_eq!(narrowed[0]["source"]["session"]["id"], in_topic["id"]);
+    assert_eq!(narrowed[0]["source"]["session"]["topic_name"], "Alpha");
+
+    let (status, archived) = http_json(&router, "GET", "/api/sessions?archived=true", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        archived["entries"],
+        json!([]),
+        "nothing is archived on a fresh install"
+    );
+}

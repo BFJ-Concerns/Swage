@@ -914,6 +914,7 @@ pub struct ConversationListResponse {
 }
 
 pub use swage_protocol::client::conversation::CreateConversationRequest;
+use swage_protocol::client::conversation::RecentSessionsResponse;
 
 // ---------------------------------------------------------------------------
 // Route handlers
@@ -945,6 +946,35 @@ pub async fn list_conversations(
         .with_config(config, state.config_root);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
+}
+
+/// Query parameters for the recent-sessions list.
+#[derive(Debug, Default, Deserialize)]
+pub struct RecentSessionsQuery {
+    /// Narrow to one topic's sessions; absent lists every scope.
+    pub topic_id: Option<Uuid>,
+    /// List the archived sessions instead of the live ones.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// `GET /api/sessions` — the recent-sessions list across every scope.
+///
+/// Returns 200 with `{ entries: [...] }`, newest activity first, automated
+/// sessions grouped beneath their source.
+pub async fn list_recent_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<RecentSessionsQuery>,
+) -> Result<Json<RecentSessionsResponse>, ApiError> {
+    let response = crate::recent_sessions::list_recent_sessions(
+        &state,
+        swage_storage::SessionListing {
+            topic_id: query.topic_id,
+            archived: query.archived,
+        },
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/conversations/:id` — get a conversation with full message history.
@@ -1705,6 +1735,7 @@ async fn execute_external_delegate_message(
         .execute_delegation(
             &delegate_msg,
             sender_turn_id,
+            None,
             topic_id,
             target_agent_config,
             target_context_transfer_config,
@@ -4271,6 +4302,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4280,6 +4312,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4328,6 +4361,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 topic_id: topic_a.id,
                 agent_id: "gateway".to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4337,6 +4371,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 topic_id: topic_b.id,
                 agent_id: "gateway".to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4346,6 +4381,7 @@ mod tests {
             .create_session(swage_storage::model::NewSession {
                 topic_id: topic_b.id,
                 agent_id: "gateway".to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -4671,6 +4707,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "operator".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

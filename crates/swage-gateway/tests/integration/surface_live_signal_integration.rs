@@ -133,6 +133,7 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "assistant".into(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })

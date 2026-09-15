@@ -814,6 +814,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "researcher".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(json!({
                     (crate::turn::AGENT_CALL_SCOPE_METADATA_KEY): "entry-77"
                 })),
@@ -1045,6 +1046,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "curator".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -1266,6 +1268,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "researcher".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -1355,6 +1358,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "curator".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

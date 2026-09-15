@@ -419,6 +419,17 @@ pub struct CommunicationConfig {
     pub expiry_interval_secs: u64,
 }
 
+/// Session list housekeeping.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SessionsConfig {
+    /// Days without a user or assistant message after which a session leaves
+    /// the recent list. Only a session with a turn executing is exempt, and
+    /// a new turn on an archived session brings it back.
+    #[ts(type = "number")]
+    pub archive_after_days: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 pub struct SettingsResponse {
     pub providers: HashMap<String, ProviderSettings>,
@@ -434,6 +445,7 @@ pub struct SettingsResponse {
     pub pricing: PricingConfig,
     pub observability: ObservabilityConfig,
     pub communication: CommunicationConfig,
+    pub sessions: SessionsConfig,
     pub restart_required: bool,
     pub can_restart: bool,
 }
@@ -471,6 +483,9 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub communication: Option<CommunicationConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub sessions: Option<SessionsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

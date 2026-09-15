@@ -235,6 +235,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "current-agent".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(json!({
                     "dispatch_bound_agent_ids": ["ancestor-agent"],
                     "dispatch_bound_task_definition_ids": ["ancestor-task"]
@@ -336,6 +337,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

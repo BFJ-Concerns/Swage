@@ -189,6 +189,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: crate::model::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
                         "integration": "dev_dm",
