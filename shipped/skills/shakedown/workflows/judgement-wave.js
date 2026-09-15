@@ -50,7 +50,7 @@ const JUDGE_MODEL_BY_DRIVER_FAMILY = { gpt: "claude-opus-5", claude: "gpt-5.6-te
 // other's output. Width is the run's (its max_concurrent_agent_calls
 // budget), not the script's. Escalation is the seat's: a rejected coverage
 // claim or null return re-dispatches between waves, never inside this
-// script. Every evidenceDir must sit inside a directory the space has
+// script. Every evidenceDir must sit inside a directory the topic has
 // attached — placement never widens the run's filesystem authority.
 //
 // OUTPUT: { sessions: [{ id, sweep, deep, combined }] } — each leg the

@@ -16,7 +16,7 @@ orchestration around them is not.
 You can write a workflow and run it in the same conversation, on a whim:
 nothing has to be saved or registered first. Run an inline script
 directly with `workflow_run` (`source`); save it only when it has earned
-reuse. Saved workflows belong to the space; shipped workflows arrive with
+reuse. Saved workflows belong to the topic; shipped workflows arrive with
 the skills that carry them and are listed beside your own (`workflow_list`
 shows every name available to this session; a saved workflow of the same
 name takes precedence over a carried one).
@@ -53,8 +53,8 @@ export const meta = {
   description: "Summarise the README.",
   argumentSchema: {
     "type": "object",
-    "required": ["topic"],
-    "properties": { "topic": { "type": "string" } }
+    "required": ["subject"],
+    "properties": { "subject": { "type": "string" } }
   }
 };
 export const defaults = { model: "gpt-5.6-terra", effort: "low" };
@@ -63,7 +63,7 @@ export const defaults = { model: "gpt-5.6-terra", effort: "low" };
 // started — the `args` field of workflow_run, or the parent's second
 // argument to workflow(). It is null when nothing was supplied.
 
-const reply = await agent(`Summarise the README's coverage of ${args.topic}.`, {
+const reply = await agent(`Summarise the README's coverage of ${args.subject}.`, {
   model: "claude-sonnet-5",
   effort: "low",
 });
@@ -110,7 +110,7 @@ return { reply };
     worker runs to completion.
   - `cwd` — the directory the worker's tools operate in; it must be a
     directory this run is allowed to place workers in (a workspace
-    attachment of the space).
+    attachment of the topic).
   - `isolation: "worktree"` — give the worker its own provisioned
     worktree of the `cwd` repository, so parallel siblings never share
     a mutable tree.
@@ -265,7 +265,7 @@ while (pending.length > 0) {
 
 **`workflow(name, args)`** — run a saved or carried workflow as a child
 run and resolve to the child's return value (`null` when it returned
-nothing). `name` resolves exactly as `workflow_run` would — the space's
+nothing). `name` resolves exactly as `workflow_run` would — the topic's
 saved workflow first, then the workflows carried by this session's
 skills. The child receives `args` as its own `args` global and is
 journalled against this run, so a resumed parent finds it rather than
@@ -450,7 +450,7 @@ writing your own long-run shape.
 ## Saving and reuse
 
 Save a script when it has earned reuse; it becomes a named, versioned
-space workflow, startable by name (and by other workflows via
+topic workflow, startable by name (and by other workflows via
 `workflow()`). Update appends a new version; runs record exactly which
 version (or inline source) ran. An agent-authored inline script carries no
 delivery grant. Saved workflows may carry an operator-configured grant, but

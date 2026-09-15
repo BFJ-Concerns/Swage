@@ -318,7 +318,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
         .unwrap()["id"]
         .as_str()
         .unwrap();
-    let started: Value = client.post(format!("{base}/api/workflow-scripts/{script_id}/runs")).json(&json!({"args":{"topic":"contract evidence","purpose":"prove the staged research contract"},"budget":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let started: Value = client.post(format!("{base}/api/workflow-scripts/{script_id}/runs")).json(&json!({"args":{"subject":"contract evidence","purpose":"prove the staged research contract"},"budget":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     let run_id = started["id"].as_str().unwrap();
     let detail = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -339,7 +339,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     })
     .await
     .unwrap();
-    assert_eq!(detail["run"]["final_output"]["topic"], "contract evidence");
+    assert_eq!(detail["run"]["final_output"]["subject"], "contract evidence");
     assert_eq!(
         detail["run"]["final_output"]["failed_sources"][0]["url"],
         "https://example.test/failed"
@@ -365,7 +365,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
             .iter()
             .any(|prompt| prompt.contains("Deliver research findings"))
     );
-    // The topic names the sweep for every worker. The purpose steers the
+    // The subject names the sweep for every worker. The purpose steers the
     // stages that choose and judge material — scoping and synthesis; gather
     // workers receive the per-source contribution the scout derived from it,
     // and the organiser curates the corpus purpose-agnostically.
@@ -386,7 +386,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
         for prompt in stage_prompts {
             assert!(
                 prompt.contains("contract evidence"),
-                "{stage_marker} must receive the submitted topic: {prompt}"
+                "{stage_marker} must receive the submitted subject: {prompt}"
             );
             if carries_purpose {
                 assert!(
