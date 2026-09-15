@@ -11,14 +11,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
-  import AutomationSettingsSurface from "./settings/AutomationSettingsSurface.svelte";
+  import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
   import CommandsPanel from "./CommandsPanel.svelte";
-  import DisplayPreferencesSettingsSurface from "./settings/DisplayPreferencesSettingsSurface.svelte";
-  import GenerationSettingsSurface from "./settings/GenerationSettingsSurface.svelte";
-  import InformationalSettingsSurface from "./settings/InformationalSettingsSurface.svelte";
-  import ProviderSettingsSurface from "./settings/ProviderSettingsSurface.svelte";
-  import RecoverySettingsSurface from "./settings/RecoverySettingsSurface.svelte";
+  import DisplayPreferencesSettingsPanel from "./settings/DisplayPreferencesSettingsPanel.svelte";
+  import GenerationSettingsPanel from "./settings/GenerationSettingsPanel.svelte";
+  import InformationalSettingsPanel from "./settings/InformationalSettingsPanel.svelte";
+  import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
+  import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
   import SkillsPanel from "./SkillsPanel.svelte";
   import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
 
@@ -328,7 +328,7 @@
         replace this shell with a real list bound to that endpoint.
         ---
       -->
-      <InformationalSettingsSurface {tab} />
+      <InformationalSettingsPanel {tab} />
     {:else if tab === "channels"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
@@ -343,7 +343,7 @@
         How to apply: extend swage-gateway with channel CRUD, then bind here.
         ---
       -->
-      <InformationalSettingsSurface {tab} />
+      <InformationalSettingsPanel {tab} />
     {:else if tab === "devices"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
@@ -356,7 +356,7 @@
         view first; design a registration flow before building the form.
         ---
       -->
-      <InformationalSettingsSurface {tab} />
+      <InformationalSettingsPanel {tab} />
     {:else if tab === "voice"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
@@ -372,11 +372,11 @@
         shell with the real form.
         ---
       -->
-      <InformationalSettingsSurface {tab} />
+      <InformationalSettingsPanel {tab} />
     {:else if tab === "recovery"}
-      <RecoverySettingsSurface />
+      <RecoverySettingsPanel />
     {:else if tab === "display"}
-      <DisplayPreferencesSettingsSurface />
+      <DisplayPreferencesSettingsPanel />
     {:else if tab === "account"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
@@ -389,7 +389,7 @@
         How to apply: revisit when remote identity / multi-host work begins.
         ---
       -->
-      <InformationalSettingsSurface {tab} />
+      <InformationalSettingsPanel {tab} />
     {/if}
   {:else if !settings}
     <p class="loading">Loading settings…</p>
@@ -438,16 +438,16 @@
     {/if}
 
     {#if tab === "providers"}
-      <ProviderSettingsSurface
+      <ProviderSettingsPanel
         bind:settings
         {savedProviderIds}
         {isPersisting}
         bind:error
       />
     {:else if tab === "generation"}
-      <GenerationSettingsSurface bind:settings />
+      <GenerationSettingsPanel bind:settings />
     {:else if tab === "automation"}
-      <AutomationSettingsSurface
+      <AutomationSettingsPanel
         bind:settings
         {topicId}
         {topics}

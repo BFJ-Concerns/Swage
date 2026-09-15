@@ -19,7 +19,7 @@ import topicPicker from "../components/TopicPicker.svelte?raw";
 import topicSelector from "../components/TopicSelector.svelte?raw";
 import toolCallDisplay from "../components/ToolCallDisplay.svelte?raw";
 import turnContextInspector from "../components/TurnContextInspector.svelte?raw";
-import displayPreferences from "../components/settings/DisplayPreferencesSettingsSurface.svelte?raw";
+import displayPreferences from "../components/settings/DisplayPreferencesSettingsPanel.svelte?raw";
 import codexProviderAuthentication from "../components/settings/CodexProviderAuthentication.svelte?raw";
 import providerConfiguration from "../components/settings/ProviderConfiguration.svelte?raw";
 import providerCreation from "../components/settings/ProviderCreation.svelte?raw";
@@ -41,7 +41,7 @@ const RETINTED_COMPONENTS = {
   TopicSelector: topicSelector,
   ToolCallDisplay: toolCallDisplay,
   TurnContextInspector: turnContextInspector,
-  DisplayPreferencesSettingsSurface: displayPreferences,
+  DisplayPreferencesSettingsPanel: displayPreferences,
   CodexProviderAuthentication: codexProviderAuthentication,
   ProviderConfiguration: providerConfiguration,
   ProviderCreation: providerCreation,
