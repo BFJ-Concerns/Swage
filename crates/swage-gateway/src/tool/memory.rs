@@ -62,7 +62,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read and write the topic's shared memory files — named markdown notes that persist in the topic and are visible to every agent working there. For private records only you will search later, use the agent_memory tool instead."
+        "Read and write the shared memory files of this session's scope — its topic's, or the general memory when no topic is selected: named markdown notes that persist there and are visible to every agent working in that scope. For private records only you will search later, use the agent_memory tool instead."
     }
 
     fn parameters(&self) -> Value {

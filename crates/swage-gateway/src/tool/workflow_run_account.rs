@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_reads_the_ending_the_partition_and_the_recovered_work() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = run_in(&storage, topic.id).await;
         storage
             .set_workflow_run_terminal_account(run_id, recorded_account())
@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_still_going_reads_as_unended_rather_than_missing() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = run_in(&storage, topic.id).await;
         let session = storage
             .create_session(NewSession {
@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_cannot_read_a_terminal_account_outside_the_recorded_contract() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = run_in(&storage, topic.id).await;
         storage
             .set_workflow_run_terminal_account(run_id, json!({"ending": "invented"}))
@@ -325,7 +325,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_in_another_topic_reads_as_absent() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let other = TopicStore::create(
             &*storage,
             NewTopic {

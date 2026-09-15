@@ -61,7 +61,7 @@ mod tests {
     async fn make_workspace_service() -> (WorkspaceAttachmentService, Arc<SqliteStorage>, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
         let topic = storage
-            .get_or_create_default()
+            .general_scope()
             .await
             .expect("default topic should exist");
         let state = crate::state::AppState::new(
@@ -352,9 +352,10 @@ mod tests {
             .await
             .expect("create should succeed");
 
-        // Non-nil UUID expected.
+        // Non-nil UUID expected; a conversation created without a topic
+        // runs in the general scope and projects no topic.
         assert_ne!(resp.id, Uuid::nil());
-        assert_ne!(resp.topic_id, Uuid::nil());
+        assert_eq!(resp.topic_id, None);
     }
 
     #[tokio::test]
@@ -710,7 +711,7 @@ default_effort = "high"
     #[tokio::test(flavor = "multi_thread")]
     async fn create_topic_session_accepts_a_definition_scoped_to_that_topic() {
         let (svc, storage) = make_definition_service();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         storage
             .upsert_agent_definition(definition("triage", Some(topic.id)))
             .await
@@ -735,7 +736,7 @@ default_effort = "high"
     #[tokio::test(flavor = "multi_thread")]
     async fn create_topic_session_rejects_a_definition_scoped_to_another_topic() {
         let (svc, storage) = make_definition_service();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         // Scoped to a topic that is not the target: invisible to the
         // selector, so validation must reject it rather than fall through
         // to the default agent.

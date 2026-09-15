@@ -75,6 +75,7 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
 }
 
 use std::{collections::HashSet, path::Path};
+use swage_core::ScopeLocation;
 
 use swage_config::model::HierarchyLevel;
 use swage_config::skill::SkillDefinition;
@@ -212,7 +213,11 @@ pub(crate) async fn discover_available_for_topic(
             "no agent definition named '{agent}' is visible to topic {topic_id}"
         ));
     }
-    Ok(discover_available_for_scope(root, &topic.slug, agent_id))
+    Ok(discover_available_for_scope(
+        root,
+        &topic.location(),
+        agent_id,
+    ))
 }
 
 /// Discover the effective skills for a configured topic and optional agent.
@@ -221,10 +226,10 @@ pub(crate) async fn discover_available_for_topic(
 /// context assembly, the HTTP catalogue, and storage-backed discovery.
 pub(crate) fn discover_available_for_scope(
     root: &Path,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: Option<&str>,
 ) -> Vec<SkillDefinition> {
-    let hierarchy = crate::turn::configuration_hierarchy(root, topic_slug, agent_id);
+    let hierarchy = crate::turn::configuration_hierarchy(root, scope, agent_id);
     let topic_dir = &hierarchy[1].1;
     let agent_dir = hierarchy
         .iter()
@@ -506,10 +511,7 @@ mod tests {
     /// Create an in-memory storage instance with a session, returning `(storage, session_id)`.
     async fn make_storage_with_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().expect("in-memory storage");
-        let topic = storage
-            .get_or_create_default()
-            .await
-            .expect("default topic");
+        let topic = storage.general_scope().await.expect("default topic");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

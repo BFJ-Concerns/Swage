@@ -186,7 +186,7 @@ impl AppState {
 
         let topic_ids = self
             .topic_store
-            .list_all()
+            .list_scopes()
             .await
             .map_err(|error| error.to_string())?
             .into_iter()

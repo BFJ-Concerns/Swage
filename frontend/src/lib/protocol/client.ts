@@ -85,6 +85,16 @@ export async function deleteTopic(id: string): Promise<void> {
   return request<void>("DELETE", `/api/topics/${encodeURIComponent(id)}`);
 }
 
+/** List the conversations that run in the general scope — started without a topic. */
+export async function listConversations(): Promise<ConversationListResponse> {
+  return request<ConversationListResponse>("GET", `/api/conversations`);
+}
+
+/** Create a conversation without a topic: a general assistant in the general scope. */
+export async function createConversation(body?: CreateConversationRequest): Promise<ConversationResponse> {
+  return request<ConversationResponse>("POST", `/api/conversations`, body);
+}
+
 /** List conversations in a topic. */
 export async function listTopicSessions(topicId: string): Promise<ConversationListResponse> {
   return request<ConversationListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/sessions`);

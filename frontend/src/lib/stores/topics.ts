@@ -159,14 +159,6 @@ export function createTopicStore(): TopicStore {
 
     async deleteTopic(id) {
       const topics = get(topicsStore);
-      const target = topics.find((p) => p.id === id);
-
-      // Guard: the default topic is the fallback for all conversations
-      // and cannot be removed — doing so would leave the system in an
-      // inconsistent state.
-      if (target?.is_default) {
-        throw new Error("Cannot delete the default topic");
-      }
 
       await api.deleteTopic(id);
 

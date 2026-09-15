@@ -396,8 +396,12 @@ budget = 20000
     )
     .unwrap();
 
-    let config = swage_config::load_resolved_config_from(root.path(), "test", "default")
-        .expect("config should load successfully");
+    let config = swage_config::load_resolved_config_from(
+        root.path(),
+        &swage_core::ScopeLocation::topic("test"),
+        "default",
+    )
+    .expect("config should load successfully");
 
     // Topic budget should override global
     assert_eq!(

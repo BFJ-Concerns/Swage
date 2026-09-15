@@ -117,6 +117,22 @@ describe("createConversation", () => {
     expect(result.topic_id).toBe("proj-1");
   });
 
+  it("creates a general-scope conversation when no topic is given", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const created = {
+      id: "general-conv",
+      created_at: "2026-01-01T00:00:00Z",
+      last_activity: "2026-01-01T00:00:00Z",
+    };
+    fetchMock.mockResolvedValueOnce(mockResponse(created, 201));
+
+    const result = await createConversation(null);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/conversations", { method: "POST" });
+    expect(result.id).toBe("general-conv");
+    expect(result.topic_id).toBeUndefined();
+  });
+
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 400));
 

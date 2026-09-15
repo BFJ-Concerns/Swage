@@ -927,7 +927,6 @@ mod topic_type_tests {
         "id": "550e8400-e29b-41d4-a716-446655440000",
         "name": "My Topic",
         "description": "A workspace",
-        "is_default": false,
         "slug": "my-topic",
         "created_at": "2024-01-01T00:00:00Z"
     }"#;
@@ -1159,7 +1158,7 @@ mod tests {
 
         let conv: ConversationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(conv.id, id);
-        assert_eq!(conv.topic_id, topic_id);
+        assert_eq!(conv.topic_id, Some(topic_id));
     }
 
     #[test]

@@ -2032,7 +2032,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_attempt_is_appended_beside_the_first_not_over_it() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,

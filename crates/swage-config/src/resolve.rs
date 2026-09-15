@@ -8,23 +8,26 @@ use crate::validation;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use swage_core::ScopeLocation;
 
-/// Construct the active Global → Topic → optional-Agent configuration hierarchy.
+/// Construct the active configuration hierarchy for a scope and an optional
+/// agent: Global → Topic → Agent for a topic, Global → Agent for the general
+/// scope, which has no scope-level layer (its agent overlays still live
+/// beneath its own directory).
 ///
-/// The reserved workflow identity is dispatch-only, so it intentionally stops
-/// at the topic level and never addresses an authored agent directory.
+/// The reserved workflow identity is dispatch-only, so it intentionally never
+/// addresses an authored agent directory.
 pub fn configuration_hierarchy(
     root: &Path,
-    topic: &str,
+    scope: &ScopeLocation,
     agent: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
-    let topic_path = root.join("topics").join(topic);
-    let mut hierarchy = vec![
-        (HierarchyLevel::Global, root.to_path_buf()),
-        (HierarchyLevel::Topic, topic_path.clone()),
-    ];
+    let mut hierarchy = vec![(HierarchyLevel::Global, root.to_path_buf())];
+    if !scope.is_general() {
+        hierarchy.push((HierarchyLevel::Topic, scope.data_dir(root)));
+    }
     if let Some(agent) = agent.filter(|agent| *agent != RESERVED_WORKFLOW_AGENT_ID) {
-        hierarchy.push((HierarchyLevel::Agent, topic_path.join("agents").join(agent)));
+        hierarchy.push((HierarchyLevel::Agent, scope.agent_dir(root, agent)));
     }
     hierarchy
 }
@@ -68,24 +71,26 @@ fn try_load_file(path: &Path, problems: &mut Vec<ConfigProblem>) -> Option<Parti
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Fully resolve configuration for a given topic and agent.
+/// Fully resolve configuration for a given scope and agent.
 ///
 /// Resolves the Swage root via `$SWAGE_HOME` / `~/.swage/`, then delegates
 /// to [`load_resolved_config_from`].
-pub fn load_resolved_config(topic: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
+pub fn load_resolved_config(
+    scope: &ScopeLocation,
+    agent: &str,
+) -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_resolved_config_from(&root, topic, agent)
+    load_resolved_config_from(&root, scope, agent)
 }
 
 /// Fully resolve configuration given an explicit root directory.
 pub fn load_resolved_config_from(
     root: &Path,
-    topic: &str,
+    scope: &ScopeLocation,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
-    // Build the Global → Topic → Agent hierarchy.
-    // Build paths for each hierarchy level.
-    let hierarchy = configuration_hierarchy(root, topic, Some(agent));
+    // Build paths for each active hierarchy level.
+    let hierarchy = configuration_hierarchy(root, scope, Some(agent));
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
@@ -243,6 +248,37 @@ mod tests {
     }
 
     #[test]
+    fn the_general_scope_has_no_scope_layer_but_keeps_its_agent_overlay() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("config.toml"),
+            "[server]\nhost = \"10.0.0.1\"\nport = 3000\n",
+        )
+        .unwrap();
+        let agent_dir = tmp.path().join("general").join("agents").join("bot");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("config.toml"), "[server]\nport = 4000\n").unwrap();
+
+        let hierarchy = configuration_hierarchy(tmp.path(), &ScopeLocation::General, Some("bot"));
+        assert_eq!(
+            hierarchy
+                .iter()
+                .map(|(level, _)| level.clone())
+                .collect::<Vec<_>>(),
+            vec![HierarchyLevel::Global, HierarchyLevel::Agent]
+        );
+        assert_eq!(hierarchy[1].1, agent_dir);
+
+        let cfg = load_resolved_config_from(tmp.path(), &ScopeLocation::General, "bot")
+            .expect("general scope resolves");
+        assert_eq!(cfg.server.host, "10.0.0.1");
+        assert_eq!(
+            cfg.server.port, 4000,
+            "the general scope's agent overlay applies"
+        );
+    }
+
+    #[test]
     fn three_level_merge_applies_overrides() {
         let tmp = TempDir::new().unwrap();
         build_fixture(
@@ -254,7 +290,8 @@ mod tests {
             Some("[server]\nport = 4000\n"),
         );
 
-        let cfg = load_resolved_config_from(tmp.path(), "proj", "bot").expect("should succeed");
+        let cfg = load_resolved_config_from(tmp.path(), &ScopeLocation::topic("proj"), "bot")
+            .expect("should succeed");
         assert_eq!(cfg.server.host, "10.0.0.1", "global host should survive");
         assert_eq!(cfg.server.port, 4000, "agent overrides global port");
         assert_eq!(
@@ -276,8 +313,9 @@ mod tests {
             None,
         );
 
-        let cfg = load_resolved_config_from(tmp.path(), "bare-topic", "default")
-            .expect("should succeed even with missing intermediate configs");
+        let cfg =
+            load_resolved_config_from(tmp.path(), &ScopeLocation::topic("bare-topic"), "default")
+                .expect("should succeed even with missing intermediate configs");
         assert_eq!(cfg.server.port, 5000);
     }
 
@@ -295,7 +333,7 @@ mod tests {
         );
         let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
 
-        let cfg = load_resolved_config("env-topic", "env-agent")
+        let cfg = load_resolved_config(&ScopeLocation::topic("env-topic"), "env-agent")
             .expect("env-derived root should resolve config");
 
         assert_eq!(cfg.server.host, "127.0.0.42");
@@ -315,7 +353,7 @@ mod tests {
             None,
         );
 
-        let result = load_resolved_config_from(tmp.path(), "proj", "bot");
+        let result = load_resolved_config_from(tmp.path(), &ScopeLocation::topic("proj"), "bot");
         assert!(
             result.is_err(),
             "malformed global config should produce Err"
@@ -334,7 +372,7 @@ mod tests {
             None,
         );
 
-        let error = load_resolved_config_from(tmp.path(), "proj", "bot")
+        let error = load_resolved_config_from(tmp.path(), &ScopeLocation::topic("proj"), "bot")
             .expect_err("missing default model entry should produce Err");
 
         assert!(

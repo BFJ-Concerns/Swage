@@ -230,7 +230,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_source_runs_with_session_bounds_without_delivery_and_is_inspectable() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -319,7 +319,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unknown_named_workflow_error_lists_the_effective_catalogue() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .create_workflow_script(swage_storage::NewWorkflowScript {
                 topic_id: topic.id,

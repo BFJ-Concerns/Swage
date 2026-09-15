@@ -27,14 +27,15 @@ pub mod ui;
 
 /// Launch the terminal user interface and connect to the Swage gateway.
 ///
-/// Creates a default topic context, constructs `App`, and delegates to the
-/// full terminal lifecycle in `App::run`. The terminal is restored on both
-/// clean exit and panic.
+/// Starts without a topic — conversations run in the general scope until the
+/// user picks one — constructs `App`, and delegates to the full terminal
+/// lifecycle in `App::run`. The terminal is restored on both clean exit and
+/// panic.
 pub async fn run(gateway_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let default_topic = state::TopicInfo {
+    let no_topic = state::TopicInfo {
         id: uuid::Uuid::nil(),
-        name: "Default".to_string(),
+        name: "No topic".to_string(),
     };
-    let mut app = app::App::new(gateway_url, default_topic);
+    let mut app = app::App::new(gateway_url, no_topic);
     app.run().await
 }

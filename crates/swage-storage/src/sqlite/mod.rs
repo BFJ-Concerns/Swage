@@ -143,13 +143,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn default_topic_seeded() {
+    async fn general_scope_seeded() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
         let count: i64 = storage
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM topics WHERE name = 'default'",
+                    "SELECT COUNT(*) FROM topics WHERE is_general = 1",
                     [],
                     |r| r.get(0),
                 )
@@ -157,7 +157,7 @@ mod tests {
             .await
             .expect("query should succeed");
 
-        assert_eq!(count, 1, "exactly one default topic should be seeded");
+        assert_eq!(count, 1, "exactly one general scope should be seeded");
     }
 
     #[tokio::test(flavor = "multi_thread")]

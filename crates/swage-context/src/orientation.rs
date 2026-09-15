@@ -21,7 +21,8 @@ use crate::tokeniser::Tokeniser;
 /// operator configuration.
 #[derive(Debug, Clone)]
 pub struct SessionEnvironment {
-    /// Topic name; empty reads as the default topic of a fresh install.
+    /// Topic name; empty means the session was started without a topic and
+    /// runs in the general scope.
     pub topic_name: String,
     /// Topic description, when the operator has written one.
     pub topic_description: String,
@@ -109,7 +110,13 @@ impl OrientationElement {
 
         let mut place = String::from("## Where you are\n");
         if self.environment.topic_name.is_empty() {
-            place.push_str("Topic: the default topic\n");
+            // Stated, never left to inference: a session that was started
+            // without a topic must not read a previous topic as current.
+            place.push_str(
+                "Topic: none — this session was started without a topic. It runs as a general \
+                 assistant with general memory and the general knowledge base, and inherits \
+                 nothing from any topic.\n",
+            );
         } else {
             place.push_str(&format!("Topic: {}", self.environment.topic_name));
             if !self.environment.topic_description.is_empty() {
@@ -117,8 +124,9 @@ impl OrientationElement {
             }
             place.push('\n');
         }
-        if let Some(dir) = &self.environment.working_directory {
-            place.push_str(&format!("Working directory: {dir}\n"));
+        match &self.environment.working_directory {
+            Some(dir) => place.push_str(&format!("Working directory: {dir}\n")),
+            None => place.push_str("Working directory: none is attached.\n"),
         }
         place.push_str(&format!(
             "Session started: {}\n",
@@ -213,7 +221,9 @@ mod tests {
 
         let text = content[0].text_content();
         assert!(text.contains("agent running on Swage"));
-        assert!(text.contains("the default topic"));
+        assert!(text.contains("Topic: none — this session was started without a topic"));
+        assert!(text.contains("inherits nothing from any topic"));
+        assert!(text.contains("Working directory: none is attached."));
         assert!(text.contains("2026-08-09 18:30 UTC"));
     }
 

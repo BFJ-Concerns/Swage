@@ -16,6 +16,7 @@ pub mod message_rendering;
 pub mod messaging;
 pub mod request;
 pub mod runtime;
+pub mod scope;
 pub mod secret;
 pub mod tool;
 
@@ -52,6 +53,7 @@ pub use request::{
     ProviderContentBlockWitness, ProviderResponseWitness, StreamChunk, TokenUsage,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+pub use scope::ScopeLocation;
 pub use swage_protocol::client::settings::{Effort, EffortCapability};
 pub use tool::{
     CompactToolReplay, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,

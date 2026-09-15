@@ -13,7 +13,6 @@ const topic: Topic = {
   name: "Research",
   slug: "research",
   description: "",
-  is_default: false,
   created_at: "2026-05-26T10:00:00Z",
 };
 
@@ -50,6 +49,18 @@ describe("TopicPicker", () => {
     (document.querySelector(".topic-settings") as HTMLElement).click();
 
     expect(onOpenTopicSettings).toHaveBeenCalledWith(topic);
+  });
+
+  it("offers a start without a topic and reports it", () => {
+    const onStartWithoutTopic = vi.fn();
+    component = mount(TopicPicker, {
+      target: document.body,
+      props: { topicStore: topicStore(), onStartWithoutTopic },
+    });
+
+    (document.querySelector(".start-general") as HTMLElement).click();
+
+    expect(onStartWithoutTopic).toHaveBeenCalledTimes(1);
   });
 
   it("renders Open as a real sibling button, not a nested span", () => {

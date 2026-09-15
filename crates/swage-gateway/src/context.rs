@@ -14,7 +14,7 @@ pub struct TopicContext {
     /// The topic this turn belongs to.
     pub topic_id: Uuid,
     /// Slug of the topic (used for config resolution and filesystem paths).
-    pub topic_slug: String,
+    pub scope: String,
     /// Absolute path to the topic's memory directory.
     ///
     /// Typically: `{swage_root}/topics/{slug}/memory/`

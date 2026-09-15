@@ -242,7 +242,7 @@ mod tests {
     }
 
     async fn create_turn(storage: &SqliteStorage) -> uuid::Uuid {
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

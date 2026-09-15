@@ -7,6 +7,7 @@
 
 use std::fs;
 use swage_config::{RESERVED_WORKFLOW_AGENT_ID, discover, load_resolved_config_from};
+use swage_core::ScopeLocation;
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -98,8 +99,9 @@ port = 4000
         "assistant",
         Some(agent),
     );
-    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("should load successfully");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("should load successfully");
 
     // Global value inherited
     assert_eq!(config.server.host, "127.0.0.1");
@@ -157,8 +159,9 @@ model_id = "gpt-4o"
 "#;
 
     let tmp = build_skeleton(Some(global), "mytopic", Some(topic), "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("should load successfully");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("should load successfully");
 
     // Topic switches the default provider and model together.
     assert_eq!(config.default_model_id(), "gpt-4o");
@@ -191,8 +194,9 @@ model_id = "claude-sonnet-4-20250514"
 "#;
 
     let tmp = build_skeleton(Some(global), "mytopic", None, "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("should load successfully");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("should load successfully");
 
     let provider = config
         .default_provider_endpoint()
@@ -218,8 +222,9 @@ default_model_id = "claude-sonnet-4-20250514"
 
     // No topic config, no agent config
     let tmp = build_skeleton(Some(global), "bare-topic", None, "default", None);
-    let config = load_resolved_config_from(tmp.path(), "bare-topic", "default")
-        .expect("should load successfully");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("bare-topic"), "default")
+            .expect("should load successfully");
 
     // Global values inherited all the way through
     assert_eq!(config.server.port, 5000);
@@ -257,8 +262,8 @@ fn instructions_compose_across_levels() {
     fs::create_dir_all(&agent_instr).unwrap();
     fs::write(agent_instr.join("personality.md"), "Be concise.").unwrap();
 
-    let config =
-        load_resolved_config_from(root, "mytopic", "assistant").expect("should load successfully");
+    let config = load_resolved_config_from(root, &ScopeLocation::topic("mytopic"), "assistant")
+        .expect("should load successfully");
 
     // All three levels present in assembled instructions
     assert!(config.instructions.contains("You are a helpful assistant."));
@@ -308,8 +313,9 @@ port = 3000
 
     // No instructions directories at any level
     let tmp = build_skeleton(Some(global), "mytopic", None, "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("should load successfully");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("should load successfully");
 
     // Instructions should be empty (or only whitespace)
     assert!(config.instructions.trim().is_empty() || config.instructions.is_empty());
@@ -325,8 +331,9 @@ fn non_markdown_files_ignored_in_instructions() {
     fs::write(instr_dir.join("scratch.txt"), "This should be ignored.").unwrap();
     fs::write(instr_dir.join("data.json"), "{}").unwrap();
 
-    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("should load successfully");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("should load successfully");
 
     assert!(config.instructions.contains("Important notes."));
     assert!(!config.instructions.contains("This should be ignored."));
@@ -347,7 +354,8 @@ fn malformed_toml_produces_parse_error() {
     )
     .unwrap();
 
-    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
+    let result =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant");
     let err = result.expect_err("should fail on malformed TOML");
 
     // Error should reference the file path
@@ -367,7 +375,8 @@ port = "not a number"
 "#;
 
     let tmp = build_skeleton(Some(bad_config), "mytopic", None, "assistant", None);
-    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
+    let result =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant");
     let err = result.expect_err("should fail on wrong type");
 
     let err_str = format!("{err}");
@@ -389,7 +398,8 @@ url = "sqlite://test.db"
 "#;
 
     let tmp = build_skeleton(Some(bad_config), "mytopic", None, "assistant", None);
-    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
+    let result =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant");
     let err = result.expect_err("should fail on unknown section");
 
     let err_str = format!("{err}");
@@ -425,8 +435,9 @@ temperature = 0.2
 "#;
 
     let tmp = build_skeleton(Some(config), "mytopic", None, "assistant", None);
-    let resolved = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("generation presets should be accepted by startup validation");
+    let resolved =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("generation presets should be accepted by startup validation");
 
     let preset = resolved
         .generation
@@ -449,7 +460,8 @@ foo = "bar"
 "#;
 
     let tmp = build_skeleton(Some(bad_config), "mytopic", None, "assistant", None);
-    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
+    let result =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant");
     let err = result.expect_err("should fail with multiple errors");
 
     let err_str = format!("{err}");
@@ -491,8 +503,9 @@ level = "info"
 "#;
 
     let tmp = build_skeleton(Some(global), "mytopic", None, "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
-        .expect("valid config should load without errors");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mytopic"), "assistant")
+            .expect("valid config should load without errors");
 
     assert_eq!(config.server.host, "127.0.0.1");
     assert_eq!(config.server.port, 3000);
@@ -514,8 +527,9 @@ enabled = false
 "#;
 
     let tmp = build_skeleton(Some(global), "mybench", None, "assistant", Some(agent));
-    let config = load_resolved_config_from(tmp.path(), "mybench", "assistant")
-        .expect("sandbox settings should resolve across the config cascade");
+    let config =
+        load_resolved_config_from(tmp.path(), &ScopeLocation::topic("mybench"), "assistant")
+            .expect("sandbox settings should resolve across the config cascade");
 
     assert!(!config.sandbox.enabled);
     assert!(config.sandbox.allow_degraded_execution);
@@ -591,8 +605,12 @@ fn reserved_workflow_agent_directory_does_not_feed_configuration() {
     )
     .unwrap();
 
-    let config = load_resolved_config_from(tmp.path(), "mytopic", RESERVED_WORKFLOW_AGENT_ID)
-        .expect("the bare workflow identity should inherit ambient configuration");
+    let config = load_resolved_config_from(
+        tmp.path(),
+        &ScopeLocation::topic("mytopic"),
+        RESERVED_WORKFLOW_AGENT_ID,
+    )
+    .expect("the bare workflow identity should inherit ambient configuration");
 
     assert_eq!(config.server.port, 3000);
     assert!(!config.instructions.contains("authored agent instruction"));

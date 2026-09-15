@@ -512,7 +512,7 @@ async fn turn_recovery_finds_pending_and_processing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn default_topic_cannot_be_deleted() {
     let storage = SqliteStorage::in_memory().expect("in-memory");
-    let default = storage.get_or_create_default().await.expect("get default");
+    let default = storage.general_scope().await.expect("get default");
 
     let err = TopicStore::delete(&storage, default.id).await.unwrap_err();
     assert!(

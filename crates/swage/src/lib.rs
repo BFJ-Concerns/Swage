@@ -30,7 +30,7 @@
 //!     .build()?;
 //!
 //! // 3. Create a topic, session, and thread, then submit a streaming turn.
-//! let topic = TopicStore::get_or_create_default(&*storage).await?;
+//! let topic = TopicStore::general_scope(&*storage).await?;
 //! let session = SessionStore::create_session(&*storage, NewSession {
 //!     topic_id: topic.id,
 //!     agent_id: "my-agent".into(),

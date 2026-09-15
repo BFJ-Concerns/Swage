@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use swage_core::ScopeLocation;
 
 use axum::extract::State;
 use swage_core::GatewayError;
@@ -52,7 +53,7 @@ pub async fn regenerate(
         state.storage.as_ref(),
         &state.config_root,
         topic_id,
-        &topic.slug,
+        &topic.location(),
     )
     .await?;
     Ok(Json(response))
@@ -63,7 +64,7 @@ pub async fn regenerate_for_topic(
     storage: &dyn Storage,
     config_root: &std::path::Path,
     topic_id: Uuid,
-    topic_slug: &str,
+    scope: &ScopeLocation,
 ) -> Result<KnowledgeMirrorRegenerateResponse, GatewayError> {
     let mut observations = storage.list_observations_by_topic(topic_id).await?;
     // The store orders by retrieved_at alone, which leaves ties to the
@@ -88,8 +89,8 @@ pub async fn regenerate_for_topic(
         });
     }
 
-    let files = render_mirror(topic_slug, &surfaces);
-    let root = mirror_root(config_root, topic_slug);
+    let files = render_mirror(scope, &surfaces);
+    let root = mirror_root(config_root, scope);
     let files_written = write_mirror(&root, &files).await?;
 
     Ok(KnowledgeMirrorRegenerateResponse {
@@ -105,10 +106,9 @@ struct ObservationSurface {
     latest: Option<ExtractionDerivation>,
 }
 
-fn mirror_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
-    config_root
-        .join("topics")
-        .join(topic_slug)
+fn mirror_root(config_root: &std::path::Path, scope: &ScopeLocation) -> PathBuf {
+    scope
+        .data_dir(config_root)
         .join(".swage")
         .join("knowledge")
         .join("mirror")
@@ -116,11 +116,14 @@ fn mirror_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
 
 /// Render the whole mirror as relative path → content. Pure: everything in
 /// the output comes from the rows, so equal input renders equal bytes.
-fn render_mirror(topic_slug: &str, surfaces: &[ObservationSurface]) -> BTreeMap<String, String> {
+fn render_mirror(
+    scope: &ScopeLocation,
+    surfaces: &[ObservationSurface],
+) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
 
     let mut index = String::new();
-    let _ = writeln!(index, "# Knowledge base — {topic_slug}");
+    let _ = writeln!(index, "# Knowledge base — {}", scope.name());
     let _ = writeln!(index);
     let _ = writeln!(index, "{GENERATED_NOTE}");
     let _ = writeln!(index);
@@ -377,18 +380,28 @@ mod tests {
         let config_root = pin_root();
         let (storage, topic_id) = seeded_storage().await;
 
-        let first = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
-            .await
-            .unwrap();
+        let first = regenerate_for_topic(
+            &storage,
+            config_root.path(),
+            topic_id,
+            &ScopeLocation::topic("research"),
+        )
+        .await
+        .unwrap();
         let root = PathBuf::from(&first.mirror_root);
         let first_tree = read_tree(&root);
         assert_eq!(first.files_written as usize, first_tree.len());
 
         std::fs::remove_dir_all(&root).expect("the mirror is disposable");
 
-        let second = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
-            .await
-            .unwrap();
+        let second = regenerate_for_topic(
+            &storage,
+            config_root.path(),
+            topic_id,
+            &ScopeLocation::topic("research"),
+        )
+        .await
+        .unwrap();
         assert_eq!(second.mirror_root, first.mirror_root);
         assert_eq!(
             read_tree(&root),
@@ -402,18 +415,28 @@ mod tests {
         let config_root = pin_root();
         let (storage, topic_id) = seeded_storage().await;
 
-        let report = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
-            .await
-            .unwrap();
+        let report = regenerate_for_topic(
+            &storage,
+            config_root.path(),
+            topic_id,
+            &ScopeLocation::topic("research"),
+        )
+        .await
+        .unwrap();
         let root = PathBuf::from(&report.mirror_root);
 
         // A file the database knows nothing about — a hand edit, or debris
         // from an observation since absorbed elsewhere.
         std::fs::write(root.join("stray.md"), "not from the database").unwrap();
 
-        regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
-            .await
-            .unwrap();
+        regenerate_for_topic(
+            &storage,
+            config_root.path(),
+            topic_id,
+            &ScopeLocation::topic("research"),
+        )
+        .await
+        .unwrap();
         assert!(
             !root.join("stray.md").exists(),
             "the mirror is a projection: anything the rows do not produce goes"
@@ -425,9 +448,14 @@ mod tests {
         let config_root = pin_root();
         let (storage, topic_id) = seeded_storage().await;
 
-        let report = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
-            .await
-            .unwrap();
+        let report = regenerate_for_topic(
+            &storage,
+            config_root.path(),
+            topic_id,
+            &ScopeLocation::topic("research"),
+        )
+        .await
+        .unwrap();
         let root = PathBuf::from(&report.mirror_root);
         let index = std::fs::read_to_string(root.join("index.md")).unwrap();
 
@@ -454,7 +482,7 @@ mod tests {
 
     #[test]
     fn empty_topic_renders_an_index_saying_so() {
-        let files = render_mirror("research", &[]);
+        let files = render_mirror(&ScopeLocation::topic("research"), &[]);
         assert_eq!(files.len(), 1);
         assert!(files["index.md"].contains("No observations have been captured yet."));
     }

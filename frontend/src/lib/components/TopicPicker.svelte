@@ -29,9 +29,12 @@
     topicStore?: TopicStore;
     onTopicChange?: () => void;
     onOpenTopicSettings?: (topic: Topic) => void;
+    // Start a conversation without a topic: a general assistant in the
+    // general scope, inheriting nothing from any topic.
+    onStartWithoutTopic?: () => void;
   }
 
-  let { topicStore, onTopicChange, onOpenTopicSettings }: Props = $props();
+  let { topicStore, onTopicChange, onOpenTopicSettings, onStartWithoutTopic }: Props = $props();
 
   // The picker tracks its own selection separately from topicStore.currentTopic
   // — picking a card is a preview, not a switch. Switching only happens when
@@ -235,8 +238,13 @@
     <h1 class="display">Choose where to work.</h1>
     <p class="lede">
       Each topic keeps its conversations together, along with its attached workspace folders.
-      Click a card to preview, then open it.
+      Click a card to preview, then open it — or start without one.
     </p>
+    {#if onStartWithoutTopic}
+      <button type="button" class="open-btn start-general" onclick={() => onStartWithoutTopic?.()}>
+        Start without a topic
+      </button>
+    {/if}
   </header>
 
   <div class="topic-grid">
@@ -275,9 +283,6 @@
             </button>
           {/if}
         </div>
-        {#if topic.is_default}
-          <span class="default-mark">Default</span>
-        {/if}
         <div class="card-actions">
           <button type="button" class="open-btn" onclick={() => openTopic(topic.id)}>
             Open
@@ -342,8 +347,6 @@
       <dl class="detail-grid">
         <dt>Slug</dt>
         <dd class="mono">{selected.slug}</dd>
-        <dt>Default</dt>
-        <dd>{selected.is_default ? "yes" : "no"}</dd>
         <dt>Created</dt>
         <dd class="mono">{selected.created_at || "—"}</dd>
         <dt>About</dt>
@@ -635,24 +638,6 @@
   .topic-settings:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-  }
-
-  .default-mark {
-    align-self: flex-start;
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: var(--font-meta);
-    line-height: 1;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    /* Text label on paper — use the AA-safe ink-orange, not the decorative
-       accent (UI audit f-8). On the selected (ink) card the accent reads
-       fine as a fill-equivalent, so keep it there. */
-    color: var(--ink-orange);
-  }
-
-  .topic-card.selected .default-mark {
-    color: var(--accent);
   }
 
   .card-actions {

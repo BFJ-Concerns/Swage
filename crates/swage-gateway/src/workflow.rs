@@ -375,7 +375,7 @@ async fn resolve_workflow_by_id(
     }
     for topic in state
         .topic_store
-        .list_all()
+        .list_scopes()
         .await
         .map_err(|error| error.to_string())?
     {
@@ -2314,7 +2314,7 @@ async fn resolve_held_worker_open(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("topic {topic_id} no longer exists"))?;
-    let mut config = crate::turn::load_session_config(state, &topic.slug, agent_id)
+    let mut config = crate::turn::load_session_config(state, &topic.location(), agent_id)
         .map_err(|error| error.to_string())?;
     if let Some(definition) = crate::service::resolve_effective_agent_definition(
         state.storage.as_ref(),
@@ -2952,7 +2952,7 @@ async fn run_ephemeral_agent_call_with_admission(
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("AgentCallError: topic {topic_id} no longer exists"))?;
                 crate::turn::resolve_requested_skills_for_agent(
-                    &topic.slug,
+                    &topic.location(),
                     &session.agent_id,
                     Some(crate::turn::resolve_swage_root(state)),
                     &persisted_skills,
@@ -3041,7 +3041,7 @@ async fn run_ephemeral_agent_call_with_admission(
                     .map_err(|error| error.to_string())?
                     .ok_or_else(|| format!("AgentCallError: topic {topic_id} no longer exists"))?;
                 crate::turn::resolve_requested_skills_for_agent(
-                    &topic.slug,
+                    &topic.location(),
                     &agent_id,
                     Some(crate::turn::resolve_swage_root(state)),
                     skills,
@@ -4211,7 +4211,7 @@ async fn resolve_agent_call_config(
         .await
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("topic {topic_id} no longer exists"))?;
-    let mut config = crate::turn::load_session_config(state, &topic.slug, &agent_id)
+    let mut config = crate::turn::load_session_config(state, &topic.location(), &agent_id)
         .map_err(|error| error.to_string())?;
     match crate::service::resolve_effective_agent_definition(
         state.storage.as_ref(),
@@ -9572,7 +9572,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_topic_lists_every_shipped_carried_workflow_and_nothing_else() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
 
         let Json(list) = list_scripts(State(state), Path(topic.id))
@@ -9604,7 +9604,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn authored_workflow_shadows_the_same_named_shipped_workflow() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let router = crate::server::build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -9760,7 +9760,7 @@ mod tests {
         .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::at(topic.id, root.path());
 
         let Json(list) = list_scripts(State(state.clone()), Path(topic.id))
@@ -9819,7 +9819,7 @@ mod tests {
         .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::at(topic.id, root.path());
 
         let Json(list) = list_scripts(State(state), Path(topic.id))
@@ -9848,7 +9848,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saved_run_rejects_invalid_arguments_before_creating_a_run() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
                 topic_id: topic.id,
@@ -9889,7 +9889,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn shipped_research_sweep_can_be_read_and_started_but_not_updated() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let Json(list) = list_scripts(State(state.clone()), Path(topic.id))
             .await
@@ -9974,7 +9974,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn listed_shipped_carried_workflow_can_start_but_not_update() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let Json(list) = list_scripts(State(state.clone()), Path(topic.id))
             .await
@@ -10048,7 +10048,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_tool_name_resolution_reaches_a_shipped_carried_workflow() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -10081,7 +10081,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_composition_resolves_a_shipped_carried_child() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
@@ -10157,7 +10157,7 @@ mod tests {
             .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         store_test_agent(&storage, topic.id, AGENT_ID).await;
         let session = storage
             .create_session(NewSession {
@@ -10244,7 +10244,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn composed_shipped_workflow_retains_embedded_source_and_skill_attribution() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
@@ -10289,7 +10289,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn interrupted_carried_run_resumes_from_its_recorded_inline_source() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let recorded_source = "return { resumed: true };";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -10340,7 +10340,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_pre_change_agent_call_replays_before_schema_validation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"return await agent("reuse recorded result", { schema: { type: 7 } });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -10468,7 +10468,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_run_reapplies_its_persisted_dispatch_bound_after_a_grant_change() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
         let lead_dir = swage_home.path().join("topics/default/agents/lead");
         std::fs::create_dir_all(&lead_dir).expect("create lead definition");
@@ -10581,7 +10581,7 @@ mod tests {
         let (state, _) = crate::turn::tests::make_state_with_approval_gated_echo(rounds).await;
         let topic = state
             .topic_store
-            .get_or_create_default()
+            .general_scope()
             .await
             .expect("default topic");
         let result = run_ephemeral_agent_call(
@@ -10656,7 +10656,7 @@ mod tests {
         let _guard = crate::test_support::SwageHomeGuard::set_to(swage_home.path());
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -10765,7 +10765,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_topic_workflow_call_grants_a_role_through_its_call_scoped_tools() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("gathered"),
@@ -10897,7 +10897,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn captured_sources_query_journals_the_run_scoped_store_read() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -11108,7 +11108,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn launch_resolves_captured_sources_from_the_persisted_authority_root() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = "return typeof capturedSources;";
         let (script, version) = storage
             .create_workflow_script(NewWorkflowScript {
@@ -11305,7 +11305,7 @@ mod tests {
     async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
         let _swage_home = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let deduplicated = storage
             .record_observation(NewSourceObservation {
                 topic_id: topic.id,
@@ -11477,7 +11477,7 @@ mod tests {
         .expect("write unrequested element");
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -11889,7 +11889,7 @@ mod tests {
     impl WorkingBudgetScaffold {
         async fn new(pending_calls: usize) -> Self {
             let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-            let topic = storage.get_or_create_default().await.expect("topic");
+            let topic = storage.general_scope().await.expect("topic");
             let run = storage
                 .create_workflow_run(NewWorkflowRun {
                     topic_id: topic.id,
@@ -12567,7 +12567,7 @@ mod tests {
 
     async fn started_effect_entry() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -12751,7 +12751,7 @@ mod tests {
             .list_workflow_journal(run_id)
             .await
             .expect("journal");
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (tx, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_host_commands(
             state,
@@ -12884,7 +12884,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn completed_and_failed_journal_broadcasts_match_persisted_entries() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -13059,7 +13059,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_refuses_a_concurrent_call_at_admission() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -13205,7 +13205,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let worker_directory = tempfile::tempdir().expect("worker directory");
         grant_workspace(&storage, topic.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
@@ -13710,7 +13710,7 @@ mod tests {
         crate::test_support::SwageHomeGuard,
     ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
         for agent in ["lead", "worker"] {
             let agent_dir = swage_home.path().join("topics/default/agents").join(agent);
@@ -14258,7 +14258,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn worker_staleness_uses_the_hot_applied_route_threshold() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
         let worker_dir = swage_home.path().join("topics/default/agents/worker");
         std::fs::create_dir_all(&worker_dir).expect("create worker config directory");
@@ -14375,7 +14375,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bare_worker_completes_with_dispatch_bounded_tools_and_an_agentless_journal() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
         let lead_dir = swage_home.path().join("topics/default/agents/lead");
         std::fs::create_dir_all(&lead_dir).expect("create lead config directory");
@@ -14506,7 +14506,7 @@ mod tests {
     async fn identified_schema_exhaustion_returns_its_failure_envelope_and_replays_without_a_new_agent_call()
      {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("not JSON"),
@@ -14653,7 +14653,7 @@ mod tests {
         std::fs::create_dir_all(&sibling).expect("create sibling directory");
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let workspace_id = grant_workspace(storage.as_ref(), topic.id, &placed).await;
         grant_workspace(storage.as_ref(), topic.id, &sibling).await;
         storage
@@ -14761,7 +14761,7 @@ mod tests {
     async fn workflow_launches_carry_task_bounds_and_fail_closed_when_the_task_disappears() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .upsert_task_definition(swage_storage::NewTaskDefinition {
                 id: "restricted".into(),
@@ -14899,7 +14899,7 @@ mod tests {
     async fn workflow_launches_preserve_call_scoped_tools_through_nested_runs() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .create_workflow_script(NewWorkflowScript {
                 topic_id: topic.id,
@@ -14998,7 +14998,7 @@ mod tests {
     async fn workflow_dispatch_re_resolves_and_applies_named_tasks() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .upsert_task_definition(swage_storage::NewTaskDefinition {
                 id: "review".into(),
@@ -15268,7 +15268,7 @@ mod tests {
         );
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let repo_grant = grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let newly_allowed = fixture.path().join("newly-allowed");
         std::fs::create_dir(&newly_allowed).expect("newly allowed fixture");
@@ -15493,7 +15493,7 @@ mod tests {
         std::fs::create_dir(&attachment).unwrap();
         std::fs::write(attachment.join("readable.txt"), "readable proof").unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .create_workspace_attachment(NewWorkspaceAttachment {
                 topic_id: topic.id,
@@ -15650,7 +15650,7 @@ mod tests {
         .trim()
         .to_string();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let placement_tool = Arc::new(PlacementWriteTool::default());
         let state = AppState::new(
@@ -15987,7 +15987,7 @@ mod tests {
         std::fs::create_dir_all(&first_cwd).unwrap();
         std::fs::create_dir_all(&second_cwd).unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         grant_workspace(storage.as_ref(), topic.id, &workspace).await;
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
@@ -16079,7 +16079,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinvocation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"return await agent("slow work", {
             effort: "high", timeoutMs: 10000, maxAttempts: 1
         });"#;
@@ -16196,7 +16196,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn parent_cancellation_wins_over_a_configured_agent_call_timeout() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"return await agent("cancelled work", {
             timeoutMs: 60000, maxAttempts: 1
         });"#;
@@ -16298,7 +16298,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = format!(
             r#"
                 await agent("working segment", {{agent: "default"}});
@@ -16425,7 +16425,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn parked_cancellation_losing_to_a_wake_keeps_the_resumed_runs_account() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"
             await awaitEvent({ kinds: ["operator.continue"] });
             return await agent("finish after wake", { agent: "default", maxAttempts: 1 });
@@ -16558,7 +16558,7 @@ mod tests {
         }
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let placement_tool = Arc::new(PlacementWriteTool::default());
         let worktree_root = fixture.path().join("worker-worktrees");
@@ -16725,7 +16725,7 @@ mod tests {
         }
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let worktree_root = fixture.path().join("worker-worktrees");
         let state = AppState::new(
@@ -16842,7 +16842,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_continuation_token_the_run_does_not_own_is_refused() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -16962,7 +16962,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_continuation_cannot_change_its_task_definition() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let error = run_ephemeral_agent_call(
             &state,
@@ -17120,7 +17120,7 @@ mod tests {
         swage_storage::WorkflowRunRecord,
     ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -17212,7 +17212,7 @@ mod tests {
             ..Default::default()
         };
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -17467,7 +17467,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_is_invisible_and_unanswerable_from_another_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let elsewhere = swage_storage::TopicStore::create(
             storage.as_ref(),
             swage_storage::model::NewTopic {
@@ -17554,7 +17554,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_held_run_parks_until_an_agent_answers_it_through_the_tool() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -17647,7 +17647,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn answering_either_concurrent_hold_advances_the_workflow() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -17754,7 +17754,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn answering_the_first_concurrent_hold_advances_the_workflow() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -17838,7 +17838,7 @@ mod tests {
     async fn an_answer_outside_the_hold_s_set_is_refused_with_feedback_and_the_hold_keeps_waiting()
     {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -17929,7 +17929,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18019,7 +18019,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn run_detail_counts_what_is_still_waiting_what_was_decided_and_what_was_refused() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18105,7 +18105,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_offering_fewer_than_two_verdicts_is_refused_at_raise() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18169,7 +18169,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_a_run_waiting_on_a_hold_closes_the_unanswered_decision() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18264,7 +18264,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answered_hold_reaches_its_script_after_a_crash_before_the_resume() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18304,7 +18304,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18406,7 +18406,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18477,7 +18477,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancellation_that_loses_to_an_answer_leaves_the_resumed_run_alone() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18547,7 +18547,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_run_closes_a_decision_it_can_no_longer_receive() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18607,7 +18607,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn operator_event_wakes_awaiting_run_and_replay_returns_recorded_answer() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18761,7 +18761,7 @@ mod tests {
                 include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js"),
             ] {
                 let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-                let topic = storage.get_or_create_default().await.expect("topic");
+                let topic = storage.general_scope().await.expect("topic");
                 let make_state = || AppState::new(
                     Arc::clone(&storage) as Arc<dyn Storage>, Arc::clone(&storage) as Arc<dyn TopicStore>,
                     Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -18883,7 +18883,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -18969,7 +18969,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_recovers_event_claimed_before_await_journal_completion() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -19059,7 +19059,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn script_event_operations_reject_invalid_kinds_without_journalling_them() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -20423,7 +20423,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_wake_pass_resumes_interrupted_and_due_parked_runs() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let make_run = |source: &str| NewWorkflowRun {
             topic_id: topic.id,
             parent_run_id: None,
@@ -20510,7 +20510,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orphaned() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"
             const worker = agentStart("restate", { agent: "worker" });
             await worker.result;
@@ -20720,7 +20720,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_recovery_keeps_turn_non_terminal_when_worker_thread_release_fails() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -20784,7 +20784,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_settlement_releases_estimate_and_retains_actual_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -21171,7 +21171,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replayed_started_calls_hold_token_reservations_until_settlement() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -21315,7 +21315,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_latches_wind_down_only_after_a_started_working_call_settles() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -21536,7 +21536,7 @@ mod tests {
 
     async fn assert_replayed_wind_down_transition(completed_transition: bool) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -21792,7 +21792,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replayed_started_closing_call_keeps_its_reserved_partition() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -22028,7 +22028,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_run_excludes_journalled_refusal_from_agent_call_count() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = "try { await agent('must not execute', {agent:'default'}); } catch (_) {} return await agent('does execute', {agent:'default'});";
         let budget = WorkflowBudget {
             max_agent_calls: Some(1),
@@ -22150,7 +22150,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_returns_detached_and_completes_from_recorded_args() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -22199,7 +22199,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_run_task_identity_is_persisted_and_filters_the_listing() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"export const meta = { task: "run-task-identity" }; return null;"#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
@@ -22277,7 +22277,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn invalid_inline_agent_prompt_fails_after_journalling_valid_work() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("valid task result"),
@@ -22346,7 +22346,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_without_reserve_keeps_hard_ceiling_behaviour() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["one", "two", "three"].map(scripted_text_output),
@@ -22414,7 +22414,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn exhausted_schema_agent_call_completes_without_a_durable_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 (0..3)
@@ -22527,7 +22527,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
                 swage_core::StreamChunk::Error {
@@ -22675,7 +22675,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_failures_attribute_handover_to_the_terminal_call() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -22780,7 +22780,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn caught_agent_failure_does_not_blame_the_call_for_a_later_script_error() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
                 swage_core::StreamChunk::Done {
@@ -22861,7 +22861,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_call_reconstruction_failure_still_leaves_a_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"await agent("known failing call", {agent: "default", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -22975,7 +22975,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn uncaught_recorded_agent_failure_replays_without_provider_work_and_keeps_attribution() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"await agent("known failing call", {agent: "default", label: "recorded failure", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -23085,7 +23085,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_handover_record_outside_the_contract_is_rejected_not_passed_through() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = "return 1;";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
@@ -23145,7 +23145,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn budget_snapshot_funds_the_following_closing_segment_from_the_reserve() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["work one", "work two", "the real closing report"].map(scripted_text_output),
@@ -23255,7 +23255,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn run_detail_survives_malformed_results_and_preserves_workflow_output() {
         let (state, storage) = workflow_test_state();
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let Json(started) = start_inline_run(
             State(state.clone()),
             Path(topic.id),
@@ -23339,7 +23339,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["working one", "working two", "closing report"].map(scripted_text_output),
@@ -23467,7 +23467,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn terminal_budget_audit_failure_preserves_the_engine_outcome() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .with_conn(|connection| {
                 connection.execute_batch(
@@ -23534,7 +23534,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn attempt_five_snapshot_enters_wind_down_through_the_consumer_expression() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output_with_usage("working segment", 12_000, 164),
@@ -23612,7 +23612,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_led_closing_calls_remain_bounded_by_the_closing_partition() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output("work one"),
@@ -23685,7 +23685,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_snapshot_led_closing_call_keeps_its_attributed_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output("work one"),
@@ -23757,7 +23757,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saved_run_winds_down_into_reserve_and_replays_the_boundary() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 [
@@ -23900,7 +23900,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_refusal_transition_only_latches_wind_down_through_a_later_snapshot() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["work"].map(scripted_text_output),
@@ -23994,7 +23994,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_refusal_transition_completion_does_not_latch_on_replay() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["work"].map(scripted_text_output),
@@ -24174,7 +24174,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_transition_completion_retries_before_latching_on_resume() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output_with_usage("working segment", 1, 2),
@@ -24345,7 +24345,7 @@ mod tests {
         });
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -24395,7 +24395,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saved_run_projects_script_version_and_parallel_failure_log() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -24457,7 +24457,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn composed_run_executes_the_child_and_journals_its_output() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -24573,7 +24573,7 @@ mod tests {
             ),
         ] {
             let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-            let topic = storage.get_or_create_default().await.expect("topic");
+            let topic = storage.general_scope().await.expect("topic");
             let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
             let state = AppState::new(
                 Arc::clone(&storage) as Arc<dyn Storage>,
@@ -24634,7 +24634,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_caught_missing_workflow_keeps_positional_replay_dense() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -24794,7 +24794,7 @@ mod tests {
         );
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -24863,7 +24863,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_child_run_cannot_compose_further() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -24933,7 +24933,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timer_won_wait_is_journalled_and_replays_the_same_winner() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -25007,7 +25007,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn route_budgets_isolate_admission_and_journal_their_balances() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output_with_usage("fallback", 1, 0),
@@ -25214,7 +25214,7 @@ protocol = "openai"
         )
         .expect("topic config");
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output_with_usage("must not run", 1, 0),
@@ -25282,7 +25282,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_route_keeps_its_recorded_closing_limit() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -25534,7 +25534,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_route_restores_credit_for_work_settled_after_wind_down() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let late_request = route_test_request("late working call", Some("alpha"));
         let mut late_json = serde_json::to_value(&late_request).expect("late request");
@@ -25639,7 +25639,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_completes_a_started_route_wind_down_once() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let working = route_test_request("working", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &working, "alpha-route", Some(4)).await;
@@ -25748,7 +25748,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_unconfigured_route_spend_uses_the_fallback_ledger() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -26049,7 +26049,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn recovery_does_not_readmit_a_started_route_call_after_later_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let started_request = route_test_request("interrupted earlier call", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &started_request, "alpha-route", None).await;
@@ -26172,7 +26172,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_resumed_call_spends_the_route_that_serves_after_a_config_change() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let resumed_request = route_test_request("interrupted call", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &resumed_request, "alpha-route", None).await;
@@ -26250,7 +26250,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_resumed_fallback_call_spends_the_route_that_served_it() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let mut resumed_request = route_test_request("interrupted call", Some("pinned"));
         resumed_request.fallback_model = Some("fallback".into());
@@ -26346,7 +26346,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_configured_default_route_keeps_its_own_spend_across_replay() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let recorded = route_test_request("recorded spend", Some("plain"));
         journal_routed_agent_call(&storage, run_id, 0, &recorded, "default", Some(5)).await;
@@ -26430,7 +26430,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unknown_model_fails_as_its_own_error_on_a_spent_fallback_ledger() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let recorded = route_test_request("spend the fallback allowance", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &recorded, "alpha-route", Some(1)).await;
@@ -26592,7 +26592,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_working_route_call_settling_after_wind_down_keeps_the_closing_allowance() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run_id = empty_journal_run(&storage, topic.id).await;
         let first_call_started = Arc::new(Notify::new());
         let release_first_call = Arc::new(Notify::new());
@@ -26750,7 +26750,7 @@ protocol = "openai"
         Uuid,
     ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let mut config = fallback_test_config();
         config.tools.permissions.allow = tools.iter().map(|tool| tool.name().to_string()).collect();
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -27239,12 +27239,7 @@ protocol = "openai"
         let error = run_ephemeral_agent_call(
             &state,
             Uuid::new_v4(),
-            state
-                .topic_store
-                .get_or_create_default()
-                .await
-                .expect("topic")
-                .id,
+            state.topic_store.general_scope().await.expect("topic").id,
             &[],
             &[],
             Uuid::new_v4(),
@@ -27517,7 +27512,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn get_run_shows_worker_liveness_before_first_evidence_and_after_settlement() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (provider, parked, release) = ParkedFirstDeltaProvider::new();
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -27668,7 +27663,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn get_run_keeps_liveness_across_live_to_durable_handoff() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (provider, parked, release) = ParkedFirstDeltaProvider::new();
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -27749,7 +27744,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_worker_persists_liveness_after_live_overlay_is_evicted() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -27872,7 +27867,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_worker_persists_liveness_after_live_overlay_is_evicted() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let pending = Arc::new(Notify::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -28054,7 +28049,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn returned_run_accounts_its_workers_and_offers_no_partial_results() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (state, _provider) =
             scripted_state(&storage, vec![scripted_text_output("survey reply")]);
         let Json(started) = start_inline_run(
@@ -28103,7 +28098,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_terminal_account_write_failure_prevents_terminal_visibility() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         storage
             .with_conn(|connection| {
                 connection.execute_batch(
@@ -28155,7 +28150,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_run_surfaces_its_completed_worker_as_a_partial_result() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (state, _provider) =
             scripted_state(&storage, vec![scripted_text_output("survey findings")]);
         let Json(started) = start_inline_run(
@@ -28202,7 +28197,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_run_accounts_for_the_worker_that_actually_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let failure = "the survey provider rejected the request";
         let (state, _provider) = scripted_state(
             &storage,
@@ -28251,7 +28246,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_threw_under_wind_down_names_the_closing_boundary_as_its_ending() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (state, _provider) = scripted_state(
             &storage,
             vec![
@@ -28317,7 +28312,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_a_run_reads_its_in_flight_worker_as_cut_short_not_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (state, provider) =
             scripted_state(&storage, vec![scripted_text_output("finishing reply")]);
         let Json(started) = start_inline_run(
@@ -28428,7 +28423,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_the_gateway_could_not_resume_accounts_for_itself_without_settling_anything() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         // A run with neither source nor script version cannot be relaunched:
         // it stands in for the run whose gateway died under it.
         let run = storage
@@ -28530,7 +28525,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_detail_rejects_a_terminal_account_outside_the_contract() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let (state, _provider) = scripted_state(&storage, vec![]);
         // A run that has recorded no account of its own, so the blob under
         // test is the only one the projection can read.
@@ -28617,7 +28612,7 @@ protocol = "openai"
         provider: Arc<ScriptedRecordingProvider>,
     ) -> (Arc<SqliteStorage>, AppState, WorkflowRunRecord) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
                 topic_id: topic.id,
@@ -29184,7 +29179,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn unavailable_usage_closes_the_token_gate_and_marks_budget_readings_incomplete() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 vec![
@@ -29287,7 +29282,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn unavailable_usage_closes_only_its_configured_route() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 vec![
@@ -29537,7 +29532,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_worker_cancelled_mid_round_reads_cut_short_not_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let source = r#"return await agent("work the run interrupts", {maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {

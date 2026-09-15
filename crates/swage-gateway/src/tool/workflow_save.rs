@@ -318,7 +318,7 @@ mod tests {
     }
 
     async fn saving_session(state: &AppState, storage: &SqliteStorage) -> (Uuid, Uuid) {
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let session = state
             .storage
             .create_session(NewSession {

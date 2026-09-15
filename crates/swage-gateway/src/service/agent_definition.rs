@@ -450,7 +450,7 @@ mod validation_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_fresh_store_holds_only_the_shipped_default() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
 
         let effective = effective_agent_definitions(&storage, topic.id)
             .await

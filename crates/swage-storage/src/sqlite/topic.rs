@@ -16,7 +16,7 @@ use crate::store::TopicStore;
 fn row_to_topic(row: &rusqlite::Row<'_>) -> rusqlite::Result<Topic> {
     let id: String = row.get(0)?;
     // Column order:
-    // id(0), name(1), description(2), is_default(3), slug(4), created_at(5), updated_at(6)
+    // id(0), name(1), description(2), is_general(3), slug(4), created_at(5), updated_at(6)
     let created: String = row.get(5)?;
     let updated: String = row.get(6)?;
     let slug: String = row.get(4)?;
@@ -25,7 +25,7 @@ fn row_to_topic(row: &rusqlite::Row<'_>) -> rusqlite::Result<Topic> {
         id: parse_uuid(&id)?,
         name: row.get(1)?,
         description: row.get(2)?,
-        is_default: row.get::<_, i64>(3)? != 0,
+        is_general: row.get::<_, i64>(3)? != 0,
         slug: parse_slug(&slug)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
@@ -65,7 +65,7 @@ impl TopicStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO topics (id, name, description, is_default, slug, created_at, updated_at)
+                "INSERT INTO topics (id, name, description, is_general, slug, created_at, updated_at)
                  VALUES (?1, ?2, '', 0, ?3, ?4, ?4)",
                 params![id.to_string(), &topic.name, topic.slug.as_str(), &now_str],
             )?;
@@ -74,7 +74,7 @@ impl TopicStore for SqliteStorage {
                 id,
                 name: topic.name,
                 description: String::new(),
-                is_default: false,
+                is_general: false,
                 slug: topic.slug,
                 created_at: now,
                 updated_at: now,
@@ -86,7 +86,7 @@ impl TopicStore for SqliteStorage {
     async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, name, description, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_general, slug, created_at, updated_at
                  FROM topics WHERE id = ?1",
                 params![id.to_string()],
                 row_to_topic,
@@ -101,7 +101,7 @@ impl TopicStore for SqliteStorage {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, description, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_general, slug, created_at, updated_at
                  FROM topics WHERE name = ?1",
                 params![&name],
                 row_to_topic,
@@ -111,13 +111,13 @@ impl TopicStore for SqliteStorage {
         .await
     }
 
-    async fn get_or_create_default(&self) -> Result<Topic, StorageError> {
+    async fn general_scope(&self) -> Result<Topic, StorageError> {
         if let Some(topic) = self
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT id, name, description, is_default, slug, created_at, updated_at
+                    "SELECT id, name, description, is_general, slug, created_at, updated_at
                      FROM topics
-                     WHERE is_default = 1",
+                     WHERE is_general = 1",
                     [],
                     row_to_topic,
                 )
@@ -134,17 +134,17 @@ impl TopicStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO topics (id, name, description, is_default, slug, created_at, updated_at)
-                 VALUES (?1, 'default', '', 1, 'default', ?2, ?2)",
+                "INSERT INTO topics (id, name, description, is_general, slug, created_at, updated_at)
+                 VALUES (?1, 'general', '', 1, 'general', ?2, ?2)",
                 params![id.to_string(), &now_str],
             )?;
 
             Ok(Topic {
                 id,
-                name: "default".into(),
+                name: "general".into(),
                 description: String::new(),
-                is_default: true,
-                slug: "default".into(),
+                is_general: true,
+                slug: "general".into(),
                 created_at: now,
                 updated_at: now,
             })
@@ -155,8 +155,20 @@ impl TopicStore for SqliteStorage {
     async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM topics ORDER BY created_at ASC",
+                "SELECT id, name, description, is_general, slug, created_at, updated_at
+                 FROM topics WHERE is_general = 0 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map([], row_to_topic)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+    }
+
+    async fn list_scopes(&self) -> Result<Vec<Topic>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, description, is_general, slug, created_at, updated_at
+                 FROM topics ORDER BY is_general DESC, created_at ASC",
             )?;
             let rows = stmt.query_map([], row_to_topic)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -168,7 +180,7 @@ impl TopicStore for SqliteStorage {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, description, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_general, slug, created_at, updated_at
                  FROM topics WHERE slug = ?1",
                 params![&slug],
                 row_to_topic,
@@ -216,7 +228,7 @@ impl TopicStore for SqliteStorage {
             )?;
 
             conn.query_row(
-                "SELECT id, name, description, is_default, slug, created_at, updated_at
+                "SELECT id, name, description, is_general, slug, created_at, updated_at
                  FROM topics WHERE id = ?1",
                 params![id_str],
                 row_to_topic,
@@ -226,12 +238,13 @@ impl TopicStore for SqliteStorage {
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
-        // Pre-flight: fetch the topic to check existence and guard the default.
+        // Pre-flight: fetch the topic to check existence and guard the general
+        // scope, which every topicless session belongs to.
         match self.get(id).await? {
             None => return Ok(false),
-            Some(ref p) if p.is_default => {
+            Some(ref p) if p.is_general => {
                 return Err(StorageError::ConstraintViolation(
-                    "cannot delete the default topic".into(),
+                    "the general scope is not a topic and cannot be deleted".into(),
                 ));
             }
             Some(_) => {}
@@ -297,11 +310,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn get_or_create_default_is_idempotent() {
+    async fn general_scope_is_idempotent() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let p1 = storage.get_or_create_default().await.unwrap();
-        let p2 = storage.get_or_create_default().await.unwrap();
-        // Same topic returned both times — not duplicated.
+        let p1 = storage.general_scope().await.unwrap();
+        let p2 = storage.general_scope().await.unwrap();
+        // Same row returned both times — not duplicated.
         assert_eq!(p1.id, p2.id);
     }
 
@@ -324,39 +337,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn get_or_create_default_returns_default_slug() {
+    async fn general_scope_is_seeded_hidden_and_located_beside_the_topics() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
-        assert!(topic.is_default);
-        assert_eq!(topic.slug, "default");
+        let general = storage.general_scope().await.unwrap();
+        assert!(general.is_general);
+        assert_eq!(general.slug, "general");
+        assert_eq!(general.location(), swage_core::ScopeLocation::General);
+        assert_eq!(general.client_topic_id(), None);
+
+        // Never a topic the user can choose: absent from the topic list,
+        // first in the scope enumeration.
+        let topics = storage.list_all().await.unwrap();
+        assert!(topics.iter().all(|topic| !topic.is_general));
+        let scopes = storage.list_scopes().await.unwrap();
+        assert_eq!(scopes[0].id, general.id);
+
+        let delete_error = storage.delete(general.id).await.unwrap_err();
+        assert!(
+            matches!(delete_error, StorageError::ConstraintViolation(_)),
+            "the general scope is protected"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn renamed_default_topic_remains_structurally_default() {
+    async fn a_topic_is_located_under_the_topics_tree_and_projects_its_id() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let default_topic = storage.get_or_create_default().await.unwrap();
-
-        let renamed = storage
-            .update(
-                default_topic.id,
-                Some("Operations".into()),
-                None,
-                Some("operations".into()),
-            )
+        let topic = storage
+            .create(NewTopic {
+                name: "Alloys".into(),
+                slug: "alloys".into(),
+            })
             .await
             .unwrap();
-
-        assert!(renamed.is_default);
-        assert_eq!(renamed.name, "Operations");
-
-        let fetched_default = storage.get_or_create_default().await.unwrap();
-        assert_eq!(fetched_default.id, default_topic.id);
-
-        let delete_error = storage.delete(default_topic.id).await.unwrap_err();
-        assert!(
-            matches!(delete_error, StorageError::ConstraintViolation(_)),
-            "renamed default topic should still be protected"
-        );
+        assert!(!topic.is_general);
+        assert_eq!(topic.location(), swage_core::ScopeLocation::topic("alloys"));
+        assert_eq!(topic.client_topic_id(), Some(topic.id));
     }
 
     // ---------------------------------------------------------------------------
@@ -364,9 +379,9 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn list_all_returns_spaces_ordered_by_created_at() {
+    async fn list_all_returns_topics_ordered_by_created_at() {
         let storage = SqliteStorage::in_memory().unwrap();
-        // The seeded default topic already exists; add two more.
+        // The general scope is seeded but never listed; add two topics.
         storage
             .create(NewTopic {
                 name: "alpha".into(),
@@ -384,12 +399,7 @@ mod tests {
 
         let all = storage.list_all().await.unwrap();
 
-        // At least 3 topics (default + alpha + beta).
-        assert!(
-            all.len() >= 3,
-            "expected at least 3 topics, got {}",
-            all.len()
-        );
+        assert_eq!(all.len(), 2, "the general scope is not a topic");
 
         // Must be ordered by created_at ASC.
         let is_sorted = all.windows(2).all(|w| w[0].created_at <= w[1].created_at);
@@ -537,14 +547,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn delete_refuses_default_topic() {
+    async fn delete_refuses_the_general_scope() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let default_topic = storage.get_or_create_default().await.unwrap();
+        let general = storage.general_scope().await.unwrap();
 
-        let result = storage.delete(default_topic.id).await;
+        let result = storage.delete(general.id).await;
         assert!(
             result.is_err(),
-            "deleting the default topic should return an error"
+            "deleting the general scope should return an error"
         );
     }
 }

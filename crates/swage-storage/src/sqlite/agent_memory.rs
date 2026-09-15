@@ -189,7 +189,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_memory_round_trips_and_filters_by_agent_and_query() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

@@ -11,12 +11,16 @@ guidance, but a conversation can start without either.
 
 ## Open a topic
 
-The web UI opens to the topic picker. A fresh install has one topic
-(`default`, marked **Default**). Select a topic card to preview it, then
+The web UI opens to the topic picker. A fresh install has no topics: a
+conversation started without one runs in the general scope — general memory,
+the general knowledge base, no inherited files or context from any topic —
+and carries no `topic_id` on the wire. Select a topic card to preview it, then
 select **Open**.
 
 Topics are created from the topic picker; every topic carries its own
-conversations, agents, instructions, skills, and workspace attachments.
+conversations, agents, instructions, skills, and workspace attachments. The
+general scope is not a topic: `GET /api/topics` never lists it, and it cannot
+be opened or deleted.
 
 ## Attach a workspace
 

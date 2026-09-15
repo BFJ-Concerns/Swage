@@ -1863,7 +1863,7 @@ mod tests {
 
         let storage = SqliteStorage::in_memory().expect("storage");
         // UFCS: TopicStore also has a `create`, so it stays out of scope.
-        let topic = swage_storage::TopicStore::get_or_create_default(&storage)
+        let topic = swage_storage::TopicStore::general_scope(&storage)
             .await
             .expect("topic");
         let session = storage
@@ -2014,7 +2014,7 @@ mod tests {
         };
 
         let storage = SqliteStorage::in_memory().expect("storage");
-        let topic = swage_storage::TopicStore::get_or_create_default(&storage)
+        let topic = swage_storage::TopicStore::general_scope(&storage)
             .await
             .expect("topic");
         let new_run = |name: &str| NewWorkflowRun {

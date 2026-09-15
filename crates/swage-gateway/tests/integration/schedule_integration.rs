@@ -889,7 +889,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
             MockProvider::text_round("second outcome"),
         ]),
     );
-    let viewing_topic = state.topic_store.get_or_create_default().await.unwrap();
+    let viewing_topic = state.topic_store.general_scope().await.unwrap();
     let target_topic = state
         .topic_store
         .create(swage_storage::NewTopic {
@@ -1041,7 +1041,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
         provider,
         config_with_gate_model(),
     );
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -1134,7 +1134,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
         provider,
         config_with_gate_model(),
     );
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -1181,7 +1181,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
         provider,
         config_with_gate_model(),
     );
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -1233,7 +1233,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
         &dir.path().join("gate-unknown.db"),
         MockProvider::new(vec![]),
     );
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
 
     let result = schedule::create_schedule(
         &state,
@@ -1442,7 +1442,7 @@ async fn completed_runs_deliver_to_a_surface_through_the_surface_substrate() {
     );
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
-    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.general_scope().await.unwrap();
     let surface = swage_gateway::surface::create_page(
         &state,
         topic.id,
@@ -1505,7 +1505,7 @@ async fn surface_delivery_rejects_a_surface_outside_the_schedules_topic() {
         &dir.path().join("cross-topic-surface.db"),
         MockProvider::new(vec![]),
     );
-    let default = state.topic_store.get_or_create_default().await.unwrap();
+    let default = state.topic_store.general_scope().await.unwrap();
     let other = state
         .topic_store
         .create(NewTopic {

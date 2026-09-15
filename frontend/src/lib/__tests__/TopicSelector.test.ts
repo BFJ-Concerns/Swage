@@ -24,7 +24,6 @@ function makeTopic(id: string, name: string) {
     id,
     name,
     description: "",
-    is_default: name === "default",
     slug: name.toLowerCase().replace(/\s+/g, "-"),
     created_at: "2026-01-01T00:00:00Z",
   };
@@ -351,22 +350,4 @@ describe("delete topic", () => {
     expect(topicAItem?.querySelector(".delete-topic-btn")).not.toBeNull();
   });
 
-  it("does not show a delete action for the default topic", () => {
-    const store = mockTopicStore({
-      get topics() { return [defaultTopic, topicA]; },
-    });
-    component = mount(TopicSelector, {
-      target: document.body,
-      props: { topicStore: store },
-    });
-
-    click(".topic-selector .toggle-btn");
-
-    const dropdown = document.querySelector(".topic-dropdown")!;
-    const defaultItem = Array.from(
-      dropdown.querySelectorAll(".topic-item"),
-    ).find((el) => el.textContent?.includes("default") && !el.textContent?.includes("Topic"));
-    // Default topic must not have a delete button.
-    expect(defaultItem?.querySelector(".delete-topic-btn")).toBeNull();
-  });
 });

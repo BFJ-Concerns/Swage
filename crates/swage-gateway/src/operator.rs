@@ -95,12 +95,12 @@ fn classify_gateway_health(
 async fn list_operator_sessions(
     state: &AppState,
 ) -> Result<Vec<OperatorSessionSummary>, GatewayError> {
-    let topics = state.topic_store.list_all().await?;
+    let scopes = state.topic_store.list_scopes().await?;
     let active_connections = state.active_connections.lock().await.clone();
     let active_turns = state.active_turns.lock().await.clone();
     let mut sessions = Vec::new();
 
-    for topic in topics {
+    for topic in scopes {
         for session in state.storage.list_by_topic(topic.id).await? {
             let preview = state
                 .storage
@@ -111,8 +111,12 @@ async fn list_operator_sessions(
 
             sessions.push(OperatorSessionSummary {
                 id: session.id,
-                topic_id: session.topic_id,
-                topic_name: topic.name.clone(),
+                topic_id: topic.client_topic_id(),
+                topic_name: if topic.is_general {
+                    "General".to_string()
+                } else {
+                    topic.name.clone()
+                },
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: preview,

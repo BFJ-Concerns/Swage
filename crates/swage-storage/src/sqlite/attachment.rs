@@ -794,7 +794,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn attachment_rows_do_not_persist_duplicate_ingested_markdown() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let attachment_id = Uuid::new_v4();
         let (attachment, _) = storage
             .queue_attachment_ingestion(

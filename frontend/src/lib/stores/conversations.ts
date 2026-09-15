@@ -12,12 +12,12 @@ export interface ConversationStore {
   readonly conversations: ConversationSummary[];
   readonly activeConversation: ConversationDetail | null;
   readonly isLoading: boolean;
-  loadConversations(topicId: string): Promise<void>;
+  loadConversations(topicId: string | null): Promise<void>;
   selectConversation(id: string): Promise<void>;
   // topicId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
   // threading topicId through every intermediate component.
-  createConversation(topicId?: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<void>;
+  createConversation(topicId?: string | null, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   // Drops the active conversation without touching the server — used when the
   // selected topic changes so a conversation from the old topic can't linger
@@ -182,16 +182,14 @@ export function createConversationStore(): ConversationStore {
     },
 
     async createConversation(topicId, selectedModelId, agentId, effort) {
-      if (!topicId) {
-        throw new Error("topicId is required to create a conversation");
-      }
-
-      const resp = await api.createConversation(topicId, selectedModelId, agentId, effort);
+      // No topic means the general scope: the gateway creates the session
+      // there and reports no topic on it.
+      const resp = await api.createConversation(topicId ?? null, selectedModelId, agentId, effort);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
         id: resp.id,
-        topic_id: resp.topic_id,
+        topic_id: resp.topic_id ?? undefined,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,

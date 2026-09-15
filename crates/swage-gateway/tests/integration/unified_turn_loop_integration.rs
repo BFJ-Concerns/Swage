@@ -718,7 +718,7 @@ async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
         start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
 
     // Topic-level grant must be in place before the turn dispatches.
-    let default_topic = storage.get_or_create_default().await.unwrap();
+    let default_topic = storage.general_scope().await.unwrap();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             topic_id: default_topic.id,

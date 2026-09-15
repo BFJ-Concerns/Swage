@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn audit_event_records_approval_state_transition() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

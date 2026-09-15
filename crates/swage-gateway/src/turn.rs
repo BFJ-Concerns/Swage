@@ -8,6 +8,7 @@
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
+use swage_core::ScopeLocation;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -1232,7 +1233,7 @@ async fn process_turn_with_composition_and_focus(
         .get(topic_id)
         .await?
         .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
-    let topic_slug = topic.slug.clone();
+    let scope = topic.location();
 
     // Placement identity is durable, but filesystem authority is not. Check
     // the recorded authority root against today's attachment/location grants
@@ -1242,7 +1243,7 @@ async fn process_turn_with_composition_and_focus(
     // Load topic-specific config. Missing topic config falls back to the
     // startup config, but present invalid config fails the turn before any
     // user message is written.
-    let config = load_session_config(state, &topic_slug, &session.agent_id)?;
+    let config = load_session_config(state, &scope, &session.agent_id)?;
 
     // A durable agent definition, when one exists for this agent, gives the
     // session its character on top of the resolved file config: instructions
@@ -1277,7 +1278,7 @@ async fn process_turn_with_composition_and_focus(
     let bound_agent_ids = dispatch_bound_agent_ids(session.metadata.as_ref())?;
     let config = apply_dispatch_bounds(
         state,
-        &topic_slug,
+        &scope,
         topic_id,
         config,
         &bound_agent_ids,
@@ -1350,7 +1351,7 @@ async fn process_turn_with_composition_and_focus(
     let active_skills = load_active_skills_for_agent(
         state,
         session_id,
-        &topic_slug,
+        &scope,
         &session.agent_id,
         Some(swage_root),
         true,
@@ -1525,7 +1526,7 @@ async fn process_turn_with_composition_and_focus(
     };
     let assembly_name = context_choices.assembly_name;
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
-        load_topic_memory(swage_root, &topic_slug).await
+        load_topic_memory(swage_root, &scope).await
     })
     .await;
     let mut session_variables: std::collections::BTreeMap<String, String> =
@@ -1583,11 +1584,10 @@ async fn process_turn_with_composition_and_focus(
 
     let environment =
         build_session_environment(&topic, Some(workspace_root.display().to_string()), &session);
-    let available_skills =
-        available_skills_for_agent(&topic_slug, &session.agent_id, Some(swage_root));
+    let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
-    let hierarchy = configuration_hierarchy(swage_root, &topic_slug, Some(&session.agent_id));
+    let hierarchy = configuration_hierarchy(swage_root, &scope, Some(&session.agent_id));
 
     let elements = build_assembly_elements(
         &config.instructions,
@@ -1614,7 +1614,7 @@ async fn process_turn_with_composition_and_focus(
         &elements,
         &tokeniser,
         Some(swage_root),
-        &topic_slug,
+        &scope,
         &session.agent_id,
         &session_variables,
     );
@@ -2716,7 +2716,7 @@ fn execute_context_assembly(
     elements: &[Box<dyn ContextElement>],
     tokeniser: &TiktokenTokeniser,
     swage_root: Option<&Path>,
-    topic_slug: &str,
+    scope: &ScopeLocation,
     agent_id: &str,
     variables: &std::collections::BTreeMap<String, String>,
 ) -> swage_context::report::AssemblyOutput {
@@ -2731,7 +2731,7 @@ fn execute_context_assembly(
     }
 
     let search_levels = swage_root
-        .map(|root| configuration_hierarchy(root, topic_slug, Some(agent_id)))
+        .map(|root| configuration_hierarchy(root, scope, Some(agent_id)))
         .unwrap_or_default();
     let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
         .iter()

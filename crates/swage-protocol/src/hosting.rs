@@ -103,7 +103,11 @@ pub struct OperatorGatewaySummary {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorSessionSummary {
     pub id: Uuid,
-    pub topic_id: Uuid,
+    /// Absent for a session in the general scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic_id: Option<Uuid>,
+    /// The topic's name, or "General" for a session without one.
     pub topic_name: String,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,

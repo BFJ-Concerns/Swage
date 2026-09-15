@@ -30,7 +30,6 @@ function createMockGateway() {
     name: "Default",
     description: "Smoke-test topic",
     slug: "default",
-    is_default: true,
     created_at: "2026-04-17T12:00:00Z",
   };
 

@@ -299,7 +299,7 @@ mod tests {
     async fn material_round_trips_archive_restore_and_promote() {
         let storage = SqliteStorage::in_memory().unwrap();
         let material_id = Uuid::new_v4();
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(crate::model::NewSession {
                 topic_id: topic.id,

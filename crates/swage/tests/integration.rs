@@ -140,7 +140,7 @@ impl Hook for AppendAfterResponseHook {
 
 async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let topic = TopicStore::get_or_create_default(storage.as_ref())
+    let topic = TopicStore::general_scope(storage.as_ref())
         .await
         .expect("default topic");
     let session = storage
@@ -421,7 +421,7 @@ async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
 #[tokio::test(flavor = "multi_thread")]
 async fn facade_storage_round_trips_session_metadata() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let topic = TopicStore::get_or_create_default(storage.as_ref())
+    let topic = TopicStore::general_scope(storage.as_ref())
         .await
         .expect("default topic");
     let metadata = json!({

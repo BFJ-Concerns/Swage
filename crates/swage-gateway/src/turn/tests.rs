@@ -50,6 +50,7 @@ use crate::{
     state::AppState, subscription::SubscriptionState, test_support::SwageHomeGuard,
     websocket::ServerEvent,
 };
+use swage_core::ScopeLocation;
 
 #[test]
 fn provider_response_witness_is_appended_without_content_fields() {
@@ -1750,7 +1751,7 @@ impl TopicStore for MockStorage {
             id: Uuid::new_v4(),
             name: topic.name,
             description: String::new(),
-            is_default: false,
+            is_general: false,
             slug: topic.slug,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1774,24 +1775,30 @@ impl TopicStore for MockStorage {
             .cloned())
     }
 
-    async fn get_or_create_default(&self) -> Result<Topic, StorageError> {
+    async fn list_scopes(&self) -> Result<Vec<Topic>, StorageError> {
+        let mut scopes: Vec<Topic> = self.db.lock().await.topics.values().cloned().collect();
+        scopes.sort_by_key(|topic| (!topic.is_general, topic.created_at));
+        Ok(scopes)
+    }
+
+    async fn general_scope(&self) -> Result<Topic, StorageError> {
         if let Some(p) = self
             .db
             .lock()
             .await
             .topics
             .values()
-            .find(|topic| topic.is_default)
+            .find(|topic| topic.is_general)
             .cloned()
         {
             return Ok(p);
         }
         let topic = Topic {
             id: Uuid::new_v4(),
-            name: "default".to_string(),
+            name: "general".to_string(),
             description: String::new(),
-            is_default: true,
-            slug: "default".into(),
+            is_general: true,
+            slug: "general".into(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1800,7 +1807,15 @@ impl TopicStore for MockStorage {
     }
 
     async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
-        let mut topics: Vec<Topic> = self.db.lock().await.topics.values().cloned().collect();
+        let mut topics: Vec<Topic> = self
+            .db
+            .lock()
+            .await
+            .topics
+            .values()
+            .filter(|topic| !topic.is_general)
+            .cloned()
+            .collect();
         topics.sort_by_key(|p| p.created_at);
         Ok(topics)
     }
@@ -4562,8 +4577,8 @@ async fn session_config_uses_root_retained_at_state_construction() {
     assert_eq!(state.config_root, constructed_root.path());
     let _redirect = SwageHomeGuard::set_to(redirected_root.path());
 
-    let loaded =
-        load_session_config(&state, "default", "gateway").expect("load config from retained root");
+    let loaded = load_session_config(&state, &ScopeLocation::General, "gateway")
+        .expect("load config from retained root");
     assert_eq!(loaded.communication.message_ttl_secs, 111);
 }
 
@@ -4595,10 +4610,7 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     }
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -4636,7 +4648,7 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     let normal = load_active_skills_for_agent(
         &state,
         session_id,
-        "default",
+        &ScopeLocation::General,
         "gateway",
         Some(root.path()),
         true,
@@ -4657,7 +4669,7 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     let reserved = load_active_skills_for_agent(
         &state,
         session_id,
-        "default",
+        &ScopeLocation::General,
         swage_config::RESERVED_WORKFLOW_AGENT_ID,
         Some(root.path()),
         false,
@@ -4700,10 +4712,7 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
     }
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let mut session_ids = Vec::new();
     for agent_id in ["gateway", swage_config::RESERVED_WORKFLOW_AGENT_ID] {
         let session = storage
@@ -4806,10 +4815,7 @@ async fn make_state_with_storage_and_root(
     config_root: Option<std::path::PathBuf>,
 ) -> (AppState, Uuid) {
     // Create the default topic via TopicStore.
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
 
     // Create a session.
     let session = storage
@@ -4878,10 +4884,7 @@ async fn make_state_with_config_and_storage(
     config: swage_config::ResolvedConfig,
     storage: Arc<MockStorage>,
 ) -> (AppState, Uuid) {
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
@@ -5206,10 +5209,7 @@ async fn full_turn_stores_messages_and_completes() {
 async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let storage = Arc::new(MockStorage::new());
 
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
@@ -5313,10 +5313,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
 #[tokio::test]
 async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     let storage = Arc::new(MockStorage::new());
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -6615,10 +6612,7 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
 async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
 
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
@@ -6663,10 +6657,7 @@ pub(crate) async fn make_state_with_capturing_tools(
 ) {
     let storage = Arc::new(MockStorage::new());
 
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
@@ -6927,10 +6918,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     ];
 
     let storage = Arc::new(MockStorage::new());
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -7400,10 +7388,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -7575,10 +7560,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -7736,10 +7718,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -7927,10 +7906,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
+    let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -8608,10 +8584,7 @@ async fn assert_delegation_fails_before_child_creation(
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -9347,10 +9320,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     // This fixture needs an authored restrictive parent; `gateway` always
     // resolves to its shipped definition and intentionally ignores stored rows.
     let session = storage
@@ -9565,10 +9535,7 @@ async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalate
 #[tokio::test(flavor = "multi_thread")]
 async fn completed_detached_result_reaches_parent_next_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -9783,10 +9750,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
     std::fs::write(attachment.join("readable.txt"), "delegated readable proof")
         .expect("readable fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -9946,10 +9910,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -10299,10 +10260,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
 async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -10468,10 +10426,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
     }
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -10574,10 +10529,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
 async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
     let fixture = tempfile::tempdir().expect("delegation fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     storage
         .upsert_task_definition(swage_storage::NewTaskDefinition {
             id: "delegation-only".into(),
@@ -10747,10 +10699,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
     std::fs::create_dir(&default_workspace).expect("default workspace");
     std::fs::create_dir(&placed_workspace).expect("placed workspace");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let default_attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             topic_id: topic.id,
@@ -10921,10 +10870,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     init_test_git_repository(&repo);
 
     let storage = Arc::new(MockStorage::new());
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let repo_attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
             topic_id: topic.id,
@@ -11259,10 +11205,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -11602,7 +11545,7 @@ async fn make_storage_with_session_metadata(
     metadata: Option<serde_json::Value>,
 ) -> (Arc<MockStorage>, Uuid) {
     let storage = Arc::new(MockStorage::new());
-    let topic = storage.get_or_create_default().await.expect("topic");
+    let topic = storage.general_scope().await.expect("topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,
@@ -14193,14 +14136,10 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let _guard = SwageHomeGuard::set_to(swage_home.path());
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("create default topic");
-    let element_path = swage_home
-        .path()
-        .join("topics")
-        .join(&topic.slug)
+    let topic = storage.general_scope().await.expect("create default topic");
+    let element_path = topic
+        .location()
+        .data_dir(swage_home.path())
         .join("elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).expect("create element directory");
     std::fs::write(&element_path, "Task: {{task}}; owner: {{owner}}")
@@ -14619,7 +14558,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
 async fn load_topic_memory_returns_empty_when_dir_absent() {
     let dir = tempfile::tempdir().unwrap();
     // No memory directory created — the helper should not panic.
-    let result = load_topic_memory(dir.path(), "no-such-topic").await;
+    let result = load_topic_memory(dir.path(), &ScopeLocation::topic("no-such-topic")).await;
     assert!(
         result.is_empty(),
         "should return empty string when memory dir is absent"
@@ -14631,7 +14570,9 @@ async fn load_topic_memory_returns_empty_when_dir_absent() {
 #[tokio::test]
 async fn load_topic_memory_concatenates_md_files_alphabetically() {
     let dir = tempfile::tempdir().unwrap();
-    let memory_dir = dir.path().join("topics").join("my-topic").join("memory");
+    let memory_dir = ScopeLocation::topic("my-topic")
+        .data_dir(dir.path())
+        .join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
 
     // b_notes sorts after a_context.
@@ -14640,7 +14581,7 @@ async fn load_topic_memory_concatenates_md_files_alphabetically() {
     // Non-.md file must not be included.
     std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
 
-    let result = load_topic_memory(dir.path(), "my-topic").await;
+    let result = load_topic_memory(dir.path(), &ScopeLocation::topic("my-topic")).await;
 
     assert!(
         result.contains("First file content"),
@@ -14668,13 +14609,15 @@ async fn load_topic_memory_concatenates_md_files_alphabetically() {
 #[tokio::test]
 async fn load_topic_memory_skips_empty_files() {
     let dir = tempfile::tempdir().unwrap();
-    let memory_dir = dir.path().join("topics").join("my-topic").join("memory");
+    let memory_dir = ScopeLocation::topic("my-topic")
+        .data_dir(dir.path())
+        .join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
 
     std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
     std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
 
-    let result = load_topic_memory(dir.path(), "my-topic").await;
+    let result = load_topic_memory(dir.path(), &ScopeLocation::topic("my-topic")).await;
 
     assert!(result.contains("Real content"));
     assert!(
@@ -16229,7 +16172,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
             finish_reason: None,
         },
     ]]);
-    let topic = storage.get_or_create_default().await.expect("topic");
+    let topic = storage.general_scope().await.expect("topic");
     let session = storage
         .create_session(NewSession {
             topic_id: topic.id,

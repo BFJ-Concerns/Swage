@@ -107,9 +107,11 @@
 
     // A deep-linked conversation may belong to a topic other than the one
     // currently in scope (or none, on first load). Bring the topic into
-    // scope so the navigation and conversation list reflect it.
+    // scope so the navigation and conversation list reflect it. A
+    // conversation without a topic runs in the general scope and moves no
+    // topic into scope.
     const conv = conversationStore.activeConversation;
-    if (conv && topicStore.currentTopic?.id !== conv.topic_id) {
+    if (conv?.topic_id && topicStore.currentTopic?.id !== conv.topic_id) {
       await topicStore.selectTopic(conv.topic_id);
       await conversationStore.loadConversations(conv.topic_id);
     }
@@ -138,8 +140,9 @@
   ): Promise<string | null> {
     try {
       keepSurfaceForConversation();
-      // Use the currently selected topic — should always be set after startup.
-      const topicId = topicStore.currentTopic?.id ?? "";
+      // The selected topic, or none: a conversation started without a topic
+      // runs in the general scope.
+      const topicId = topicStore.currentTopic?.id ?? null;
       await conversationStore.createConversation(topicId, selectedModelId, agentId, effort);
       const id = conversationStore.activeConversation?.id;
       if (id) {
@@ -367,6 +370,12 @@
   // Startup
   // ---------------------------------------------------------------------------
 
+  // Starts a general-assistant conversation from the picker: no topic is
+  // brought into scope, the session runs in the general scope.
+  function startWithoutTopic(): void {
+    void createAndNavigate();
+  }
+
   // Called by TopicSelector when the user switches topics.
   // Reloads the conversation list for the newly active topic and clears
   // any cross-topic UI state (active conversation, WebSocket connection).
@@ -465,6 +474,7 @@
     streamingStore={composerStreamingStore}
     {topicStore}
     onTopicChange={handleTopicChange}
+    onStartWithoutTopic={startWithoutTopic}
     onRetry={handleRetry}
     {activeSurface}
     {surfacesStore}

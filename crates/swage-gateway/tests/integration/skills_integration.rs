@@ -96,7 +96,7 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
     let (provider, requests) = fixed_response_provider_with_capture("Commission ready.");
     let (router, addr, storage) =
         start_test_server_with_config(provider, swage_config::ResolvedConfig::default()).await;
-    let topic = swage_storage::store::TopicStore::get_or_create_default(storage.as_ref())
+    let topic = swage_storage::store::TopicStore::general_scope(storage.as_ref())
         .await
         .unwrap();
 
@@ -711,7 +711,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
 
     // Get the default topic ID for the query parameter.
     use swage_storage::store::TopicStore;
-    let topic = storage.get_or_create_default().await.unwrap();
+    let topic = storage.general_scope().await.unwrap();
 
     let (status, body) = http(
         &router,

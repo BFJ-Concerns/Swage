@@ -33,8 +33,13 @@ const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the A
 /// Errors during startup are printed to stderr and the process exits.
 pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: Option<String>) {
     // Step 1: Load configuration. Errors go to stderr — no logging yet.
-    let config_name = config_path.as_deref().unwrap_or("default");
-    let mut config = match swage_config::load_resolved_config(config_name, "default") {
+    // The gateway's own configuration is the global layer with a default
+    // agent overlay; a configured name selects the topic whose layer applies.
+    let scope = match config_path.as_deref() {
+        Some(name) => swage_core::ScopeLocation::topic(name),
+        None => swage_core::ScopeLocation::General,
+    };
+    let mut config = match swage_config::load_resolved_config(&scope, "default") {
         Ok(c) => c,
         Err(e) => {
             for problem in &e.problems {
@@ -1134,7 +1139,7 @@ mod tests {
         );
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.get_or_create_default().await.expect("topic");
+        let topic = storage.general_scope().await.expect("topic");
         let new_run = |source_hash: &str| NewWorkflowRun {
             topic_id: topic.id,
             parent_run_id: None,

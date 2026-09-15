@@ -31,22 +31,18 @@ vi.mock("../api/topics", () => ({
 function makeTopic(
   id: string,
   name: string,
-  extra: Partial<{ slug: string; is_default: boolean }> = {},
+  extra: Partial<{ slug: string }> = {},
 ) {
   return {
     id,
     name,
     description: "",
-    is_default: extra.is_default ?? false,
     slug: extra.slug ?? name.toLowerCase().replace(/\s+/g, "-"),
     created_at: "2026-01-01T00:00:00Z",
   };
 }
 
-// The default topic — special-cased: cannot be deleted.
-const defaultTopic = makeTopic("proj-default", "default", {
-  is_default: true,
-});
+const defaultTopic = makeTopic("proj-default", "default");
 
 const topicA = makeTopic("proj-a", "Topic A");
 const topicB = makeTopic("proj-b", "Topic B");
@@ -246,18 +242,6 @@ describe("deleteTopic", () => {
     await store.deleteTopic("proj-b");
 
     expect(store.topics.map((p) => p.id)).toEqual(["proj-a"]);
-  });
-
-  it("throws and does not call the API when deleting the default topic", async () => {
-    const store = createTopicStore();
-    vi.mocked(api.listTopics).mockResolvedValueOnce([
-      defaultTopic,
-      topicA,
-    ]);
-    await store.loadTopics();
-
-    await expect(store.deleteTopic("proj-default")).rejects.toThrow();
-    expect(api.deleteTopic).not.toHaveBeenCalled();
   });
 
   it("selects the next topic when the current topic is deleted", async () => {

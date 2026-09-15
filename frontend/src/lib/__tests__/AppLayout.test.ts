@@ -145,7 +145,6 @@ function mockTopicStore(hasCurrentTopic = true, topicId = "default"): TopicStore
     id: topicId,
     name: topicId,
     description: "",
-    is_default: topicId === "default",
     slug: topicId,
     created_at: "",
   };

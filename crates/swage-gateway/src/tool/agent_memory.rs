@@ -433,7 +433,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn remember_and_recall_persist_memory() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn history_filters_secret_events_and_recall_respects_scope_boundaries() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.get_or_create_default().await.unwrap();
+        let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,

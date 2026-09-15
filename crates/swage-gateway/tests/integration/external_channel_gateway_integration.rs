@@ -93,10 +93,7 @@ async fn queued_channel_drain_carries_the_created_turn_id_into_the_delivery_reco
     let directory = tempfile::tempdir().expect("queue database directory");
     let database_path = directory.path().join("queue.db");
     let storage = Arc::new(SqliteStorage::open(&database_path).expect("queue storage"));
-    let topic = storage
-        .get_or_create_default()
-        .await
-        .expect("default topic");
+    let topic = storage.general_scope().await.expect("default topic");
     storage
         .upsert_channel_link(NewChannelLink {
             integration: "dev_dm".into(),

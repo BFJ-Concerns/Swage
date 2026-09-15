@@ -32,7 +32,8 @@ use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::{AuditStore, SqliteStorage};
+use swage_storage::{AuditStore, SqliteStorage, TopicStore};
+use uuid::Uuid;
 
 use crate::support::{ProcessEnvGuard, start_live_server};
 
@@ -222,14 +223,13 @@ async fn sessions_are_isolated_between_topics() {
         .expect("sessions should be an array");
     assert_eq!(sessions_b.len(), 1, "topic B should have exactly 1 session");
 
-    // The default topic should still exist and be unaffected.
+    // The other topic is unaffected, and the general scope stays unlisted.
     let (list_status, topic_list) = http_json(&router, "GET", "/api/topics", None).await;
     assert_eq!(list_status, StatusCode::OK);
     let topics = topic_list["topics"]
         .as_array()
         .expect("topics should be an array");
-    // Default + Alpha + Bravo = 3 topics.
-    assert_eq!(topics.len(), 3, "should have default + 2 created topics");
+    assert_eq!(topics.len(), 2, "Alpha and Bravo are the only topics");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -326,12 +326,13 @@ async fn workspace_attachment_mutations_record_whole_state_audit_events() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_conversation_rejects_explicit_topic_target_without_creating_session() {
+async fn a_conversation_without_a_topic_runs_in_the_general_scope() {
     let (router, _storage) = make_test_router();
     let (address, server) = start_live_server(router).await;
     let client = reqwest::Client::new();
     let base_url = format!("http://{address}");
 
+    // The general scope is never listed as a topic.
     let topics = client
         .get(format!("{base_url}/api/topics"))
         .send()
@@ -342,17 +343,15 @@ async fn default_conversation_rejects_explicit_topic_target_without_creating_ses
         .json::<Value>()
         .await
         .unwrap();
-    let default_topic_id = topics["topics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|topic| topic["is_default"] == true)
-        .and_then(|topic| topic["id"].as_str())
-        .expect("default topic should be listed");
-    let sessions_url = format!("{base_url}/api/topics/{default_topic_id}/sessions");
+    assert_eq!(
+        topics["topics"].as_array().unwrap().len(),
+        0,
+        "a fresh install lists no topics: the general scope is not one"
+    );
 
-    let before = client
-        .get(&sessions_url)
+    // A conversation created without choosing a topic carries none.
+    let created = client
+        .post(format!("{base_url}/api/conversations"))
         .send()
         .await
         .unwrap()
@@ -361,11 +360,30 @@ async fn default_conversation_rejects_explicit_topic_target_without_creating_ses
         .json::<Value>()
         .await
         .unwrap();
-    assert_eq!(before["conversations"].as_array().unwrap().len(), 0);
+    assert!(
+        created.get("topic_id").is_none(),
+        "a topicless session projects no topic: {created}"
+    );
+    let detail = client
+        .get(format!(
+            "{base_url}/api/conversations/{}",
+            created["id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(detail.get("topic_id").is_none(), "{detail}");
 
+    // Naming a topic on the topicless creation route is still refused as an
+    // undeclared field, and nothing is created.
     let response = client
         .post(format!("{base_url}/api/conversations"))
-        .json(&json!({ "topic_id": default_topic_id }))
+        .json(&json!({ "topic_id": Uuid::new_v4() }))
         .send()
         .await
         .unwrap();
@@ -375,18 +393,6 @@ async fn default_conversation_rejects_explicit_topic_target_without_creating_ses
         rejection.contains("topic_id"),
         "rejection should name the undeclared field: {rejection}"
     );
-
-    let after = client
-        .get(&sessions_url)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
-    assert_eq!(after["conversations"].as_array().unwrap().len(), 0);
 
     server.abort();
 }
@@ -475,41 +481,34 @@ async fn memory_is_isolated_between_topics() {
 // ---------------------------------------------------------------------------
 // Spans: [k2zw] topic CRUD handlers, [n548] storage CRUD
 //
-// Proves: Delivery Closure — the default topic is protected from deletion.
+// Proves: Delivery Closure — the general scope is neither listed nor deletable.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_topic_cannot_be_deleted() {
-    let (router, _storage) = make_test_router();
+async fn the_general_scope_is_not_a_topic_the_api_can_reach() {
+    let (router, storage) = make_test_router();
+    let general = storage.general_scope().await.expect("general scope");
 
-    // List all topics to find the default one (auto-created by migrations).
+    // Absent from the topic list …
     let (list_status, list_body) = http_json(&router, "GET", "/api/topics", None).await;
     assert_eq!(list_status, StatusCode::OK);
+    assert!(
+        list_body["topics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|topic| topic["id"].as_str() != Some(&general.id.to_string())),
+        "the general scope must not be listed as a topic"
+    );
 
-    let topics = list_body["topics"]
-        .as_array()
-        .expect("topics should be an array");
-    let default_topic = topics
-        .iter()
-        .find(|p| p["name"].as_str() == Some("default"))
-        .expect("default topic should exist in the list");
-    let default_id = default_topic["id"]
-        .as_str()
-        .expect("default topic should have an id");
-
-    // Attempt to delete it — should fail with 409 Conflict.
+    // … and protected from deletion: it is where every topicless session lives.
     let (status, _body) = http_json(
         &router,
         "DELETE",
-        &format!("/api/topics/{default_id}"),
+        &format!("/api/topics/{}", general.id),
         None,
     )
     .await;
-
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "deleting the default topic should return 409"
-    );
+    assert_eq!(status, StatusCode::CONFLICT);
 }
 
 // ---------------------------------------------------------------------------

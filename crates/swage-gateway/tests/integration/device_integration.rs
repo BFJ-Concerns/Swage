@@ -231,7 +231,9 @@ async fn run_turn_and_collect_tool_result(
         let response = reqwest::Client::new()
             .post(format!(
                 "http://{addr}/api/topics/{}/workspaces",
-                conversation.topic_id
+                conversation
+                    .topic_id
+                    .expect("a topic-scoped conversation projects its topic")
             ))
             .json(&json!({
                 "path": workspace_root,

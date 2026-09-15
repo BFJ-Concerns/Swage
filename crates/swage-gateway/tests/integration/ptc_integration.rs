@@ -134,7 +134,7 @@ async fn start_ptc_test_server(
     config.tools.permissions.require_approval = vec![];
 
     let default_topic = storage
-        .get_or_create_default()
+        .general_scope()
         .await
         .expect("default topic should be seeded for PTC harness");
     let workspace_attachment = storage

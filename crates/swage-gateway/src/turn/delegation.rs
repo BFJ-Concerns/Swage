@@ -248,7 +248,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         let active_skills = load_active_skills_for_agent(
             &self.state,
             session.id,
-            &self.topic.slug,
+            &self.topic.location(),
             &self.agent_id,
             Some(&self.swage_root),
             false,
@@ -268,7 +268,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let assembly_name = context_choices.assembly_name;
         let memory_content = load_memory_for_assembly(&assembly_name, || async {
-            load_topic_memory(&self.swage_root, &self.topic.slug).await
+            load_topic_memory(&self.swage_root, &self.topic.location()).await
         })
         .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self
@@ -283,8 +283,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         session_variables.extend(self.composition.variables.clone().unwrap_or_default());
         let environment =
             build_session_environment(&self.topic, Some(self.working_directory.clone()), session);
-        let available_skills =
-            available_skills_for_agent(&self.topic.slug, &self.agent_id, Some(&self.swage_root));
+        let available_skills = available_skills_for_agent(
+            &self.topic.location(),
+            &self.agent_id,
+            Some(&self.swage_root),
+        );
         // Delegated children read the same operator-guidance sources as
         // foreground turns: the trust policy is re-derived here because the
         // assembler holds only the working directory, not the policy.
@@ -295,8 +298,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         )
         .await;
         let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
-        let hierarchy =
-            configuration_hierarchy(&self.swage_root, &self.topic.slug, Some(&self.agent_id));
+        let hierarchy = configuration_hierarchy(
+            &self.swage_root,
+            &self.topic.location(),
+            Some(&self.agent_id),
+        );
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,
@@ -317,7 +323,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &elements,
             &tokeniser,
             Some(&self.swage_root),
-            &self.topic.slug,
+            &self.topic.location(),
             &self.agent_id,
             &session_variables,
         );
@@ -570,7 +576,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         };
 
         let target_resolved =
-            load_session_config(&self.state, &topic.slug, target_agent_id).map_err(|error| {
+            load_session_config(&self.state, &topic.location(), target_agent_id).map_err(|error| {
                 AgentError::InvalidConfig(format!(
                     "failed to load config for delegated agent '{target_agent_id}' in topic '{}': {error}",
                     topic.slug
@@ -625,7 +631,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             None => target_resolved,
         };
         resolve_requested_skills_for_agent(
-            &topic.slug,
+            &topic.location(),
             target_agent_id,
             Some(resolve_swage_root(&self.state)),
             skills.as_deref().unwrap_or_default(),
@@ -661,7 +667,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             })?;
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
-            &topic.slug,
+            &topic.location(),
             topic_id,
             target_resolved.clone(),
             &bound_agent_ids,
