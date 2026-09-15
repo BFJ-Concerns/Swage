@@ -260,6 +260,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "gateway".to_string(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

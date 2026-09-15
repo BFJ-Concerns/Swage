@@ -885,6 +885,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .execute_delegation(
                         &delegate_msg,
                         Some(sender_turn_id),
+                        Some(sender_session_id),
                         topic_id,
                         target_agent_config,
                         target_context_transfer_config,
@@ -975,6 +976,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         .execute_delegation(
                             &delegate_msg,
                             Some(sender_turn_id),
+                            Some(sender_session_id),
                             topic_id,
                             target_agent_config,
                             target_context_transfer_config,

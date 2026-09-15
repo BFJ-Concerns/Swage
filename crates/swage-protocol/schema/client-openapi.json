@@ -2439,6 +2439,181 @@
         ],
         "type": "object"
       },
+      "RecentSession": {
+        "description": "One session as the recent-sessions list shows it.",
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "archived_at": {
+            "description": "Set while the inactivity sweep has the session hidden from the\nrecent list.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "has_interrupted_turn": {
+            "type": "boolean"
+          },
+          "has_running_turn": {
+            "description": "A turn is executing on the session right now.",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "last_activity": {
+            "description": "When the latest user or assistant message landed — the list's order.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "message_preview": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "$ref": "#/components/schemas/SessionOrigin"
+          },
+          "topic_id": {
+            "description": "Absent for a session in the general scope.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "topic_name": {
+            "description": "The topic's name, or \"General\" for a session without one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic_name",
+          "agent_id",
+          "origin",
+          "created_at",
+          "last_activity",
+          "has_interrupted_turn",
+          "has_running_turn"
+        ],
+        "type": "object"
+      },
+      "RecentSessionsEntry": {
+        "description": "One entry in the recent-sessions list: a source and the automated\nsessions beneath it, newest first.",
+        "properties": {
+          "automated": {
+            "items": {
+              "$ref": "#/components/schemas/RecentSession"
+            },
+            "type": "array"
+          },
+          "last_activity": {
+            "description": "The latest activity across the source and everything beneath it —\nthe list's order.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/RecentSessionsSource"
+          }
+        },
+        "required": [
+          "source",
+          "last_activity",
+          "automated"
+        ],
+        "type": "object"
+      },
+      "RecentSessionsResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/RecentSessionsEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "type": "object"
+      },
+      "RecentSessionsSource": {
+        "description": "What a recent-sessions entry is: the thing its automated sessions hang\nbeneath.",
+        "oneOf": [
+          {
+            "description": "A conversation a person opened.",
+            "properties": {
+              "kind": {
+                "const": "conversation",
+                "type": "string"
+              },
+              "session": {
+                "$ref": "#/components/schemas/RecentSession"
+              }
+            },
+            "required": [
+              "kind",
+              "session"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A schedule whose runs opened sessions; `message` is the schedule's\nstanding instruction.",
+            "properties": {
+              "id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "kind": {
+                "const": "schedule",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "message"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A workflow run started outside any conversation (the operator API);\n`label` is its script name or task when it has one.",
+            "properties": {
+              "id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "kind": {
+                "const": "workflow_run",
+                "type": "string"
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "RecoveryExportListResponse": {
         "properties": {
           "exports": {
@@ -2738,6 +2913,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/SandboxConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionsConfig"
               },
               {
                 "type": "null"
@@ -4007,6 +4193,74 @@
           }
         ]
       },
+      "SessionOrigin": {
+        "description": "What opened a session. A direct session is one a person opened; the\nother kinds are automation, and the recent-sessions list groups them\nbeneath their source instead of listing them at the top level.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "schedule_run",
+                "type": "string"
+              },
+              "schedule_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "schedule_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "workflow_worker",
+                "type": "string"
+              },
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "delegation",
+                "type": "string"
+              },
+              "parent_session_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "parent_session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SessionPolicy": {
         "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `topic_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
         "oneOf": [
@@ -4049,6 +4303,22 @@
             "type": "object"
           }
         ]
+      },
+      "SessionsConfig": {
+        "additionalProperties": false,
+        "description": "Session list housekeeping.",
+        "properties": {
+          "archive_after_days": {
+            "description": "Days without a user or assistant message after which a session leaves\nthe recent list. Only a session with a turn executing is exempt, and\na new turn on an archived session brings it back.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "archive_after_days"
+        ],
+        "type": "object"
       },
       "SettingsResponse": {
         "properties": {
@@ -4100,6 +4370,9 @@
           "sandbox": {
             "$ref": "#/components/schemas/SandboxConfig"
           },
+          "sessions": {
+            "$ref": "#/components/schemas/SessionsConfig"
+          },
           "tool_permissions": {
             "$ref": "#/components/schemas/ToolPermissionConfig"
           },
@@ -4121,6 +4394,7 @@
           "pricing",
           "observability",
           "communication",
+          "sessions",
           "restart_required",
           "can_restart"
         ],
@@ -7840,6 +8114,46 @@
           }
         },
         "summary": "Read a conversation."
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "operationId": "list_recent_sessions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "topic_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecentSessionsResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The recent-sessions list across every scope, newest activity first, automated sessions grouped beneath their source; `topic_id` narrows to a topic and `archived=true` lists the archived sessions instead."
       }
     },
     "/api/settings": {

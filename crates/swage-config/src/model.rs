@@ -741,6 +741,30 @@ impl Default for SchedulingConfig {
     }
 }
 
+/// Session list housekeeping.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionsConfig {
+    /// Days without a user or assistant message after which a session is
+    /// archived out of the recent list. Only a session with a turn executing
+    /// is exempt; a new turn on an archived session returns it. Archiving is
+    /// visibility only — nothing is cancelled and nothing queued is blocked.
+    /// Default: 7 days.
+    #[serde(default = "default_archive_after_days")]
+    pub archive_after_days: u64,
+}
+
+fn default_archive_after_days() -> u64 {
+    7
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            archive_after_days: default_archive_after_days(),
+        }
+    }
+}
+
 /// Named generation parameters that can be applied to provider requests.
 ///
 /// Empty presets are invalid at the settings API boundary. The config type is
@@ -836,6 +860,8 @@ pub struct ResolvedConfig {
     pub communication: CommunicationConfig,
     /// Scheduler settings, including local run-history retention.
     pub scheduling: SchedulingConfig,
+    /// Session list housekeeping: the inactivity archive.
+    pub sessions: SessionsConfig,
     /// Named generation parameter presets available to model entries.
     pub generation: GenerationConfig,
     /// External communication channel configuration.

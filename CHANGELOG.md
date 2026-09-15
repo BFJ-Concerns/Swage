@@ -4,6 +4,11 @@ All notable changes to Swage are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The web UI opens to a recent-sessions list across every topic and the general scope, ordered by the latest user or assistant message, with a topic filter (**All sessions** by default) and an archived view; automated sessions — schedule runs, workflow workers, delegated children — are grouped beneath the conversation or schedule that caused them. Every session records its origin, and workflow runs record the session that dispatched them (`GET /api/sessions`).
+- Sessions with no user or assistant message for a configurable number of days (`[sessions] archive_after_days`, default 7, set under Settings → Automation) are archived out of the recent list. Only a session with a turn executing is exempt; a new turn on an archived session returns it, and archiving cancels nothing.
+
 ### Changed
 
 - The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.

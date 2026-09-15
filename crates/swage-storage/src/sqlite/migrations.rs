@@ -92,8 +92,31 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("059_surface_templates", CREATE_PAGE_TEMPLATE_TABLES),
         ("060_workflow_run_holds", CREATE_WORKFLOW_RUN_HOLDS),
         ("061_worker_call_record", CREATE_WORKER_CALL_RECORD),
+        (
+            "062_session_origin_and_archive",
+            ADD_SESSION_ORIGIN_AND_ARCHIVE,
+        ),
     ]
 }
+
+/// What opened a session, and whether the inactivity sweep has archived it.
+/// `origin_kind` is one of `direct`, `schedule_run`, `workflow_worker`,
+/// `delegation`; `origin_source_id` names the schedule, workflow run or
+/// parent session for the automated kinds. The recent-sessions list groups
+/// automated sessions beneath their source by these columns, and reads
+/// `archived_at` to keep a hidden session out of the live list. Workflow runs
+/// gain the session that dispatched them so a run's workers can be traced to
+/// the conversation that started the run.
+const ADD_SESSION_ORIGIN_AND_ARCHIVE: &str = "
+    ALTER TABLE sessions ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'direct';
+    ALTER TABLE sessions ADD COLUMN origin_source_id TEXT;
+    ALTER TABLE sessions ADD COLUMN archived_at TEXT;
+    CREATE INDEX IF NOT EXISTS idx_sessions_origin ON sessions(origin_kind, origin_source_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
+    ALTER TABLE workflow_runs ADD COLUMN dispatching_session_id TEXT;
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_dispatching_session
+        ON workflow_runs(dispatching_session_id);
+";
 
 /// Annotations on a surface's modules: the notes a user and an agent both hang
 /// on the same module, so neither has to describe a location to the other.
@@ -2040,6 +2063,45 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Topics: slug column
     // ---------------------------------------------------------------------------
+
+    #[test]
+    fn sessions_carry_an_origin_and_an_archive_stamp_and_runs_their_dispatching_session() {
+        let conn = open_migrated();
+        for column in ["origin_kind", "origin_source_id", "archived_at"] {
+            let present: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .expect("pragma_table_info query");
+            assert_eq!(present, 1, "sessions.{column} should exist after migration");
+        }
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('workflow_runs') WHERE name = 'dispatching_session_id'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("pragma_table_info query");
+        assert_eq!(present, 1);
+        // A session inserted without an origin is a direct one.
+        let topic_id = default_topic_id(&conn);
+        conn.execute(
+            "INSERT INTO sessions (id, topic_id, agent_id, created_at, updated_at)
+             VALUES ('s-1', ?1, 'gateway', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [topic_id],
+        )
+        .expect("insert session");
+        let origin: String = conn
+            .query_row(
+                "SELECT origin_kind FROM sessions WHERE id = 's-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("origin_kind");
+        assert_eq!(origin, "direct");
+    }
 
     #[test]
     fn slug_column_exists_after_migration() {

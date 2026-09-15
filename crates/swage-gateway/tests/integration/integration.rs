@@ -519,6 +519,7 @@ async fn startup_recovery_marks_orphaned_turns() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -549,6 +550,7 @@ async fn startup_recovery_marks_orphaned_turns() {
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: "gateway".to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })

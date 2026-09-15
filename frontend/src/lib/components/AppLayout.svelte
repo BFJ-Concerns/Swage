@@ -6,6 +6,7 @@
   import SettingsPage from "./SettingsPage.svelte";
   import WorkflowRunView from "./WorkflowRunView.svelte";
   import TopicPicker from "./TopicPicker.svelte";
+  import RecentSessions from "./RecentSessions.svelte";
   import TopicSelector from "./TopicSelector.svelte";
   import TopicSettingsPage from "./TopicSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
@@ -32,6 +33,9 @@
     topicStore?: TopicStore;
     onTopicChange?: () => void;
     onStartWithoutTopic?: () => void;
+    // Leave the open topic or conversation and return to the recent-sessions
+    // list.
+    onOpenSessions?: () => void;
     onRetry: () => void;
     activeSurface: Surface;
     surfacesStore?: SurfacesStore;
@@ -57,6 +61,7 @@
     topicStore,
     onTopicChange,
     onStartWithoutTopic,
+    onOpenSessions,
     onRetry,
     activeSurface,
     surfacesStore,
@@ -149,6 +154,7 @@
 
 {#if inScope}
   <header class="topbar">
+    <button type="button" class="sessions-btn" onclick={() => onOpenSessions?.()}>All sessions</button>
     <TopicSelector {topicStore} {onTopicChange} />
     <nav aria-label="Surface">
       <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => selectSurface("conversation")}>Conversations</button>
@@ -200,8 +206,19 @@
     {/if}
   </div>
 {:else if !inScope}
-  <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
-  <TopicPicker {topicStore} {onTopicChange} {onStartWithoutTopic} />
+  <!--
+    The front door: the recent-sessions list across every scope first, the
+    topic cards beneath it for starting somewhere new.
+  -->
+  <main class="landing">
+    <button class="landing-settings" onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
+    <RecentSessions
+      topics={topicStore?.topics ?? []}
+      onSelectSession={(id) => void conversationStore.selectConversation(id)}
+      onOpenWorkflowRun={(id) => onNavigate?.(`/workflow-runs/${encodeURIComponent(id)}`)}
+    />
+    <TopicPicker {topicStore} {onTopicChange} {onStartWithoutTopic} />
+  </main>
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
 {:else if activeSurface === "surfaces"}
@@ -227,6 +244,8 @@
 
 <style>
   .topbar { display: flex; align-items: center; gap: 1rem; padding: .75rem; border-bottom: 1px solid var(--ink); }
+  .landing { height: 100vh; overflow: auto; display: flex; flex-direction: column; }
+  .landing-settings { align-self: flex-end; margin: .75rem .75rem 0; }
   nav { display: flex; gap: .5rem; }
   .settings-window { height: calc(100vh - 4rem); overflow: auto; }
   .settings-chrome { display: flex; align-items: center; justify-content: space-between; padding: .75rem; border-bottom: 1px solid var(--ink); }

@@ -137,6 +137,7 @@ pub fn build_router(state: AppState) -> Router {
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))
+        .route("/api/sessions", get(handlers::list_recent_sessions))
         .route(
             "/api/conversations/{id}",
             get(handlers::get_conversation).delete(handlers::delete_conversation),

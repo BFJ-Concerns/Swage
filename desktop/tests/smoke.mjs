@@ -100,6 +100,27 @@ function createMockGateway() {
       return;
     }
 
+    if (request.method === "GET" && pathname === "/api/sessions") {
+      writeJson(response, 200, {
+        entries: listConversationSummaries().map((conversation) => ({
+          source: {
+            kind: "conversation",
+            session: {
+              ...conversation,
+              topic_id: topic.id,
+              topic_name: topic.name,
+              agent_id: "gateway",
+              origin: { kind: "direct" },
+              has_running_turn: false,
+            },
+          },
+          last_activity: conversation.last_activity,
+          automated: [],
+        })),
+      });
+      return;
+    }
+
     if (request.method === "GET" && pathname === `/api/topics/${topic.id}/materials`) {
       writeJson(response, 200, { materials: [] });
       return;

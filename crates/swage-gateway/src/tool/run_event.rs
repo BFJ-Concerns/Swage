@@ -118,6 +118,7 @@ mod tests {
                 topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
+                dispatching_session_id: None,
                 script_version_id: None,
                 inline_workflow_id: None,
                 inline_workflow_name: None,

@@ -26,13 +26,14 @@ pub use model::{
     NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin, OrientationCard,
     OrientationCardLifecycle, OrientationCardLifecycleKind, PendingChannelOrigin,
     ProviderRoundRecord, Schedule, ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState,
-    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionPolicy,
-    SessionVariable, SkipReason, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
-    SurfaceModule, SurfaceTemplate, SurfaceTemplateModule, TaskDefinition, Thread, ThreadBranch,
-    ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule,
-    WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer,
-    WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
-    WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionActivity,
+    SessionListing, SessionOrigin, SessionPolicy, SessionVariable, SkipReason, SourceCapture,
+    SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, SurfaceTemplate,
+    SurfaceTemplateModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord,
+    Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowRunWorkerPlacement,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{

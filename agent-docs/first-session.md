@@ -11,7 +11,15 @@ guidance, but a conversation can start without either.
 
 ## Open a topic
 
-The web UI opens to the topic picker. A fresh install has no topics: a
+The web UI opens to the recent-sessions list (`GET /api/sessions`): every
+scope's sessions ordered by their latest user or assistant message, with
+automated sessions grouped beneath their source (`entries[].automated`
+under a `conversation`, `schedule` or `workflow_run` source). `?topic_id=`
+narrows the list to a topic; `?archived=true` lists the sessions the
+inactivity sweep has hidden (`[sessions] archive_after_days`, default 7;
+a turn on an archived session unarchives it). Every session records its
+origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`). The
+topic cards sit beneath the list. A fresh install has no topics: a
 conversation started without one runs in the general scope — general memory,
 the general knowledge base, no inherited files or context from any topic —
 and carries no `topic_id` on the wire. Select a topic card to preview it, then

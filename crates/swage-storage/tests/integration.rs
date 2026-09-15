@@ -48,6 +48,7 @@ async fn create_full_hierarchy(
         .create_session(NewSession {
             topic_id,
             agent_id: agent_id.to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -318,6 +319,7 @@ async fn thread_state_machine_enforced() {
         .create_session(NewSession {
             topic_id,
             agent_id: AGENT_A.to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -413,6 +415,7 @@ async fn turn_recovery_finds_pending_and_processing() {
         .create_session(NewSession {
             topic_id,
             agent_id: AGENT_A.to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })
@@ -537,6 +540,7 @@ async fn messages_ordered_within_thread() {
         .create_session(NewSession {
             topic_id,
             agent_id: AGENT_A.to_string(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         })

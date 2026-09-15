@@ -5,9 +5,16 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewSession, Session};
+use crate::model::{NewSession, Session, SessionActivity, SessionListing, SessionOrigin};
 use crate::sqlite::SqliteStorage;
 use crate::store::SessionStore;
+
+/// The session columns every read selects, in `row_to_session` order.
+/// Table-qualified so the activity join can add its own `created_at`.
+const SESSION_COLUMNS: &str = "sessions.id, sessions.topic_id, sessions.agent_id, \
+    sessions.metadata_json, sessions.selected_model_id, \
+    sessions.active_workspace_attachment_id, sessions.created_at, sessions.updated_at, \
+    sessions.origin_kind, sessions.origin_source_id, sessions.archived_at";
 
 // ---------------------------------------------------------------------------
 // Row mapping
@@ -22,21 +29,74 @@ pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
     let active_workspace_attachment_id: Option<String> = row.get(5)?;
     let created: String = row.get(6)?;
     let updated: String = row.get(7)?;
+    let origin_kind: String = row.get(8)?;
+    let origin_source_id: Option<String> = row.get(9)?;
+    let archived_at: Option<String> = row.get(10)?;
+
+    let origin = SessionOrigin::from_columns(
+        &origin_kind,
+        origin_source_id.as_deref().map(parse_uuid).transpose()?,
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
+    })?;
 
     Ok(Session {
         id: parse_uuid(&id)?,
         topic_id: parse_uuid(&topic_id)?,
         agent_id,
+        origin,
         metadata: parse_metadata(metadata_json.as_deref())?,
         selected_model_id,
         active_workspace_attachment_id: active_workspace_attachment_id
             .as_deref()
             .map(parse_uuid)
             .transpose()?,
+        archived_at: archived_at.as_deref().map(parse_dt).transpose()?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
 }
+
+/// A session row joined with its latest user-or-assistant message.
+fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionActivity> {
+    let session = row_to_session(row)?;
+    let last_activity: String = row.get(11)?;
+    let latest_message: Option<String> = row.get(12)?;
+    let has_interrupted_turn: bool = row.get(13)?;
+    Ok(SessionActivity {
+        last_activity: parse_dt(&last_activity)?,
+        latest_message,
+        has_interrupted_turn,
+        session,
+    })
+}
+
+/// The activity columns appended to `SESSION_COLUMNS` for the recent list:
+/// the latest user-or-assistant message's time and text (creation time and
+/// no text for a session with none), and whether any turn was interrupted.
+/// Tool and system messages are excluded so the list reflects what a person
+/// or the agent last said, not bookkeeping.
+const SESSION_ACTIVITY_COLUMNS: &str = "
+    COALESCE(latest.created_at, sessions.created_at) AS last_activity,
+    latest.content AS latest_message,
+    EXISTS (
+        SELECT 1 FROM turns
+        JOIN threads ON threads.id = turns.thread_id
+        WHERE threads.session_id = sessions.id AND turns.state = 'interrupted'
+    ) AS has_interrupted_turn";
+
+const SESSION_ACTIVITY_JOIN: &str = "
+    LEFT JOIN (
+        SELECT threads.session_id, messages.created_at, messages.content,
+               ROW_NUMBER() OVER (
+                   PARTITION BY threads.session_id
+                   ORDER BY messages.created_at DESC, messages.position DESC
+               ) AS recency
+        FROM messages
+        JOIN threads ON threads.id = messages.thread_id
+        WHERE messages.role IN ('user', 'assistant')
+    ) AS latest ON latest.session_id = sessions.id AND latest.recency = 1";
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
     s.parse::<Uuid>().map_err(|e| {
@@ -92,8 +152,8 @@ impl SessionStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO sessions (id, topic_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                "INSERT INTO sessions (id, topic_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at, origin_kind, origin_source_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
                 params![
                     id.to_string(),
                     session.topic_id.to_string(),
@@ -102,7 +162,9 @@ impl SessionStore for SqliteStorage {
                     session
                         .active_workspace_attachment_id
                         .map(|id| id.to_string()),
-                    &now_str
+                    &now_str,
+                    session.origin.kind(),
+                    session.origin.source_id().map(|id| id.to_string()),
                 ],
             )?;
 
@@ -110,9 +172,11 @@ impl SessionStore for SqliteStorage {
                 id,
                 topic_id: session.topic_id,
                 agent_id: session.agent_id,
+                origin: session.origin,
                 metadata: session.metadata,
                 selected_model_id: None,
                 active_workspace_attachment_id: session.active_workspace_attachment_id,
+                archived_at: None,
                 created_at: now,
                 updated_at: now,
             })
@@ -123,8 +187,7 @@ impl SessionStore for SqliteStorage {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
-                 FROM sessions WHERE id = ?1",
+                &format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1"),
                 params![id.to_string()],
                 row_to_session,
             )
@@ -135,11 +198,10 @@ impl SessionStore for SqliteStorage {
 
     async fn list_by_topic(&self, topic_id: Uuid) -> Result<Vec<Session>, StorageError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
-                 FROM sessions WHERE topic_id = ?1
-                 ORDER BY updated_at DESC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE topic_id = ?1
+                 ORDER BY updated_at DESC"
+            ))?;
             let rows = stmt.query_map(params![topic_id.to_string()], row_to_session)?;
             rows.collect()
         })
@@ -152,11 +214,10 @@ impl SessionStore for SqliteStorage {
     ) -> Result<Vec<Session>, StorageError> {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
-                 FROM sessions WHERE agent_id = ?1
-                 ORDER BY updated_at DESC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions WHERE agent_id = ?1
+                 ORDER BY updated_at DESC"
+            ))?;
             let rows = stmt.query_map(params![&agent_id], row_to_session)?;
             rows.collect()
         })
@@ -182,6 +243,89 @@ impl SessionStore for SqliteStorage {
                 params![&now_str, id.to_string()],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn list_recent_sessions(
+        &self,
+        listing: SessionListing,
+    ) -> Result<Vec<SessionActivity>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {SESSION_COLUMNS}, {SESSION_ACTIVITY_COLUMNS}
+                 FROM sessions {SESSION_ACTIVITY_JOIN}
+                 WHERE (?1 IS NULL OR sessions.topic_id = ?1)
+                   AND (sessions.archived_at IS NULL) = (?2 = 0)
+                 ORDER BY last_activity DESC, sessions.created_at DESC"
+            ))?;
+            let rows = stmt.query_map(
+                params![listing.topic_id.map(|id| id.to_string()), listing.archived],
+                row_to_session_activity,
+            )?;
+            rows.collect()
+        })
+        .await
+    }
+
+    async fn get_session_activity(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<SessionActivity>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {SESSION_COLUMNS}, {SESSION_ACTIVITY_COLUMNS}
+                     FROM sessions {SESSION_ACTIVITY_JOIN}
+                     WHERE sessions.id = ?1"
+                ),
+                params![id.to_string()],
+                row_to_session_activity,
+            )
+            .optional()
+        })
+        .await
+    }
+
+    async fn archive_inactive_sessions(
+        &self,
+        inactive_before: DateTime<Utc>,
+        exempt: &[Uuid],
+    ) -> Result<Vec<Uuid>, StorageError> {
+        let exempt: Vec<String> = exempt.iter().map(Uuid::to_string).collect();
+        self.with_conn(move |conn| {
+            let exempt_json = serde_json::to_string(&exempt)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let now_str = Utc::now().to_rfc3339();
+            let mut stmt = conn.prepare(&format!(
+                "UPDATE sessions SET archived_at = ?1
+                 WHERE archived_at IS NULL
+                   AND id NOT IN (SELECT value FROM json_each(?2))
+                   AND id IN (
+                       SELECT sessions.id FROM sessions {SESSION_ACTIVITY_JOIN}
+                       WHERE COALESCE(latest.created_at, sessions.created_at) < ?3
+                   )
+                 RETURNING id"
+            ))?;
+            let rows = stmt.query_map(
+                params![now_str, exempt_json, inactive_before.to_rfc3339()],
+                |row| {
+                    let id: String = row.get(0)?;
+                    parse_uuid(&id)
+                },
+            )?;
+            rows.collect()
+        })
+        .await
+    }
+
+    async fn unarchive_session(&self, id: Uuid) -> Result<bool, StorageError> {
+        self.with_conn(move |conn| {
+            let affected = conn.execute(
+                "UPDATE sessions SET archived_at = NULL WHERE id = ?1 AND archived_at IS NOT NULL",
+                params![id.to_string()],
+            )?;
+            Ok(affected > 0)
         })
         .await
     }
@@ -291,13 +435,14 @@ impl SessionStore for SqliteStorage {
         let conversation = conversation.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
-                 FROM sessions
-                 WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
-                   AND json_extract(metadata_json, '$.channel_origin.account') = ?2
-                   AND json_extract(metadata_json, '$.channel_origin.conversation') = ?3
-                 ORDER BY updated_at DESC
-                 LIMIT 1",
+                &format!(
+                    "SELECT {SESSION_COLUMNS} FROM sessions
+                     WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
+                       AND json_extract(metadata_json, '$.channel_origin.account') = ?2
+                       AND json_extract(metadata_json, '$.channel_origin.conversation') = ?3
+                     ORDER BY updated_at DESC
+                     LIMIT 1"
+                ),
                 params![integration, account, conversation],
                 row_to_session,
             )
@@ -309,8 +454,9 @@ impl SessionStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewTopic, NewWorkspaceAttachment};
+    use crate::model::{Message, NewMessage, NewThread, NewTopic, NewWorkspaceAttachment};
     use crate::store::{TopicStore, WorkspaceAttachmentStore};
+    use swage_core::Role;
 
     use super::*;
 
@@ -333,6 +479,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "test-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -353,6 +500,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "test-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -364,6 +512,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "test-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -377,6 +526,236 @@ mod tests {
         assert!(sessions[0].updated_at >= sessions[1].updated_at);
     }
 
+    async fn say(storage: &SqliteStorage, session_id: Uuid, role: Role, content: &str) -> Message {
+        use crate::store::{MessageStore, ThreadStore};
+        let thread = match ThreadStore::list_by_session(storage, session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+        {
+            Some(thread) => thread,
+            None => ThreadStore::create(
+                storage,
+                NewThread {
+                    session_id,
+                    agent_id: "test-agent".to_string(),
+                },
+            )
+            .await
+            .unwrap(),
+        };
+        let position = storage
+            .list_messages_by_thread(thread.id)
+            .await
+            .unwrap()
+            .len() as i32;
+        storage
+            .create_message(NewMessage {
+                thread_id: thread.id,
+                turn_id: None,
+                role,
+                content: content.to_string(),
+                attachments: Vec::new(),
+                position,
+                agent_id: "test-agent".to_string(),
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Move a message's timestamp so a test can stage inactivity without
+    /// waiting for it.
+    async fn backdate_message(
+        storage: &SqliteStorage,
+        message_id: Uuid,
+        days: i64,
+    ) -> DateTime<Utc> {
+        let created_at = Utc::now() - chrono::Duration::days(days);
+        let stamp = created_at.to_rfc3339();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+                    params![stamp, message_id.to_string()],
+                )
+            })
+            .await
+            .unwrap();
+        created_at
+    }
+
+    fn direct(topic_id: Uuid) -> NewSession {
+        NewSession {
+            topic_id,
+            agent_id: "test-agent".to_string(),
+            origin: SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_records_what_opened_it() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let schedule_id = Uuid::new_v4();
+        let session = storage
+            .create_session(NewSession {
+                origin: SessionOrigin::ScheduleRun { schedule_id },
+                ..direct(topic_id)
+            })
+            .await
+            .unwrap();
+
+        let fetched = storage.get_session(session.id).await.unwrap().unwrap();
+        assert_eq!(fetched.origin, SessionOrigin::ScheduleRun { schedule_id });
+        assert_eq!(fetched.archived_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_recent_list_orders_by_the_latest_user_or_assistant_message() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let quiet = storage.create_session(direct(topic_id)).await.unwrap();
+        let spoken = storage.create_session(direct(topic_id)).await.unwrap();
+        let tooled = storage.create_session(direct(topic_id)).await.unwrap();
+        // The quiet session is newest by creation; the spoken one has a user
+        // message; the tooled one only a tool message, which does not count.
+        let said = say(&storage, spoken.id, Role::User, "hello").await;
+        let said_at = backdate_message(&storage, said.id, 1).await;
+        say(&storage, tooled.id, Role::Tool, "{}").await;
+
+        let listing = storage
+            .list_recent_sessions(SessionListing::default())
+            .await
+            .unwrap();
+        let ids: Vec<Uuid> = listing.iter().map(|entry| entry.session.id).collect();
+
+        assert_eq!(ids, vec![tooled.id, quiet.id, spoken.id]);
+        let spoken_entry = &listing[2];
+        assert_eq!(spoken_entry.last_activity, said_at);
+        assert_eq!(spoken_entry.latest_message.as_deref(), Some("hello"));
+        let tooled_entry = &listing[0];
+        assert_eq!(tooled_entry.last_activity, tooled.created_at);
+        assert_eq!(tooled_entry.latest_message, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_recent_list_spans_every_scope_and_narrows_to_one() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let general = storage.general_scope().await.unwrap();
+        let in_topic = storage.create_session(direct(topic_id)).await.unwrap();
+        let in_general = storage.create_session(direct(general.id)).await.unwrap();
+
+        let everywhere = storage
+            .list_recent_sessions(SessionListing::default())
+            .await
+            .unwrap();
+        let mut ids: Vec<Uuid> = everywhere.iter().map(|entry| entry.session.id).collect();
+        ids.sort();
+        let mut expected = vec![in_topic.id, in_general.id];
+        expected.sort();
+        assert_eq!(ids, expected);
+
+        let narrowed = storage
+            .list_recent_sessions(SessionListing {
+                topic_id: Some(topic_id),
+                archived: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].session.id, in_topic.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_archive_sweep_hides_inactive_sessions_and_spares_the_executing_and_the_recent() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let stale = storage.create_session(direct(topic_id)).await.unwrap();
+        let executing = storage.create_session(direct(topic_id)).await.unwrap();
+        let fresh = storage.create_session(direct(topic_id)).await.unwrap();
+        let old = say(&storage, stale.id, Role::Assistant, "long ago").await;
+        backdate_message(&storage, old.id, 10).await;
+        let old_but_busy = say(&storage, executing.id, Role::Assistant, "long ago too").await;
+        backdate_message(&storage, old_but_busy.id, 10).await;
+        say(&storage, fresh.id, Role::User, "just now").await;
+
+        let cutoff = Utc::now() - chrono::Duration::days(7);
+        let archived = storage
+            .archive_inactive_sessions(cutoff, &[executing.id])
+            .await
+            .unwrap();
+        assert_eq!(archived, vec![stale.id]);
+
+        let live: Vec<Uuid> = storage
+            .list_recent_sessions(SessionListing::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.session.id)
+            .collect();
+        assert!(live.contains(&executing.id) && live.contains(&fresh.id));
+        assert!(!live.contains(&stale.id));
+
+        let hidden = storage
+            .list_recent_sessions(SessionListing {
+                topic_id: None,
+                archived: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].session.id, stale.id);
+        assert!(hidden[0].session.archived_at.is_some());
+
+        // A second sweep finds nothing new; archiving is idempotent.
+        assert!(
+            storage
+                .archive_inactive_sessions(cutoff, &[executing.id])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Once nothing executes on it, the old session goes too.
+        assert_eq!(
+            storage
+                .archive_inactive_sessions(cutoff, &[])
+                .await
+                .unwrap(),
+            vec![executing.id]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_archived_session_returns_when_unarchived() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let session = storage.create_session(direct(topic_id)).await.unwrap();
+        let old = say(&storage, session.id, Role::User, "long ago").await;
+        backdate_message(&storage, old.id, 30).await;
+        storage
+            .archive_inactive_sessions(Utc::now() - chrono::Duration::days(7), &[])
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .get_session(session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .archived_at
+                .is_some()
+        );
+
+        assert!(storage.unarchive_session(session.id).await.unwrap());
+        assert!(!storage.unarchive_session(session.id).await.unwrap());
+        let fetched = storage
+            .get_session_activity(session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.session.archived_at, None);
+        assert_eq!(fetched.latest_message.as_deref(), Some("long ago"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_session_returns_true_then_false() {
         let (storage, topic_id) = make_storage_with_topic().await;
@@ -384,6 +763,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "test-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -401,6 +781,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "my-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -425,6 +806,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "my-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: Some(metadata.clone()),
                 active_workspace_attachment_id: None,
             })
@@ -454,6 +836,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "my-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: Some(workspace.id),
             })
@@ -479,6 +862,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "alpha".to_string(),
+                origin: crate::model::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -488,6 +872,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "beta".to_string(),
+                origin: crate::model::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -497,6 +882,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "alpha".to_string(),
+                origin: crate::model::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -531,6 +917,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id,
                 agent_id: "test-agent".to_string(),
+                origin: SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

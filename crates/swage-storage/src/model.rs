@@ -250,7 +250,61 @@ pub struct WorkspaceAttachment {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A session (conversation) within a topic, scoped to a single agent.
+/// How a session came to exist: opened by a person, or spawned by automation
+/// on behalf of a source. The origin is fixed at creation and is what the
+/// recent-sessions list groups by — an automated session sits beneath the
+/// conversation or schedule that caused it rather than beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionOrigin {
+    /// A person opened it: the web UI, the TUI, the CLI, or an external
+    /// channel conversation.
+    Direct,
+    /// A schedule's run opened it (the run itself links back through
+    /// `schedule_runs.session_id`).
+    ScheduleRun { schedule_id: Uuid },
+    /// A workflow run opened it as a worker.
+    WorkflowWorker { run_id: Uuid },
+    /// A turn in another session delegated to it.
+    Delegation { parent_session_id: Uuid },
+}
+
+impl SessionOrigin {
+    /// The stored discriminant.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::ScheduleRun { .. } => "schedule_run",
+            Self::WorkflowWorker { .. } => "workflow_worker",
+            Self::Delegation { .. } => "delegation",
+        }
+    }
+
+    /// The stored source identifier: the schedule, the workflow run, or the
+    /// parent session. Absent for a direct session.
+    pub fn source_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Direct => None,
+            Self::ScheduleRun { schedule_id } => Some(*schedule_id),
+            Self::WorkflowWorker { run_id } => Some(*run_id),
+            Self::Delegation { parent_session_id } => Some(*parent_session_id),
+        }
+    }
+
+    /// Rebuild an origin from its stored columns. A kind that names a source
+    /// but carries none is a corrupt row and is reported as such.
+    pub fn from_columns(kind: &str, source_id: Option<Uuid>) -> Result<Self, String> {
+        match (kind, source_id) {
+            ("direct", _) => Ok(Self::Direct),
+            ("schedule_run", Some(schedule_id)) => Ok(Self::ScheduleRun { schedule_id }),
+            ("workflow_worker", Some(run_id)) => Ok(Self::WorkflowWorker { run_id }),
+            ("delegation", Some(parent_session_id)) => Ok(Self::Delegation { parent_session_id }),
+            (kind, None) => Err(format!("session origin '{kind}' has no source id")),
+            (kind, Some(_)) => Err(format!("unknown session origin '{kind}'")),
+        }
+    }
+}
+
+/// A session (conversation) within a scope, owned by a single agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
@@ -258,6 +312,8 @@ pub struct Session {
     /// The agent that owns this session. Used to scope queries in multi-agent
     /// deployments so each agent sees only its own sessions.
     pub agent_id: String,
+    /// What opened the session. See [`SessionOrigin`].
+    pub origin: SessionOrigin,
     /// Host-managed opaque metadata associated with the session.
     ///
     /// This stays outside prompt and WebSocket transport surfaces unless a
@@ -266,8 +322,37 @@ pub struct Session {
     /// Optional configured model key selected for this conversation.
     pub selected_model_id: Option<String>,
     pub active_workspace_attachment_id: Option<Uuid>,
+    /// Set when the inactivity sweep hid the session from the recent list.
+    /// Archiving is visibility only: nothing about the session's threads,
+    /// surfaces or queued continuations changes, and the next turn on the
+    /// session clears it.
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A session as the recent-sessions list reads it: the row plus the
+/// activity the list orders by and previews.
+#[derive(Debug, Clone)]
+pub struct SessionActivity {
+    pub session: Session,
+    /// When the latest user or assistant message landed, or the session's
+    /// creation when it has none. Tool and system messages do not count: a
+    /// session is as recent as the last thing a person or the agent said.
+    pub last_activity: DateTime<Utc>,
+    /// The latest user or assistant message's text.
+    pub latest_message: Option<String>,
+    pub has_interrupted_turn: bool,
+}
+
+/// Which sessions the recent-sessions listing returns.
+#[derive(Debug, Clone, Default)]
+pub struct SessionListing {
+    /// Restrict to one scope's sessions. `None` lists every scope — the
+    /// topics and the general scope alike.
+    pub topic_id: Option<Uuid>,
+    /// List the archived sessions instead of the live ones.
+    pub archived: bool,
 }
 
 /// A persisted non-local device registration.
@@ -1848,6 +1933,8 @@ pub struct NewSession {
     pub topic_id: Uuid,
     /// The agent that owns this session.
     pub agent_id: String,
+    /// What is opening the session. See [`SessionOrigin`].
+    pub origin: SessionOrigin,
     /// Host-managed opaque metadata to persist with the session.
     pub metadata: Option<serde_json::Value>,
     pub active_workspace_attachment_id: Option<Uuid>,
@@ -2178,6 +2265,10 @@ pub struct WorkflowRunRecord {
     /// When a parked run is due to wake. Set only while `state` is
     /// `parked`; cleared on every other state transition.
     pub wake_at: Option<DateTime<Utc>>,
+    /// The session whose turn started this run — the conversation the run's
+    /// workers are grouped beneath in the recent-sessions list. `None` for a
+    /// run started by the operator API or a schedule.
+    pub dispatching_session_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -2187,6 +2278,8 @@ pub struct NewWorkflowRun {
     pub topic_id: Uuid,
     pub parent_run_id: Option<Uuid>,
     pub parent_seq: Option<u64>,
+    /// See `WorkflowRunRecord::dispatching_session_id`.
+    pub dispatching_session_id: Option<Uuid>,
     pub script_version_id: Option<Uuid>,
     /// Identity carried beside inline source when the source belongs to an
     /// immutable workflow outside the authored-version tables.
@@ -2940,9 +3033,11 @@ mod tests {
             id,
             topic_id,
             agent_id: "my-agent".to_string(),
+            origin: SessionOrigin::Direct,
             metadata: None,
             selected_model_id: None,
             active_workspace_attachment_id: None,
+            archived_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -2959,6 +3054,7 @@ mod tests {
         let ns = NewSession {
             topic_id: Uuid::new_v4(),
             agent_id: "config-agent".to_string(),
+            origin: SessionOrigin::Direct,
             metadata: None,
             active_workspace_attachment_id: None,
         };

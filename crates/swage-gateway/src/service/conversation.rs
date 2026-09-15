@@ -6,7 +6,7 @@ use uuid::Uuid;
 use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
-    model::{NewSession, NewThread, ThreadBranch, TurnState},
+    model::{NewSession, NewThread, SessionOrigin, ThreadBranch, TurnState},
     store::{Storage, TopicStore},
 };
 
@@ -157,6 +157,7 @@ impl ConversationService {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: agent_id.clone(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Self::effort_metadata(effort),
                 active_workspace_attachment_id,
             })
@@ -395,8 +396,13 @@ impl ConversationService {
         topic_id: Uuid,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_topic_for_agent(topic_id, DEFAULT_AGENT_ID, selected_model_id)
-            .await
+        self.create_session_in_topic_for_agent(
+            topic_id,
+            DEFAULT_AGENT_ID,
+            SessionOrigin::Direct,
+            selected_model_id,
+        )
+        .await
     }
 
     /// Create a session in a topic from a client request, resolving and
@@ -428,6 +434,7 @@ impl ConversationService {
         self.create_session_in_topic_for_agent_with_effort(
             topic_id,
             &agent_id,
+            SessionOrigin::Direct,
             selected_model_id,
             effort,
         )
@@ -438,16 +445,19 @@ impl ConversationService {
     ///
     /// The general session-creation path: interactive conversations use the
     /// default `"gateway"` agent via the wrappers above, while fresh-policy
-    /// schedule runs create sessions for their schedule's target agent.
+    /// schedule runs create sessions for their schedule's target agent and
+    /// record the schedule as the session's origin.
     pub async fn create_session_in_topic_for_agent(
         &self,
         topic_id: Uuid,
         agent_id: &str,
+        origin: SessionOrigin,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
         self.create_session_in_topic_for_agent_with_effort(
             topic_id,
             agent_id,
+            origin,
             selected_model_id,
             None,
         )
@@ -458,6 +468,7 @@ impl ConversationService {
         &self,
         topic_id: Uuid,
         agent_id: &str,
+        origin: SessionOrigin,
         selected_model_id: Option<String>,
         effort: Option<swage_protocol::client::settings::Effort>,
     ) -> Result<ConversationResponse, GatewayError> {
@@ -474,6 +485,7 @@ impl ConversationService {
             .create_session(NewSession {
                 topic_id,
                 agent_id: agent_id.to_string(),
+                origin,
                 metadata: Self::effort_metadata(effort),
                 active_workspace_attachment_id,
             })

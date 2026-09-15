@@ -249,6 +249,7 @@ pub async fn create_channel_link(
         .create_session(NewSession {
             topic_id: topic.id,
             agent_id: agent_id.clone(),
+            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(metadata),
             active_workspace_attachment_id: None,
         })
@@ -599,6 +600,7 @@ pub async fn import_gateway_recovery_bundle(
                     ))
                 })?,
                 agent_id: session.agent_id.clone(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: session.metadata,
                 active_workspace_attachment_id: None,
             })

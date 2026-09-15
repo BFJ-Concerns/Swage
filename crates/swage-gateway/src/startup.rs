@@ -239,6 +239,12 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    // The inactivity archive: hides sessions nobody has spoken in for the
+    // configured delay, first pass at startup.
+    let archive_handle = crate::session_archive::spawn_archive_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
     let queue_handle = crate::background_loop::spawn_periodic_loop(
         std::time::Duration::from_millis(250),
         background_shutdown.clone(),
@@ -333,6 +339,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
             ("schedule", schedule_handle),
             ("workflow wake", workflow_wake_handle),
             ("attachment ingestion", attachment_handle),
+            ("session archive", archive_handle),
             ("channel queue", queue_handle),
         ] {
             if let Err(error) = handle.await {
@@ -1144,6 +1151,7 @@ mod tests {
             topic_id: topic.id,
             parent_run_id: None,
             parent_seq: None,
+            dispatching_session_id: None,
             script_version_id: None,
             inline_workflow_id: None,
             inline_workflow_name: None,

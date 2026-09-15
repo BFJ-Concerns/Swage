@@ -154,7 +154,12 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
     );
     let topic = state.topic_store.general_scope().await.unwrap();
     let session = ConversationService::new(state.storage.clone(), state.topic_store.clone())
-        .create_session_in_topic_for_agent(topic.id, "gateway", None)
+        .create_session_in_topic_for_agent(
+            topic.id,
+            "gateway",
+            swage_storage::SessionOrigin::Direct,
+            None,
+        )
         .await
         .unwrap();
     let context = host_context(&state, session.id);

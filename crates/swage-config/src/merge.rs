@@ -7,7 +7,7 @@ use crate::model::{
     ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
     ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SchedulingConfig, SearchProviderConfig,
-    ServerConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
+    ServerConfig, SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -228,6 +228,12 @@ pub struct PartialSchedulingConfig {
     pub run_history_max_per_schedule: Option<u32>,
 }
 
+/// Partial mirror of `SessionsConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialSessionsConfig {
+    pub archive_after_days: Option<u64>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -246,6 +252,7 @@ pub struct PartialConfig {
     pub hitl: Option<PartialHitlConfig>,
     pub communication: Option<PartialCommunicationConfig>,
     pub scheduling: Option<PartialSchedulingConfig>,
+    pub sessions: Option<PartialSessionsConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
     /// Top-level bypass for the permission and approval system.
@@ -402,6 +409,9 @@ impl From<ResolvedConfig> for PartialConfig {
                 run_history_max_age_days: Some(r.scheduling.run_history_max_age_days),
                 run_history_max_per_schedule: Some(r.scheduling.run_history_max_per_schedule),
             }),
+            sessions: Some(PartialSessionsConfig {
+                archive_after_days: Some(r.sessions.archive_after_days),
+            }),
             generation: Some(PartialGenerationConfig {
                 presets: if r.generation.presets.is_empty() {
                     None
@@ -504,6 +514,7 @@ impl_merge_overlay!(PartialSchedulingConfig {
     run_history_max_age_days,
     run_history_max_per_schedule,
 });
+impl_merge_overlay!(PartialSessionsConfig { archive_after_days });
 impl_merge_overlay!(PartialTelegramChannelConfig {
     bot_token_secret_ref,
     bot_token_env,
@@ -663,6 +674,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             }
         }),
         scheduling: merge_overlay_section(base.scheduling, overlay.scheduling),
+        sessions: merge_overlay_section(base.sessions, overlay.sessions),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
             if let Some(overlay_presets) = o.presets {
@@ -936,6 +948,14 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 run_history_max_per_schedule: s
                     .run_history_max_per_schedule
                     .unwrap_or(ds.run_history_max_per_schedule),
+            }
+        },
+        sessions: {
+            let s = partial.sessions.unwrap_or_default();
+            SessionsConfig {
+                archive_after_days: s
+                    .archive_after_days
+                    .unwrap_or_else(|| SessionsConfig::default().archive_after_days),
             }
         },
         // Instructions are assembled separately by the instructions module
@@ -1884,6 +1904,31 @@ mod tests {
         assert_eq!(restored.server.port, 8080);
         assert_eq!(restored.default_model_id(), "test-model");
         assert_eq!(restored.tools.shell_timeout_secs, 120);
+    }
+
+    #[test]
+    fn sessions_archive_delay_defaults_and_overlays() {
+        assert_eq!(
+            resolve(PartialConfig::default())
+                .sessions
+                .archive_after_days,
+            7
+        );
+
+        let base = PartialConfig {
+            sessions: Some(PartialSessionsConfig {
+                archive_after_days: Some(30),
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            sessions: Some(PartialSessionsConfig {
+                archive_after_days: Some(3),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.sessions.archive_after_days, 3);
     }
 
     #[test]

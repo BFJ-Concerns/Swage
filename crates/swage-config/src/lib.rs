@@ -32,7 +32,8 @@ pub use model::{
     ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
     ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
-    TelegramChannelConfig, ToolConfig, ToolPermissionConfig, resolve_provider_route,
+    SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
+    resolve_provider_route,
 };
 
 // Error types

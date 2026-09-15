@@ -18,12 +18,13 @@ use crate::model::{
     NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection,
     NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
     PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate,
-    SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation, Surface,
-    SurfaceAnnotation, SurfaceModule, SurfaceTemplate, SurfaceTemplateModule, TaskDefinition,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnState,
-    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    SecretRecord, Session, SessionActivity, SessionListing, SessionVariable, SourceCapture,
+    SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, SurfaceTemplate,
+    SurfaceTemplateModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord,
+    Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +115,29 @@ pub trait SessionStore: Send + Sync {
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
+    /// The recent-sessions list: sessions with their latest user-or-assistant
+    /// activity, newest first, across every scope or one topic, live or
+    /// archived (`SessionListing`).
+    async fn list_recent_sessions(
+        &self,
+        listing: SessionListing,
+    ) -> Result<Vec<SessionActivity>, StorageError>;
+    /// One session with its activity, as `list_recent_sessions` would read
+    /// it, whether or not it is archived.
+    async fn get_session_activity(&self, id: Uuid)
+    -> Result<Option<SessionActivity>, StorageError>;
+    /// Archive every live session whose latest user-or-assistant message (or
+    /// creation, when it has none) is older than `inactive_before`, except
+    /// the ids in `exempt` — the sessions with work executing right now.
+    /// Returns the ids archived.
+    async fn archive_inactive_sessions(
+        &self,
+        inactive_before: chrono::DateTime<chrono::Utc>,
+        exempt: &[Uuid],
+    ) -> Result<Vec<Uuid>, StorageError>;
+    /// Return an archived session to the recent list. Returns true when the
+    /// session was archived.
+    async fn unarchive_session(&self, id: Uuid) -> Result<bool, StorageError>;
     /// Replace host-managed session metadata.
     async fn set_session_metadata(
         &self,
@@ -1564,6 +1588,28 @@ mod tests {
             unimplemented!()
         }
         async fn update_activity(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_recent_sessions(
+            &self,
+            _: SessionListing,
+        ) -> Result<Vec<SessionActivity>, StorageError> {
+            unimplemented!()
+        }
+        async fn get_session_activity(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<SessionActivity>, StorageError> {
+            unimplemented!()
+        }
+        async fn archive_inactive_sessions(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+            _: &[Uuid],
+        ) -> Result<Vec<Uuid>, StorageError> {
+            unimplemented!()
+        }
+        async fn unarchive_session(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn set_session_metadata(

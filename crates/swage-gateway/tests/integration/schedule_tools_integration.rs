@@ -131,7 +131,12 @@ fn host_context(state: &AppState, agent_id: &str, session_id: Uuid) -> GatewayTo
 
 async fn tool_session(state: &AppState, topic_id: Uuid) -> Uuid {
     ConversationService::new(state.storage.clone(), state.topic_store.clone())
-        .create_session_in_topic_for_agent(topic_id, "gateway", None)
+        .create_session_in_topic_for_agent(
+            topic_id,
+            "gateway",
+            swage_storage::SessionOrigin::Direct,
+            None,
+        )
         .await
         .unwrap()
         .id
@@ -797,7 +802,12 @@ async fn wake_me_later_schedules_a_one_off_continuation_of_the_calling_session()
     let state = test_state();
     let topic = state.topic_store.general_scope().await.unwrap();
     let session = ConversationService::new(state.storage.clone(), state.topic_store.clone())
-        .create_session_in_topic_for_agent(topic.id, "gateway", None)
+        .create_session_in_topic_for_agent(
+            topic.id,
+            "gateway",
+            swage_storage::SessionOrigin::Direct,
+            None,
+        )
         .await
         .unwrap();
     let dispatcher = dispatcher(permissions(&["*"], &[]));

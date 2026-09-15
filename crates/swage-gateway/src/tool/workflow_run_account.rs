@@ -159,6 +159,7 @@ mod tests {
                 topic_id,
                 parent_run_id: None,
                 parent_seq: None,
+                dispatching_session_id: None,
                 script_version_id: None,
                 inline_workflow_id: None,
                 inline_workflow_name: Some("fan-out".into()),
@@ -227,6 +228,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -267,6 +269,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -299,6 +302,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: topic.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
@@ -344,6 +348,7 @@ mod tests {
             .create_session(NewSession {
                 topic_id: other.id,
                 agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
                 metadata: None,
                 active_workspace_attachment_id: None,
             })

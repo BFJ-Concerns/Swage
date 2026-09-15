@@ -155,3 +155,77 @@ pub struct MessageView {
 pub struct ConversationListResponse {
     pub conversations: Vec<ConversationSummary>,
 }
+
+/// What opened a session. A direct session is one a person opened; the
+/// other kinds are automation, and the recent-sessions list groups them
+/// beneath their source instead of listing them at the top level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionOrigin {
+    Direct,
+    ScheduleRun { schedule_id: Uuid },
+    WorkflowWorker { run_id: Uuid },
+    Delegation { parent_session_id: Uuid },
+}
+
+/// One session as the recent-sessions list shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct RecentSession {
+    pub id: Uuid,
+    /// Absent for a session in the general scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic_id: Option<Uuid>,
+    /// The topic's name, or "General" for a session without one.
+    pub topic_name: String,
+    pub agent_id: String,
+    pub origin: SessionOrigin,
+    pub created_at: DateTime<Utc>,
+    /// When the latest user or assistant message landed — the list's order.
+    pub last_activity: DateTime<Utc>,
+    pub message_preview: Option<String>,
+    pub has_interrupted_turn: bool,
+    /// A turn is executing on the session right now.
+    pub has_running_turn: bool,
+    /// Set while the inactivity sweep has the session hidden from the
+    /// recent list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
+/// What a recent-sessions entry is: the thing its automated sessions hang
+/// beneath.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecentSessionsSource {
+    /// A conversation a person opened.
+    Conversation { session: RecentSession },
+    /// A schedule whose runs opened sessions; `message` is the schedule's
+    /// standing instruction.
+    Schedule { id: Uuid, message: String },
+    /// A workflow run started outside any conversation (the operator API);
+    /// `label` is its script name or task when it has one.
+    WorkflowRun {
+        id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        label: Option<String>,
+    },
+}
+
+/// One entry in the recent-sessions list: a source and the automated
+/// sessions beneath it, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct RecentSessionsEntry {
+    pub source: RecentSessionsSource,
+    /// The latest activity across the source and everything beneath it —
+    /// the list's order.
+    pub last_activity: DateTime<Utc>,
+    pub automated: Vec<RecentSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct RecentSessionsResponse {
+    pub entries: Vec<RecentSessionsEntry>,
+}

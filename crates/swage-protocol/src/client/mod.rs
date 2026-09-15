@@ -65,6 +65,7 @@ pub struct ClientSurface {
     create_conversation_branch_request: conversation::CreateConversationBranchRequest,
     conversation: conversation::ConversationResponse,
     conversation_list: conversation::ConversationListResponse,
+    recent_sessions: conversation::RecentSessionsResponse,
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
     turn_context: context::TurnContextResponse,
