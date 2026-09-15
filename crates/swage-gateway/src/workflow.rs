@@ -11357,7 +11357,7 @@ mod tests {
             Path(research_sweep_id(topic.id)),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({
-                    "topic": "contract evidence",
+                    "subject": "contract evidence",
                     "purpose": "prove the shipped sweep contract"
                 }),
                 budget: None,

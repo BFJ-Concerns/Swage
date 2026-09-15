@@ -87,7 +87,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             ADD_TOOL_CALL_DISPLAY_SUMMARY,
         ),
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
-        ("057_pages", CREATE_PAGE_TABLES),
+        ("057_surfaces", CREATE_PAGE_TABLES),
         ("058_surface_annotations", CREATE_PAGE_ANNOTATION_TABLE),
         ("059_surface_templates", CREATE_PAGE_TEMPLATE_TABLES),
         ("060_workflow_run_holds", CREATE_WORKFLOW_RUN_HOLDS),

@@ -1,8 +1,8 @@
-// Research sweep: from a topic and the purpose the findings must serve, run
+// Research sweep: from a subject and the purpose the findings must serve, run
 // an unattended gather → organise → synthesise pass over live web sources,
-// landing everything in the space's cumulative knowledge base.
+// landing everything in the topic's cumulative knowledge base.
 //
-// Saved-script contract: args = { topic, purpose, maxSources? }. Every
+// Saved-script contract: args = { subject, purpose, maxSources? }. Every
 // worker here is a bare dispatch — prompt, tool grants, and the run's
 // inherited model — never an agent definition: the roles (scout and
 // gatherer, organiser, synthesist) exist only inside this script, so an
@@ -16,17 +16,17 @@
 // duplicates even when the live page's bytes changed between attempts.
 export const defaults = { maxAttempts: 3 };
 
-const topic = args.topic;
+const subject = args.subject;
 const purpose = args.purpose;
 const maxSources = args.maxSources ?? 8;
-if (!topic || !purpose) {
-  throw new Error("research-sweep needs args.topic and args.purpose");
+if (!subject || !purpose) {
+  throw new Error("research-sweep needs args.subject and args.purpose");
 }
 
 // Standing instructions per role, prefixed to every prompt that role
 // receives. The tool lists beside them are the role's whole grant.
 const researcherBrief =
-  "Research the requested topic from web sources. Record gathered source " +
+  "Research the requested subject from web sources. Record gathered source " +
   "material in the knowledge base and report source failures without " +
   "inventing substitutes.\n\n";
 const researcherTools = [
@@ -78,7 +78,7 @@ dispatching("Scope sources", "re-briefed", "the sweep's first worker; its grants
 const plan = await agent(
   researcherBrief +
     `You are scoping a research sweep.\n` +
-    `Topic: ${topic}\n` +
+    `Subject: ${subject}\n` +
     `Purpose the findings must serve: ${purpose}\n\n` +
     `Choose up to ${maxSources} concrete web sources worth gathering - ` +
     `specific pages or documents, not site homepages. Use web search if you ` +
@@ -131,7 +131,7 @@ const gathered = await pipeline(
     dispatching(`Gather ${source.url}`, "re-briefed", "one independent gatherer per source: a failed fetch collapses only its own slot, and no source's worker profits from another's context");
     return agent(
       researcherBrief +
-        `Gather one source for the research sweep on "${topic}".\n` +
+        `Gather one source for the research sweep on "${subject}".\n` +
         `Source: ${source.url}\n` +
         `Expected contribution: ${source.why}\n\n` +
         `Fetch it (degrade to the browser only if a plain fetch fails). ` +
@@ -182,11 +182,11 @@ phase("Organise: orientation and curation");
 dispatching("Organise corpus", "re-briefed", "the organiser's grants are the curation tools alone, an envelope no gatherer holds; it reads what this sweep recorded through the corpus, not through a gatherer's memory of fetching it");
 const organised = await agent(
   organiserBrief +
-    `A research sweep on "${topic}" just recorded these observations:\n` +
+    `A research sweep on "${subject}" just recorded these observations:\n` +
     landed
       .map((entry) => `- ${entry.observation_id} (${entry.url})`)
       .join("\n") +
-    `\n\nOrganise them into the space's knowledge base. Search the corpus ` +
+    `\n\nOrganise them into the topic's knowledge base. Search the corpus ` +
     `to see what already exists. Author orientation cards with ` +
     `knowledge_curate_orientation - a short signpost titled by what it ` +
     `orients, its content saying what the material covers and where to ` +
@@ -237,9 +237,9 @@ dispatching("Synthesise findings", "re-briefed", "independence is the point: the
 const findings = await agent(
   synthesistBrief +
     `Deliver research findings.\n` +
-    `Topic: ${topic}\n` +
+    `Subject: ${subject}\n` +
     `Purpose the findings must serve: ${purpose}\n\n` +
-    `Work only from the space's knowledge base via knowledge_search - no ` +
+    `Work only from the topic's knowledge base via knowledge_search - no ` +
     `fetching, no memory of this conversation. For every claim, call ` +
     `knowledge_cite with the observation id, extraction version, and ` +
     `shortest sufficient exact quote returned by search. Put the claim in ` +
@@ -294,7 +294,7 @@ if (findings === null) {
   throw new Error("research-sweep could not validate its findings");
 }
 return {
-  topic,
+  subject,
   purpose,
   gathered: landed.map((entry) => ({
     url: entry.url,

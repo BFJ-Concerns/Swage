@@ -1,11 +1,11 @@
 ---
 name: Research
-description: Run an unattended research sweep — gather live web sources on a topic into the topic's knowledge base, organise them, and synthesise cited findings against a stated purpose. Use when asked to research a topic, build up evidence on a question, or answer from gathered sources rather than from memory.
+description: Run an unattended research sweep — gather live web sources on a subject into the topic's knowledge base, organise them, and synthesise cited findings against a stated purpose. Use when asked to research a subject, build up evidence on a question, or answer from gathered sources rather than from memory.
 ---
 
 # Research
 
-A research sweep turns a topic and a purpose into cited findings in the
+A research sweep turns a subject and a purpose into cited findings in the
 topic's cumulative knowledge base. It runs unattended: sources are
 gathered and recorded as immutable observations, an organising pass
 signposts what landed, and a synthesis pass delivers claims only where a
@@ -18,13 +18,13 @@ they say.
 Start the carried `research-sweep` workflow with `workflow_run`:
 
 ```json
-{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+{ "name": "research-sweep", "args": { "subject": "…", "purpose": "…", "maxSources": 8 } }
 ```
 
-- `topic` — what to research, as the user phrased it.
+- `subject` — what to research, as the user phrased it.
 - `purpose` — what the findings must serve; the synthesis is judged
   against this, so carry the user's actual need rather than a
-  paraphrase of the topic.
+  paraphrase of the subject.
 - `maxSources` — optional ceiling on sources gathered (default 8).
 
 Leave `wait` unset unless the user needs the findings in this turn: a

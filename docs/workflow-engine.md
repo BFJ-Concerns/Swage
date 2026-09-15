@@ -599,10 +599,10 @@ To run a research sweep, activate the research skill on the session, then
 dispatch the carried workflow:
 
 ```json
-{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+{ "name": "research-sweep", "args": { "subject": "…", "purpose": "…", "maxSources": 8 } }
 ```
 
-- **`topic`** — what to research, as the user phrased it.
+- **`subject`** — what to research, as the user phrased it.
 - **`purpose`** — what the findings must serve; the synthesis is judged
   against this, so it should carry the user's actual need.
 - **`maxSources`** — optional ceiling on sources gathered (default 8).

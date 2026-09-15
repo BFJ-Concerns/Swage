@@ -48,7 +48,7 @@ export const defaults = {
 // width with the run's max_concurrent_agent_calls budget at start, from the
 // campaign record's measured basis. The wave dispatches every charter and
 // lets the engine queue to the declared width. Every workspace must sit
-// inside a directory the space has attached — placement never widens the
+// inside a directory the topic has attached — placement never widens the
 // run's filesystem authority — and the seat's black-box verification of
 // each workspace happens before this run starts: the sealed script cannot
 // inspect the filesystem.

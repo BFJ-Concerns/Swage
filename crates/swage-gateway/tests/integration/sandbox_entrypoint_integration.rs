@@ -71,7 +71,7 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
     assert!(
         full.output["output"]
             .as_str()
-            .is_some_and(|output| output.contains("No topic left on device")),
+            .is_some_and(|output| output.contains("No space left on device")),
         "/dev/full failure must remain ENOSPC rather than a sandbox denial: {full:?}"
     );
 
