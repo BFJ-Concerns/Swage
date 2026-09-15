@@ -221,7 +221,17 @@ async fn run_turn_and_collect_tool_result(
     let client = GatewayClient::new(&format!("http://{addr}"));
     // Attaching a workspace needs a topic to attach it to, so the device
     // turns run in one; the general scope has no workspace attachments.
-    let topic = client.create_topic("device-tests").await.unwrap();
+    let topic = match client.create_topic("device-tests").await {
+        Ok(topic) => topic,
+        Err(_) => client
+            .list_topics()
+            .await
+            .unwrap()
+            .topics
+            .into_iter()
+            .find(|topic| topic.name == "device-tests")
+            .expect("device-tests topic exists"),
+    };
     let conversation = client.create_topic_conversation(topic.id).await.unwrap();
     if let Some(metadata) = session_metadata {
         state

@@ -170,7 +170,7 @@ impl TopicService {
     /// Delete a topic.
     ///
     /// Returns 404 if not found. Returns a conflict error if called on the
-    /// default topic. The topic directory on disk is preserved.
+    /// general scope. The topic directory on disk is preserved.
     pub async fn delete_topic(&self, id: Uuid) -> Result<(), GatewayError> {
         let found = self.topic_store.delete(id).await.map_err(|e| match e {
             swage_core::StorageError::ConstraintViolation(msg) => GatewayError::TopicConflict(msg),

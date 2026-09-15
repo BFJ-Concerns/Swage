@@ -4818,7 +4818,7 @@ async fn make_state_with_storage_and_root(
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,
 ) -> (AppState, Uuid) {
-    // Create the default topic via TopicStore.
+    // The general scope is the seeded scope every topicless session uses.
     let topic = storage.general_scope().await.expect("create default topic");
 
     // Create a session.
@@ -9179,7 +9179,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should include platform identity: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Topic: the default topic")
+        child_request_text.contains("Topic: none — this session was started without a topic")
             && child_request_text.contains("Working directory:")
             && child_request_text.contains("Session started:"),
         "delegated provider request should include the child session's place: {child_request_text}"
@@ -14134,14 +14134,13 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let _guard = SwageHomeGuard::set_to(swage_home.path());
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage.general_scope().await.expect("create default topic");
-    let element_path = topic
-        .location()
-        .data_dir(swage_home.path())
-        .join("elements/current-work.md");
+    // The session runs in the general scope, whose only levels are Global and
+    // Agent: a shared briefing element lives at the global root.
+    let topic = storage.general_scope().await.expect("general scope");
+    let element_path = swage_home.path().join("elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).expect("create element directory");
     std::fs::write(&element_path, "Task: {{task}}; owner: {{owner}}")
-        .expect("write topic briefing");
+        .expect("write shared briefing");
     std::fs::write(
         element_path.parent().unwrap().join("unrequested.md"),
         "This briefing must not be composed",

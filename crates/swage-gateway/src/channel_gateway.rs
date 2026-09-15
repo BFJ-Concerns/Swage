@@ -929,7 +929,7 @@ mod tests {
     async fn channel_status_counts_only_sent_deliveries() {
         let (mut state, _) = make_state_with_session(vec![]).await;
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.general_scope().await.expect("default topic");
+        let topic = storage.general_scope().await.expect("general scope");
         let session_id = storage
             .create_session(NewSession {
                 topic_id: topic.id,
