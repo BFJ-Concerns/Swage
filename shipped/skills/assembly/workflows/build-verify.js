@@ -8,12 +8,17 @@
 export const defaults = {
   // Builders ride the flagship GPT tier at low effort: the brief plus the
   // named exemplar have already decided the path, so the tier carries the
-  // capability and effort stays the cost lever. Fix rounds override effort
-  // to medium — a verdict that sent the unit back falsifies the pin's
-  // ground that the path is decided. Claude legs are the
-  // cross-family verifiers, deliberately below the top tier (the top tier
-  // appears nowhere in assembly pipelines), pinned per call. Pinned because
-  // per-model effort defaults are uneven.
+  // capability and effort stays the cost lever. The builder is one held
+  // worker — restatement, build, fix rounds and a warm landing are turns of
+  // a single session — and a held worker's model and effort are fixed when
+  // it opens, so fix rounds run at the build pin: the context the worker
+  // carries into a fix round substitutes for the search a higher effort
+  // would buy, and escalation is what a park and a fresh re-brief are for.
+  // Claude legs are the cross-family verifiers, deliberately below the top
+  // tier (the top tier appears nowhere in assembly pipelines), pinned per
+  // call; the verifier is held too, so every re-verification returns to the
+  // reader that derived the claims. Pinned because per-model effort
+  // defaults are uneven.
   model: "gpt-5.6-sol",
   effort: "low",
 };
@@ -90,6 +95,30 @@ const runHold = async (stage, content, verdicts) => {
   }
 };
 
+// ------------------------------------------------------- dispatch record
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why. The choice is this script's,
+// made per stage: a later turn that profits from a worker's accumulated
+// context — a fix round after its own build, a re-verification after its
+// own verdict — continues the held worker; a stage whose value is
+// independence, or whose envelope (model, effort, grants, placement) must
+// differ from the worker's, re-briefs. `staleness()` is a journalled
+// reading, so a decision taken on it replays identically.
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
+// A held worker's idle gap against its route's threshold, phrased for the
+// dispatch record: the recorded fact a warm-continue-or-re-brief decision
+// rests on, never a guess.
+const idleReading = async (worker) => {
+  const reading = await staleness(worker);
+  const phrase = reading.stale === true
+    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+    : reading.stale === false
+      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
+  return { ...reading, phrase };
+};
+
 // ---------------------------------------------------------------- restate
 phase("restate");
 
@@ -111,15 +140,28 @@ If admission passes: read the exemplar's spine entry and its landed files, and t
 
 Reply with: admission ("ok"/"refused"), restatement (the brief in your own words — outcome and constraints, not a paraphrase of its sentences), approach (the concrete first moves, what you extend where, your test plan), disputes (anything the brief has wrong — the exemplar does not cover this, the obligation is already true, a constraint contradicts the code; "" if none). Reply with the JSON last.`;
 
+// The builder is one held worker from restatement onward: the reading it
+// does to restate the brief — the exemplar, the commission slice, the code
+// around the extension point — is the context the build turn starts from,
+// and a corrected restatement is a refinement of its own proposal. Its
+// model, effort, placement and grants are fixed here; every later turn
+// keeps them.
+const builder = await session({ cwd: worktree, label: "builder" });
 let sketch = null;
 let holdDecision = null;
 // Hold-decision notes — restate and triage alike — carried forward to every
 // later verification: a ruling may supersede write-once brief text.
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
-  sketch = await agent(restatePrompt(holdDecision && holdDecision.note), {
+  dispatching(
+    `restate:${attempt}`,
+    attempt === 0 ? "re-briefed" : "continued",
+    attempt === 0
+      ? "the builder's held session opens on the brief; the build and its fix rounds continue this worker"
+      : "the orchestrator corrected this worker's own restatement — it refines what it proposed rather than re-deriving the brief"
+  );
+  sketch = await send(builder, restatePrompt(holdDecision && holdDecision.note), {
     schema: restatementSchema,
-    cwd: worktree,
     label: `restate:${attempt}`,
   });
   if (!sketch) throw new Error("restatement stage returned nothing usable");
@@ -140,10 +182,13 @@ if (sketch.admission === "refused")
 // ---------------------------------------------------------------- build
 phase("build");
 
-// The accepted sketch is persisted so the builder builds what was accepted,
-// not what it happens to re-derive: fresh agents share no memory.
-const buildReport = await agent(
-  `Build the unit this accepted restatement describes (persist trust in it — it was accepted by the orchestrator over the brief at ${briefPath}):
+// The accepted sketch is handed back verbatim so the builder builds what
+// was accepted — the orchestrator may have corrected it — not what it
+// happens to recall proposing.
+dispatching("build", "continued", "the build starts from the reading this worker did to restate: the exemplar, the commission slice and the code it extends are already in its context");
+const buildReport = await send(
+  builder,
+  `Build the unit this accepted restatement describes — your own restatement, as the orchestrator accepted it over the brief at ${briefPath}; persist trust in it:
 
 <accepted-restatement>
 ${JSON.stringify(sketch)}
@@ -152,7 +197,7 @@ ${JSON.stringify(sketch)}
 Work only in this worktree (${worktree}); commit as you go with plain descriptive messages. Publication is the landing stage's, never yours: never push, never open PRs, never merge this unit's work outward — but merging ${mergePolicy === "pr" ? integrationBranch : "the repository's main branch"} into your own branch is ordinary maintenance, permitted when the unit's work needs it. Extend the named spine exemplar's pattern; its imitation boundary and envelope (its entry in ${spinePath}) are hard constraints — incidental wiring the extension requires (registration, imports, config, tests beside the code) is part of extending; modifying non-spine files beyond that wiring is not yours, report it as blocked instead. Verify your work within the unit's scope as the brief's proof expectation describes, then run the project's check gate and the tests covering the surfaces you touched, on the tree your build finishes on, and get them green — fix what they find and re-run as many times as that takes. The full test-suite gate is not yours: it runs later, batched over landed units. Every new test must discriminate — test something genuine that a broken product would fail, with a real failure the assertion can register, never a check the change's mere presence satisfies: write each test of behaviour this unit builds so it would fail without your change, and never let a fixture, seed, or mock itself supply the state the assertion checks; a test of behaviour that predates the unit proves its teeth by mutation instead — break the behaviour deliberately in a scratch copy, watch the test fail, restore. Demonstrating the failure is the preferred evidence because it is usually cheap; where the demonstration itself would need machinery out of proportion to the change — a separately triggered build estate, a reconstructed historical tree, a live external dependency, a bespoke process harness — do not build that machinery: state in your report why demonstration is disproportionate — covering both routes, the scratch-tree fail-before run and the mutation fallback (break the behaviour deliberately in a scratch copy, watch the test fail); mutation is usually cheap, so most would-be declarations fall to it — and what instead shows the test discriminates (the real state it runs over, the behaviour's own output its assertion reads, the specific failure a broken product would produce); its disposition is the orchestrator's. Where you cannot meet the brief's proof expectation honestly at its named rung — the surface never shows the state, or the product cannot produce it — do not manufacture the state: report the impossibility as a failure finding (what the rung cannot show, and the strongest honest proof you produced instead); its disposition is the orchestrator's. If you cannot get it green, say so in your report as a failure finding — what failed, what you tried — never as a quietly recorded red result. Later stages audit your final recorded run rather than repeat it.
 
 Write ${unitDir}/report.md: what was built at one level above the diff; what was tried and abandoned, and why; what fought back; how you verified and what you did NOT exercise; the check gate's run and the touched-surface test runs — the exact commands, the tree sha they ran on, and the results; your overall confidence (high/medium/low) with a one-line why. Reply with a two-sentence summary and the head commit hash.`,
-  { cwd: worktree, label: "build", timeoutMs: 14400000 }
+  { label: "build", timeoutMs: 14400000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -203,9 +248,14 @@ Every command your verdict leans on is evidenced by the command line as executed
 
 Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
-let verdict = await agent(verifyPrompt(null, null), {
-  model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: "verify",
+// The verifier is a held worker of the opposite family: opened blind to the
+// builder's session, then continued for every re-verification, so the
+// claims it derived before reading the report are what it re-examines.
+const verifier = await session({
+  model: "claude-opus-5", effort: "medium", cwd: worktree, label: "verifier",
 });
+dispatching("verify", "re-briefed", "cross-family verification is independent by design: a fresh reader of the opposite family, sharing nothing with the builder's session; its re-verifications continue this worker");
+let verdict = await send(verifier, verifyPrompt(null, null), { schema: findingsSchema, label: "verify" });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
   throw new Error("verifier examined-account empty — invalid report, re-run");
@@ -253,14 +303,17 @@ while (severesIn(verdict).length) {
     handover = "autonomous round limit reached with severe findings open";
     break;
   }
-  const autoFix = await agent(autoFixPrompt(rounds), {
-    effort: "medium", schema: autoFixSchema,
-    cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000,
+  const builderIdle = await idleReading(builder);
+  dispatching(`fix:${rounds}`, "continued", `a fix round after its own build: the worker holds what it built and why, so the findings land on context rather than on a re-read of the worktree (${builderIdle.phrase}; continued regardless — the context is worth more than the cache)`);
+  const autoFix = await send(builder, autoFixPrompt(rounds), {
+    schema: autoFixSchema, label: `fix:${rounds}`, timeoutMs: 7200000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
-  verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
+  const verifierIdle = await idleReading(verifier);
+  dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict: the reader re-examines the claims it derived and the fix delta against what it already saw (${verifierIdle.phrase}; continued regardless)`);
+  verdict = await send(verifier, verifyPrompt(rounds, "autonomous"), {
+    schema: findingsSchema, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -357,12 +410,17 @@ while (true) {
   for (const d of dispositions)
     if (d.note && d.note.trim())
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
-  fixReport = await agent(
+  const builderIdle = await idleReading(builder);
+  dispatching(`fix:${rounds}`, "continued", `a directed fix round after its own build: the dispositions name findings against work this worker holds in context (${builderIdle.phrase}; continued regardless — the context is worth more than the cache)`);
+  fixReport = await send(
+    builder,
     `The verifier raised findings against your unit (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}). The orchestrator's dispositions, by finding index: ${JSON.stringify(fixList)} — with this note: "${triage.note || ""}".${rulings.length ? `\n\nThe orchestrator's rulings below hold the brief's standing, and a conflicting ruling supersedes it — delivering what a ruling withheld is a defect, not a fix. Where two conflict, the later governs.\n<orchestrator-rulings>\n${rulings.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n</orchestrator-rulings>\n` : ""} Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge the unit's work outward — publication is the landing stage's, though merging the integration lane into the unit branch stays permitted where the work needs it; the spine exemplar's imitation boundary still binds. Apply exactly the dispositions marked fix — no more (an accepted-with-note finding is not yours to fix). A disposition you cannot apply honestly as written — the demanded proof or change cannot be produced without manufacturing state or asserting something untrue — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. A duplication finding whose verdict routes it to filing (adoption needs a cross-unit extraction) is not yours to perform either — leave it as it stands rather than growing the unit's diff. Commit as you go. Verify each fix with the checks covering the surfaces it touched — no project gate re-runs per fix round; the lane gate covers the composed result. Then make the whole of ${unitDir}/report.md true about the current tree — re-derive what changed from git log over the unit's commits and correct every section the fixes dated (built, tried-and-abandoned, verification, confidence, any commit inventory), not just the sections a finding quoted. Reply with a summary and the new head commit.`,
-    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, timeoutMs: 7200000 }
+    { label: `fix:${rounds}`, timeoutMs: 7200000 }
   );
-  verdict = await agent(verifyPrompt(rounds, "directed"), {
-    model: "claude-opus-5", effort: "medium", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
+  const verifierIdle = await idleReading(verifier);
+  dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict, over the delta the orchestrator's dispositions authorised (${verifierIdle.phrase}; continued regardless)`);
+  verdict = await send(verifier, verifyPrompt(rounds, "directed"), {
+    schema: findingsSchema, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -387,12 +445,30 @@ const landingSchema = {
   },
 };
 
-const landing = await agent(
+const landPrompt =
   mergePolicy === "direct-merge"
     ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log). Reply with the JSON last.`
-    : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`,
-  { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
-);
+    : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`;
+
+// The landing continues the builder while its session is warm — it knows
+// the unit it is publishing — and re-briefs a fresh worker once the triage
+// hold has outlived the route's cache: the landing is mechanical, and
+// report.md carries what a fresh worker needs, so a cold re-read of the
+// whole build buys nothing. The reading decides; the reason records it.
+const builderIdle = await idleReading(builder);
+let landing;
+if (builderIdle.stale === false) {
+  dispatching("land", "continued", `the builder publishes its own unit while its session is warm (${builderIdle.phrase})`);
+  landing = await send(builder, landPrompt, { schema: landingSchema, label: "land", timeoutMs: 1800000 });
+} else {
+  dispatching("land", "re-briefed", `the landing is mechanical and ${unitDir}/report.md carries what it needs; ${builderIdle.stale === true ? "the builder's session is cold" : "the route declares no staleness threshold, so warmth is unknown"} (${builderIdle.phrase})`);
+  landing = await agent(landPrompt, { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 });
+}
+// Closed on the success path so the journal records intent; the early
+// returns above are run-ending, and a run ending by any path closes every
+// worker it still holds.
+await close(builder);
+await close(verifier);
 
 // The pipeline never writes the ledger: the orchestrator records the
 // obligation's evidence from this returned envelope (references/ledger.md),

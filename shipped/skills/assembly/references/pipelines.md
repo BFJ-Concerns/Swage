@@ -94,9 +94,9 @@ Stages, with the holds where the pipeline waits on you:
 4. **Fix rounds, then the triage hold** — severe is the terminal
    severity, and the pipeline converges it without you first: while the
    verdict carries a severe finding, every finding in it goes straight
-   back to the builder as an autonomous fix round (effort stepped up to
-   medium — the verdict falsifies the decided-path ground the build pin
-   rests on) and the delta is re-verified, up to three autonomous rounds
+   back to the builder as an autonomous fix round — the same held
+   worker, still holding what it built and why — and the delta is
+   re-verified by the same held verifier, up to three autonomous rounds
    inside a five-round total budget. The loop hands over early — its
    reason in the hold content — when a fix comes back blocked or a
    re-verified severe finding survives its round: both need a
@@ -186,10 +186,27 @@ Tier pins ride the template's `defaults`: builders on the build family's
 flagship tier at low effort (the brief and exemplar have decided the path —
 the tier carries capability, effort is the cost lever), verifiers
 cross-family below their family's top tier at medium (semantic judgement is
-genuinely open). Fix rounds override the builder to medium effort — a
-verdict that sent the unit back falsifies the decided-path ground the low
-pin rests on. Override per dispatch only with a nameable reason,
+genuinely open). Override per dispatch only with a nameable reason,
 journalled.
+
+The builder and the verifier are each one **held worker** for the unit's
+life. The builder's session opens on the restatement and carries through
+the build, every fix round, and — while the route's staleness reading says
+it is still warm — the landing; the verifier's session opens blind to the
+builder's and carries every re-verification, so the claims it derived
+before reading the report are what it re-examines. A held worker's model
+and effort are fixed when it opens, so fix rounds run at the build pin: the
+context the worker carries into a fix round substitutes for the search a
+higher effort would buy, and escalation is a park and a fresh re-brief,
+never a mid-session switch. Every dispatch in the pipeline writes a
+`[dispatch]` line to the run journal naming whether it **continued** a held
+worker or **re-briefed** a fresh one and why — read them when a unit's
+behaviour surprises you; a fix round's line carries the staleness reading
+it was taken on. The choice is the script's, per stage, never the engine's:
+a stage whose value is independence (the first verification, the triage
+proposers, a blind sweep) re-briefs; a stage whose envelope must differ
+from the worker's (a landing on another family) re-briefs; a later turn
+that profits from what the worker already holds continues.
 
 A pin is only as good as the model actually serving the worker: the run
 record names the model each call resolved to, so confirm a suspect

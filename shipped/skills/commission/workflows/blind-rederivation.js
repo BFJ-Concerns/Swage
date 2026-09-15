@@ -259,10 +259,20 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 // drafting whose output steers a build or a pivot — leverage prices the top tier
 // (references/model-selection.md) — and the open design space is the named residue
 // behind high (references/effort-calibration.md).
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("derive");
 const designs = [];
 for (const chunk of chunks) {
   log(`deriving chunk "${chunk.id}" (${designs.length ? "building on " + designs.map((d) => d.id).join(", ") : "first chunk"})`);
+  dispatching(`design:${chunk.id}`, "re-briefed", designs.length
+    ? "a later chunk takes the earlier blind output as a fixed contract read from disk, not as its own memory of deriving it: a designer continuing its own session would warp the new chunk around reasoning the contract never recorded"
+    : "the first designer opens blind by construction in the empty run directory");
   const result = await agent(designPrompt(chunk, designs), {
     // Top Claude tier: leverage prices the top tier for whole-design drafting.
     model: "claude-fable-5",
@@ -286,14 +296,15 @@ if (existing) {
   phase("compare");
   comparisons = (
     await parallel(
-      ["gpt", "claude"].map((family) => () =>
-        agent(comparisonPrompt(designs), {
+      ["gpt", "claude"].map((family) => () => {
+        dispatching(`compare:${family}`, "re-briefed", "the comparison is a fresh cross-family read of two finished texts; a designer comparing its own document would defend it");
+        return agent(comparisonPrompt(designs), {
           ...FAMILY[family],
           cwd: runDir,
           schema: comparisonSchema,
           label: `compare:${family}`,
-        }).then((c) => (c ? { family, ...c } : null)),
-      ),
+        }).then((c) => (c ? { family, ...c } : null));
+      }),
     )
   ).filter(Boolean);
   // The cross-family read is the point: a lost comparator is a failed run, not a

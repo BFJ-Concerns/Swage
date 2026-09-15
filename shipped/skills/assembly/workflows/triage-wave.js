@@ -26,6 +26,13 @@ if (!tasksPath) throw new Error("tasksPath is required: the annexe's TASKS.md mu
 if (!obligationsDir) throw new Error("obligationsDir is required: the wave reads build/obligations/ to avoid duplicating seeded records");
 const waves = Number(args.waves) || 4;
 
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("propose");
 
 const proposalSchema = {
@@ -66,11 +73,14 @@ Propose what the delta actually needs — no padding obligations for completenes
 const proposals = (
   await parallel(
     Array.from({ length: waves }, (_, i) => () =>
-      agent(proposePrompt(i), {
-        schema: proposalSchema,
-        cwd: repo,
-        label: `propose:${i}`,
-      })
+      {
+        dispatching(`propose:${i}`, "re-briefed", "each proposer is an independent read of the same delta — disagreement between them is the wave's product, so none shares another's context");
+        return agent(proposePrompt(i), {
+          schema: proposalSchema,
+          cwd: repo,
+          label: `propose:${i}`,
+        });
+      }
     )
   )
 ).filter(Boolean);
@@ -79,6 +89,7 @@ log(`proposals: ${proposals.length}/${waves} workers, ${proposals.reduce((n, p) 
 
 phase("reduce");
 
+dispatching("reduce", "re-briefed", "the reducer merges every proposer's output on a different tier from any of them; continuing one proposer would let its own axis curate the others");
 const reduced = await agent(
   `Merge these decomposition proposals into ONE proposal document for a human-judged landing. Proposals (each has criteria, criteria_why, obligations):
 ${JSON.stringify(proposals)}
