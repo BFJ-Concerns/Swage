@@ -19,7 +19,7 @@
   import type { ConversationStore } from "./lib/stores/conversations";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
-  import { createPagesStore } from "./lib/stores/pages";
+  import { createSurfacesStore } from "./lib/stores/surfaces";
   import {
     createStreamingStore,
     withConversationAutoCreate,
@@ -35,7 +35,7 @@
     writeDisplayPreferences,
     type DisplayPreferences,
   } from "./lib/display-preferences";
-  type Surface = "conversation" | "operator" | "pages";
+  type Surface = "conversation" | "operator" | "surfaces";
 
   // ---------------------------------------------------------------------------
   // Store creation
@@ -81,10 +81,10 @@
     streamingStore.handleServerEvent(event, conversationId),
   );
 
-  // The pages store opens its own work-surface channel: page signals are not
-  // turn events, and an open page must stay live even with no conversation
+  // The surfaces store opens its own work-surface channel: surface signals are not
+  // turn events, and an open surface must stay live even with no conversation
   // selected.
-  const pagesStore = createPagesStore();
+  const surfacesStore = createSurfacesStore();
 
   // ---------------------------------------------------------------------------
   // Router-aware conversation actions
@@ -202,7 +202,7 @@
   // Router
   // ---------------------------------------------------------------------------
   // selectAndNavigate is passed so router.init() can activate the right
-  // conversation when the page loads with a deep URL like /conversations/:id.
+  // conversation when the surface loads with a deep URL like /conversations/:id.
 
   function handleRouteChange(route: Route): void {
     currentRoute = route;
@@ -344,13 +344,13 @@
     const previous = activeSurface;
     activeSurface = next;
 
-    // The pages surface keeps the conversation socket: the conversation is
+    // The surfaces surface keeps the conversation socket: the conversation is
     // the control channel beside the work surface rather than a place to
-    // navigate away to. Page liveness does not depend on it — the pages
+    // navigate away to. Surface liveness does not depend on it — the surfaces
     // store listens on its own channel.
     if (next === "operator") return;
 
-    // Conversations and Pages share the same ambient channel. Moving between
+    // Conversations and Surfaces share the same ambient channel. Moving between
     // them must retain its socket and in-memory history; only returning from
     // Operator needs to establish the connection again.
     if (previous === "operator") {
@@ -467,7 +467,7 @@
     onTopicChange={handleTopicChange}
     onRetry={handleRetry}
     {activeSurface}
-    {pagesStore}
+    {surfacesStore}
     onSelectSurface={handleSelectSurface}
     {desktopRuntime}
     {themeMode}

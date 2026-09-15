@@ -2,9 +2,9 @@
 
 /**
  * Write a module's source: replace an existing instance's content, or
- * append a new instance to the page when `module_id` is absent.
+ * append a new instance to the surface when `module_id` is absent.
  */
-export type WritePageModuleRequest = { module_id?: string | null,
+export type WriteSurfaceModuleRequest = { module_id?: string | null,
 /**
  * Module kind for a new instance ("document" first); ignored when
  * `module_id` names an existing instance.

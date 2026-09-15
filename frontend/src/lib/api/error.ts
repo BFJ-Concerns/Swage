@@ -3,7 +3,7 @@
 // Every failed gateway request answers `{ code, message }`
 // (`ApiErrorBody` in the generated protocol). This error carries that body
 // so a caller can branch on `code` and show `message` to a person; a
-// response outside the contract (a proxy page, an empty body) still throws,
+// response outside the contract (a proxy surface, an empty body) still throws,
 // with the status and raw text kept for diagnostics.
 
 import type { ApiErrorBody } from "../protocol/ApiErrorBody";

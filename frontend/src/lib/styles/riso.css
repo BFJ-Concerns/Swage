@@ -77,7 +77,7 @@
     practical minimum for comfortable reading (UI audit f-15).
   */
   --font-display-1: 32px;  /* hero topic name, splash mark */
-  --font-display-2: 24px;  /* pane/page titles */
+  --font-display-2: 24px;  /* pane/surface titles */
   --font-display-3: 19px;  /* card titles, section heads */
   --font-body-lg: 16px;    /* prominent body */
   --font-body-md: 14px;    /* default body */

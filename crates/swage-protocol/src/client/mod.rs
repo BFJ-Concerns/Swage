@@ -10,13 +10,13 @@ pub mod error;
 pub mod knowledge;
 pub mod material;
 pub mod openapi;
-pub mod page;
 pub mod provider_signin;
 pub mod recovery;
 pub mod routes;
 pub mod schedule;
 pub mod settings;
 pub mod skill;
+pub mod surface;
 pub mod topic;
 pub mod turn;
 pub mod typescript_client;
@@ -45,16 +45,16 @@ pub struct ClientSurface {
     synthesise_speech_response: voice::SynthesiseSpeechResponse,
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
     create_topic_request: topic::CreateTopicRequest,
-    create_page_request: page::CreatePageRequest,
-    write_page_module_request: page::WritePageModuleRequest,
-    create_page_annotation_request: page::CreatePageAnnotationRequest,
-    update_page_annotation_request: page::UpdatePageAnnotationRequest,
-    delete_page_annotation_response: page::DeletePageAnnotationResponse,
-    page: page::PageResponse,
-    page_list: page::PageListResponse,
-    create_page_template_request: page::CreatePageTemplateRequest,
-    page_template: page::PageTemplateResponse,
-    page_template_list: page::PageTemplateListResponse,
+    create_surface_request: surface::CreateSurfaceRequest,
+    write_surface_module_request: surface::WriteSurfaceModuleRequest,
+    create_surface_annotation_request: surface::CreateSurfaceAnnotationRequest,
+    update_surface_annotation_request: surface::UpdateSurfaceAnnotationRequest,
+    delete_surface_annotation_response: surface::DeleteSurfaceAnnotationResponse,
+    surface: surface::SurfaceResponse,
+    surface_list: surface::SurfaceListResponse,
+    create_surface_template_request: surface::CreateSurfaceTemplateRequest,
+    surface_template: surface::SurfaceTemplateResponse,
+    surface_template_list: surface::SurfaceTemplateListResponse,
     update_topic_request: topic::UpdateTopicRequest,
     topic_list: topic::TopicListResponse,
     create_workspace_attachment_request: topic::CreateWorkspaceAttachmentRequest,

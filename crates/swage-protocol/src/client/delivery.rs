@@ -52,8 +52,8 @@ pub enum DeliveryTarget {
         conversation: String,
     },
     LocalStorage,
-    Page {
-        page_id: Uuid,
+    Surface {
+        surface_id: Uuid,
     },
     Webhook {
         url: String,

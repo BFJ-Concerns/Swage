@@ -1,7 +1,7 @@
-//! SQLite implementation of PageStore.
+//! SQLite implementation of SurfaceStore.
 //!
-//! Pages are agent-run tabs on a topic, assembled from module instances.
-//! The database is authoritative for page content (the knowledge base's
+//! Surfaces are agent-run tabs on a topic, assembled from module instances.
+//! The database is authoritative for surface content (the knowledge base's
 //! posture): file renderings are derived projections, never the source.
 
 use async_trait::async_trait;
@@ -12,24 +12,24 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput,
-    Page, PageModule, PageTemplate, PageTemplateModule,
+    NewSurface, NewSurfaceModule, NewSurfaceTemplate, NewSurfaceTemplateModule,
+    NewSurfaceTemplateModuleInput, Surface, SurfaceModule, SurfaceTemplate, SurfaceTemplateModule,
 };
 use crate::sqlite::SqliteStorage;
-use crate::store::PageStore;
+use crate::store::SurfaceStore;
 
-/// Every page read selects the same column list, lineage included.
+/// Every surface read selects the same column list, lineage included.
 const PAGE_COLUMNS: &str =
     "id, topic_id, title, created_at, updated_at, forked_from_template_id, forked_at";
 
-fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
+fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
     let id: String = row.get(0)?;
     let topic_id: String = row.get(1)?;
     let created: String = row.get(3)?;
     let updated: String = row.get(4)?;
     let forked_from: Option<String> = row.get(5)?;
     let forked_at: Option<String> = row.get(6)?;
-    Ok(Page {
+    Ok(Surface {
         id: parse_uuid(&id)?,
         topic_id: parse_uuid(&topic_id)?,
         title: row.get(2)?,
@@ -40,12 +40,12 @@ fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     })
 }
 
-fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageTemplate> {
+fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceTemplate> {
     let id: String = row.get(0)?;
     let topic_id: String = row.get(1)?;
     let created: String = row.get(3)?;
     let updated: String = row.get(4)?;
-    Ok(PageTemplate {
+    Ok(SurfaceTemplate {
         id: parse_uuid(&id)?,
         topic_id: parse_uuid(&topic_id)?,
         name: row.get(2)?,
@@ -54,12 +54,12 @@ fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageTemplate> {
     })
 }
 
-fn row_to_template_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageTemplateModule> {
+fn row_to_template_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceTemplateModule> {
     let id: String = row.get(0)?;
     let template_id: String = row.get(1)?;
     let created: String = row.get(5)?;
     let updated: String = row.get(6)?;
-    Ok(PageTemplateModule {
+    Ok(SurfaceTemplateModule {
         id: parse_uuid(&id)?,
         template_id: parse_uuid(&template_id)?,
         kind: row.get(2)?,
@@ -70,14 +70,14 @@ fn row_to_template_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageTempl
     })
 }
 
-fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageModule> {
+fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceModule> {
     let id: String = row.get(0)?;
-    let page_id: String = row.get(1)?;
+    let surface_id: String = row.get(1)?;
     let created: String = row.get(5)?;
     let updated: String = row.get(6)?;
-    Ok(PageModule {
+    Ok(SurfaceModule {
         id: parse_uuid(&id)?,
-        page_id: parse_uuid(&page_id)?,
+        surface_id: parse_uuid(&surface_id)?,
         kind: row.get(2)?,
         position: row.get(3)?,
         source: row.get(4)?,
@@ -101,26 +101,26 @@ pub(crate) fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 #[async_trait]
-impl PageStore for SqliteStorage {
-    async fn create_page(&self, page: NewPage) -> Result<Page, StorageError> {
+impl SurfaceStore for SqliteStorage {
+    async fn create_page(&self, surface: NewSurface) -> Result<Surface, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO pages (id, topic_id, title, created_at, updated_at)
+                "INSERT INTO surfaces (id, topic_id, title, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     id.to_string(),
-                    page.topic_id.to_string(),
-                    &page.title,
+                    surface.topic_id.to_string(),
+                    &surface.title,
                     &now_str
                 ],
             )?;
-            Ok(Page {
+            Ok(Surface {
                 id,
-                topic_id: page.topic_id,
-                title: page.title,
+                topic_id: surface.topic_id,
+                title: surface.title,
                 created_at: now,
                 updated_at: now,
                 forked_from_template_id: None,
@@ -130,10 +130,10 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn get_page(&self, id: Uuid) -> Result<Option<Page>, StorageError> {
+    async fn get_page(&self, id: Uuid) -> Result<Option<Surface>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
-                &format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ?1"),
+                &format!("SELECT {PAGE_COLUMNS} FROM surfaces WHERE id = ?1"),
                 params![id.to_string()],
                 row_to_page,
             )
@@ -142,10 +142,10 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Page>, StorageError> {
+    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Surface>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {PAGE_COLUMNS} FROM pages WHERE topic_id = ?1 ORDER BY created_at ASC"
+                "SELECT {PAGE_COLUMNS} FROM surfaces WHERE topic_id = ?1 ORDER BY created_at ASC"
             ))?;
             let rows = stmt.query_map(params![topic_id.to_string()], row_to_page)?;
             rows.collect()
@@ -153,17 +153,20 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn create_page_module(&self, module: NewPageModule) -> Result<PageModule, StorageError> {
+    async fn create_surface_module(
+        &self,
+        module: NewSurfaceModule,
+    ) -> Result<SurfaceModule, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO page_modules (id, page_id, kind, position, source, created_at, updated_at)
+                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                 params![
                     id.to_string(),
-                    module.page_id.to_string(),
+                    module.surface_id.to_string(),
                     &module.kind,
                     module.position,
                     &module.source,
@@ -171,12 +174,12 @@ impl PageStore for SqliteStorage {
                 ],
             )?;
             conn.execute(
-                "UPDATE pages SET updated_at = ?1 WHERE id = ?2",
-                params![&now_str, module.page_id.to_string()],
+                "UPDATE surfaces SET updated_at = ?1 WHERE id = ?2",
+                params![&now_str, module.surface_id.to_string()],
             )?;
-            Ok(PageModule {
+            Ok(SurfaceModule {
                 id,
-                page_id: module.page_id,
+                surface_id: module.surface_id,
                 kind: module.kind,
                 position: module.position,
                 source: module.source,
@@ -187,11 +190,11 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn get_page_module(&self, id: Uuid) -> Result<Option<PageModule>, StorageError> {
+    async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, page_id, kind, position, source, created_at, updated_at
-                 FROM page_modules WHERE id = ?1",
+                "SELECT id, surface_id, kind, position, source, created_at, updated_at
+                 FROM surface_modules WHERE id = ?1",
                 params![id.to_string()],
                 row_to_module,
             )
@@ -200,29 +203,36 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn list_page_modules(&self, page_id: Uuid) -> Result<Vec<PageModule>, StorageError> {
+    async fn list_surface_modules(
+        &self,
+        surface_id: Uuid,
+    ) -> Result<Vec<SurfaceModule>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, page_id, kind, position, source, created_at, updated_at
-                 FROM page_modules WHERE page_id = ?1 ORDER BY position ASC, created_at ASC",
+                "SELECT id, surface_id, kind, position, source, created_at, updated_at
+                 FROM surface_modules WHERE surface_id = ?1 ORDER BY position ASC, created_at ASC",
             )?;
-            let rows = stmt.query_map(params![page_id.to_string()], row_to_module)?;
+            let rows = stmt.query_map(params![surface_id.to_string()], row_to_module)?;
             rows.collect()
         })
         .await
     }
 
-    async fn update_page_module_source(&self, id: Uuid, source: &str) -> Result<(), StorageError> {
+    async fn update_surface_module_source(
+        &self,
+        id: Uuid,
+        source: &str,
+    ) -> Result<(), StorageError> {
         let source = source.to_owned();
         self.with_conn(move |conn| {
             let now_str = Utc::now().to_rfc3339();
             conn.execute(
-                "UPDATE page_modules SET source = ?1, updated_at = ?2 WHERE id = ?3",
+                "UPDATE surface_modules SET source = ?1, updated_at = ?2 WHERE id = ?3",
                 params![&source, &now_str, id.to_string()],
             )?;
             conn.execute(
-                "UPDATE pages SET updated_at = ?1
-                 WHERE id = (SELECT page_id FROM page_modules WHERE id = ?2)",
+                "UPDATE surfaces SET updated_at = ?1
+                 WHERE id = (SELECT surface_id FROM surface_modules WHERE id = ?2)",
                 params![&now_str, id.to_string()],
             )?;
             Ok(())
@@ -230,16 +240,16 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn create_page_template(
+    async fn create_surface_template(
         &self,
-        template: NewPageTemplate,
-    ) -> Result<PageTemplate, StorageError> {
+        template: NewSurfaceTemplate,
+    ) -> Result<SurfaceTemplate, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO page_templates (id, topic_id, name, created_at, updated_at)
+                "INSERT INTO surface_templates (id, topic_id, name, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     id.to_string(),
@@ -248,7 +258,7 @@ impl PageStore for SqliteStorage {
                     &now_str
                 ],
             )?;
-            Ok(PageTemplate {
+            Ok(SurfaceTemplate {
                 id,
                 topic_id: template.topic_id,
                 name: template.name,
@@ -259,18 +269,18 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn create_page_template_with_modules(
+    async fn create_surface_template_with_modules(
         &self,
-        template: NewPageTemplate,
-        modules: Vec<NewPageTemplateModuleInput>,
-    ) -> Result<PageTemplate, StorageError> {
+        template: NewSurfaceTemplate,
+        modules: Vec<NewSurfaceTemplateModuleInput>,
+    ) -> Result<SurfaceTemplate, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             let tx = conn.unchecked_transaction()?;
             tx.execute(
-                "INSERT INTO page_templates (id, topic_id, name, created_at, updated_at)
+                "INSERT INTO surface_templates (id, topic_id, name, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     id.to_string(),
@@ -281,7 +291,7 @@ impl PageStore for SqliteStorage {
             )?;
             for module in modules {
                 tx.execute(
-                    "INSERT INTO page_template_modules
+                    "INSERT INTO surface_template_modules
                          (id, template_id, kind, position, source, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                     params![
@@ -295,7 +305,7 @@ impl PageStore for SqliteStorage {
                 )?;
             }
             tx.commit()?;
-            Ok(PageTemplate {
+            Ok(SurfaceTemplate {
                 id,
                 topic_id: template.topic_id,
                 name: template.name,
@@ -306,11 +316,14 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError> {
+    async fn get_surface_template(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<SurfaceTemplate>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, topic_id, name, created_at, updated_at
-                 FROM page_templates WHERE id = ?1",
+                 FROM surface_templates WHERE id = ?1",
                 params![id.to_string()],
                 row_to_template,
             )
@@ -319,14 +332,14 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn list_page_templates_by_topic(
+    async fn list_surface_templates_by_topic(
         &self,
         topic_id: Uuid,
-    ) -> Result<Vec<PageTemplate>, StorageError> {
+    ) -> Result<Vec<SurfaceTemplate>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, topic_id, name, created_at, updated_at
-                 FROM page_templates WHERE topic_id = ?1 ORDER BY created_at ASC",
+                 FROM surface_templates WHERE topic_id = ?1 ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map(params![topic_id.to_string()], row_to_template)?;
             rows.collect()
@@ -334,16 +347,16 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn create_page_template_module(
+    async fn create_surface_template_module(
         &self,
-        module: NewPageTemplateModule,
-    ) -> Result<PageTemplateModule, StorageError> {
+        module: NewSurfaceTemplateModule,
+    ) -> Result<SurfaceTemplateModule, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO page_template_modules
+                "INSERT INTO surface_template_modules
                      (id, template_id, kind, position, source, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                 params![
@@ -356,10 +369,10 @@ impl PageStore for SqliteStorage {
                 ],
             )?;
             conn.execute(
-                "UPDATE page_templates SET updated_at = ?1 WHERE id = ?2",
+                "UPDATE surface_templates SET updated_at = ?1 WHERE id = ?2",
                 params![&now_str, module.template_id.to_string()],
             )?;
-            Ok(PageTemplateModule {
+            Ok(SurfaceTemplateModule {
                 id,
                 template_id: module.template_id,
                 kind: module.kind,
@@ -372,14 +385,14 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn list_page_template_modules(
+    async fn list_surface_template_modules(
         &self,
         template_id: Uuid,
-    ) -> Result<Vec<PageTemplateModule>, StorageError> {
+    ) -> Result<Vec<SurfaceTemplateModule>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, template_id, kind, position, source, created_at, updated_at
-                 FROM page_template_modules WHERE template_id = ?1
+                 FROM surface_template_modules WHERE template_id = ?1
                  ORDER BY position ASC, created_at ASC",
             )?;
             let rows = stmt.query_map(params![template_id.to_string()], row_to_template_module)?;
@@ -388,47 +401,47 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn create_page_from_template(
+    async fn create_surface_from_template(
         &self,
-        page: NewPage,
+        surface: NewSurface,
         template_id: Uuid,
-    ) -> Result<Page, StorageError> {
+    ) -> Result<Surface, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            // One transaction: a page whose seeded modules are missing is
-            // never observable, and a failed copy leaves no page behind.
+            // One transaction: a surface whose seeded modules are missing is
+            // never observable, and a failed copy leaves no surface behind.
             let tx = conn.unchecked_transaction()?;
             tx.execute(
-                "INSERT INTO pages
+                "INSERT INTO surfaces
                      (id, topic_id, title, created_at, updated_at,
                       forked_from_template_id, forked_at)
                  VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4)",
                 params![
                     id.to_string(),
-                    page.topic_id.to_string(),
-                    &page.title,
+                    surface.topic_id.to_string(),
+                    &surface.title,
                     &now_str,
                     template_id.to_string(),
                 ],
             )?;
-            let seeds: Vec<PageTemplateModule> = {
+            let seeds: Vec<SurfaceTemplateModule> = {
                 let mut stmt = tx.prepare(
                     "SELECT id, template_id, kind, position, source, created_at, updated_at
-                     FROM page_template_modules WHERE template_id = ?1
+                     FROM surface_template_modules WHERE template_id = ?1
                      ORDER BY position ASC, created_at ASC",
                 )?;
                 let rows =
                     stmt.query_map(params![template_id.to_string()], row_to_template_module)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
-            // The seeds are copied into rows of the page's own: new ids, new
+            // The seeds are copied into rows of the surface's own: new ids, new
             // timestamps. Nothing links back but the lineage column.
             for (position, seed) in seeds.into_iter().enumerate() {
                 tx.execute(
-                    "INSERT INTO page_modules
-                         (id, page_id, kind, position, source, created_at, updated_at)
+                    "INSERT INTO surface_modules
+                         (id, surface_id, kind, position, source, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                     params![
                         Uuid::new_v4().to_string(),
@@ -441,10 +454,10 @@ impl PageStore for SqliteStorage {
                 )?;
             }
             tx.commit()?;
-            Ok(Page {
+            Ok(Surface {
                 id,
-                topic_id: page.topic_id,
-                title: page.title,
+                topic_id: surface.topic_id,
+                title: surface.title,
                 created_at: now,
                 updated_at: now,
                 forked_from_template_id: Some(template_id),
@@ -458,8 +471,8 @@ impl PageStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::{
-        NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput,
-        NewTopic,
+        NewSurface, NewSurfaceModule, NewSurfaceTemplate, NewSurfaceTemplateModule,
+        NewSurfaceTemplateModuleInput, NewTopic,
     };
     use crate::store::TopicStore;
 
@@ -482,8 +495,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn pages_and_modules_round_trip_in_position_order() {
         let (storage, topic_id) = make_topic().await;
-        let page = storage
-            .create_page(NewPage {
+        let surface = storage
+            .create_page(NewSurface {
                 topic_id,
                 title: "Planning".into(),
             })
@@ -491,8 +504,8 @@ mod tests {
             .unwrap();
 
         let second = storage
-            .create_page_module(NewPageModule {
-                page_id: page.id,
+            .create_surface_module(NewSurfaceModule {
+                surface_id: surface.id,
                 kind: "document".into(),
                 position: 1,
                 source: "## Later".into(),
@@ -500,8 +513,8 @@ mod tests {
             .await
             .unwrap();
         let first = storage
-            .create_page_module(NewPageModule {
-                page_id: page.id,
+            .create_surface_module(NewSurfaceModule {
+                surface_id: surface.id,
                 kind: "document".into(),
                 position: 0,
                 source: "# First".into(),
@@ -509,7 +522,7 @@ mod tests {
             .await
             .unwrap();
 
-        let modules = storage.list_page_modules(page.id).await.unwrap();
+        let modules = storage.list_surface_modules(surface.id).await.unwrap();
         assert_eq!(
             modules.iter().map(|m| m.id).collect::<Vec<_>>(),
             vec![first.id, second.id],
@@ -522,18 +535,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn writing_a_module_touches_its_page_updated_at() {
+    async fn writing_a_module_touches_its_surface_updated_at() {
         let (storage, topic_id) = make_topic().await;
-        let page = storage
-            .create_page(NewPage {
+        let surface = storage
+            .create_page(NewSurface {
                 topic_id,
                 title: "Notes".into(),
             })
             .await
             .unwrap();
         let module = storage
-            .create_page_module(NewPageModule {
-                page_id: page.id,
+            .create_surface_module(NewSurfaceModule {
+                surface_id: surface.id,
                 kind: "document".into(),
                 position: 0,
                 source: "before".into(),
@@ -542,16 +555,20 @@ mod tests {
             .unwrap();
 
         storage
-            .update_page_module_source(module.id, "after")
+            .update_surface_module_source(module.id, "after")
             .await
             .unwrap();
 
-        let read = storage.get_page_module(module.id).await.unwrap().unwrap();
+        let read = storage
+            .get_surface_module(module.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(read.source, "after");
-        let page_read = storage.get_page(page.id).await.unwrap().unwrap();
+        let surface_read = storage.get_page(surface.id).await.unwrap().unwrap();
         assert!(
-            page_read.updated_at >= read.created_at,
-            "page carries the mutation's timestamp"
+            surface_read.updated_at >= read.created_at,
+            "surface carries the mutation's timestamp"
         );
     }
 
@@ -559,14 +576,14 @@ mod tests {
     /// path cannot pass by accident of insertion sequence.
     async fn seeded_template(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         let template = storage
-            .create_page_template(NewPageTemplate {
+            .create_surface_template(NewSurfaceTemplate {
                 topic_id,
                 name: "Standup".into(),
             })
             .await
             .unwrap();
         storage
-            .create_page_template_module(NewPageTemplateModule {
+            .create_surface_template_module(NewSurfaceTemplateModule {
                 template_id: template.id,
                 kind: "document".into(),
                 position: 1,
@@ -575,7 +592,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .create_page_template_module(NewPageTemplateModule {
+            .create_surface_template_module(NewSurfaceTemplateModule {
                 template_id: template.id,
                 kind: "document".into(),
                 position: 0,
@@ -592,7 +609,7 @@ mod tests {
         let template_id = seeded_template(&storage, topic_id).await;
 
         let modules = storage
-            .list_page_template_modules(template_id)
+            .list_surface_template_modules(template_id)
             .await
             .unwrap();
         assert_eq!(
@@ -605,7 +622,7 @@ mod tests {
         );
 
         let listed = storage
-            .list_page_templates_by_topic(topic_id)
+            .list_surface_templates_by_topic(topic_id)
             .await
             .unwrap();
         assert_eq!(listed.len(), 1);
@@ -619,7 +636,7 @@ mod tests {
             .with_conn(|conn| {
                 conn.execute_batch(
                     "CREATE TRIGGER reject_template_module
-                     BEFORE INSERT ON page_template_modules
+                     BEFORE INSERT ON surface_template_modules
                      WHEN NEW.source = 'reject this module'
                      BEGIN SELECT RAISE(ABORT, 'forced template module failure'); END;",
                 )
@@ -628,18 +645,18 @@ mod tests {
             .unwrap();
 
         let result = storage
-            .create_page_template_with_modules(
-                NewPageTemplate {
+            .create_surface_template_with_modules(
+                NewSurfaceTemplate {
                     topic_id,
                     name: "Broken template".into(),
                 },
                 vec![
-                    NewPageTemplateModuleInput {
+                    NewSurfaceTemplateModuleInput {
                         kind: "document".into(),
                         position: 0,
                         source: "this module lands first".into(),
                     },
-                    NewPageTemplateModuleInput {
+                    NewSurfaceTemplateModuleInput {
                         kind: "document".into(),
                         position: 1,
                         source: "reject this module".into(),
@@ -651,7 +668,7 @@ mod tests {
         assert!(result.is_err(), "the trigger rejects the later module");
         assert!(
             storage
-                .list_page_templates_by_topic(topic_id)
+                .list_surface_templates_by_topic(topic_id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -659,7 +676,7 @@ mod tests {
         );
         let module_count: i64 = storage
             .with_conn(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM page_template_modules", [], |row| {
+                conn.query_row("SELECT COUNT(*) FROM surface_template_modules", [], |row| {
                     row.get(0)
                 })
             })
@@ -669,13 +686,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_page_forked_from_a_template_carries_its_modules_and_its_lineage() {
+    async fn a_surface_forked_from_a_template_carries_its_modules_and_its_lineage() {
         let (storage, topic_id) = make_topic().await;
         let template_id = seeded_template(&storage, topic_id).await;
 
-        let page = storage
-            .create_page_from_template(
-                NewPage {
+        let surface = storage
+            .create_surface_from_template(
+                NewSurface {
                     topic_id,
                     title: "Monday standup".into(),
                 },
@@ -684,7 +701,7 @@ mod tests {
             .await
             .unwrap();
 
-        let modules = storage.list_page_modules(page.id).await.unwrap();
+        let modules = storage.list_surface_modules(surface.id).await.unwrap();
         assert_eq!(
             modules
                 .iter()
@@ -694,7 +711,7 @@ mod tests {
             "seeded modules copied in the template's position order"
         );
 
-        let read = storage.get_page(page.id).await.unwrap().unwrap();
+        let read = storage.get_page(surface.id).await.unwrap().unwrap();
         assert_eq!(
             read.forked_from_template_id,
             Some(template_id),
@@ -706,7 +723,7 @@ mod tests {
         );
 
         let blank = storage
-            .create_page(NewPage {
+            .create_page(NewSurface {
                 topic_id,
                 title: "Scratch".into(),
             })
@@ -715,29 +732,29 @@ mod tests {
         let blank_read = storage.get_page(blank.id).await.unwrap().unwrap();
         assert_eq!(
             blank_read.forked_from_template_id, None,
-            "a page created blank carries no lineage"
+            "a surface created blank carries no lineage"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn page_fork_rolls_back_when_a_later_seed_insert_fails() {
+    async fn surface_fork_rolls_back_when_a_later_seed_insert_fails() {
         let (storage, topic_id) = make_topic().await;
         let template_id = seeded_template(&storage, topic_id).await;
         storage
             .with_conn(|conn| {
                 conn.execute_batch(
-                    "CREATE TRIGGER reject_page_module
-                     BEFORE INSERT ON page_modules
+                    "CREATE TRIGGER reject_surface_module
+                     BEFORE INSERT ON surface_modules
                      WHEN NEW.source = '## Blockers'
-                     BEGIN SELECT RAISE(ABORT, 'forced page module failure'); END;",
+                     BEGIN SELECT RAISE(ABORT, 'forced surface module failure'); END;",
                 )
             })
             .await
             .unwrap();
 
         let result = storage
-            .create_page_from_template(
-                NewPage {
+            .create_surface_from_template(
+                NewSurface {
                     topic_id,
                     title: "Broken fork".into(),
                 },
@@ -752,40 +769,40 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty(),
-            "the page head rolls back"
+            "the surface head rolls back"
         );
         let (lineage_count, module_count): (i64, i64) = storage
             .with_conn(|conn| {
                 Ok((
                     conn.query_row(
-                        "SELECT COUNT(*) FROM pages WHERE forked_from_template_id IS NOT NULL",
+                        "SELECT COUNT(*) FROM surfaces WHERE forked_from_template_id IS NOT NULL",
                         [],
                         |row| row.get(0),
                     )?,
-                    conn.query_row("SELECT COUNT(*) FROM page_modules", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM surface_modules", [], |row| row.get(0))?,
                 ))
             })
             .await
             .unwrap();
         assert_eq!(
             lineage_count, 0,
-            "the fork lineage rolls back with the page"
+            "the fork lineage rolls back with the surface"
         );
         assert_eq!(module_count, 0, "earlier seeded module rows roll back");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn editing_a_forked_page_leaves_the_template_untouched() {
+    async fn editing_a_forked_surface_leaves_the_template_untouched() {
         let (storage, topic_id) = make_topic().await;
         let template_id = seeded_template(&storage, topic_id).await;
         let before = storage
-            .list_page_template_modules(template_id)
+            .list_surface_template_modules(template_id)
             .await
             .unwrap();
 
-        let page = storage
-            .create_page_from_template(
-                NewPage {
+        let surface = storage
+            .create_surface_from_template(
+                NewSurface {
                     topic_id,
                     title: "Monday standup".into(),
                 },
@@ -793,14 +810,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let seeded = storage.list_page_modules(page.id).await.unwrap();
+        let seeded = storage.list_surface_modules(surface.id).await.unwrap();
         storage
-            .update_page_module_source(seeded[0].id, "## Yesterday: shipped the fork")
+            .update_surface_module_source(seeded[0].id, "## Yesterday: shipped the fork")
             .await
             .unwrap();
 
         let after = storage
-            .list_page_template_modules(template_id)
+            .list_surface_template_modules(template_id)
             .await
             .unwrap();
         assert_eq!(
@@ -812,13 +829,13 @@ mod tests {
                 .iter()
                 .map(|m| (m.id, m.source.as_str(), m.updated_at))
                 .collect::<Vec<_>>(),
-            "the template's rows are unchanged by an edit to a page forked from it"
+            "the template's rows are unchanged by an edit to a surface forked from it"
         );
         assert!(
             seeded.iter().all(|module| !before
                 .iter()
                 .any(|template_module| template_module.id == module.id)),
-            "the forked page's modules are rows of its own, not the template's"
+            "the forked surface's modules are rows of its own, not the template's"
         );
     }
 }

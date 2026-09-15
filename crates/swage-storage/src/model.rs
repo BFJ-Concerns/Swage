@@ -1104,36 +1104,36 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// A page: an agent-run tab on a topic, assembled from module instances.
+/// A surface: an agent-run tab on a topic, assembled from module instances.
 ///
-/// The database is authoritative for page content; renderings are derived.
+/// The database is authoritative for surface content; renderings are derived.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Page {
+pub struct Surface {
     pub id: Uuid,
     pub topic_id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
-    /// Advanced on every module mutation, so "has this page moved?" is one
+    /// Advanced on every module mutation, so "has this surface moved?" is one
     /// column read.
     pub updated_at: DateTime<Utc>,
-    /// The template this page was forked from, if any. Recorded origin, not
-    /// a live link: the page's modules are its own from birth, and neither
+    /// The template this surface was forked from, if any. Recorded origin, not
+    /// a live link: the surface's modules are its own from birth, and neither
     /// side's later edits reach the other.
     pub forked_from_template_id: Option<Uuid>,
     /// When the fork happened, alongside `forked_from_template_id`.
     pub forked_at: Option<DateTime<Utc>>,
 }
 
-/// A module instance on a page: work product seeded from a canonical module
+/// A module instance on a surface: work product seeded from a canonical module
 /// kind, legitimately divergent from the moment it is used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PageModule {
+pub struct SurfaceModule {
     pub id: Uuid,
-    pub page_id: Uuid,
+    pub surface_id: Uuid,
     /// The canonical module kind this instance was seeded from ("document"
     /// first). Kinds are compiled-in until module authoring lands.
     pub kind: String,
-    /// Ordering index within the page.
+    /// Ordering index within the surface.
     pub position: i32,
     /// The module's durable source, in the kind's own format (markdown for
     /// the document module).
@@ -1142,32 +1142,32 @@ pub struct PageModule {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Input for creating a page. `id` and timestamps are storage-assigned.
+/// Input for creating a surface. `id` and timestamps are storage-assigned.
 #[derive(Debug, Clone)]
-pub struct NewPage {
+pub struct NewSurface {
     pub topic_id: Uuid,
     pub title: String,
 }
 
-/// Input for adding a module instance to a page.
+/// Input for adding a module instance to a surface.
 #[derive(Debug, Clone)]
-pub struct NewPageModule {
-    pub page_id: Uuid,
+pub struct NewSurfaceModule {
+    pub surface_id: Uuid,
     pub kind: String,
     pub position: i32,
     pub source: String,
 }
 
-/// A note hung on one of a page's modules — the shared reference a user and
+/// A note hung on one of a surface's modules — the shared reference a user and
 /// an agent both point at instead of describing a location to each other.
 ///
 /// Anchoring is at module grain and only there: `module_id` names the module
-/// the note is about. Nothing here addresses the page as a whole, and nothing
+/// the note is about. Nothing here addresses the surface as a whole, and nothing
 /// addresses a position inside a module's content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PageAnnotation {
+pub struct SurfaceAnnotation {
     pub id: Uuid,
-    pub page_id: Uuid,
+    pub surface_id: Uuid,
     pub module_id: Uuid,
     /// The note's text, in whatever words its author used.
     pub body: String,
@@ -1179,11 +1179,11 @@ pub struct PageAnnotation {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A reusable page shape a topic keeps: a named set of module rows that
-/// seeds new pages. Topic-local — templates are neither shared nor
+/// A reusable surface shape a topic keeps: a named set of module rows that
+/// seeds new surfaces. Topic-local — templates are neither shared nor
 /// distributed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PageTemplate {
+pub struct SurfaceTemplate {
     pub id: Uuid,
     pub topic_id: Uuid,
     pub name: String,
@@ -1193,18 +1193,18 @@ pub struct PageTemplate {
 
 /// Input for leaving an annotation. `id` and timestamps are storage-assigned.
 #[derive(Debug, Clone)]
-pub struct NewPageAnnotation {
-    pub page_id: Uuid,
+pub struct NewSurfaceAnnotation {
+    pub surface_id: Uuid,
     pub module_id: Uuid,
     pub body: String,
     pub tags: Vec<String>,
     pub author: String,
 }
 
-/// A module row on a template: the same shape a page module has, copied
-/// into the forked page's own rows at creation.
+/// A module row on a template: the same shape a surface module has, copied
+/// into the forked surface's own rows at creation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PageTemplateModule {
+pub struct SurfaceTemplateModule {
     pub id: Uuid,
     pub template_id: Uuid,
     pub kind: String,
@@ -1214,16 +1214,16 @@ pub struct PageTemplateModule {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Input for creating a page template.
+/// Input for creating a surface template.
 #[derive(Debug, Clone)]
-pub struct NewPageTemplate {
+pub struct NewSurfaceTemplate {
     pub topic_id: Uuid,
     pub name: String,
 }
 
 /// Input for a module seeded into a template at its creation.
 #[derive(Debug, Clone)]
-pub struct NewPageTemplateModuleInput {
+pub struct NewSurfaceTemplateModuleInput {
     pub kind: String,
     pub position: i32,
     pub source: String,
@@ -1231,7 +1231,7 @@ pub struct NewPageTemplateModuleInput {
 
 /// Input for adding a module row to a template.
 #[derive(Debug, Clone)]
-pub struct NewPageTemplateModule {
+pub struct NewSurfaceTemplateModule {
     pub template_id: Uuid,
     pub kind: String,
     pub position: i32,

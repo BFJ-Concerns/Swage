@@ -79,7 +79,7 @@ directory unless a tool says otherwise.
 Where tools overlap, prefer the specific one. The topic's memory is yours \
 to use — reach for `agent_memory` to remember and recall what you learn \
 across sessions, and `memory` only to work with the topic's memory files \
-directly. Use `web_search` to find pages and `url_fetch` to read a URL \
+directly. Use `web_search` to find surfaces and `url_fetch` to read a URL \
 you already have. Use `workflow_run` for a saved, journalled multi-step \
 job and `delegate` for a one-off child task. Prefer your native \
 file and shell tools over `python_execute` unless the task is genuinely \

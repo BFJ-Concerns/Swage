@@ -537,7 +537,7 @@ mod tests {
         let first = storage.record_observation(first).await.unwrap();
 
         // The same journalled call re-runs after an interruption and fetches
-        // the same page again; the live body differs between attempts.
+        // the same surface again; the live body differs between attempts.
         let mut retried = new_observation(topic_id, "https://example.org/a", "cc33");
         retried.capture_scope = Some("call-1".into());
         let retried = storage.record_observation(retried).await.unwrap();

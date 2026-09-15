@@ -2,7 +2,7 @@
   import ConversationChannel from "./ConversationChannel.svelte";
   import ConversationList from "./ConversationList.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
-  import PagesSurface from "./PagesSurface.svelte";
+  import SurfacesPane from "./SurfacesPane.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import WorkflowRunView from "./WorkflowRunView.svelte";
   import TopicPicker from "./TopicPicker.svelte";
@@ -19,11 +19,11 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { TopicStore } from "../stores/topics";
   import type { StreamingStore } from "../stores/streaming";
-  import type { PagesStore } from "../stores/pages";
+  import type { SurfacesStore } from "../stores/surfaces";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
 
-  type Surface = "conversation" | "operator" | "pages";
+  type Surface = "conversation" | "operator" | "surfaces";
 
   interface Props {
     conversationStore: ConversationStore;
@@ -33,7 +33,7 @@
     onTopicChange?: () => void;
     onRetry: () => void;
     activeSurface: Surface;
-    pagesStore?: PagesStore;
+    surfacesStore?: SurfacesStore;
     onSelectSurface: (next: Surface) => void;
     desktopRuntime?: DesktopRuntimeInfo | null;
     themeMode?: ThemeMode;
@@ -57,7 +57,7 @@
     onTopicChange,
     onRetry,
     activeSurface,
-    pagesStore,
+    surfacesStore,
     onSelectSurface,
     desktopRuntime,
     themeMode = "system",
@@ -147,7 +147,7 @@
     <TopicSelector {topicStore} {onTopicChange} />
     <nav aria-label="Surface">
       <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => selectSurface("conversation")}>Conversations</button>
-      <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => selectSurface("pages")}>Pages</button>
+      <button aria-pressed={!settingsMode && activeSurface === "surfaces"} class:active={!settingsMode && activeSurface === "surfaces"} onclick={() => selectSurface("surfaces")}>Surfaces</button>
       <button aria-pressed={!settingsMode && activeSurface === "operator"} class:active={!settingsMode && activeSurface === "operator"} onclick={() => selectSurface("operator")}>Operator</button>
       <button aria-pressed={settingsMode} class:active={settingsMode} onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
     </nav>
@@ -172,7 +172,7 @@
     />
   </main>
 {:else if settingsMode}
-  <!-- The settings window chrome lives here; the pages own their content only. -->
+  <!-- The settings window chrome lives here; the surfaces own their content only. -->
   <div class="settings-window">
     <header class="settings-chrome">
       <h2>Settings</h2>
@@ -199,16 +199,16 @@
   <TopicPicker {topicStore} {onTopicChange} />
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
-{:else if activeSurface === "pages"}
+{:else if activeSurface === "surfaces"}
   <!--
     The work surface carries the control channel: the same channel markup and
     the same store instances as the conversation surface, so moving between
-    pages keeps the conversation running rather than leaving it behind.
+    surfaces keeps the conversation running rather than leaving it behind.
   -->
-  <main class="pages-surface">
+  <main class="surfaces-surface">
     <div class="work">
-      {#if pagesStore && currentTopic}
-        <PagesSurface store={pagesStore} topicId={currentTopic.id} />
+      {#if surfacesStore && currentTopic}
+        <SurfacesPane store={surfacesStore} topicId={currentTopic.id} />
       {/if}
     </div>
     <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
@@ -231,7 +231,7 @@
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
   /* The work surface and its docked channel share the conversation surface's
      two-column rule, mirrored: the work takes the wide column. */
-  .pages-surface { display: grid; grid-template-columns: 1fr minmax(20rem, 33%); height: calc(100vh - 4rem); }
-  .pages-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
+  .surfaces-surface { display: grid; grid-template-columns: 1fr minmax(20rem, 33%); height: calc(100vh - 4rem); }
+  .surfaces-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
   .operator { min-width: 0; overflow: auto; }
 </style>

@@ -197,11 +197,11 @@ mod tests {
         assert_eq!(val["output"], "Hello, world!");
         assert!(
             val.get("total_bytes").is_none(),
-            "small first-page reads should keep their old shape: {val:?}"
+            "small first-surface reads should keep their old shape: {val:?}"
         );
         assert!(
             val.get("follow_up").is_none(),
-            "small first-page reads should not invent follow-up metadata: {val:?}"
+            "small first-surface reads should not invent follow-up metadata: {val:?}"
         );
     }
 

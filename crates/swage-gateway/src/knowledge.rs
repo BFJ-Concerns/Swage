@@ -124,10 +124,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn write_is_idempotent_and_read_round_trips() {
         let root = pin_root();
-        let first = write_body(root.path(), "research", b"captured page")
+        let first = write_body(root.path(), "research", b"captured surface")
             .await
             .unwrap();
-        let second = write_body(root.path(), "research", b"captured page")
+        let second = write_body(root.path(), "research", b"captured surface")
             .await
             .unwrap();
         assert_eq!(first.sha256, second.sha256);
@@ -135,7 +135,7 @@ mod tests {
         let bytes = read_body(root.path(), "research", &first.sha256)
             .await
             .unwrap();
-        assert_eq!(bytes, b"captured page");
+        assert_eq!(bytes, b"captured surface");
     }
 
     #[tokio::test(flavor = "multi_thread")]

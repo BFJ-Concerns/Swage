@@ -844,8 +844,8 @@ mod tests {
         let first = tool
             .execute(
                 json!({
-                    "content": "the page as first fetched",
-                    "url": "https://example.test/page",
+                    "content": "the surface as first fetched",
+                    "url": "https://example.test/surface",
                     "extracted_text": "readable text from the first fetch",
                 }),
                 &ctx,
@@ -858,8 +858,8 @@ mod tests {
         let retried = tool
             .execute(
                 json!({
-                    "content": "the page as fetched on the resumed attempt",
-                    "url": "https://example.test/page",
+                    "content": "the surface as fetched on the resumed attempt",
+                    "url": "https://example.test/surface",
                     "extracted_text": "readable text from the resumed fetch",
                 }),
                 &ctx,

@@ -3,7 +3,7 @@
   the message history, and the composer (or the approval it is waiting on).
   It is ambient: it rides whatever work surface the user is standing on
   rather than being a place they navigate to, so the same instance renders
-  beside the pages surface and beside the conversation list. Sessions cycle
+  beside the surfaces surface and beside the conversation list. Sessions cycle
   within it — picking up an earlier conversation or starting a fresh one is
   done from here, without leaving the work in view.
 -->
@@ -81,7 +81,7 @@
 
 <section aria-label="Conversation">
   <!-- Session controls travel with the channel, so cycling to another
-       conversation or starting one costs no page. -->
+       conversation or starting one costs no surface. -->
   <header class="session-bar">
     <select
       class="session-select"

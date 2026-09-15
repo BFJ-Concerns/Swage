@@ -2,7 +2,7 @@
 
 /**
  * Restate an annotation: body and tags are replaced together with what the
- * author now says. The displaced text survives in the page's provenance
+ * author now says. The displaced text survives in the surface's provenance
  * trail, not in a version of the annotation.
  */
-export type UpdatePageAnnotationRequest = { body: string, tags?: Array<string>, };
+export type UpdateSurfaceAnnotationRequest = { body: string, tags?: Array<string>, };

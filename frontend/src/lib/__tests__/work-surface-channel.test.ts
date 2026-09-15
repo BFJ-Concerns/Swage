@@ -1,4 +1,4 @@
-// The work-surface channel — the socket an open page listens on. It takes no
+// The work-surface channel — the socket an open surface listens on. It takes no
 // conversation, so a surface stays live whether or not one is selected.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -39,7 +39,7 @@ describe("work-surface channel", () => {
     channel.close();
   });
 
-  it("delivers a page signal from the wire to its subscriber", () => {
+  it("delivers a surface signal from the wire to its subscriber", () => {
     installFakeSocket();
     const channel = createWorkSurfaceChannel({ wsBaseUrl: "ws://gateway" });
     const seen: ServerEvent[] = [];
@@ -47,14 +47,14 @@ describe("work-surface channel", () => {
 
     FakeSocket.last?.onmessage?.({
       data: JSON.stringify({
-        type: "page_updated",
-        page_id: "11111111-1111-4111-8111-111111111111",
+        type: "surface_updated",
+        surface_id: "11111111-1111-4111-8111-111111111111",
         module_id: "22222222-2222-4222-8222-222222222222",
       }),
     });
 
     expect(seen).toHaveLength(1);
-    expect(seen[0].type).toBe("page_updated");
+    expect(seen[0].type).toBe("surface_updated");
     channel.close();
   });
 

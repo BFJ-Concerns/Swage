@@ -3,4 +3,4 @@
 /**
  * Confirms that an annotation was removed.
  */
-export type DeletePageAnnotationResponse = { deleted: boolean, };
+export type DeleteSurfaceAnnotationResponse = { deleted: boolean, };

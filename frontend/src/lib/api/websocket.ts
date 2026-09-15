@@ -106,7 +106,7 @@ export function createWebSocketClient(
 
   function resolveWsBase(): string {
     if (options?.wsBaseUrl !== undefined) return options.wsBaseUrl;
-    // Derive from the current page origin so relative-style routing works.
+    // Derive from the current surface origin so relative-style routing works.
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     return `${protocol}//${window.location.host}`;
   }

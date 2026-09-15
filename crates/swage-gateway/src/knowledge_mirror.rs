@@ -10,7 +10,7 @@
 //!
 //! The mirror lives under the topic data root at
 //! `topics/<slug>/.swage/knowledge/mirror/`, beside the body files, as an
-//! `index.md` plus one page per observation. Regeneration wipes the
+//! `index.md` plus one surface per observation. Regeneration wipes the
 //! directory and rewrites it whole; a crash mid-write leaves a partial
 //! mirror, and the next regeneration replaces it — disposability is the
 //! recovery path, so no atomic-rename ceremony is warranted here.
@@ -77,18 +77,18 @@ pub async fn regenerate_for_topic(
         .map(|assertion| (assertion.observation_id, assertion))
         .collect();
 
-    let mut pages = Vec::with_capacity(observations.len());
+    let mut surfaces = Vec::with_capacity(observations.len());
     for observation in observations {
         let latest = storage.latest_extraction(observation.id).await?;
         let effective = curation.get(&observation.id).cloned();
-        pages.push(ObservationPage {
+        surfaces.push(ObservationSurface {
             observation,
             curation: effective,
             latest,
         });
     }
 
-    let files = render_mirror(topic_slug, &pages);
+    let files = render_mirror(topic_slug, &surfaces);
     let root = mirror_root(config_root, topic_slug);
     let files_written = write_mirror(&root, &files).await?;
 
@@ -99,7 +99,7 @@ pub async fn regenerate_for_topic(
 }
 
 /// One observation's mirror-facing state, joined from the three stores.
-struct ObservationPage {
+struct ObservationSurface {
     observation: SourceObservation,
     curation: Option<CurationAssertion>,
     latest: Option<ExtractionDerivation>,
@@ -116,7 +116,7 @@ fn mirror_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
 
 /// Render the whole mirror as relative path → content. Pure: everything in
 /// the output comes from the rows, so equal input renders equal bytes.
-fn render_mirror(topic_slug: &str, pages: &[ObservationPage]) -> BTreeMap<String, String> {
+fn render_mirror(topic_slug: &str, surfaces: &[ObservationSurface]) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
 
     let mut index = String::new();
@@ -124,37 +124,37 @@ fn render_mirror(topic_slug: &str, pages: &[ObservationPage]) -> BTreeMap<String
     let _ = writeln!(index);
     let _ = writeln!(index, "{GENERATED_NOTE}");
     let _ = writeln!(index);
-    if pages.is_empty() {
+    if surfaces.is_empty() {
         let _ = writeln!(index, "No observations have been captured yet.");
     } else {
-        let _ = writeln!(index, "{} observations, newest first.", pages.len());
+        let _ = writeln!(index, "{} observations, newest first.", surfaces.len());
         let _ = writeln!(index);
-        for page in pages {
+        for surface in surfaces {
             let _ = writeln!(
                 index,
                 "- [{}](observations/{}.md) — retrieved {}, {}, {}",
-                origin_label(&page.observation),
-                page.observation.id,
-                page.observation.retrieved_at.to_rfc3339(),
-                page.observation.media_type,
-                curation_label(page.curation.as_ref(), "observations/"),
+                origin_label(&surface.observation),
+                surface.observation.id,
+                surface.observation.retrieved_at.to_rfc3339(),
+                surface.observation.media_type,
+                curation_label(surface.curation.as_ref(), "observations/"),
             );
         }
     }
     files.insert("index.md".to_string(), index);
 
-    for page in pages {
+    for surface in surfaces {
         files.insert(
-            format!("observations/{}.md", page.observation.id),
-            render_observation(page),
+            format!("observations/{}.md", surface.observation.id),
+            render_observation(surface),
         );
     }
 
     files
 }
 
-fn render_observation(page: &ObservationPage) -> String {
-    let observation = &page.observation;
+fn render_observation(surface: &ObservationSurface) -> String {
+    let observation = &surface.observation;
     let mut text = String::new();
     let _ = writeln!(text, "# {}", origin_label(observation));
     let _ = writeln!(text);
@@ -175,10 +175,10 @@ fn render_observation(page: &ObservationPage) -> String {
     let _ = writeln!(
         text,
         "- Curation: {}",
-        curation_label(page.curation.as_ref(), "")
+        curation_label(surface.curation.as_ref(), "")
     );
     let _ = writeln!(text);
-    match &page.latest {
+    match &surface.latest {
         Some(extraction) => {
             let _ = writeln!(
                 text,
@@ -204,12 +204,12 @@ fn origin_label(observation: &SourceObservation) -> String {
         .unwrap_or_else(|| observation.id.to_string())
 }
 
-/// The observation's effective curation state, as the index and page show
+/// The observation's effective curation state, as the index and surface show
 /// it. Curated-out material stays in the mirror with its state named —
 /// the mirror browses everything; default *retrieval* is where curation
 /// hides things. `link_prefix` is the path from the rendering file to the
 /// `observations/` directory: `"observations/"` from the index, `""` from
-/// a page inside that directory.
+/// a surface inside that directory.
 fn curation_label(assertion: Option<&CurationAssertion>, link_prefix: &str) -> String {
     match assertion {
         None => "active".to_string(),
@@ -439,16 +439,16 @@ mod tests {
         assert!(index.contains("active"));
 
         // Cross-references resolve from where they are written: the index
-        // links into observations/, while a page beside its sibling must not
+        // links into observations/, while a surface beside its sibling must not
         // repeat the directory.
         let superseded_page = std::fs::read_dir(root.join("observations"))
             .unwrap()
             .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
-            .find(|page| page.contains("superseded by"))
-            .expect("the superseded observation has a page");
+            .find(|surface| surface.contains("superseded by"))
+            .expect("the superseded observation has a surface");
         assert!(
             !superseded_page.contains("(observations/"),
-            "a page's sibling link must be relative to observations/, not to the mirror root"
+            "a surface's sibling link must be relative to observations/, not to the mirror root"
         );
     }
 

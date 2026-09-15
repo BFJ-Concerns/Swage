@@ -759,7 +759,7 @@ pub(crate) async fn validate_resolved_schedule(
     Ok(())
 }
 
-/// A page target is meaningful only within the schedule's own topic. Resolve
+/// A surface target is meaningful only within the schedule's own topic. Resolve
 /// continuation policies here as well as fresh ones, so invalid routing never
 /// reaches a future run.
 async fn validate_schedule_delivery_targets(
@@ -780,13 +780,13 @@ async fn validate_schedule_delivery_targets(
         }
     };
     for target in targets {
-        if let crate::channel_gateway::DeliveryTarget::Page { page_id } = target {
-            let page = state.storage.get_page(page_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("no page with id {page_id}"))
+        if let crate::channel_gateway::DeliveryTarget::Surface { surface_id } = target {
+            let surface = state.storage.get_page(surface_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("no surface with id {surface_id}"))
             })?;
-            if page.topic_id != topic_id {
+            if surface.topic_id != topic_id {
                 return Err(GatewayError::ValidationError(format!(
-                    "page delivery target {page_id} is not in the schedule's topic"
+                    "surface delivery target {surface_id} is not in the schedule's topic"
                 )));
             }
         }

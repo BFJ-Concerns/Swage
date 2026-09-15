@@ -76,7 +76,7 @@ No modes or flags — read the world:
   `build/`: re-read the commission and the annexe's task list as they
   stand now — and where the commission carries a commitment register,
   sweep it by ID: every commitment and goal line, wherever it sits on the
-  page, and every `stands on` entry, since a dependency named there is
+  surface, and every `stands on` entry, since a dependency named there is
   contract material no heading may scope away. Work the delta implies — new
   obligations, new
   instruction-text deliverables — joins the work list; a delta may need

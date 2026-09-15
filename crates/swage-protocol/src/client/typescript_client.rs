@@ -170,7 +170,7 @@ mod tests {
             "export async function deleteTopic(id: string): Promise<void> {\n  return request<void>(\"DELETE\", `/api/topics/${encodeURIComponent(id)}`);\n}"
         ));
         assert!(rendered.contains(
-            "export async function deletePageAnnotation(annotationId: string): Promise<DeletePageAnnotationResponse> {\n  return request<DeletePageAnnotationResponse>(\"DELETE\", `/api/page-annotations/${encodeURIComponent(annotationId)}`);\n}"
+            "export async function deleteSurfaceAnnotation(annotationId: string): Promise<DeleteSurfaceAnnotationResponse> {\n  return request<DeleteSurfaceAnnotationResponse>(\"DELETE\", `/api/surface-annotations/${encodeURIComponent(annotationId)}`);\n}"
         ));
     }
 

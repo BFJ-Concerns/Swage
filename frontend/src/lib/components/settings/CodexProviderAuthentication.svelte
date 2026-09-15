@@ -35,11 +35,11 @@
       {#if !saved}<small>Save settings before signing in.</small>{/if}
       {#if deviceCode}
         <div class="device-code-instruction">
-          <span>Enter this device code on the verification page opened in your browser:</span>
+          <span>Enter this device code on the verification surface opened in your browser:</span>
           <div class="opt-row">
             <label><span class="sr-only">Device code</span><input class="text device-code" readonly value={deviceCode.code} /></label>
             <button type="button" class="secondary" onclick={oncopy}>Copy code</button>
-            <a href={deviceCode.verificationUrl} target="_blank" rel="noreferrer">Open verification page</a>
+            <a href={deviceCode.verificationUrl} target="_blank" rel="noreferrer">Open verification surface</a>
           </div>
         </div>
       {/if}

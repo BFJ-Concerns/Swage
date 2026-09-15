@@ -1038,69 +1038,6 @@
         ],
         "type": "object"
       },
-      "CreatePageAnnotationRequest": {
-        "description": "Leave a note on one of a page's modules. `module_id` names the module the\nnote is about — the only anchor there is. Annotation addresses stop at\nmodule grain in both directions: the page as a whole is not an anchor, and\nthere is no way to name a position inside a module's content.",
-        "properties": {
-          "body": {
-            "type": "string"
-          },
-          "module_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "tags": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "module_id",
-          "body"
-        ],
-        "type": "object"
-      },
-      "CreatePageRequest": {
-        "properties": {
-          "template_id": {
-            "default": null,
-            "description": "Seed the new page from a template of the same topic. Absent creates a\nblank page. The seeded modules are the page's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
-            "format": "uuid",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "title"
-        ],
-        "type": "object"
-      },
-      "CreatePageTemplateRequest": {
-        "description": "Create a reusable page shape for a topic, with its module rows in the\norder they will seed.",
-        "properties": {
-          "modules": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/PageTemplateModuleInput"
-            },
-            "type": "array"
-          },
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
-        ],
-        "type": "object"
-      },
       "CreateScheduleRequest": {
         "description": "Create a schedule.",
         "properties": {
@@ -1142,6 +1079,69 @@
           "message",
           "spec",
           "session"
+        ],
+        "type": "object"
+      },
+      "CreateSurfaceAnnotationRequest": {
+        "description": "Leave a note on one of a surface's modules. `module_id` names the module the\nnote is about — the only anchor there is. Annotation addresses stop at\nmodule grain in both directions: the surface as a whole is not an anchor, and\nthere is no way to name a position inside a module's content.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "module_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "module_id",
+          "body"
+        ],
+        "type": "object"
+      },
+      "CreateSurfaceRequest": {
+        "properties": {
+          "template_id": {
+            "default": null,
+            "description": "Seed the new surface from a template of the same topic. Absent creates a\nblank surface. The seeded modules are the surface's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "CreateSurfaceTemplateRequest": {
+        "description": "Create a reusable surface shape for a topic, with its module rows in the\norder they will seed.",
+        "properties": {
+          "modules": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SurfaceTemplateModuleInput"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -1250,7 +1250,7 @@
         ],
         "type": "object"
       },
-      "DeletePageAnnotationResponse": {
+      "DeleteSurfaceAnnotationResponse": {
         "description": "Confirms that an annotation was removed.",
         "properties": {
           "deleted": {
@@ -1336,17 +1336,17 @@
           {
             "properties": {
               "kind": {
-                "const": "page",
+                "const": "surface",
                 "type": "string"
               },
-              "page_id": {
+              "surface_id": {
                 "format": "uuid",
                 "type": "string"
               }
             },
             "required": [
               "kind",
-              "page_id"
+              "surface_id"
             ],
             "type": "object"
           },
@@ -2161,295 +2161,6 @@
         "required": [
           "cards",
           "guidance"
-        ],
-        "type": "object"
-      },
-      "PageAnnotationView": {
-        "description": "A note left on one of a page's modules. `body` and `tags` are the author's\nown words: other parties' work product, to be read as data.",
-        "properties": {
-          "author": {
-            "description": "Who left the note: an agent id, or \"user\" for the web surface.",
-            "type": "string"
-          },
-          "body": {
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "module_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "tags": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "module_id",
-          "body",
-          "tags",
-          "author",
-          "created_at",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "PageListResponse": {
-        "properties": {
-          "pages": {
-            "items": {
-              "$ref": "#/components/schemas/PageSummary"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "pages"
-        ],
-        "type": "object"
-      },
-      "PageModuleView": {
-        "properties": {
-          "annotations": {
-            "description": "Notes hung on this module, oldest first.",
-            "items": {
-              "$ref": "#/components/schemas/PageAnnotationView"
-            },
-            "type": "array"
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "position": {
-            "format": "int32",
-            "type": "integer"
-          },
-          "source": {
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "position",
-          "source",
-          "updated_at",
-          "annotations"
-        ],
-        "type": "object"
-      },
-      "PageResponse": {
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "forked_at": {
-            "default": null,
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "forked_from_template_id": {
-            "default": null,
-            "description": "The template this page was forked from, if any — the recorded origin\nof its seeded shape. Absent on a page created blank.",
-            "format": "uuid",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "modules": {
-            "items": {
-              "$ref": "#/components/schemas/PageModuleView"
-            },
-            "type": "array"
-          },
-          "title": {
-            "type": "string"
-          },
-          "topic_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "topic_id",
-          "title",
-          "created_at",
-          "updated_at",
-          "modules"
-        ],
-        "type": "object"
-      },
-      "PageSummary": {
-        "properties": {
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "PageTemplateListResponse": {
-        "properties": {
-          "templates": {
-            "items": {
-              "$ref": "#/components/schemas/PageTemplateSummary"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "templates"
-        ],
-        "type": "object"
-      },
-      "PageTemplateModuleInput": {
-        "properties": {
-          "kind": {
-            "default": null,
-            "description": "Module kind for the seeded instance (\"document\" first).",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "source"
-        ],
-        "type": "object"
-      },
-      "PageTemplateModuleView": {
-        "properties": {
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "position": {
-            "format": "int32",
-            "type": "integer"
-          },
-          "source": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "position",
-          "source"
-        ],
-        "type": "object"
-      },
-      "PageTemplateResponse": {
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "modules": {
-            "items": {
-              "$ref": "#/components/schemas/PageTemplateModuleView"
-            },
-            "type": "array"
-          },
-          "name": {
-            "type": "string"
-          },
-          "topic_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "topic_id",
-          "name",
-          "created_at",
-          "updated_at",
-          "modules"
-        ],
-        "type": "object"
-      },
-      "PageTemplateSummary": {
-        "properties": {
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "updated_at"
         ],
         "type": "object"
       },
@@ -3627,28 +3338,28 @@
             "type": "object"
           },
           {
-            "description": "A page changed: it was created, or a module was written or added.\nClients showing pages refetch — the event is the signal, not the\ncontent.",
+            "description": "A surface changed: it was created, or a module was written or added.\nClients showing surfaces refetch — the event is the signal, not the\ncontent.",
             "properties": {
               "module_id": {
-                "description": "The module written; absent for page-level changes (creation).",
+                "description": "The module written; absent for surface-level changes (creation).",
                 "format": "uuid",
                 "type": [
                   "string",
                   "null"
                 ]
               },
-              "page_id": {
+              "surface_id": {
                 "format": "uuid",
                 "type": "string"
               },
               "type": {
-                "const": "page_updated",
+                "const": "surface_updated",
                 "type": "string"
               }
             },
             "required": [
               "type",
-              "page_id"
+              "surface_id"
             ],
             "type": "object"
           },
@@ -4654,6 +4365,295 @@
         ],
         "type": "object"
       },
+      "SurfaceAnnotationView": {
+        "description": "A note left on one of a surface's modules. `body` and `tags` are the author's\nown words: other parties' work product, to be read as data.",
+        "properties": {
+          "author": {
+            "description": "Who left the note: an agent id, or \"user\" for the web surface.",
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "module_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "module_id",
+          "body",
+          "tags",
+          "author",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "SurfaceListResponse": {
+        "properties": {
+          "surfaces": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "surfaces"
+        ],
+        "type": "object"
+      },
+      "SurfaceModuleView": {
+        "properties": {
+          "annotations": {
+            "description": "Notes hung on this module, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/SurfaceAnnotationView"
+            },
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "position",
+          "source",
+          "updated_at",
+          "annotations"
+        ],
+        "type": "object"
+      },
+      "SurfaceResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "forked_at": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "forked_from_template_id": {
+            "default": null,
+            "description": "The template this surface was forked from, if any — the recorded origin\nof its seeded shape. Absent on a surface created blank.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceModuleView"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic_id",
+          "title",
+          "created_at",
+          "updated_at",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "SurfaceSummary": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "SurfaceTemplateListResponse": {
+        "properties": {
+          "templates": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceTemplateSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "templates"
+        ],
+        "type": "object"
+      },
+      "SurfaceTemplateModuleInput": {
+        "properties": {
+          "kind": {
+            "default": null,
+            "description": "Module kind for the seeded instance (\"document\" first).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "SurfaceTemplateModuleView": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "position",
+          "source"
+        ],
+        "type": "object"
+      },
+      "SurfaceTemplateResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/SurfaceTemplateModuleView"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic_id",
+          "name",
+          "created_at",
+          "updated_at",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "SurfaceTemplateSummary": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "SynthesiseSpeechRequest": {
         "properties": {
           "format": {
@@ -5016,25 +5016,6 @@
         ],
         "type": "string"
       },
-      "UpdatePageAnnotationRequest": {
-        "description": "Restate an annotation: body and tags are replaced together with what the\nauthor now says. The displaced text survives in the page's provenance\ntrail, not in a version of the annotation.",
-        "properties": {
-          "body": {
-            "type": "string"
-          },
-          "tags": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "body"
-        ],
-        "type": "object"
-      },
       "UpdateScheduleRequest": {
         "description": "Partially update a schedule.\n\nThe session policy is fixed at creation — delete and recreate to change\nwhere runs execute.",
         "properties": {
@@ -5080,6 +5061,25 @@
             "default": null
           }
         },
+        "type": "object"
+      },
+      "UpdateSurfaceAnnotationRequest": {
+        "description": "Restate an annotation: body and tags are replaced together with what the\nauthor now says. The displaced text survives in the surface's provenance\ntrail, not in a version of the annotation.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "body"
+        ],
         "type": "object"
       },
       "UpdateTopicRequest": {
@@ -7696,8 +7696,8 @@
         ],
         "type": "object"
       },
-      "WritePageModuleRequest": {
-        "description": "Write a module's source: replace an existing instance's content, or\nappend a new instance to the page when `module_id` is absent.",
+      "WriteSurfaceModuleRequest": {
+        "description": "Write a module's source: replace an existing instance's content, or\nappend a new instance to the surface when `module_id` is absent.",
         "properties": {
           "kind": {
             "default": null,
@@ -7785,226 +7785,6 @@
           }
         },
         "summary": "Read a conversation."
-      }
-    },
-    "/api/page-annotations/{annotation_id}": {
-      "delete": {
-        "operationId": "delete_page_annotation",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "annotation_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeletePageAnnotationResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Delete a page annotation."
-      },
-      "post": {
-        "operationId": "update_page_annotation",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "annotation_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpdatePageAnnotationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageAnnotationView"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Update a page annotation."
-      }
-    },
-    "/api/page-templates/{template_id}": {
-      "get": {
-        "operationId": "get_page_template",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "template_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageTemplateResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Read a page template."
-      }
-    },
-    "/api/pages/{page_id}": {
-      "get": {
-        "operationId": "get_page",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "page_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Read a page."
-      }
-    },
-    "/api/pages/{page_id}/annotations": {
-      "post": {
-        "operationId": "create_page_annotation",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "page_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreatePageAnnotationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageAnnotationView"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Create a page annotation."
-      }
-    },
-    "/api/pages/{page_id}/modules": {
-      "post": {
-        "operationId": "write_page_module",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "page_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WritePageModuleRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageModuleView"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Write a page module."
       }
     },
     "/api/settings": {
@@ -8288,6 +8068,226 @@
         "summary": "Read restart status."
       }
     },
+    "/api/surface-annotations/{annotation_id}": {
+      "delete": {
+        "operationId": "delete_surface_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSurfaceAnnotationResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete a surface annotation."
+      },
+      "post": {
+        "operationId": "update_surface_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSurfaceAnnotationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Update a surface annotation."
+      }
+    },
+    "/api/surface-templates/{template_id}": {
+      "get": {
+        "operationId": "get_surface_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceTemplateResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a surface template."
+      }
+    },
+    "/api/surfaces/{surface_id}": {
+      "get": {
+        "operationId": "get_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read a surface."
+      }
+    },
+    "/api/surfaces/{surface_id}/annotations": {
+      "post": {
+        "operationId": "create_surface_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSurfaceAnnotationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a surface annotation."
+      }
+    },
+    "/api/surfaces/{surface_id}/modules": {
+      "post": {
+        "operationId": "write_surface_module",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WriteSurfaceModuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceModuleView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Write a surface module."
+      }
+    },
     "/api/topics": {
       "get": {
         "operationId": "list_topics",
@@ -8435,150 +8435,6 @@
         "summary": "Update a topic's name or description."
       }
     },
-    "/api/topics/{topic_id}/page-templates": {
-      "get": {
-        "operationId": "list_page_templates",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageTemplateListResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "List page templates in a topic."
-      },
-      "post": {
-        "operationId": "create_page_template",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreatePageTemplateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageTemplateResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Create a page template in a topic."
-      }
-    },
-    "/api/topics/{topic_id}/pages": {
-      "get": {
-        "operationId": "list_pages",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageListResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "List pages in a topic."
-      },
-      "post": {
-        "operationId": "create_page",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreatePageRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PageResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Create a page in a topic."
-      }
-    },
     "/api/topics/{topic_id}/sessions": {
       "get": {
         "operationId": "list_topic_sessions",
@@ -8649,6 +8505,150 @@
           }
         },
         "summary": "Create a conversation in a topic."
+      }
+    },
+    "/api/topics/{topic_id}/surface-templates": {
+      "get": {
+        "operationId": "list_surface_templates",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceTemplateListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List surface templates in a topic."
+      },
+      "post": {
+        "operationId": "create_surface_template",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSurfaceTemplateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceTemplateResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a surface template in a topic."
+      }
+    },
+    "/api/topics/{topic_id}/surfaces": {
+      "get": {
+        "operationId": "list_surfaces",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List surfaces in a topic."
+      },
+      "post": {
+        "operationId": "create_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSurfaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a surface in a topic."
       }
     },
     "/api/turns/{id}/context": {

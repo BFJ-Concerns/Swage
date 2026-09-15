@@ -4,7 +4,7 @@ import { listEffectiveAgentDefinitions } from "../api/agent-definitions";
 import { ApiError } from "../api/error";
 import { listTopicMaterials, setMaterialsBaseUrl } from "../api/materials";
 import { fetchOperatorOverview, setOperatorBaseUrl } from "../api/operator";
-import { listPages, setBaseUrl as setPagesBaseUrl } from "../api/pages";
+import { listSurfaces, setBaseUrl as setSurfacesBaseUrl } from "../api/surfaces";
 import { listSkills } from "../api/skills";
 import { listTopicWorkspaces, setTopicsBaseUrl } from "../api/topics";
 import { fetchTurnContext, setBaseUrl as setTurnsBaseUrl } from "../api/turns";
@@ -17,7 +17,7 @@ function failedResponse(body: BodyInit, status: number): Response {
 
 const wrappers = [
   { name: "conversations", request: () => listConversations("topic-1") },
-  { name: "pages", request: () => listPages("topic-1") },
+  { name: "surfaces", request: () => listSurfaces("topic-1") },
   { name: "operator", request: () => fetchOperatorOverview() },
   { name: "agent definitions", request: () => listEffectiveAgentDefinitions("topic-1") },
   { name: "materials", request: () => listTopicMaterials("topic-1") },
@@ -30,7 +30,7 @@ const wrappers = [
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
   setConversationsBaseUrl("");
-  setPagesBaseUrl("");
+  setSurfacesBaseUrl("");
   setOperatorBaseUrl("");
   setMaterialsBaseUrl("");
   setTopicsBaseUrl("");

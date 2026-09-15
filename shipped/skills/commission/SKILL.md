@@ -305,7 +305,7 @@ subdirectory (`build/`, or a legacy `maestro/`) = scratch.
 
 | File | Role |
 |------|------|
-| `README.md` | The commission — this skill's artifact. Forgejo renders it on the repo front page; agents read READMEs by instinct. |
+| `README.md` | The commission — this skill's artifact. Forgejo renders it on the repo front surface; agents read READMEs by instinct. |
 | `IDEAS.md` | The user's zero-ceremony inbox: anything they want to bring to a commission pass — feature ideas, open questions, things to look into with an agent later. Written by the user alone; processed only by a commission conversation. Agents route idea-shaped findings through their own reports for the user to triage in. |
 | `ISSUES.md` | The shared find-ingest log: bugs and tangential finds written down in passing, appended by agents and user alike, with no judgement of scope or fix — each entry a reporter's unverified claim until triage checks it against the code. This skill is its triage owner and works the whole log — destination finds into the README, decided work into `TASKS.md` kind-tagged, idea-shaped finds surfaced to the user, friction-shaped entries (no defect, just a change that fought back) moved to `FRICTION.md`, stale entries struck. The orchestrator takes the unambiguous, clearly-journey finds itself between commission passes to keep them moving — its habit, not a disposition a triage may choose; every find that needs a scope or intent call waits for this triage, and a commission pass never leaves a find behind for the orchestrator. A disposed entry is deleted from the log, the commit message carrying its disposition. |
 | `FRICTION.md` | The friction ledger: dated observations of a codebase area resisting change — area, symptom, expected-versus-actual — appended by agents whenever a change fought back harder than the work warranted. Reviewed by commission updates for recurrence, which is assessed against the repo's history and answered with a scoped refactor proposal to the user; entries persist as the recurrence evidence — pruned only when a commission pass promotes a case into decided work (deleted with the promotion) or finds an entry's area gone (deleted as stale) — with assessment conclusions recorded beneath the entries they judged. |
@@ -580,7 +580,7 @@ commission conversation. A run that finds it unset settles it then.
   promising a future scoping pass is an instruction to hold that pass here.
   Full elaboration means intent-level journeys, not implementation design.
 - Absolute dates only. One term per concept throughout. Brevity targets
-  roughly 1–3 dense pages — over-capture is over-specification.
+  roughly 1–3 dense surfaces — over-capture is over-specification.
 
 **One live contract file per commissionable project, never sharded.** Exactly
 one file — the README — claims currency about what may be built, so an agent
@@ -697,7 +697,7 @@ findings return.
   wants voiced in conversation that match no commitment — is settled with the
   user (a new line, a hold, a non-binding tail mention or `IDEAS.md` entry, or
   a deliberate exclusion), and the deliberate exclusions ride the sign-off
-  page as decision cards, so the user signs over what was left out as well as
+  surface as decision cards, so the user signs over what was left out as well as
   what was written; a mined want the register already covers needs nothing. A
   line whose text actually changed in response to a finding gets a fresh
   hollow verdict before signature — re-run the hollow leg over just those

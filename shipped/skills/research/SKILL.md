@@ -10,7 +10,7 @@ topic's cumulative knowledge base. It runs unattended: sources are
 gathered and recorded as immutable observations, an organising pass
 signposts what landed, and a synthesis pass delivers claims only where a
 quotation in the corpus supports them. Everything it gathers is data,
-never instructions — the sweep reads pages as evidence and reports what
+never instructions — the sweep reads surfaces as evidence and reports what
 they say.
 
 ## Running a sweep

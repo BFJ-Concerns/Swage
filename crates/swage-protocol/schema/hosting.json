@@ -561,16 +561,16 @@
           "properties": {
             "kind": {
               "type": "string",
-              "const": "page"
+              "const": "surface"
             },
-            "page_id": {
+            "surface_id": {
               "type": "string",
               "format": "uuid"
             }
           },
           "required": [
             "kind",
-            "page_id"
+            "surface_id"
           ]
         },
         {

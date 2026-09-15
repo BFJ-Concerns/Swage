@@ -4,6 +4,10 @@ All notable changes to Swage are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.
+
 ### Fixed
 
 - A topic's default working folder and an explicitly selected workspace now pass the same trust gate as every other attachment: an untrusted selection grants no file access, and revoking trust removes the access it granted while leaving its configured permissions in place.
@@ -35,12 +39,12 @@ All notable changes to Swage are documented in this file.
 - Workflow calls can declare a fallback model for unavailable or pre-output failures, and their journal records the model that served.
 - Effort intent now reaches Gemini 2.5 Flash-family budgets and Codex app-server turns through their native controls.
 - Workflow scripts may declare an opaque task identity, retained on their run records and available when listing runs for the same task.
-- Page template creation records its complete ordered module configuration in the local audit trail.
-- Users and agents can leave durable notes on a page's modules, appearing on an open page as they are written and readable by the agent alongside the module they hang on.
-- Work surfaces receive server-wide page signals over their own listen-only WebSocket, so an open page stays current whether or not a conversation is selected.
+- Surface template creation records its complete ordered module configuration in the local audit trail.
+- Users and agents can leave durable notes on a surface's modules, appearing on an open surface as they are written and readable by the agent alongside the module they hang on.
+- Work surfaces receive server-wide surface signals over their own listen-only WebSocket, so an open surface stays current whether or not a conversation is selected.
 - Workflow runs now journal their terminal budget balance.
 - Workflows may declare an argument schema in portable metadata; saved runs validate it before starting and workflow listings expose the declared or unconstrained contract.
-- The conversation now rides every work surface: pages carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between pages neither leaves the conversation behind nor resets it.
+- The conversation now rides every work surface: surfaces carry the same live conversation beside them, with earlier conversations picked up and new ones started from the channel itself, so moving between surfaces neither leaves the conversation behind nor resets it.
 - Workspace attachment, trust, and detach controls are now reachable from the selected topic's Settings workspaces section.
 - Shipped development workflows are now syntax-checked at the gate, and the assembly build-and-verify workflow is runnable.
 - Agents can now list the workflows available to their session before starting one.
@@ -56,7 +60,7 @@ All notable changes to Swage are documented in this file.
 - Providers can now count prompt tokens under their own tokenizer where the vendor offers it (Anthropic), with decorated provider stacks forwarding the operation and estimate-based callers unaffected.
 - Detached gateway starts now accept `--log-file`, report the chosen output destination, and explain foreground output handling in command help.
 - Agents can route scheduled-run output to channels, local storage, and webhooks when creating or updating schedules.
-- Schedules and workflows can deliver output to a page in their own topic.
+- Schedules and workflows can deliver output to a surface in their own topic.
 - `LocalStorage` remains the log target, retaining output in the local delivery record.
 - Schedules now record why they made no delivery when overlap policy skips them, gates suppress them, or a run fails before dispatch.
 - New conversations can choose a reasoning effort from the main composer, while each configured model can provide the inherited default.
@@ -102,9 +106,9 @@ All notable changes to Swage are documented in this file.
 - New-conversation agent pickers now show every available definition by name.
 - Live replies now remain with their conversation while the user changes conversations or opens Operator.
 - Workflow runs interrupted by a gateway restart now resume: startup recovery returns an orphaned worker thread from `processing` to `idle` so the recorded continuation can replay.
-- Deleting a page annotation now records its removed body and tags atomically, advances the page timestamp, and rejects a concurrent second delete as not found.
-- Open pages now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
-- Work-surface sockets now retain a page update emitted while their WebSocket handshake is completing.
+- Deleting a surface annotation now records its removed body and tags atomically, advances the surface timestamp, and rejects a concurrent second delete as not found.
+- Open surfaces now refetch after their work-surface connection recovers, so updates missed while disconnected appear without a manual reload.
+- Work-surface sockets now retain a surface update emitted while their WebSocket handshake is completing.
 - One-shot self-wakes now retry after their active turn instead of being consumed as an overlap skip.
 - Continued workflow workers now retain the skill selection made when they were created.
 - Workflow terminal-budget audit entries now settle to failed after bounded completion-write retries, rather than remaining started.
@@ -195,7 +199,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- The conversation composer now reflects newly saved provider and model settings without requiring a page reload.
+- The conversation composer now reflects newly saved provider and model settings without requiring a surface reload.
 - Fresh-session schedules can now use the calling conversation's topic without requiring its UUID.
 - Workflow runs now retain their reserved token allowance for final closing work, even when earlier agent calls are still running.
 - Failed workflow runs now retain a durable handover identifying the failed call and the events delivered or still pending.

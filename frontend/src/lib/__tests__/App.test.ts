@@ -97,13 +97,13 @@ vi.mock("../api/agent-definitions", () => ({
   listEffectiveAgentDefinitions: vi.fn(async () => []),
 }));
 
-vi.mock("../api/pages", () => ({
+vi.mock("../api/surfaces", () => ({
   setBaseUrl: vi.fn(),
-  listPages: vi.fn(async () => ({ pages: [] })),
-  listPageTemplates: vi.fn(async () => ({ templates: [] })),
-  getPage: vi.fn(),
-  createPage: vi.fn(),
-  writePageModule: vi.fn(),
+  listSurfaces: vi.fn(async () => ({ surfaces: [] })),
+  listSurfaceTemplates: vi.fn(async () => ({ templates: [] })),
+  getSurface: vi.fn(),
+  createSurface: vi.fn(),
+  writeSurfaceModule: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -153,16 +153,16 @@ describe("ambient channel control path", () => {
     wsClient.connect.mockClear();
     vi.mocked(getConversation).mockClear();
 
-    surfaceButton("Pages").click();
+    surfaceButton("Surfaces").click();
     await vi.waitFor(() => {
-      expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
+      expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
     });
 
     // The socket is the conversation's: the work surface must not cost it.
     expect(wsClient.disconnect).not.toHaveBeenCalled();
     expect(wsClient.connect).not.toHaveBeenCalled();
     expect(getConversation).not.toHaveBeenCalled();
-    expect(document.querySelector('main.pages-surface [aria-label="Conversation"]')?.textContent)
+    expect(document.querySelector('main.surfaces-surface [aria-label="Conversation"]')?.textContent)
       .toContain("History of conv-1");
   });
 
@@ -182,13 +182,13 @@ describe("ambient channel control path", () => {
 
   it("cycles sessions in place, leaving the user on the work surface", async () => {
     component = await mountAppOnConversation();
-    surfaceButton("Pages").click();
+    surfaceButton("Surfaces").click();
     await vi.waitFor(() => {
-      expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
+      expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
     });
 
     const selector = document.querySelector(
-      'main.pages-surface select[aria-label="Active conversation"]',
+      'main.surfaces-surface select[aria-label="Active conversation"]',
     ) as HTMLSelectElement;
     selector.value = "conv-2";
     selector.dispatchEvent(new Event("change", { bubbles: true }));
@@ -197,16 +197,16 @@ describe("ambient channel control path", () => {
       expect(document.body.textContent).toContain("History of conv-2");
     });
     // Picking up the other conversation did not move the user off their work.
-    expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector("main.pages-surface")).not.toBeNull();
+    expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector("main.surfaces-surface")).not.toBeNull();
     expect(wsClient.connect).toHaveBeenLastCalledWith("conv-2");
   });
 
   it("creates a conversation in place, leaving the user on the work surface", async () => {
     component = await mountAppOnConversation();
-    surfaceButton("Pages").click();
+    surfaceButton("Surfaces").click();
     await vi.waitFor(() => {
-      expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
+      expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
     });
 
     vi.mocked(createConversation).mockResolvedValueOnce({
@@ -218,7 +218,7 @@ describe("ambient channel control path", () => {
     });
 
     (document.querySelector(
-      'main.pages-surface button.new-session',
+      'main.surfaces-surface button.new-session',
     ) as HTMLButtonElement).click();
 
     await vi.waitFor(() => {
@@ -226,10 +226,10 @@ describe("ambient channel control path", () => {
     });
     expect(createConversation).toHaveBeenCalledWith(topic.id, undefined, undefined, undefined);
     expect((document.querySelector(
-      'main.pages-surface select[aria-label="Active conversation"]',
+      'main.surfaces-surface select[aria-label="Active conversation"]',
     ) as HTMLSelectElement).value).toBe("conv-new");
     expect(document.body.textContent).not.toContain("History of conv-1");
-    expect(surfaceButton("Pages").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("routes a workflow run URL into the run view and requests that run", async () => {

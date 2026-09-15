@@ -88,85 +88,85 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_pages", CREATE_PAGE_TABLES),
-        ("058_page_annotations", CREATE_PAGE_ANNOTATION_TABLE),
-        ("059_page_templates", CREATE_PAGE_TEMPLATE_TABLES),
+        ("058_surface_annotations", CREATE_PAGE_ANNOTATION_TABLE),
+        ("059_surface_templates", CREATE_PAGE_TEMPLATE_TABLES),
         ("060_workflow_run_holds", CREATE_WORKFLOW_RUN_HOLDS),
         ("061_worker_call_record", CREATE_WORKER_CALL_RECORD),
     ]
 }
 
-/// Annotations on a page's modules: the notes a user and an agent both hang
+/// Annotations on a surface's modules: the notes a user and an agent both hang
 /// on the same module, so neither has to describe a location to the other.
 /// Anchoring is at module grain and only there — `module_id` names the module
-/// the note hangs on, and every note has one. Nothing addresses the page as a
+/// the note hangs on, and every note has one. Nothing addresses the surface as a
 /// whole, and nothing addresses a position inside a module's content.
 const CREATE_PAGE_ANNOTATION_TABLE: &str = "
-CREATE TABLE IF NOT EXISTS page_annotations (
+CREATE TABLE IF NOT EXISTS surface_annotations (
     id          TEXT NOT NULL PRIMARY KEY,
-    page_id     TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
-    module_id   TEXT NOT NULL REFERENCES page_modules(id) ON DELETE CASCADE,
+    surface_id     TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+    module_id   TEXT NOT NULL REFERENCES surface_modules(id) ON DELETE CASCADE,
     body        TEXT NOT NULL,
     tags        TEXT NOT NULL,
     author      TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_page_annotations_page ON page_annotations(page_id);
-CREATE INDEX IF NOT EXISTS idx_page_annotations_module ON page_annotations(module_id);
+CREATE INDEX IF NOT EXISTS idx_surface_annotations_page ON surface_annotations(surface_id);
+CREATE INDEX IF NOT EXISTS idx_surface_annotations_module ON surface_annotations(module_id);
 ";
 
-/// Pages — agent-run tabs on a topic — and their module instances. The
-/// database is authoritative for page content; the alpha wipe-and-rebuild
-/// posture applies (pages are work product, regenerable by their authors,
+/// Surfaces — agent-run tabs on a topic — and their module instances. The
+/// database is authoritative for surface content; the alpha wipe-and-rebuild
+/// posture applies (surfaces are work product, regenerable by their authors,
 /// unlike knowledge-base evidence).
 const CREATE_PAGE_TABLES: &str = "
-CREATE TABLE IF NOT EXISTS pages (
+CREATE TABLE IF NOT EXISTS surfaces (
     id          TEXT NOT NULL PRIMARY KEY,
     topic_id    TEXT NOT NULL REFERENCES topics(id),
     title       TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_pages_topic ON pages(topic_id);
-CREATE TABLE IF NOT EXISTS page_modules (
+CREATE INDEX IF NOT EXISTS idx_pages_topic ON surfaces(topic_id);
+CREATE TABLE IF NOT EXISTS surface_modules (
     id          TEXT NOT NULL PRIMARY KEY,
-    page_id     TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    surface_id     TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
     kind        TEXT NOT NULL,
     position    INTEGER NOT NULL,
     source      TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_page_modules_page ON page_modules(page_id);
+CREATE INDEX IF NOT EXISTS idx_surface_modules_page ON surface_modules(surface_id);
 ";
 
-/// Page templates — the reusable module shapes a topic keeps, and the
-/// lineage a page carries from the template it was forked from. A template's
-/// modules seed the new page's own rows at creation; the fork is a real page
+/// Surface templates — the reusable module shapes a topic keeps, and the
+/// lineage a surface carries from the template it was forked from. A template's
+/// modules seed the new surface's own rows at creation; the fork is a real surface
 /// from birth, so lineage is a recorded origin and never a live projection
 /// (neither side's later edits reach the other). Templates are topic-local.
 const CREATE_PAGE_TEMPLATE_TABLES: &str = "
-CREATE TABLE IF NOT EXISTS page_templates (
+CREATE TABLE IF NOT EXISTS surface_templates (
     id          TEXT NOT NULL PRIMARY KEY,
     topic_id    TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_page_templates_topic ON page_templates(topic_id);
-CREATE TABLE IF NOT EXISTS page_template_modules (
+CREATE INDEX IF NOT EXISTS idx_surface_templates_topic ON surface_templates(topic_id);
+CREATE TABLE IF NOT EXISTS surface_template_modules (
     id          TEXT NOT NULL PRIMARY KEY,
-    template_id TEXT NOT NULL REFERENCES page_templates(id) ON DELETE CASCADE,
+    template_id TEXT NOT NULL REFERENCES surface_templates(id) ON DELETE CASCADE,
     kind        TEXT NOT NULL,
     position    INTEGER NOT NULL,
     source      TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_page_template_modules_template
-    ON page_template_modules(template_id);
-ALTER TABLE pages ADD COLUMN forked_from_template_id TEXT REFERENCES page_templates(id) ON DELETE SET NULL;
-ALTER TABLE pages ADD COLUMN forked_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_surface_template_modules_template
+    ON surface_template_modules(template_id);
+ALTER TABLE surfaces ADD COLUMN forked_from_template_id TEXT REFERENCES surface_templates(id) ON DELETE SET NULL;
+ALTER TABLE surfaces ADD COLUMN forked_at TEXT;
 ";
 
 const CREATE_WORKER_CALL_RECORD: &str = "

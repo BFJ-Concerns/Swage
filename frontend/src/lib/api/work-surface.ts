@@ -1,7 +1,7 @@
 // Work-surface signal channel — the live route for the shared work surfaces.
 //
 // Separate from the conversation socket by necessity: that socket needs a
-// conversation id and admits one connection per conversation, while a page
+// conversation id and admits one connection per conversation, while a surface
 // changes whenever anyone writes to it and the person watching it may have no
 // conversation selected at all. This channel takes no identity, is listen-only,
 // and carries signals rather than content — the surface answers a signal by
