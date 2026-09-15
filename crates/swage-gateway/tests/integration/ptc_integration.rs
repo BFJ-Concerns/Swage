@@ -29,7 +29,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 use swage_storage::model::NewWorkspaceAttachment;
-use swage_storage::store::{SpaceStore, WorkspaceAttachmentStore};
+use swage_storage::store::{TopicStore, WorkspaceAttachmentStore};
 
 use crate::support::start_live_server;
 
@@ -129,32 +129,32 @@ async fn start_ptc_test_server(
     let mut config = swage_config::ResolvedConfig::default();
     // These tests exercise Python tool chaining itself. Approval routing and
     // the workspace permission gate are covered separately, so keep
-    // python_execute ungated and grant the space full workspace permissions
+    // python_execute ungated and grant the topic full workspace permissions
     // in this harness.
     config.tools.permissions.require_approval = vec![];
 
-    let default_space = storage
+    let default_topic = storage
         .get_or_create_default()
         .await
-        .expect("default space should be seeded for PTC harness");
+        .expect("default topic should be seeded for PTC harness");
     let workspace_attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: default_space.id,
+            topic_id: default_topic.id,
             label: "ptc-test-workspace".to_string(),
             path: workspace.path().to_string_lossy().into_owned(),
             permissions: vec!["read".to_string(), "write".to_string()],
             is_trusted: true,
         })
         .await
-        .expect("trusted workspace attachment should attach to default space");
+        .expect("trusted workspace attachment should attach to default topic");
     storage
-        .set_space_default_workspace(default_space.id, Some(workspace_attachment.id))
+        .set_topic_default_workspace(default_topic.id, Some(workspace_attachment.id))
         .await
         .expect("PTC workspace should be the default active workspace");
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,

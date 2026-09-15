@@ -13,18 +13,18 @@ use crate::store::AgentDefinitionStore;
 // Row mapping
 // ---------------------------------------------------------------------------
 
-const DEFINITION_COLUMNS: &str = "id, space_id, display_name, description, instructions,
+const DEFINITION_COLUMNS: &str = "id, topic_id, display_name, description, instructions,
      model_id, tool_permissions_json, skills_json, output_schema_json,
      output_max_retries, created_at, updated_at";
 
 fn row_to_definition(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentDefinition> {
-    let space_id: Option<String> = row.get(1)?;
+    let topic_id: Option<String> = row.get(1)?;
     let tool_permissions: Option<String> = row.get(6)?;
     let skills: String = row.get(7)?;
     let output_schema: Option<String> = row.get(8)?;
     Ok(AgentDefinition {
         id: row.get(0)?,
-        space_id: space_id.map(|s| parse_uuid(&s)).transpose()?,
+        topic_id: topic_id.map(|s| parse_uuid(&s)).transpose()?,
         display_name: row.get(2)?,
         description: row.get(3)?,
         instructions: row.get(4)?,
@@ -115,8 +115,8 @@ impl AgentDefinitionStore for SqliteStorage {
             let existing: Option<String> = conn
                 .query_row(
                     "SELECT created_at FROM agent_definitions
-                     WHERE id = ?1 AND space_id IS ?2",
-                    params![definition.id, definition.space_id.map(|id| id.to_string())],
+                     WHERE id = ?1 AND topic_id IS ?2",
+                    params![definition.id, definition.topic_id.map(|id| id.to_string())],
                     |row| row.get(0),
                 )
                 .optional()?;
@@ -128,10 +128,10 @@ impl AgentDefinitionStore for SqliteStorage {
                          SET display_name = ?3, description = ?4, instructions = ?5,
                              model_id = ?6, tool_permissions_json = ?7, skills_json = ?8,
                              output_schema_json = ?9, output_max_retries = ?10, updated_at = ?11
-                         WHERE id = ?1 AND space_id IS ?2",
+                         WHERE id = ?1 AND topic_id IS ?2",
                         params![
                             definition.id,
-                            definition.space_id.map(|id| id.to_string()),
+                            definition.topic_id.map(|id| id.to_string()),
                             definition.display_name,
                             definition.description,
                             definition.instructions,
@@ -148,13 +148,13 @@ impl AgentDefinitionStore for SqliteStorage {
                 None => {
                     conn.execute(
                         "INSERT INTO agent_definitions (
-                             id, space_id, display_name, description, instructions,
+                             id, topic_id, display_name, description, instructions,
                              model_id, tool_permissions_json, skills_json, output_schema_json,
                              output_max_retries, created_at, updated_at
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
                         params![
                             definition.id,
-                            definition.space_id.map(|id| id.to_string()),
+                            definition.topic_id.map(|id| id.to_string()),
                             definition.display_name,
                             definition.description,
                             definition.instructions,
@@ -172,9 +172,9 @@ impl AgentDefinitionStore for SqliteStorage {
             conn.query_row(
                 &format!(
                     "SELECT {DEFINITION_COLUMNS} FROM agent_definitions
-                     WHERE id = ?1 AND space_id IS ?2"
+                     WHERE id = ?1 AND topic_id IS ?2"
                 ),
-                params![definition.id, definition.space_id.map(|id| id.to_string())],
+                params![definition.id, definition.topic_id.map(|id| id.to_string())],
                 row_to_definition,
             )
         })
@@ -184,20 +184,20 @@ impl AgentDefinitionStore for SqliteStorage {
     async fn resolve_agent_definition(
         &self,
         agent_id: &str,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Option<AgentDefinition>, StorageError> {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
-            // Space-scoped shadows global: order puts the space row first and
+            // Topic-scoped shadows global: order puts the topic row first and
             // takes one.
             conn.query_row(
                 &format!(
                     "SELECT {DEFINITION_COLUMNS} FROM agent_definitions
-                     WHERE id = ?1 AND (space_id = ?2 OR space_id IS NULL)
-                     ORDER BY space_id IS NULL
+                     WHERE id = ?1 AND (topic_id = ?2 OR topic_id IS NULL)
+                     ORDER BY topic_id IS NULL
                      LIMIT 1"
                 ),
-                params![agent_id, space_id.to_string()],
+                params![agent_id, topic_id.to_string()],
                 row_to_definition,
             )
             .optional()
@@ -207,15 +207,15 @@ impl AgentDefinitionStore for SqliteStorage {
 
     async fn list_agent_definitions(
         &self,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
     ) -> Result<Vec<AgentDefinition>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {DEFINITION_COLUMNS} FROM agent_definitions
-                 WHERE space_id IS ?1 ORDER BY id"
+                 WHERE topic_id IS ?1 ORDER BY id"
             ))?;
             let rows = stmt.query_map(
-                params![space_id.map(|id| id.to_string())],
+                params![topic_id.map(|id| id.to_string())],
                 row_to_definition,
             )?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -226,13 +226,13 @@ impl AgentDefinitionStore for SqliteStorage {
     async fn delete_agent_definition(
         &self,
         agent_id: &str,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
     ) -> Result<bool, StorageError> {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let affected = conn.execute(
-                "DELETE FROM agent_definitions WHERE id = ?1 AND space_id IS ?2",
-                params![agent_id, space_id.map(|id| id.to_string())],
+                "DELETE FROM agent_definitions WHERE id = ?1 AND topic_id IS ?2",
+                params![agent_id, topic_id.map(|id| id.to_string())],
             )?;
             Ok(affected > 0)
         })
@@ -243,13 +243,13 @@ impl AgentDefinitionStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::NewSpace;
-    use crate::store::SpaceStore;
+    use crate::model::NewTopic;
+    use crate::store::TopicStore;
 
-    fn definition(id: &str, space_id: Option<Uuid>, instructions: &str) -> NewAgentDefinition {
+    fn definition(id: &str, topic_id: Option<Uuid>, instructions: &str) -> NewAgentDefinition {
         NewAgentDefinition {
             id: id.into(),
-            space_id,
+            topic_id,
             display_name: id.into(),
             description: String::new(),
             instructions: instructions.into(),
@@ -286,10 +286,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn space_scoped_definition_shadows_global() {
+    async fn topic_scoped_definition_shadows_global() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "research".into(),
                 slug: "research".into(),
             })
@@ -301,20 +301,20 @@ mod tests {
             .await
             .unwrap();
         storage
-            .upsert_agent_definition(definition("assistant", Some(space.id), "space character"))
+            .upsert_agent_definition(definition("assistant", Some(topic.id), "topic character"))
             .await
             .unwrap();
 
         let resolved = storage
-            .resolve_agent_definition("assistant", space.id)
+            .resolve_agent_definition("assistant", topic.id)
             .await
             .unwrap()
             .expect("should resolve");
-        assert_eq!(resolved.instructions, "space character");
+        assert_eq!(resolved.instructions, "topic character");
 
-        // A different space falls through to the global definition.
+        // A different topic falls through to the global definition.
         let other = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "other".into(),
                 slug: "other".into(),
             })
@@ -331,10 +331,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unknown_agent_resolves_to_none() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
 
         let resolved = storage
-            .resolve_agent_definition("nobody", space.id)
+            .resolve_agent_definition("nobody", topic.id)
             .await
             .unwrap();
         assert!(resolved.is_none());
@@ -375,25 +375,25 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_removes_only_the_addressed_definition() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
 
         storage
             .upsert_agent_definition(definition("assistant", None, "global"))
             .await
             .unwrap();
         storage
-            .upsert_agent_definition(definition("assistant", Some(space.id), "scoped"))
+            .upsert_agent_definition(definition("assistant", Some(topic.id), "scoped"))
             .await
             .unwrap();
 
         let deleted = storage
-            .delete_agent_definition("assistant", Some(space.id))
+            .delete_agent_definition("assistant", Some(topic.id))
             .await
             .unwrap();
         assert!(deleted);
 
         let resolved = storage
-            .resolve_agent_definition("assistant", space.id)
+            .resolve_agent_definition("assistant", topic.id)
             .await
             .unwrap()
             .expect("global survives");

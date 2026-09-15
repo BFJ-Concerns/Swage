@@ -1,7 +1,7 @@
 //! Orientation element — the baseline every session starts from.
 //!
 //! Built-in content that survives an empty configuration: platform identity
-//! (an agent running on Swage), place (space, working directory, session
+//! (an agent running on Swage), place (topic, working directory, session
 //! time, channel), and capability (the skills available to activate).
 //! Operator instructions layer after it by priority and extend the baseline
 //! rather than replacing it.
@@ -21,10 +21,10 @@ use crate::tokeniser::Tokeniser;
 /// operator configuration.
 #[derive(Debug, Clone)]
 pub struct SessionEnvironment {
-    /// Space name; empty reads as the default space of a fresh install.
-    pub space_name: String,
-    /// Space description, when the operator has written one.
-    pub space_description: String,
+    /// Topic name; empty reads as the default topic of a fresh install.
+    pub topic_name: String,
+    /// Topic description, when the operator has written one.
+    pub topic_description: String,
     /// The directory tool paths resolve against, when a workspace is mounted.
     pub working_directory: Option<String>,
     /// Session start time. Rendered to the minute — stable across the
@@ -59,8 +59,8 @@ pub struct AvailableSkill {
 
 const IDENTITY: &str = "\
 You are an agent running on Swage, a context-governed agent platform on your \
-operator's own hardware. You work inside a space — a container holding this \
-conversation, the space's memory, and any attached workspaces.
+operator's own hardware. You work inside a topic — a container holding this \
+conversation, the topic's memory, and any attached workspaces.
 
 Everything you do here is recorded locally on the operator's machine and is \
 reconstructable afterwards: your turns, your tool calls and their results, \
@@ -76,9 +76,9 @@ retrying, and continue with the approved result or work around a \
 rejection. File paths in tool calls resolve against your working \
 directory unless a tool says otherwise.
 
-Where tools overlap, prefer the specific one. The space's memory is yours \
+Where tools overlap, prefer the specific one. The topic's memory is yours \
 to use — reach for `agent_memory` to remember and recall what you learn \
-across sessions, and `memory` only to work with the space's memory files \
+across sessions, and `memory` only to work with the topic's memory files \
 directly. Use `web_search` to find pages and `url_fetch` to read a URL \
 you already have. Use `workflow_run` for a saved, journalled multi-step \
 job and `delegate` for a one-off child task. Prefer your native \
@@ -108,12 +108,12 @@ impl OrientationElement {
         let mut blocks = vec![IDENTITY.to_string()];
 
         let mut place = String::from("## Where you are\n");
-        if self.environment.space_name.is_empty() {
-            place.push_str("Space: the default space\n");
+        if self.environment.topic_name.is_empty() {
+            place.push_str("Topic: the default topic\n");
         } else {
-            place.push_str(&format!("Space: {}", self.environment.space_name));
-            if !self.environment.space_description.is_empty() {
-                place.push_str(&format!(" — {}", self.environment.space_description));
+            place.push_str(&format!("Topic: {}", self.environment.topic_name));
+            if !self.environment.topic_description.is_empty() {
+                place.push_str(&format!(" — {}", self.environment.topic_description));
             }
             place.push('\n');
         }
@@ -191,8 +191,8 @@ mod tests {
 
     fn bare_environment() -> SessionEnvironment {
         SessionEnvironment {
-            space_name: String::new(),
-            space_description: String::new(),
+            topic_name: String::new(),
+            topic_description: String::new(),
             working_directory: None,
             started_at: DateTime::parse_from_rfc3339("2026-08-09T18:30:00Z")
                 .unwrap()
@@ -213,7 +213,7 @@ mod tests {
 
         let text = content[0].text_content();
         assert!(text.contains("agent running on Swage"));
-        assert!(text.contains("the default space"));
+        assert!(text.contains("the default topic"));
         assert!(text.contains("2026-08-09 18:30 UTC"));
     }
 
@@ -297,15 +297,15 @@ mod tests {
     }
 
     #[test]
-    fn space_and_workspace_render_when_present() {
+    fn topic_and_workspace_render_when_present() {
         let mut environment = bare_environment();
-        environment.space_name = "research".into();
-        environment.space_description = "material science digging".into();
+        environment.topic_name = "research".into();
+        environment.topic_description = "material science digging".into();
         environment.working_directory = Some("/data/projects/alloys".into());
 
         let element = OrientationElement::new(environment, vec![]);
         let text = element.content()[0].text_content();
-        assert!(text.contains("Space: research — material science digging"));
+        assert!(text.contains("Topic: research — material science digging"));
         assert!(text.contains("Working directory: /data/projects/alloys"));
     }
 

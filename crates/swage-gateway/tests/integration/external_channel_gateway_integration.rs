@@ -22,7 +22,7 @@ use swage_provider::LlmProvider;
 use swage_storage::{
     NewChannelInboundMessage, NewChannelLink, SqliteStorage,
     store::{
-        ChannelLinkStore, ChannelQueueStore, DeliveryStore, SessionStore, SpaceStore, ThreadStore,
+        ChannelLinkStore, ChannelQueueStore, DeliveryStore, SessionStore, ThreadStore, TopicStore,
     },
 };
 
@@ -77,7 +77,7 @@ async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -93,16 +93,16 @@ async fn queued_channel_drain_carries_the_created_turn_id_into_the_delivery_reco
     let directory = tempfile::tempdir().expect("queue database directory");
     let database_path = directory.path().join("queue.db");
     let storage = Arc::new(SqliteStorage::open(&database_path).expect("queue storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     storage
         .upsert_channel_link(NewChannelLink {
             integration: "dev_dm".into(),
             account: "queue-account".into(),
             conversation: "queue-user".into(),
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".into(),
             session_id: None,
             home_target: None,
@@ -128,7 +128,7 @@ async fn queued_channel_drain_carries_the_created_turn_id_into_the_delivery_reco
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![vec![
             StreamChunk::Delta {
                 content: "queued reply".into(),
@@ -202,7 +202,7 @@ async fn start_file_backed_test_server(
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

@@ -93,7 +93,7 @@ describe("ScheduleAutomationPanel", () => {
   it("lists schedules with their status and run history", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "space-1", sessionId: "session-1" },
+      props: { topicId: "topic-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -116,7 +116,7 @@ describe("ScheduleAutomationPanel", () => {
     });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "space-1", sessionId: "session-1" },
+      props: { topicId: "topic-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -124,13 +124,13 @@ describe("ScheduleAutomationPanel", () => {
     expect(document.body.textContent).toContain("by agent researcher");
   });
 
-  it("shows the complete fresh-session target from another selected space", async () => {
+  it("shows the complete fresh-session target from another selected topic", async () => {
     // Agent `gateway` creates a schedule that runs as a different agent.
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({
       schedules: [
         {
           ...SCHEDULE,
-          session: { policy: "fresh", space_id: "target-space", agent_id: "researcher" },
+          session: { policy: "fresh", topic_id: "target-topic", agent_id: "researcher" },
           creator: { kind: "agent", agent_id: "gateway" },
         },
       ],
@@ -138,11 +138,11 @@ describe("ScheduleAutomationPanel", () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
       props: {
-        spaceId: "viewing-space",
+        topicId: "viewing-topic",
         sessionId: "viewing-session",
-        spaces: [
+        topics: [
           {
-            id: "target-space",
+            id: "target-topic",
             name: "Research",
             slug: "research",
             description: "",
@@ -155,27 +155,27 @@ describe("ScheduleAutomationPanel", () => {
     await flushUi();
 
     // The execution target and creator are both explicit, even though this
-    // operator-level schedule is being viewed from a different space.
-    expect(document.body.textContent).toContain("space Research · agent researcher");
+    // operator-level schedule is being viewed from a different topic.
+    expect(document.body.textContent).toContain("topic Research · agent researcher");
     expect(document.body.textContent).toContain("by agent gateway");
   });
 
-  it("falls back to a fresh-session target's space ID when its name is unavailable", async () => {
+  it("falls back to a fresh-session target's topic ID when its name is unavailable", async () => {
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({
       schedules: [
         {
           ...SCHEDULE,
-          session: { policy: "fresh", space_id: "unknown-space", agent_id: "gateway" },
+          session: { policy: "fresh", topic_id: "unknown-topic", agent_id: "gateway" },
         },
       ],
     });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "viewing-space", sessionId: "viewing-session", spaces: [] },
+      props: { topicId: "viewing-topic", sessionId: "viewing-session", topics: [] },
     });
     await flushUi();
 
-    expect(document.body.textContent).toContain("space unknown-space · agent gateway");
+    expect(document.body.textContent).toContain("topic unknown-topic · agent gateway");
   });
 
   it("shows the specific continuation-session target", async () => {
@@ -189,7 +189,7 @@ describe("ScheduleAutomationPanel", () => {
     });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "viewing-space", sessionId: "viewing-session" },
+      props: { topicId: "viewing-topic", sessionId: "viewing-session" },
     });
     await flushUi();
 
@@ -200,7 +200,7 @@ describe("ScheduleAutomationPanel", () => {
     vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [EMPTY_RUN] });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "space-1", sessionId: "session-1" },
+      props: { topicId: "topic-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -211,7 +211,7 @@ describe("ScheduleAutomationPanel", () => {
   it("runs a schedule now through the trigger endpoint", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "space-1", sessionId: "session-1" },
+      props: { topicId: "topic-1", sessionId: "session-1" },
     });
     await flushUi();
 
@@ -225,7 +225,7 @@ describe("ScheduleAutomationPanel", () => {
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
-      props: { spaceId: "space-1", sessionId: "session-1" },
+      props: { topicId: "topic-1", sessionId: "session-1" },
     });
     await flushUi();
 

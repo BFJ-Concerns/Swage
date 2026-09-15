@@ -148,7 +148,7 @@ impl Tool for WebSearchTool {
             .as_ref()
             .ok_or_else(|| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
-                message: "Web search is not configured. Set [tools.search] in your space config."
+                message: "Web search is not configured. Set [tools.search] in your topic config."
                     .to_owned(),
             })?;
 

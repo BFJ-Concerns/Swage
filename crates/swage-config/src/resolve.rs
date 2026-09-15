@@ -9,22 +9,22 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Construct the active Global → Space → optional-Agent configuration hierarchy.
+/// Construct the active Global → Topic → optional-Agent configuration hierarchy.
 ///
 /// The reserved workflow identity is dispatch-only, so it intentionally stops
-/// at the space level and never addresses an authored agent directory.
+/// at the topic level and never addresses an authored agent directory.
 pub fn configuration_hierarchy(
     root: &Path,
-    space: &str,
+    topic: &str,
     agent: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
-    let space_path = root.join("spaces").join(space);
+    let topic_path = root.join("topics").join(topic);
     let mut hierarchy = vec![
         (HierarchyLevel::Global, root.to_path_buf()),
-        (HierarchyLevel::Space, space_path.clone()),
+        (HierarchyLevel::Topic, topic_path.clone()),
     ];
     if let Some(agent) = agent.filter(|agent| *agent != RESERVED_WORKFLOW_AGENT_ID) {
-        hierarchy.push((HierarchyLevel::Agent, space_path.join("agents").join(agent)));
+        hierarchy.push((HierarchyLevel::Agent, topic_path.join("agents").join(agent)));
     }
     hierarchy
 }
@@ -68,28 +68,28 @@ fn try_load_file(path: &Path, problems: &mut Vec<ConfigProblem>) -> Option<Parti
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Fully resolve configuration for a given space and agent.
+/// Fully resolve configuration for a given topic and agent.
 ///
 /// Resolves the Swage root via `$SWAGE_HOME` / `~/.swage/`, then delegates
 /// to [`load_resolved_config_from`].
-pub fn load_resolved_config(space: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
+pub fn load_resolved_config(topic: &str, agent: &str) -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_resolved_config_from(&root, space, agent)
+    load_resolved_config_from(&root, topic, agent)
 }
 
 /// Fully resolve configuration given an explicit root directory.
 pub fn load_resolved_config_from(
     root: &Path,
-    space: &str,
+    topic: &str,
     agent: &str,
 ) -> Result<ResolvedConfig, ConfigError> {
-    // Build the Global → Space → Agent hierarchy.
+    // Build the Global → Topic → Agent hierarchy.
     // Build paths for each hierarchy level.
-    let hierarchy = configuration_hierarchy(root, space, Some(agent));
+    let hierarchy = configuration_hierarchy(root, topic, Some(agent));
 
     let mut all_problems: Vec<ConfigProblem> = Vec::new();
 
-    // Active merge levels: Global → Space → Agent.
+    // Active merge levels: Global → Topic → Agent.
     let mut config_chain: Vec<PartialConfig> = Vec::new();
     for (_, directory) in &hierarchy {
         let path = directory.join("config.toml");
@@ -223,19 +223,19 @@ mod tests {
     fn build_fixture(
         root: &Path,
         global_toml: Option<&str>,
-        space: &str,
-        space_toml: Option<&str>,
+        topic: &str,
+        topic_toml: Option<&str>,
         agent: &str,
         agent_toml: Option<&str>,
     ) {
         if let Some(content) = global_toml {
             fs::write(root.join("config.toml"), content).unwrap();
         }
-        let space_dir = root.join("spaces").join(space);
-        let agent_dir = space_dir.join("agents").join(agent);
+        let topic_dir = root.join("topics").join(topic);
+        let agent_dir = topic_dir.join("agents").join(agent);
         fs::create_dir_all(&agent_dir).unwrap();
-        if let Some(content) = space_toml {
-            fs::write(space_dir.join("config.toml"), content).unwrap();
+        if let Some(content) = topic_toml {
+            fs::write(topic_dir.join("config.toml"), content).unwrap();
         }
         if let Some(content) = agent_toml {
             fs::write(agent_dir.join("config.toml"), content).unwrap();
@@ -260,7 +260,7 @@ mod tests {
         assert_eq!(
             cfg.default_model_id(),
             "claude-opus",
-            "space model should apply"
+            "topic model should apply"
         );
     }
 
@@ -270,13 +270,13 @@ mod tests {
         build_fixture(
             tmp.path(),
             Some("[server]\nport = 5000\n"),
-            "bare-space",
+            "bare-topic",
             None,
             "default",
             None,
         );
 
-        let cfg = load_resolved_config_from(tmp.path(), "bare-space", "default")
+        let cfg = load_resolved_config_from(tmp.path(), "bare-topic", "default")
             .expect("should succeed even with missing intermediate configs");
         assert_eq!(cfg.server.port, 5000);
     }
@@ -288,14 +288,14 @@ mod tests {
         build_fixture(
             tmp.path(),
             Some("[server]\nport = 5042\n"),
-            "env-space",
+            "env-topic",
             Some("[models]\ndefault_model_id = \"env-model\"\n"),
             "env-agent",
             Some("[server]\nhost = \"127.0.0.42\"\n"),
         );
         let _env_guard = EnvVarGuard::set("SWAGE_HOME", tmp.path());
 
-        let cfg = load_resolved_config("env-space", "env-agent")
+        let cfg = load_resolved_config("env-topic", "env-agent")
             .expect("env-derived root should resolve config");
 
         assert_eq!(cfg.server.host, "127.0.0.42");

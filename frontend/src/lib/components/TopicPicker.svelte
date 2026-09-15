@@ -1,41 +1,41 @@
 <!--
-  Two-stage space picker:
-    1. Card grid of space names. Single click on a space name selects it and reveals
+  Two-stage topic picker:
+    1. Card grid of topic names. Single click on a topic name selects it and reveals
        a details panel below the grid (about, last opened, conversation count,
        attached folders — though the data is still thin server-side).
-    2. A deliberate second action — the space card's "Open" button —
-       enters the space, which is what calls spaceStore.selectSpace().
+    2. A deliberate second action — the topic card's "Open" button —
+       enters the topic, which is what calls topicStore.selectTopic().
 
-  This component renders as the body content when no space is selected. The
+  This component renders as the body content when no topic is selected. The
   parent (AppLayout) collapses the top bar in that mode.
 
-  Per the same doc, space cards show only the name — storage paths, attached
+  Per the same doc, topic cards show only the name — storage paths, attached
   folders, etc. are noise on the picker. Those reveal in the details panel.
 
 -->
 <script lang="ts">
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
-    attachSpaceWorkspace,
-    detachSpaceWorkspace,
-    listSpaceSessions,
-    listSpaceWorkspaces,
-    updateSpace,
-  } from "../api/spaces";
-  import type { SpaceStore } from "../stores/spaces";
-  import type { Space, ConversationSummary, WorkspaceAttachment } from "../types";
+    attachTopicWorkspace,
+    detachTopicWorkspace,
+    listTopicSessions,
+    listTopicWorkspaces,
+    updateTopic,
+  } from "../api/topics";
+  import type { TopicStore } from "../stores/topics";
+  import type { Topic, ConversationSummary, WorkspaceAttachment } from "../types";
 
   interface Props {
-    spaceStore?: SpaceStore;
-    onSpaceChange?: () => void;
-    onOpenSpaceSettings?: (space: Space) => void;
+    topicStore?: TopicStore;
+    onTopicChange?: () => void;
+    onOpenTopicSettings?: (topic: Topic) => void;
   }
 
-  let { spaceStore, onSpaceChange, onOpenSpaceSettings }: Props = $props();
+  let { topicStore, onTopicChange, onOpenTopicSettings }: Props = $props();
 
-  // The picker tracks its own selection separately from spaceStore.currentSpace
+  // The picker tracks its own selection separately from topicStore.currentTopic
   // — picking a card is a preview, not a switch. Switching only happens when
-  // the user explicitly opens the space.
+  // the user explicitly opens the topic.
   let selectedId = $state<string | null>(null);
 
   // Inline create form state.
@@ -44,7 +44,7 @@
   let createError = $state<string | null>(null);
   let isCreating = $state(false);
   let selectedWorkspaces = $state<WorkspaceAttachment[]>([]);
-  // Attaching decides whether the new folder becomes the space's working
+  // Attaching decides whether the new folder becomes the topic's working
   // folder from this list, so the form waits for a real load rather than
   // reading an empty placeholder as "no attachments yet".
   let selectedWorkspacesLoaded = $state(false);
@@ -62,22 +62,22 @@
   let relinkDrafts = $state<Record<string, string>>({});
   let relinkingWorkspaceId = $state<string | null>(null);
 
-  const spaces = $derived(spaceStore?.spaces ?? []);
+  const topics = $derived(topicStore?.topics ?? []);
   const selected = $derived(
-    selectedId ? spaces.find((b) => b.id === selectedId) ?? null : null,
+    selectedId ? topics.find((b) => b.id === selectedId) ?? null : null,
   );
   const selectedLastOpened = $derived(selected?.last_opened_at ?? null);
 
-  function selectCard(space: Space): void {
-    selectedId = space.id;
-    aboutDraft = space.description ?? "";
+  function selectCard(topic: Topic): void {
+    selectedId = topic.id;
+    aboutDraft = topic.description ?? "";
     aboutNotice = null;
     workspaceNotice = null;
   }
 
   $effect(() => {
-    const spaceId = selected?.id;
-    if (!spaceId) {
+    const topicId = selected?.id;
+    if (!topicId) {
       selectedWorkspaces = [];
       selectedWorkspacesLoaded = false;
       selectedConversations = [];
@@ -92,18 +92,18 @@
       return;
     }
     aboutDraft = selected.description ?? "";
-    void loadSpaceDetail(spaceId);
+    void loadTopicDetail(topicId);
   });
 
-  async function loadSpaceDetail(spaceId: string): Promise<void> {
+  async function loadTopicDetail(topicId: string): Promise<void> {
     detailError = null;
     selectedWorkspacesLoaded = false;
     try {
       const [workspaces, conversations] = await Promise.all([
-        listSpaceWorkspaces(spaceId),
-        listSpaceSessions(spaceId),
+        listTopicWorkspaces(topicId),
+        listTopicSessions(topicId),
       ]);
-      if (selected?.id !== spaceId) return;
+      if (selected?.id !== topicId) return;
       selectedWorkspaces = workspaces;
       selectedWorkspacesLoaded = true;
       selectedConversations = conversations;
@@ -113,47 +113,47 @@
     } catch (error) {
       selectedWorkspaces = [];
       selectedConversations = [];
-      detailError = error instanceof Error ? error.message : "Failed to load space detail.";
+      detailError = error instanceof Error ? error.message : "Failed to load topic detail.";
     }
   }
 
-  async function openSpace(id: string): Promise<void> {
-    if (!spaceStore) return;
-    await spaceStore.selectSpace(id);
-    onSpaceChange?.();
+  async function openTopic(id: string): Promise<void> {
+    if (!topicStore) return;
+    await topicStore.selectTopic(id);
+    onTopicChange?.();
   }
 
   async function submitCreate(event: Event): Promise<void> {
     event.preventDefault();
-    if (!spaceStore || !newName.trim()) return;
+    if (!topicStore || !newName.trim()) return;
 
     isCreating = true;
     createError = null;
     try {
-      await spaceStore.createSpace(newName.trim());
+      await topicStore.createTopic(newName.trim());
       showCreateForm = false;
       newName = "";
-      onSpaceChange?.();
+      onTopicChange?.();
     } catch (err) {
-      createError = err instanceof Error ? err.message : "Failed to create space";
+      createError = err instanceof Error ? err.message : "Failed to create topic";
     } finally {
       isCreating = false;
     }
   }
 
-  async function saveSpaceAbout(): Promise<void> {
-    if (!selected || !spaceStore) return;
+  async function saveTopicAbout(): Promise<void> {
+    if (!selected || !topicStore) return;
     isSavingAbout = true;
     detailError = null;
     aboutNotice = null;
     try {
-      const updated = await updateSpace(selected.id, { description: aboutDraft.trim() });
-      await spaceStore.loadSpaces();
+      const updated = await updateTopic(selected.id, { description: aboutDraft.trim() });
+      await topicStore.loadTopics();
       selectedId = updated.id;
       aboutDraft = updated.description;
       aboutNotice = "Saved.";
     } catch (error) {
-      detailError = error instanceof Error ? error.message : "Failed to save space about text.";
+      detailError = error instanceof Error ? error.message : "Failed to save topic about text.";
     } finally {
       isSavingAbout = false;
     }
@@ -177,7 +177,7 @@
     detailError = null;
     workspaceNotice = null;
     try {
-      await attachSpaceWorkspace(selected.id, {
+      await attachTopicWorkspace(selected.id, {
         path: workspacePathDraft.trim(),
         label: workspaceLabelDraft.trim() || undefined,
         permissions: workspacePermissions(),
@@ -188,7 +188,7 @@
       workspaceLabelDraft = "";
       workspaceCanWrite = true;
       workspaceIsTrusted = false;
-      await loadSpaceDetail(selected.id);
+      await loadTopicDetail(selected.id);
       workspaceNotice = "Workspace attached.";
     } catch (error) {
       detailError = error instanceof Error ? error.message : "Failed to attach workspace.";
@@ -210,8 +210,8 @@
     detailError = null;
     workspaceNotice = null;
     try {
-      await detachSpaceWorkspace(selected.id, workspace.id);
-      await attachSpaceWorkspace(selected.id, {
+      await detachTopicWorkspace(selected.id, workspace.id);
+      await attachTopicWorkspace(selected.id, {
         path: replacementPath,
         label: workspace.label,
         permissions: workspace.permissions,
@@ -219,7 +219,7 @@
         set_as_default: workspace.is_default,
       });
       setRelinkDraft(workspace.id, "");
-      await loadSpaceDetail(selected.id);
+      await loadTopicDetail(selected.id);
       workspaceNotice = "Workspace relinked.";
     } catch (error) {
       detailError = error instanceof Error ? error.message : "Failed to relink workspace.";
@@ -231,55 +231,55 @@
 
 <div class="picker">
   <header class="picker-head">
-    <p class="eyebrow">Pick a space</p>
+    <p class="eyebrow">Pick a topic</p>
     <h1 class="display">Choose where to work.</h1>
     <p class="lede">
-      Each space keeps its conversations together, along with its attached workspace folders.
+      Each topic keeps its conversations together, along with its attached workspace folders.
       Click a card to preview, then open it.
     </p>
   </header>
 
-  <div class="space-grid">
-    {#each spaces as space (space.id)}
-      {@const isSelected = selectedId === space.id}
+  <div class="topic-grid">
+    {#each topics as topic (topic.id)}
+      {@const isSelected = selectedId === topic.id}
       <!--
         Card is a non-interactive container; every interactive target inside is
         a real sibling <button>. The previous markup nested <span role="button">
         for Open and Settings inside a card <button>, which is invalid HTML and
         produces unpredictable accessibility-tree behaviour (UI audit f-2).
-        Preview (select) is the space-name button; Open and Settings are its
+        Preview (select) is the topic-name button; Open and Settings are its
         siblings. Double-click as a skip-preview shortcut is gone — it doesn't
         translate to touch and was only discoverable after first selecting a
         card (UI audit f-11). Open is always visible, so preview is optional.
       -->
-      <article class="space-card" class:selected={isSelected} aria-label={`Space ${space.name}`}>
+      <article class="topic-card" class:selected={isSelected} aria-label={`Topic ${topic.name}`}>
         <div class="card-top">
           <button
             type="button"
-            class="space-name-btn"
-            onclick={() => selectCard(space)}
+            class="topic-name-btn"
+            onclick={() => selectCard(topic)}
             aria-pressed={isSelected}
-            aria-label={isSelected ? `Previewing space ${space.name}` : `Preview space ${space.name}`}
+            aria-label={isSelected ? `Previewing topic ${topic.name}` : `Preview topic ${topic.name}`}
           >
-            <h2 class="space-name">{space.name}</h2>
+            <h2 class="topic-name">{topic.name}</h2>
           </button>
-          {#if onOpenSpaceSettings}
+          {#if onOpenTopicSettings}
             <button
               type="button"
-              class="space-settings"
-              aria-label={`Space settings for ${space.name}`}
-              title="Space settings"
-              onclick={() => onOpenSpaceSettings?.(space)}
+              class="topic-settings"
+              aria-label={`Topic settings for ${topic.name}`}
+              title="Topic settings"
+              onclick={() => onOpenTopicSettings?.(topic)}
             >
               ⚙
             </button>
           {/if}
         </div>
-        {#if space.is_default}
+        {#if topic.is_default}
           <span class="default-mark">Default</span>
         {/if}
         <div class="card-actions">
-          <button type="button" class="open-btn" onclick={() => openSpace(space.id)}>
+          <button type="button" class="open-btn" onclick={() => openTopic(topic.id)}>
             Open
           </button>
           <span class="hint">Enter to open</span>
@@ -287,12 +287,12 @@
       </article>
     {/each}
 
-    <!-- New space: dashed-border card that flips into an inline form. -->
+    <!-- New topic: dashed-border card that flips into an inline form. -->
     {#if showCreateForm}
-      <form class="space-card new-form" onsubmit={submitCreate}>
-        <label class="eyebrow" for="new-space-name">New space name</label>
+      <form class="topic-card new-form" onsubmit={submitCreate}>
+        <label class="eyebrow" for="new-topic-name">New topic name</label>
         <input
-          id="new-space-name"
+          id="new-topic-name"
           type="text"
           bind:value={newName}
           placeholder="e.g. research"
@@ -322,21 +322,21 @@
     {:else}
       <button
         type="button"
-        class="space-card new-card"
+        class="topic-card new-card"
         onclick={() => {
           showCreateForm = true;
         }}
       >
         <span class="plus">＋</span>
-        <span class="new-label">New space</span>
+        <span class="new-label">New topic</span>
       </button>
     {/if}
   </div>
 
   {#if selected}
-    <aside class="space-detail" aria-label="Space detail">
+    <aside class="topic-detail" aria-label="Topic detail">
       <header class="detail-head">
-        <p class="eyebrow">Space detail</p>
+        <p class="eyebrow">Topic detail</p>
         <h2 class="detail-name">{selected.name}</h2>
       </header>
       <dl class="detail-grid">
@@ -352,14 +352,14 @@
             class="about-input"
             bind:value={aboutDraft}
             rows="3"
-            aria-label="Space about text"
-            placeholder="What is this space for?"
+            aria-label="Topic about text"
+            placeholder="What is this topic for?"
           ></textarea>
           <div class="about-actions">
             <button
               type="button"
               class="save-about"
-              onclick={saveSpaceAbout}
+              onclick={saveTopicAbout}
               disabled={isSavingAbout || aboutDraft.trim() === (selected.description ?? "")}
             >
               {isSavingAbout ? "Saving..." : "Save about"}
@@ -465,7 +465,7 @@
 
 <style>
   /*
-    Riso space picker. Card grid, two-stage selection, dashed-border "new" card.
+    Riso topic picker. Card grid, two-stage selection, dashed-border "new" card.
     Inherits palette from <body> so it switches with the theme toggle.
   */
 
@@ -518,7 +518,7 @@
     max-width: 50ch;
   }
 
-  .space-grid {
+  .topic-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
     gap: 14px;
@@ -527,7 +527,7 @@
   /* Cards — flat ink frame. The offset orange shadow is reserved for the
      single active selection only, not hover, so it keeps meaning "selected"
      (UI audit f-18). Hovered cards signal state through border/fill alone. */
-  .space-card {
+  .topic-card {
     position: relative;
     background: var(--paper);
     color: var(--ink);
@@ -541,7 +541,7 @@
     isolation: isolate;
   }
 
-  .space-card::after {
+  .topic-card::after {
     content: "";
     position: absolute;
     inset: 0;
@@ -556,11 +556,11 @@
 
   /* Shadow on selected only — the single active selection. Hover no longer
      paints the offset so it stops competing for emphasis (UI audit f-18). */
-  .space-card.selected::after {
+  .topic-card.selected::after {
     opacity: var(--shadow-opacity);
   }
 
-  .space-card.selected {
+  .topic-card.selected {
     background: var(--ink);
     color: var(--paper);
   }
@@ -572,10 +572,10 @@
     gap: 12px;
   }
 
-  /* The space name is the preview/select trigger — a real button so keyboard
+  /* The topic name is the preview/select trigger — a real button so keyboard
      and SR are clean (UI audit f-2, f-12). It carries the display type; the
      <h2> inside keeps the heading semantics. */
-  .space-name-btn {
+  .topic-name-btn {
     background: none;
     border: none;
     padding: 0;
@@ -587,18 +587,18 @@
     max-width: 100%;
   }
 
-  .space-name-btn:hover {
+  .topic-name-btn:hover {
     text-decoration: underline;
     text-decoration-thickness: 2px;
     text-underline-offset: 4px;
   }
 
-  .space-name-btn:focus-visible {
+  .topic-name-btn:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 3px;
   }
 
-  .space-name {
+  .topic-name {
     margin: 0;
     font-family: var(--font-display);
     font-weight: 400;
@@ -609,7 +609,7 @@
     color: inherit;
   }
 
-  .space-settings {
+  .topic-settings {
     flex-shrink: 0;
     background: none;
     border: 1px solid var(--rule-soft);
@@ -626,13 +626,13 @@
     padding: 0;
   }
 
-  .space-settings:hover,
-  .space-settings:focus-visible {
+  .topic-settings:hover,
+  .topic-settings:focus-visible {
     opacity: 1;
     border-color: var(--ink);
   }
 
-  .space-settings:focus-visible {
+  .topic-settings:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -651,7 +651,7 @@
     color: var(--ink-orange);
   }
 
-  .space-card.selected .default-mark {
+  .topic-card.selected .default-mark {
     color: var(--accent);
   }
 
@@ -702,7 +702,7 @@
     color: color-mix(in srgb, var(--paper) 70%, transparent);
   }
 
-  /* New-space card and inline form. */
+  /* New-topic card and inline form. */
   .new-card,
   .new-form {
     border-style: dashed;
@@ -792,7 +792,7 @@
   }
 
   /* Detail panel below the grid — same visual weight as a card. */
-  .space-detail {
+  .topic-detail {
     border: 2px solid var(--ink);
     background: var(--paper);
     padding: 18px 22px;
@@ -1023,7 +1023,7 @@
       padding: 24px 22px;
     }
 
-    .space-grid {
+    .topic-grid {
       grid-template-columns: 1fr;
     }
   }

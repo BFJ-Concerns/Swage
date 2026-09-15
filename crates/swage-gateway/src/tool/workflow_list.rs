@@ -145,15 +145,15 @@ mod tests {
     use swage_core::CompletionRequest;
     use swage_provider::{LlmProvider, ProviderConfig, openai::OpenAiProvider};
     use swage_storage::{
-        AgentDefinitionStore, NewAgentDefinition, NewSession, NewSpace, NewWorkflowScript,
-        SessionStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
+        AgentDefinitionStore, NewAgentDefinition, NewSession, NewTopic, NewWorkflowScript,
+        SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
 
     fn state(storage: Arc<SqliteStorage>) -> AppState {
         AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            storage as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -171,11 +171,11 @@ mod tests {
         GatewayToolContext::new(&base, tx, storage as Arc<dyn Storage>).with_app_state(Some(state))
     }
 
-    async fn store_test_agent(storage: &SqliteStorage, space_id: Uuid, agent_id: &str) {
+    async fn store_test_agent(storage: &SqliteStorage, topic_id: Uuid, agent_id: &str) {
         storage
             .upsert_agent_definition(NewAgentDefinition {
                 id: agent_id.into(),
-                space_id: Some(space_id),
+                topic_id: Some(topic_id),
                 display_name: agent_id.into(),
                 description: String::new(),
                 instructions: String::new(),
@@ -191,14 +191,14 @@ mod tests {
 
     fn write_agent_workflow(
         root: &std::path::Path,
-        space_slug: &str,
+        topic_slug: &str,
         agent_id: &str,
         skill_name: &str,
         workflow_name: &str,
     ) {
         let skill_dir = root
-            .join("spaces")
-            .join(space_slug)
+            .join("topics")
+            .join(topic_slug)
             .join("agents")
             .join(agent_id)
             .join("skills")
@@ -301,10 +301,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn lists_shipped_and_saved_workflows_for_the_calling_session() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "operator-report".into(),
                 description: "Produce an operator report.".into(),
                 source: "return {};".into(),
@@ -316,7 +316,7 @@ mod tests {
             .expect("saved workflow");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -352,10 +352,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn listing_projects_declared_and_unconstrained_argument_contracts() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "constrained-report".into(),
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["topic"]} }; return {};"#.into(),
@@ -367,7 +367,7 @@ mod tests {
             .expect("constrained workflow");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "open-report".into(),
                 description: String::new(),
                 source: "return {};".into(),
@@ -379,7 +379,7 @@ mod tests {
             .expect("unconstrained workflow");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -407,23 +407,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn listing_uses_the_callers_space() {
+    async fn listing_uses_the_callers_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let first_space = storage.get_or_create_default().await.expect("first space");
-        let second_space = SpaceStore::create(
+        let first_topic = storage.get_or_create_default().await.expect("first topic");
+        let second_topic = TopicStore::create(
             &*storage,
-            NewSpace {
-                name: "Other space".into(),
-                slug: "other-space".into(),
+            NewTopic {
+                name: "Other topic".into(),
+                slug: "other-topic".into(),
             },
         )
         .await
-        .expect("second space");
+        .expect("second topic");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: first_space.id,
-                name: "private-first-space-workflow".into(),
-                description: "Only in the first space.".into(),
+                topic_id: first_topic.id,
+                name: "private-first-topic-workflow".into(),
+                description: "Only in the first topic.".into(),
                 source: "return {};".into(),
                 delivery_grant: None,
                 captured_sources_grant: Default::default(),
@@ -433,7 +433,7 @@ mod tests {
             .expect("saved workflow");
         let second_session = storage
             .create_session(NewSession {
-                space_id: second_space.id,
+                topic_id: second_topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -456,7 +456,7 @@ mod tests {
                 .as_array()
                 .expect("workflow array")
                 .iter()
-                .any(|workflow| workflow["name"] == "private-first-space-workflow")
+                .any(|workflow| workflow["name"] == "private-first-topic-workflow")
         );
         assert!(
             result["workflows"]
@@ -471,26 +471,26 @@ mod tests {
     async fn listing_uses_the_callers_agent_skills() {
         let root = tempfile::tempdir().expect("skill root");
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        store_test_agent(&storage, space.id, "agent-one").await;
-        store_test_agent(&storage, space.id, "agent-two").await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        store_test_agent(&storage, topic.id, "agent-one").await;
+        store_test_agent(&storage, topic.id, "agent-two").await;
         write_agent_workflow(
             root.path(),
-            &space.slug,
+            &topic.slug,
             "agent-one",
             "one-workflows",
             "only-agent-one",
         );
         write_agent_workflow(
             root.path(),
-            &space.slug,
+            &topic.slug,
             "agent-two",
             "two-workflows",
             "only-agent-two",
         );
         let first_session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-one".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -499,7 +499,7 @@ mod tests {
             .expect("first session");
         let second_session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-two".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

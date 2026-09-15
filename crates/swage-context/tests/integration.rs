@@ -30,9 +30,9 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     // Set up: create prompt rules at two hierarchy levels with different priorities
     let root = TempDir::new().unwrap();
     let global_prompts = root.path().join("prompts");
-    let space_prompts = root.path().join("spaces/test/prompts");
+    let topic_prompts = root.path().join("topics/test/prompts");
     fs::create_dir_all(&global_prompts).unwrap();
-    fs::create_dir_all(&space_prompts).unwrap();
+    fs::create_dir_all(&topic_prompts).unwrap();
 
     // Global rule with lower priority
     fs::write(
@@ -41,10 +41,10 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     )
     .unwrap();
 
-    // Space rule with higher priority (appears first)
+    // Topic rule with higher priority (appears first)
     fs::write(
-        space_prompts.join("space.md"),
-        "---\npriority: 100\n---\n\nYou are working on space test.",
+        topic_prompts.join("topic.md"),
+        "---\npriority: 100\n---\n\nYou are working on topic test.",
     )
     .unwrap();
 
@@ -55,18 +55,18 @@ fn default_assembly_preserves_legacy_prompt_shape() {
         )
         .unwrap(),
         swage_config::prompt_rule::parse_prompt_rule_file(
-            &space_prompts.join("space.md"),
-            swage_config::HierarchyLevel::Space,
+            &topic_prompts.join("topic.md"),
+            swage_config::HierarchyLevel::Topic,
         )
         .unwrap(),
     ];
     rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
     assert_eq!(rules.len(), 2, "should find rules at both levels");
 
-    // The higher-priority space rule should come first
+    // The higher-priority topic rule should come first
     assert_eq!(
         rules[0].priority, 100,
-        "space rule (priority 100) should be first"
+        "topic rule (priority 100) should be first"
     );
     assert_eq!(
         rules[1].priority, 10,
@@ -106,19 +106,19 @@ fn default_assembly_preserves_legacy_prompt_shape() {
     match system_text {
         swage_core::ContentPart::Text { text } => {
             assert!(
-                text.contains("You are working on space test."),
-                "higher-priority space rule should appear in system message"
+                text.contains("You are working on topic test."),
+                "higher-priority topic rule should appear in system message"
             );
             assert!(
                 text.contains("You are a helpful assistant."),
                 "lower-priority global rule should appear in system message"
             );
-            // Priority order: space rule content should appear before global
-            let space_pos = text.find("You are working on space test.").unwrap();
+            // Priority order: topic rule content should appear before global
+            let topic_pos = text.find("You are working on topic test.").unwrap();
             let global_pos = text.find("You are a helpful assistant.").unwrap();
             assert!(
-                space_pos < global_pos,
-                "space rule (priority 100) should appear before global rule (priority 10)"
+                topic_pos < global_pos,
+                "topic rule (priority 100) should appear before global rule (priority 10)"
             );
         }
         _ => panic!("expected text content in system message"),
@@ -295,7 +295,7 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
     .unwrap();
 
     // Agent: one rule with no frontmatter (default priority 0)
-    let agent_prompts = root.path().join("spaces/test/agents/default/prompts");
+    let agent_prompts = root.path().join("topics/test/agents/default/prompts");
     fs::create_dir_all(&agent_prompts).unwrap();
     fs::write(
         agent_prompts.join("persona.md"),
@@ -384,11 +384,11 @@ timeout = 10
     )
     .unwrap();
 
-    // Space config overrides the budget
-    let space_dir = root.path().join("spaces/test");
-    fs::create_dir_all(space_dir.join("agents/default")).unwrap();
+    // Topic config overrides the budget
+    let topic_dir = root.path().join("topics/test");
+    fs::create_dir_all(topic_dir.join("agents/default")).unwrap();
     fs::write(
-        space_dir.join("config.toml"),
+        topic_dir.join("config.toml"),
         r#"
 [context]
 budget = 20000
@@ -399,13 +399,13 @@ budget = 20000
     let config = swage_config::load_resolved_config_from(root.path(), "test", "default")
         .expect("config should load successfully");
 
-    // Space budget should override global
+    // Topic budget should override global
     assert_eq!(
         config.context.budget,
         Some(20000),
-        "space budget should override global"
+        "topic budget should override global"
     );
-    // Timeout should inherit from global (not overridden by space)
+    // Timeout should inherit from global (not overridden by topic)
     assert_eq!(
         config.context.timeout, 10,
         "timeout should inherit from global level"

@@ -14,7 +14,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{ContextSnapshotStore, SessionStore, SpaceStore, SqliteStorage, Storage};
+use swage_storage::{ContextSnapshotStore, SessionStore, SqliteStorage, Storage, TopicStore};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 use crate::support::{ProcessEnvGuard, scratch_tempdir};
@@ -81,7 +81,7 @@ async fn start_server(
     );
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         provider as Arc<dyn LlmProvider>,
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

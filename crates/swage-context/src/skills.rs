@@ -47,7 +47,7 @@ pub struct ActiveSkill {
 /// active, the element produces no messages — the assembly engine treats it
 /// as a zero-token no-op.
 ///
-/// Priority 75 places skills below system prompts (100) but above space
+/// Priority 75 places skills below system prompts (100) but above topic
 /// memory (50), ensuring skill instructions are seen before retrieved context
 /// but after core identity instructions.
 pub struct SkillsElement {
@@ -86,7 +86,7 @@ impl ContextElement for SkillsElement {
         "skills"
     }
 
-    /// Priority 75: below system prompts (100) but above space memory (50).
+    /// Priority 75: below system prompts (100) but above topic memory (50).
     fn priority(&self) -> i32 {
         75
     }
@@ -130,7 +130,7 @@ impl ContextElement for SkillsElement {
     /// Human-readable provenance listing each active skill with its level and
     /// token cost.
     ///
-    /// Example: `"skills: code-review (space, 142 tokens), persona (agent, 89 tokens)"`
+    /// Example: `"skills: code-review (topic, 142 tokens), persona (agent, 89 tokens)"`
     fn source(&self) -> String {
         if self.skills.is_empty() {
             return "skills (none active)".to_string();
@@ -199,7 +199,7 @@ mod tests {
             name: name.to_string(),
             instructions: instructions.to_string(),
             source_directory: PathBuf::from(format!("/skills/{name}")),
-            level: HierarchyLevel::Space,
+            level: HierarchyLevel::Topic,
             is_agent_level: false,
             activation_order: order,
         }

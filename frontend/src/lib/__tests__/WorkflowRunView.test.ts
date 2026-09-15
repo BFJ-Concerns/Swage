@@ -16,7 +16,7 @@ function run(
 ): WorkflowRun {
   return {
     id,
-    space_id: "space-1",
+    topic_id: "topic-1",
     script_id: null,
     script_name: scriptName,
     script_version: null,

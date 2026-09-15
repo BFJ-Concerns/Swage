@@ -1,4 +1,4 @@
-//! Shell execution tool — runs commands in the space's workspace directory.
+//! Shell execution tool — runs commands in the topic's workspace directory.
 
 use std::io;
 use std::time::Duration;
@@ -311,7 +311,7 @@ mod tests {
         let mut ctx = MockToolContext::new("agent-test", "sess-test");
         ctx.working_directory = dir.path().to_path_buf();
         ctx.turn_id = Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap());
-        ctx.call_id = Some("call/with spaces".to_string());
+        ctx.call_id = Some("call/with topics".to_string());
         ctx
     }
 
@@ -427,7 +427,7 @@ mod tests {
             json!(artifact_path)
         );
         assert!(
-            artifact_path.contains("call_with_spaces"),
+            artifact_path.contains("call_with_topics"),
             "call_id should be path-safe: {artifact_path}"
         );
 

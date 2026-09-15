@@ -50,7 +50,7 @@ fn serialise_json(value: Option<&serde_json::Value>) -> Result<Option<String>, r
 }
 
 fn row_to_channel_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelLink> {
-    let space_id: String = row.get(3)?;
+    let topic_id: String = row.get(3)?;
     let session_id: Option<String> = row.get(5)?;
     let linked_at: String = row.get(7)?;
     let updated_at: String = row.get(8)?;
@@ -59,7 +59,7 @@ fn row_to_channel_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelLink>
         integration: row.get(0)?,
         account: row.get(1)?,
         conversation: row.get(2)?,
-        space_id: parse_uuid(&space_id)?,
+        topic_id: parse_uuid(&topic_id)?,
         agent_id: row.get(4)?,
         session_id: session_id.as_deref().map(parse_uuid).transpose()?,
         home_target: parse_json(row.get::<_, Option<String>>(6)?.as_deref())?,
@@ -78,10 +78,10 @@ impl ChannelLinkStore for SqliteStorage {
             let now_str = now.to_rfc3339();
             conn.execute(
                 "INSERT INTO channel_links
-                 (integration, account, conversation, space_id, agent_id, session_id, home_target_json, linked_at, updated_at)
+                 (integration, account, conversation, topic_id, agent_id, session_id, home_target_json, linked_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
                  ON CONFLICT(integration, account, conversation) DO UPDATE SET
-                     space_id = excluded.space_id,
+                     topic_id = excluded.topic_id,
                      agent_id = excluded.agent_id,
                      session_id = excluded.session_id,
                      home_target_json = excluded.home_target_json,
@@ -90,7 +90,7 @@ impl ChannelLinkStore for SqliteStorage {
                     &link.integration,
                     &link.account,
                     &link.conversation,
-                    link.space_id.to_string(),
+                    link.topic_id.to_string(),
                     &link.agent_id,
                     link.session_id.map(|value| value.to_string()),
                     &home_target_json,
@@ -109,7 +109,7 @@ impl ChannelLinkStore for SqliteStorage {
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                space_id: link.space_id,
+                topic_id: link.topic_id,
                 agent_id: link.agent_id,
                 session_id: link.session_id,
                 home_target: link.home_target,
@@ -131,7 +131,7 @@ impl ChannelLinkStore for SqliteStorage {
         let conversation = conversation.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT integration, account, conversation, space_id, agent_id, session_id, home_target_json, linked_at, updated_at
+                "SELECT integration, account, conversation, topic_id, agent_id, session_id, home_target_json, linked_at, updated_at
                  FROM channel_links
                  WHERE integration = ?1 AND account = ?2 AND conversation = ?3",
                 params![integration, account, conversation],
@@ -145,7 +145,7 @@ impl ChannelLinkStore for SqliteStorage {
     async fn list_channel_links(&self) -> Result<Vec<ChannelLink>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT integration, account, conversation, space_id, agent_id, session_id, home_target_json, linked_at, updated_at
+                "SELECT integration, account, conversation, topic_id, agent_id, session_id, home_target_json, linked_at, updated_at
                  FROM channel_links
                  ORDER BY linked_at ASC, integration ASC, account ASC, conversation ASC",
             )?;
@@ -179,18 +179,18 @@ impl ChannelLinkStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::NewSession;
-    use crate::model::NewSpace;
-    use crate::store::{ChannelLinkStore, SessionStore, SpaceStore};
+    use crate::model::NewTopic;
+    use crate::store::{ChannelLinkStore, SessionStore, TopicStore};
 
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn channel_link_round_trips_and_updates_bound_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
-                name: "channel-space".into(),
-                slug: "channel-space".into(),
+        let topic = storage
+            .create(NewTopic {
+                name: "channel-topic".into(),
+                slug: "channel-topic".into(),
             })
             .await
             .unwrap();
@@ -199,7 +199,7 @@ mod tests {
                 integration: "dev_dm".into(),
                 account: "workspace-a".into(),
                 conversation: "alice".into(),
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 session_id: None,
                 home_target: Some(serde_json::json!({
@@ -212,7 +212,7 @@ mod tests {
 
         let session_id = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -225,7 +225,7 @@ mod tests {
                 integration: "dev_dm".into(),
                 account: "workspace-a".into(),
                 conversation: "alice".into(),
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 session_id: Some(session_id),
                 home_target: Some(serde_json::json!({

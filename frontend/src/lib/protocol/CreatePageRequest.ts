@@ -2,7 +2,7 @@
 
 export type CreatePageRequest = { title: string,
 /**
- * Seed the new page from a template of the same space. Absent creates a
+ * Seed the new page from a template of the same topic. Absent creates a
  * blank page. The seeded modules are the page's own from birth; the
  * template is recorded as the fork's origin, never projected into it.
  */

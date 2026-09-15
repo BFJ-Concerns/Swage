@@ -141,17 +141,17 @@ mod tests {
         ScheduleRunTrigger, ScheduleStatus, SessionPolicy, TurnState,
     };
     use crate::store::{
-        DeliveryStore, ScheduleStore, SessionStore, SpaceStore, ThreadStore, TurnStore,
+        DeliveryStore, ScheduleStore, SessionStore, ThreadStore, TopicStore, TurnStore,
     };
     use crate::{NewDeliveryRecord, NewSession};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_and_lists_by_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -189,10 +189,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_schedule_run_and_turn_attribution() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

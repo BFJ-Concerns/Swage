@@ -83,19 +83,19 @@ impl SessionVariableStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NewSession, NewSpace, SessionStore, SpaceSlug, SpaceStore};
+    use crate::{NewSession, NewTopic, SessionStore, TopicSlug, TopicStore};
 
     async fn session(storage: &SqliteStorage, slug: &str) -> Uuid {
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: slug.into(),
-                slug: SpaceSlug::new(slug).unwrap(),
+                slug: TopicSlug::new(slug).unwrap(),
             })
             .await
             .unwrap();
         storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "lead".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

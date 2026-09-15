@@ -53,12 +53,12 @@ fn invalid(tool: &str, message: impl Into<String>) -> ToolError {
 }
 
 /// Map a schedule-service error onto the right tool error: a validation
-/// failure is the model's to fix (bad spec, unknown space, empty message), so
+/// failure is the model's to fix (bad spec, unknown topic, empty message), so
 /// it is `InvalidParameters`; anything else is an execution failure.
 fn map_service_error(tool: &str, error: GatewayError) -> ToolError {
     match error {
         GatewayError::ValidationError(message) => invalid(tool, message),
-        GatewayError::SpaceNotFound { .. } | GatewayError::ConversationNotFound { .. } => {
+        GatewayError::TopicNotFound { .. } | GatewayError::ConversationNotFound { .. } => {
             invalid(tool, error.to_string())
         }
         other => ToolError::ExecutionFailed {
@@ -261,7 +261,7 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "enum": ["fresh", "continuation"],
                     "description": "Which session each run executes in, fixed at creation. fresh: \
-                                    a new session in `space_id` for `agent_id`, opened with only \
+                                    a new session in `topic_id` for `agent_id`, opened with only \
                                     the task and the last run's outcome — the isolated, recommended \
                                     choice for recurring work. continuation: reuse the existing \
                                     `continuation_session_id`, running as whatever agent it \
@@ -270,11 +270,11 @@ impl Tool for ScheduleTool {
                                     cannot be changed after (remove and recreate to move a \
                                     schedule)."
                 },
-                "space_id": {
+                "topic_id": {
                     "type": ["string", "null"],
-                    "description": "For session=fresh: the UUID of the space each new run's \
+                    "description": "For session=fresh: the UUID of the topic each new run's \
                                     session is created in. Omit it to use this conversation's \
-                                    space."
+                                    topic."
                 },
                 "agent_id": {
                     "type": "string",
@@ -561,27 +561,27 @@ async fn build_session(
     let session = required_str(SCHEDULE_TOOL, params, "session")?;
     match session {
         "fresh" => {
-            let explicit_space_id = match params.get("space_id") {
+            let explicit_topic_id = match params.get("topic_id") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(value)) if value.trim().is_empty() => None,
-                Some(Value::String(value)) => Some(parse_uuid(SCHEDULE_TOOL, "space_id", value)
+                Some(Value::String(value)) => Some(parse_uuid(SCHEDULE_TOOL, "topic_id", value)
                     .map_err(|_| {
                         invalid(
                             SCHEDULE_TOOL,
                             format!(
-                                "'space_id' must be a UUID when provided, got '{value}'; omit it to use this conversation's space"
+                                "'topic_id' must be a UUID when provided, got '{value}'; omit it to use this conversation's topic"
                             ),
                         )
                     })?),
                 Some(_) => {
                     return Err(invalid(
                         SCHEDULE_TOOL,
-                        "'space_id' must be a UUID string when provided; omit it to use this conversation's space",
+                        "'topic_id' must be a UUID string when provided; omit it to use this conversation's topic",
                     ));
                 }
             };
-            let space_id = match explicit_space_id {
-                Some(space_id) => space_id,
+            let topic_id = match explicit_topic_id {
+                Some(topic_id) => topic_id,
                 None => {
                     storage
                         .get_session(calling_session_id)
@@ -596,11 +596,11 @@ async fn build_session(
                                 format!("calling session '{calling_session_id}' was not found"),
                             )
                         })?
-                        .space_id
+                        .topic_id
                 }
             };
             Ok(wire::SessionPolicy::Fresh {
-                space_id,
+                topic_id,
                 agent_id: required_str(SCHEDULE_TOOL, params, "agent_id")?.to_owned(),
             })
         }
@@ -790,7 +790,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use swage_storage::{NewSession, SessionStore, SpaceStore, SqliteStorage};
+    use swage_storage::{NewSession, SessionStore, SqliteStorage, TopicStore};
 
     #[test]
     fn parse_delay_accepts_units() {
@@ -840,12 +840,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_session_defaults_to_the_calling_sessions_space() {
+    async fn fresh_session_defaults_to_the_calling_sessions_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "assistant".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -864,22 +864,22 @@ mod tests {
         assert_eq!(
             policy,
             wire::SessionPolicy::Fresh {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "assistant".into(),
             }
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_session_preserves_an_explicit_space_without_resolving_the_caller() {
+    async fn fresh_session_preserves_an_explicit_topic_without_resolving_the_caller() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let explicit_space_id = Uuid::new_v4();
+        let explicit_topic_id = Uuid::new_v4();
 
         let policy = build_session(
             storage.as_ref(),
             &json!({
                 "session": "fresh",
-                "space_id": explicit_space_id,
+                "topic_id": explicit_topic_id,
                 "agent_id": "assistant"
             }),
             Uuid::new_v4(),
@@ -889,12 +889,12 @@ mod tests {
 
         assert!(matches!(
             policy,
-            wire::SessionPolicy::Fresh { space_id, .. } if space_id == explicit_space_id
+            wire::SessionPolicy::Fresh { topic_id, .. } if topic_id == explicit_topic_id
         ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_session_rejects_a_missing_calling_session_when_space_is_omitted() {
+    async fn fresh_session_rejects_a_missing_calling_session_when_topic_is_omitted() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
         let error = build_session(
@@ -909,14 +909,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_session_rejects_an_invalid_explicit_space() {
+    async fn fresh_session_rejects_an_invalid_explicit_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
         let error = build_session(
             storage.as_ref(),
             &json!({
                 "session": "fresh",
-                "space_id": "not-a-uuid",
+                "topic_id": "not-a-uuid",
                 "agent_id": "assistant"
             }),
             Uuid::new_v4(),
@@ -927,17 +927,17 @@ mod tests {
         assert!(matches!(
             error,
             ToolError::InvalidParameters { message, .. }
-                if message.contains("omit it to use this conversation's space")
+                if message.contains("omit it to use this conversation's topic")
         ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn fresh_session_defaults_null_and_blank_spaces_to_the_calling_session() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "assistant".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -945,12 +945,12 @@ mod tests {
             .await
             .unwrap();
 
-        for space_id in [Value::Null, Value::String("  ".into())] {
+        for topic_id in [Value::Null, Value::String("  ".into())] {
             let policy = build_session(
                 storage.as_ref(),
                 &json!({
                     "session": "fresh",
-                    "space_id": space_id,
+                    "topic_id": topic_id,
                     "agent_id": "assistant"
                 }),
                 session.id,
@@ -960,7 +960,7 @@ mod tests {
 
             assert!(matches!(
                 policy,
-                wire::SessionPolicy::Fresh { space_id, .. } if space_id == space.id
+                wire::SessionPolicy::Fresh { topic_id, .. } if topic_id == topic.id
             ));
         }
     }

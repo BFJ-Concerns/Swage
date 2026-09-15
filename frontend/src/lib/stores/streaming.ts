@@ -598,7 +598,7 @@ export interface ConversationAutoCreateOptions {
   createConversation(selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<string | null>;
 }
 
-// Wraps a streaming store so the composer works in a space with no
+// Wraps a streaming store so the composer works in a topic with no
 // conversation yet: startTurn transparently creates one, connects, then
 // dispatches. Every other member delegates to the wrapped store.
 export function withConversationAutoCreate(

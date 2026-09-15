@@ -4,7 +4,7 @@ import type { WorkflowRunHandover } from "./WorkflowRunHandover";
 import type { WorkflowRunState } from "./WorkflowRunState";
 import type { WorkflowRunTerminalAccount } from "./WorkflowRunTerminalAccount";
 
-export type WorkflowRun = { id: string, space_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null,
+export type WorkflowRun = { id: string, topic_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null,
 /**
  * Opaque identity declared by the workflow script for grouping its runs.
  */

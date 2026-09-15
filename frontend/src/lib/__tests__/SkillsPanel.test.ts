@@ -23,7 +23,7 @@ describe("SkillsPanel", () => {
   it("shows loading and listing errors", async () => {
     let rejectRequest: ((reason: Error) => void) | undefined;
     vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise((_, reject) => { rejectRequest = reject; }));
-    component = mount(SkillsPanel, { target: document.body, props: { spaceId: "space-1" } });
+    component = mount(SkillsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await tick();
 
     expect(document.body.textContent).toContain("Loading skills");
@@ -33,13 +33,13 @@ describe("SkillsPanel", () => {
   });
 
   it("lists resolved skills, shows shipped detail, and performs no mutation", async () => {
-    const shipped = skill("research", { id: "shipped-space-1-research", display_name: "Research", description: "Gather primary sources.", level: "space", tools: ["web_search", "file_read"], always_active: true, shipped: true });
+    const shipped = skill("research", { id: "shipped-topic-1-research", display_name: "Research", description: "Gather primary sources.", level: "topic", tools: ["web_search", "file_read"], always_active: true, shipped: true });
     const selected = skill("notes", { display_name: "Notes", description: "Maintain project notes.", tools: ["file_write"] });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ skills: [shipped, selected] }), { status: 200 }));
-    component = mount(SkillsPanel, { target: document.body, props: { spaceId: "space id/1" } });
+    component = mount(SkillsPanel, { target: document.body, props: { topicId: "topic id/1" } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("Research"));
 
-    expect(fetchSpy).toHaveBeenCalledWith("/api/skills?space_id=space%20id%2F1", { method: "GET" });
+    expect(fetchSpy).toHaveBeenCalledWith("/api/skills?topic_id=topic%20id%2F1", { method: "GET" });
     const research = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("Research"));
     const notes = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("Notes"));
     expect(research?.querySelector(".shipped")?.textContent).toBe("Shipped");
@@ -60,7 +60,7 @@ describe("SkillsPanel", () => {
 
   it("shows an empty result without a selected detail", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ skills: [] }), { status: 200 }));
-    component = mount(SkillsPanel, { target: document.body, props: { spaceId: "space-1" } });
+    component = mount(SkillsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("No skills are available"));
 
     expect(document.querySelector("article")).toBeNull();

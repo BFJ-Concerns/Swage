@@ -27,7 +27,7 @@ use swage_gateway::{
 use swage_provider::LlmProvider;
 use swage_storage::{
     AttachmentStatus, BackgroundJobState, SqliteStorage,
-    store::{AttachmentStore, BackgroundJobStore, SessionStore, SpaceStore, Storage},
+    store::{AttachmentStore, BackgroundJobStore, SessionStore, Storage, TopicStore},
 };
 
 struct MockProvider;
@@ -69,7 +69,7 @@ fn test_state(
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     let mut state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -130,7 +130,7 @@ fn encode_bytes(bytes: &[u8]) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_and_space_attachments_survive_restart_with_queryable_records() {
+async fn session_and_topic_attachments_survive_restart_with_queryable_records() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("attachments.db");
     let capabilities = WorkflowCapabilities {
@@ -144,7 +144,7 @@ async fn session_and_space_attachments_survive_restart_with_queryable_records() 
 
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
-    let space_id = session.space_id;
+    let topic_id = session.topic_id;
 
     let (text_status, text_body) = post_json(
         &router,
@@ -178,20 +178,20 @@ async fn session_and_space_attachments_survive_restart_with_queryable_records() 
     assert_eq!(image_status, StatusCode::CREATED);
     let session_image_attachment_id = image_body["attachment"]["id"].as_str().unwrap();
 
-    let (space_status, space_body) = post_json(
+    let (topic_status, topic_body) = post_json(
         &router,
         "/api/attachments",
         json!({
-            "scope_kind": "space",
-            "space_id": space_id,
-            "filename": "space.txt",
+            "scope_kind": "topic",
+            "topic_id": topic_id,
+            "filename": "topic.txt",
             "mime_type": "text/plain",
-            "content_base64": encode_bytes(b"Space context")
+            "content_base64": encode_bytes(b"Topic context")
         }),
     )
     .await;
-    assert_eq!(space_status, StatusCode::CREATED);
-    let space_attachment_id = space_body["attachment"]["id"].as_str().unwrap();
+    assert_eq!(topic_status, StatusCode::CREATED);
+    let topic_attachment_id = topic_body["attachment"]["id"].as_str().unwrap();
 
     assert_eq!(attachment::tick_once(&state).await.unwrap(), 3);
 
@@ -214,14 +214,14 @@ async fn session_and_space_attachments_survive_restart_with_queryable_records() 
                 == format!("![scan.png](attachment://{session_image_attachment_id})")
     }));
 
-    let (space_list_status, space_list_body) =
-        get_json(&router, &format!("/api/spaces/{space_id}/attachments")).await;
-    assert_eq!(space_list_status, StatusCode::OK);
-    let space_attachments = space_list_body["attachments"].as_array().unwrap();
-    assert_eq!(space_attachments.len(), 1);
-    assert_eq!(space_attachments[0]["id"], space_attachment_id);
-    assert_eq!(space_attachments[0]["status"], "ready");
-    assert_eq!(space_attachments[0]["ingested_markdown"], "Space context");
+    let (topic_list_status, topic_list_body) =
+        get_json(&router, &format!("/api/topics/{topic_id}/attachments")).await;
+    assert_eq!(topic_list_status, StatusCode::OK);
+    let topic_attachments = topic_list_body["attachments"].as_array().unwrap();
+    assert_eq!(topic_attachments.len(), 1);
+    assert_eq!(topic_attachments[0]["id"], topic_attachment_id);
+    assert_eq!(topic_attachments[0]["status"], "ready");
+    assert_eq!(topic_attachments[0]["ingested_markdown"], "Topic context");
 
     let (restarted_state, _restarted_storage) = test_state(&db_path, capabilities);
     let restarted_router = build_router(restarted_state.clone());
@@ -246,16 +246,16 @@ async fn session_and_space_attachments_survive_restart_with_queryable_records() 
                 == format!("![scan.png](attachment://{session_image_attachment_id})")
     }));
 
-    let (restarted_space_status, restarted_space_body) = get_json(
+    let (restarted_topic_status, restarted_topic_body) = get_json(
         &restarted_router,
-        &format!("/api/spaces/{space_id}/attachments"),
+        &format!("/api/topics/{topic_id}/attachments"),
     )
     .await;
-    assert_eq!(restarted_space_status, StatusCode::OK);
-    let restarted_space_attachments = restarted_space_body["attachments"].as_array().unwrap();
-    assert_eq!(restarted_space_attachments.len(), 1);
-    assert_eq!(restarted_space_attachments[0]["id"], space_attachment_id);
-    assert_eq!(restarted_space_attachments[0]["status"], "ready");
+    assert_eq!(restarted_topic_status, StatusCode::OK);
+    let restarted_topic_attachments = restarted_topic_body["attachments"].as_array().unwrap();
+    assert_eq!(restarted_topic_attachments.len(), 1);
+    assert_eq!(restarted_topic_attachments[0]["id"], topic_attachment_id);
+    assert_eq!(restarted_topic_attachments[0]["status"], "ready");
 }
 
 #[tokio::test(flavor = "multi_thread")]

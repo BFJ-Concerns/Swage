@@ -40,7 +40,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{ApprovalStore, SessionStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore},
+    store::{ApprovalStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore},
 };
 
 use crate::support::{
@@ -175,7 +175,7 @@ async fn start_test_server_with_tools(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(tools),

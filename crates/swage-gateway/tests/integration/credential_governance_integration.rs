@@ -15,7 +15,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::store::{SpaceStore, Storage};
+use swage_storage::store::{Storage, TopicStore};
 use swage_storage::{MANAGED_SECRET_KEY_ENV, SqliteStorage};
 
 use crate::support::ProcessEnvGuard;
@@ -66,7 +66,7 @@ fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

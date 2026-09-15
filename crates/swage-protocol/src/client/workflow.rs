@@ -11,12 +11,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowScript {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
     pub description: String,
     pub head_version: u32,
     /// The shipped or operator skill that carries this workflow, when it is
-    /// not an authored row of the space. A carried workflow is immutable in
+    /// not an authored row of the topic. A carried workflow is immutable in
     /// place; a same-named authored row shadows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -403,7 +403,7 @@ pub struct WorkflowRunTerminalAccount {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkflowRun {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub script_id: Option<Uuid>,
     pub script_name: Option<String>,
     pub script_version: Option<u32>,

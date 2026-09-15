@@ -309,13 +309,13 @@ pub async fn save_settings(
     Ok(response)
 }
 
-pub(crate) async fn persist_permanent_tool_approval_for_space(
+pub(crate) async fn persist_permanent_tool_approval_for_topic(
     config_root: &std::path::Path,
     config: &swage_config::ResolvedConfig,
-    space: &swage_storage::model::Space,
+    topic: &swage_storage::model::Topic,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = space_config_path(config_root, &space.slug);
+    let path = topic_config_path(config_root, &topic.slug);
     persist_permanent_tool_approval_to_path(config, tool_name, path).await
 }
 
@@ -349,10 +349,10 @@ async fn persist_permanent_tool_approval_to_path(
     Ok(())
 }
 
-fn space_config_path(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
+fn topic_config_path(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
     config_root
-        .join("spaces")
-        .join(space_slug)
+        .join("topics")
+        .join(topic_slug)
         .join("config.toml")
 }
 
@@ -1326,7 +1326,7 @@ mod tests {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
@@ -1395,7 +1395,7 @@ mod tests {
         );
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             initial_config,
@@ -1546,7 +1546,7 @@ mod tests {
         }
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             initial_config,
@@ -1666,7 +1666,7 @@ mod tests {
         });
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             config,
@@ -1785,7 +1785,7 @@ mod tests {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
-            storage as std::sync::Arc<dyn swage_storage::store::SpaceStore>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
                 as std::sync::Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),

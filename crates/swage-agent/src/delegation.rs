@@ -177,7 +177,7 @@ impl DelegationExecutor {
     /// Execute a delegation: instantiate the target agent, run it, and deliver
     /// the result back to the sender.
     ///
-    /// `space_id` is the space the child session should belong to (inherited
+    /// `topic_id` is the topic the child session should belong to (inherited
     /// from the parent session). `target_config` and `target_tool_dispatcher`
     /// are resolved by the caller (gateway) from the config cascade.
     /// `cancel_token` is a child token for this delegation: cancelling the
@@ -188,7 +188,7 @@ impl DelegationExecutor {
         &self,
         delegate_msg: &AgentMessage,
         sender_turn_id: Option<Uuid>,
-        space_id: Uuid,
+        topic_id: Uuid,
         target_config: AgentConfig,
         target_context_transfer_config: swage_config::ContextTransferConfig,
         target_tool_dispatcher: Option<ToolDispatcher>,
@@ -238,7 +238,7 @@ impl DelegationExecutor {
                 let session = self
                     .storage
                     .create_session(NewSession {
-                        space_id,
+                        topic_id,
                         agent_id: target_agent_id.clone(),
                         metadata: Some(session_metadata),
                         active_workspace_attachment_id: None,
@@ -459,7 +459,7 @@ impl DelegationExecutor {
                 session_id: session.id,
                 thread_id: thread.id,
                 turn_id,
-                space_id: Some(space_id),
+                topic_id: Some(topic_id),
             },
             user_message: task_description.to_string(),
             assembled_context,
@@ -713,7 +713,7 @@ pub trait DelegationHandler: Send + Sync {
         delegate_call_id: &str,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
-        space_id: Uuid,
+        topic_id: Uuid,
         cancel_token: tokio_util::sync::CancellationToken,
         completion_mode: DelegateCompletionMode,
     ) -> Result<DelegationOutcome, AgentError>;
@@ -757,7 +757,7 @@ mod tests {
         CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use swage_storage::store::SpaceStore;
+    use swage_storage::store::TopicStore;
     use swage_storage::{SessionStore, SqliteStorage, TurnStore};
 
     use super::*;
@@ -812,10 +812,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_construction_failure_marks_precreated_child_turn_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let storage_trait: Arc<dyn Storage> = storage.clone();
         let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
         let delegate_message = router
@@ -849,7 +849,7 @@ mod tests {
             .execute_delegation(
                 &delegate_message,
                 None,
-                space.id,
+                topic.id,
                 config,
                 swage_config::ContextTransferConfig::default(),
                 None,
@@ -895,10 +895,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delegated_task_record_failure_stops_before_provider_execution() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let storage_trait: Arc<dyn Storage> = storage.clone();
         let router = Arc::new(MessageRouter::new(storage_trait.clone(), None));
         let delegate_message = router
@@ -937,7 +937,7 @@ mod tests {
             .execute_delegation(
                 &delegate_message,
                 None,
-                space.id,
+                topic.id,
                 AgentConfig::new("agent-b").with_workspace(std::env::temp_dir(), vec![]),
                 swage_config::ContextTransferConfig::default(),
                 None,

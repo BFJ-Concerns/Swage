@@ -161,7 +161,7 @@ impl ToolDispatcher {
     ///
     /// Useful for sharing the same registry across multiple dispatchers with
     /// different permission configurations (e.g., the gateway builds a per-turn
-    /// dispatcher with space-specific permissions but the same tool set).
+    /// dispatcher with topic-specific permissions but the same tool set).
     pub fn registry(&self) -> &Arc<ToolRegistry> {
         &self.registry
     }

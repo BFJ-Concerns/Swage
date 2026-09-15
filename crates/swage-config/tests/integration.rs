@@ -18,8 +18,8 @@ use tempfile::TempDir;
 /// and the root path.
 fn build_skeleton(
     global_toml: Option<&str>,
-    space: &str,
-    space_toml: Option<&str>,
+    topic: &str,
+    topic_toml: Option<&str>,
     agent: &str,
     agent_toml: Option<&str>,
 ) -> TempDir {
@@ -31,19 +31,19 @@ fn build_skeleton(
         fs::write(root.join("config.toml"), content).expect("failed to write global config");
     }
 
-    // Space level
-    let space_dir = root.join("spaces").join(space);
-    fs::create_dir_all(space_dir.join("agents").join(agent))
+    // Topic level
+    let topic_dir = root.join("topics").join(topic);
+    fs::create_dir_all(topic_dir.join("agents").join(agent))
         .expect("failed to create agent config dir");
 
-    if let Some(content) = space_toml {
-        fs::write(space_dir.join("config.toml"), content).expect("failed to write space config");
+    if let Some(content) = topic_toml {
+        fs::write(topic_dir.join("config.toml"), content).expect("failed to write topic config");
     }
 
     // Agent level
     if let Some(content) = agent_toml {
         fs::write(
-            space_dir.join("agents").join(agent).join("config.toml"),
+            topic_dir.join("agents").join(agent).join("config.toml"),
             content,
         )
         .expect("failed to write agent config");
@@ -56,7 +56,7 @@ fn build_skeleton(
 // Journey: Agent Configuration — cascade merging
 // ---------------------------------------------------------------------------
 
-/// Three-level fixture: global sets defaults, space overrides model,
+/// Three-level fixture: global sets defaults, topic overrides model,
 /// agent overrides port. The resolved config reflects all three levels.
 #[test]
 fn cascade_merge_three_levels() {
@@ -81,7 +81,7 @@ provider_id = "anthropic"
 model_id = "claude-sonnet-4-20250514"
 "#;
 
-    let space = r#"
+    let topic = r#"
 [models]
 default_model_id = "claude-opus-4-20250514"
 "#;
@@ -93,21 +93,21 @@ port = 4000
 
     let tmp = build_skeleton(
         Some(global),
-        "myspace",
-        Some(space),
+        "mytopic",
+        Some(topic),
         "assistant",
         Some(agent),
     );
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("should load successfully");
 
     // Global value inherited
     assert_eq!(config.server.host, "127.0.0.1");
     // Agent overrides global port
     assert_eq!(config.server.port, 4000);
-    // Space overrides global model
+    // Topic overrides global model
     assert_eq!(config.default_model_id(), "claude-opus-4-20250514");
-    // Global value inherited through space (space didn't set protocol)
+    // Global value inherited through topic (topic didn't set protocol)
     let provider = config
         .default_provider_endpoint()
         .expect("default provider should resolve");
@@ -118,11 +118,11 @@ port = 4000
     );
 }
 
-/// Space-level list field replaces (not extends) the global-level list.
-/// Using provider protocol as an enum field — if space sets it, global's
+/// Topic-level list field replaces (not extends) the global-level list.
+/// Using provider protocol as an enum field — if topic sets it, global's
 /// value is fully replaced.
 #[test]
-fn space_list_replaces_global() {
+fn topic_list_replaces_global() {
     let global = r#"
 [providers]
 default = "anthropic"
@@ -139,7 +139,7 @@ provider_id = "anthropic"
 model_id = "claude-sonnet-4-20250514"
 "#;
 
-    let space = r#"
+    let topic = r#"
 [providers]
 default = "openai"
 
@@ -156,11 +156,11 @@ provider_id = "openai"
 model_id = "gpt-4o"
 "#;
 
-    let tmp = build_skeleton(Some(global), "myspace", Some(space), "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let tmp = build_skeleton(Some(global), "mytopic", Some(topic), "assistant", None);
+    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("should load successfully");
 
-    // Space switches the default provider and model together.
+    // Topic switches the default provider and model together.
     assert_eq!(config.default_model_id(), "gpt-4o");
     let provider = config
         .default_provider_endpoint()
@@ -190,8 +190,8 @@ provider_id = "anthropic"
 model_id = "claude-sonnet-4-20250514"
 "#;
 
-    let tmp = build_skeleton(Some(global), "myspace", None, "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let tmp = build_skeleton(Some(global), "mytopic", None, "assistant", None);
+    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("should load successfully");
 
     let provider = config
@@ -205,7 +205,7 @@ model_id = "claude-sonnet-4-20250514"
 }
 
 /// Missing intermediate config files are skipped without error.
-/// A space with no config.toml inherits everything from global.
+/// A topic with no config.toml inherits everything from global.
 #[test]
 fn missing_intermediate_config_skipped() {
     let global = r#"
@@ -216,9 +216,9 @@ port = 5000
 default_model_id = "claude-sonnet-4-20250514"
 "#;
 
-    // No space config, no agent config
-    let tmp = build_skeleton(Some(global), "bare-space", None, "default", None);
-    let config = load_resolved_config_from(tmp.path(), "bare-space", "default")
+    // No topic config, no agent config
+    let tmp = build_skeleton(Some(global), "bare-topic", None, "default", None);
+    let config = load_resolved_config_from(tmp.path(), "bare-topic", "default")
         .expect("should load successfully");
 
     // Global values inherited all the way through
@@ -230,11 +230,11 @@ default_model_id = "claude-sonnet-4-20250514"
 // Journey: Agent Configuration — instruction assembly
 // ---------------------------------------------------------------------------
 
-/// Instructions from global, space, and agent levels compose in that order.
+/// Instructions from global, topic, and agent levels compose in that order.
 /// Within a level, files sort alphabetically. Each level is attributed.
 #[test]
 fn instructions_compose_across_levels() {
-    let tmp = build_skeleton(None, "myspace", None, "assistant", None);
+    let tmp = build_skeleton(None, "mytopic", None, "assistant", None);
     let root = tmp.path();
 
     // Global instructions
@@ -247,40 +247,40 @@ fn instructions_compose_across_levels() {
     .unwrap();
     fs::write(global_instr.join("02-safety.md"), "Always be safe.").unwrap();
 
-    // Space instructions
-    let space_instr = root.join("spaces/myspace/instructions");
-    fs::create_dir_all(&space_instr).unwrap();
-    fs::write(space_instr.join("context.md"), "This is a Rust space.").unwrap();
+    // Topic instructions
+    let topic_instr = root.join("topics/mytopic/instructions");
+    fs::create_dir_all(&topic_instr).unwrap();
+    fs::write(topic_instr.join("context.md"), "This is a Rust topic.").unwrap();
 
     // Agent instructions
-    let agent_instr = root.join("spaces/myspace/agents/assistant/instructions");
+    let agent_instr = root.join("topics/mytopic/agents/assistant/instructions");
     fs::create_dir_all(&agent_instr).unwrap();
     fs::write(agent_instr.join("personality.md"), "Be concise.").unwrap();
 
     let config =
-        load_resolved_config_from(root, "myspace", "assistant").expect("should load successfully");
+        load_resolved_config_from(root, "mytopic", "assistant").expect("should load successfully");
 
     // All three levels present in assembled instructions
     assert!(config.instructions.contains("You are a helpful assistant."));
     assert!(config.instructions.contains("Always be safe."));
-    assert!(config.instructions.contains("This is a Rust space."));
+    assert!(config.instructions.contains("This is a Rust topic."));
     assert!(config.instructions.contains("Be concise."));
 
-    // Global content appears before space content, space before agent.
+    // Global content appears before topic content, topic before agent.
     // We check relative positions.
     let global_pos = config
         .instructions
         .find("You are a helpful assistant.")
         .unwrap();
-    let space_pos = config.instructions.find("This is a Rust space.").unwrap();
+    let topic_pos = config.instructions.find("This is a Rust topic.").unwrap();
     let agent_pos = config.instructions.find("Be concise.").unwrap();
     assert!(
-        global_pos < space_pos,
-        "global instructions should come before space"
+        global_pos < topic_pos,
+        "global instructions should come before topic"
     );
     assert!(
-        space_pos < agent_pos,
-        "space instructions should come before agent"
+        topic_pos < agent_pos,
+        "topic instructions should come before agent"
     );
 
     // Level attribution is present
@@ -289,8 +289,8 @@ fn instructions_compose_across_levels() {
         "should attribute global level"
     );
     assert!(
-        config.instructions.contains("Space"),
-        "should attribute space level"
+        config.instructions.contains("Topic"),
+        "should attribute topic level"
     );
     assert!(
         config.instructions.contains("Agent"),
@@ -307,8 +307,8 @@ port = 3000
 "#;
 
     // No instructions directories at any level
-    let tmp = build_skeleton(Some(global), "myspace", None, "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let tmp = build_skeleton(Some(global), "mytopic", None, "assistant", None);
+    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("should load successfully");
 
     // Instructions should be empty (or only whitespace)
@@ -318,14 +318,14 @@ port = 3000
 /// Non-markdown files in instructions/ are ignored silently.
 #[test]
 fn non_markdown_files_ignored_in_instructions() {
-    let tmp = build_skeleton(None, "myspace", None, "assistant", None);
+    let tmp = build_skeleton(None, "mytopic", None, "assistant", None);
     let instr_dir = tmp.path().join("instructions");
     fs::create_dir_all(&instr_dir).unwrap();
     fs::write(instr_dir.join("notes.md"), "Important notes.").unwrap();
     fs::write(instr_dir.join("scratch.txt"), "This should be ignored.").unwrap();
     fs::write(instr_dir.join("data.json"), "{}").unwrap();
 
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("should load successfully");
 
     assert!(config.instructions.contains("Important notes."));
@@ -340,14 +340,14 @@ fn non_markdown_files_ignored_in_instructions() {
 /// Malformed TOML produces an error naming the file and line.
 #[test]
 fn malformed_toml_produces_parse_error() {
-    let tmp = build_skeleton(None, "myspace", None, "assistant", None);
+    let tmp = build_skeleton(None, "mytopic", None, "assistant", None);
     fs::write(
         tmp.path().join("config.toml"),
         "this is not valid toml ===\n",
     )
     .unwrap();
 
-    let result = load_resolved_config_from(tmp.path(), "myspace", "assistant");
+    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
     let err = result.expect_err("should fail on malformed TOML");
 
     // Error should reference the file path
@@ -366,8 +366,8 @@ fn wrong_type_produces_type_error() {
 port = "not a number"
 "#;
 
-    let tmp = build_skeleton(Some(bad_config), "myspace", None, "assistant", None);
-    let result = load_resolved_config_from(tmp.path(), "myspace", "assistant");
+    let tmp = build_skeleton(Some(bad_config), "mytopic", None, "assistant", None);
+    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
     let err = result.expect_err("should fail on wrong type");
 
     let err_str = format!("{err}");
@@ -388,8 +388,8 @@ port = 3000
 url = "sqlite://test.db"
 "#;
 
-    let tmp = build_skeleton(Some(bad_config), "myspace", None, "assistant", None);
-    let result = load_resolved_config_from(tmp.path(), "myspace", "assistant");
+    let tmp = build_skeleton(Some(bad_config), "mytopic", None, "assistant", None);
+    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
     let err = result.expect_err("should fail on unknown section");
 
     let err_str = format!("{err}");
@@ -424,8 +424,8 @@ max_tokens = 1024
 temperature = 0.2
 "#;
 
-    let tmp = build_skeleton(Some(config), "myspace", None, "assistant", None);
-    let resolved = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let tmp = build_skeleton(Some(config), "mytopic", None, "assistant", None);
+    let resolved = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("generation presets should be accepted by startup validation");
 
     let preset = resolved
@@ -448,8 +448,8 @@ port = "not a number"
 foo = "bar"
 "#;
 
-    let tmp = build_skeleton(Some(bad_config), "myspace", None, "assistant", None);
-    let result = load_resolved_config_from(tmp.path(), "myspace", "assistant");
+    let tmp = build_skeleton(Some(bad_config), "mytopic", None, "assistant", None);
+    let result = load_resolved_config_from(tmp.path(), "mytopic", "assistant");
     let err = result.expect_err("should fail with multiple errors");
 
     let err_str = format!("{err}");
@@ -490,8 +490,8 @@ allow_degraded_execution = true
 level = "info"
 "#;
 
-    let tmp = build_skeleton(Some(global), "myspace", None, "assistant", None);
-    let config = load_resolved_config_from(tmp.path(), "myspace", "assistant")
+    let tmp = build_skeleton(Some(global), "mytopic", None, "assistant", None);
+    let config = load_resolved_config_from(tmp.path(), "mytopic", "assistant")
         .expect("valid config should load without errors");
 
     assert_eq!(config.server.host, "127.0.0.1");
@@ -522,37 +522,37 @@ enabled = false
 }
 
 // ---------------------------------------------------------------------------
-// Journey: Space Workspace — directory discovery
+// Journey: Topic Workspace — directory discovery
 // ---------------------------------------------------------------------------
 
-/// Scanning discovers all space directories and their agents.
+/// Scanning discovers all topic directories and their agents.
 #[test]
 fn discovery_finds_spaces_and_agents() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
 
-    // Create multiple spaces with agents
-    let proj_a = root.join("spaces/alpha/agents");
+    // Create multiple topics with agents
+    let proj_a = root.join("topics/alpha/agents");
     fs::create_dir_all(proj_a.join("coder")).unwrap();
     fs::create_dir_all(proj_a.join("reviewer")).unwrap();
     fs::create_dir_all(proj_a.join(RESERVED_WORKFLOW_AGENT_ID)).unwrap();
 
-    let proj_b = root.join("spaces/beta/agents");
+    let proj_b = root.join("topics/beta/agents");
     fs::create_dir_all(proj_b.join("assistant")).unwrap();
 
-    // A space with no agents directory
-    fs::create_dir_all(root.join("spaces/gamma")).unwrap();
+    // A topic with no agents directory
+    fs::create_dir_all(root.join("topics/gamma")).unwrap();
 
-    let spaces = discover(root);
+    let topics = discover(root);
 
-    // All three spaces discovered
-    let names: Vec<&str> = spaces.iter().map(|p| p.name.as_str()).collect();
+    // All three topics discovered
+    let names: Vec<&str> = topics.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"alpha"), "should discover alpha");
     assert!(names.contains(&"beta"), "should discover beta");
     assert!(names.contains(&"gamma"), "should discover gamma");
 
     // Alpha has two agents
-    let alpha = spaces.iter().find(|p| p.name == "alpha").unwrap();
+    let alpha = topics.iter().find(|p| p.name == "alpha").unwrap();
     assert!(alpha.agents.contains(&"coder".to_string()));
     assert!(alpha.agents.contains(&"reviewer".to_string()));
     assert!(
@@ -562,27 +562,27 @@ fn discovery_finds_spaces_and_agents() {
     );
 
     // Beta has one agent
-    let beta = spaces.iter().find(|p| p.name == "beta").unwrap();
+    let beta = topics.iter().find(|p| p.name == "beta").unwrap();
     assert_eq!(beta.agents.len(), 1);
 
     // Gamma has no agents
-    let gamma = spaces.iter().find(|p| p.name == "gamma").unwrap();
+    let gamma = topics.iter().find(|p| p.name == "gamma").unwrap();
     assert!(gamma.agents.is_empty());
 }
 
-/// The bare workflow identity inherits global and space configuration only.
+/// The bare workflow identity inherits global and topic configuration only.
 #[test]
 fn reserved_workflow_agent_directory_does_not_feed_configuration() {
     let tmp = build_skeleton(
         Some("[server]\nport = 3000\n"),
-        "myspace",
+        "mytopic",
         None,
         RESERVED_WORKFLOW_AGENT_ID,
         Some("[server]\nport = 4321\n"),
     );
     let reserved_dir = tmp
         .path()
-        .join("spaces/myspace/agents")
+        .join("topics/mytopic/agents")
         .join(RESERVED_WORKFLOW_AGENT_ID);
     fs::create_dir_all(reserved_dir.join("instructions")).unwrap();
     fs::write(
@@ -591,23 +591,23 @@ fn reserved_workflow_agent_directory_does_not_feed_configuration() {
     )
     .unwrap();
 
-    let config = load_resolved_config_from(tmp.path(), "myspace", RESERVED_WORKFLOW_AGENT_ID)
+    let config = load_resolved_config_from(tmp.path(), "mytopic", RESERVED_WORKFLOW_AGENT_ID)
         .expect("the bare workflow identity should inherit ambient configuration");
 
     assert_eq!(config.server.port, 3000);
     assert!(!config.instructions.contains("authored agent instruction"));
 }
 
-/// A space with no config.toml is still discovered (it inherits global config).
+/// A topic with no config.toml is still discovered (it inherits global config).
 #[test]
-fn space_without_config_still_discovered() {
+fn topic_without_config_still_discovered() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
 
-    // Space directory exists but has no config.toml
-    fs::create_dir_all(root.join("spaces/bare")).unwrap();
+    // Topic directory exists but has no config.toml
+    fs::create_dir_all(root.join("topics/bare")).unwrap();
 
-    let spaces = discover(root);
-    assert_eq!(spaces.len(), 1);
-    assert_eq!(spaces[0].name, "bare");
+    let topics = discover(root);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(topics[0].name, "bare");
 }

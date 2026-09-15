@@ -3,6 +3,6 @@ import type { DeliveryTarget } from "./DeliveryTarget";
 import type { ExternalChannelIntegration } from "./ExternalChannelIntegration";
 
 /**
- * Request a short-lived code that links a channel conversation to a space.
+ * Request a short-lived code that links a channel conversation to a topic.
  */
-export type CreateChannelLinkCodeRequest = { integration: ExternalChannelIntegration, space_id?: string | null, agent_id?: string | null, home_target?: DeliveryTarget | null, };
+export type CreateChannelLinkCodeRequest = { integration: ExternalChannelIntegration, topic_id?: string | null, agent_id?: string | null, home_target?: DeliveryTarget | null, };

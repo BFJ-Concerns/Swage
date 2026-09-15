@@ -30,8 +30,8 @@ describe("parseRoute", () => {
       conversationId: null,
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -42,8 +42,8 @@ describe("parseRoute", () => {
       conversationId: "abc-123",
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -54,8 +54,8 @@ describe("parseRoute", () => {
       conversationId: null,
       workflowRunId: "run-42",
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -66,8 +66,8 @@ describe("parseRoute", () => {
       conversationId: null,
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -78,8 +78,8 @@ describe("parseRoute", () => {
       conversationId: null,
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -90,8 +90,8 @@ describe("parseRoute", () => {
       conversationId: null,
       workflowRunId: "run-9",
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -102,8 +102,8 @@ describe("parseRoute", () => {
       conversationId: null,
       workflowRunId: null,
       settingsTab: "generation",
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });
@@ -117,14 +117,14 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/skills").settingsTab).toBe("skills");
   });
 
-  it("maps space settings routes to their space slug and tab", () => {
-    expect(parseRoute("/settings/space/research/workspaces")).toEqual({
-      path: "/settings/space/research/workspaces",
+  it("maps topic settings routes to their topic slug and tab", () => {
+    expect(parseRoute("/settings/topic/research/workspaces")).toEqual({
+      path: "/settings/topic/research/workspaces",
       conversationId: null,
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: "research",
-      settingsSpaceTab: "workspaces",
+      settingsTopicSlug: "research",
+      settingsTopicTab: "workspaces",
       notFound: false,
     });
   });
@@ -378,8 +378,8 @@ describe("init with conversation store", () => {
       conversationId: "new-conv",
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
 
@@ -422,8 +422,8 @@ describe("init with conversation store", () => {
       conversationId: "second-conv",
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     });
   });

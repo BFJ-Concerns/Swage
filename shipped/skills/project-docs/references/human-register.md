@@ -30,8 +30,8 @@ consistency", ", enhancing performance", ", allowing for flexibility". These
 assert a benefit without saying how it arises. Either state the mechanism as its
 own sentence or cut the tail.
 
-**Copula avoidance.** "The gallery features four spaces and boasts 3,000 square
-feet" → "The gallery has four spaces and 3,000 square feet". Plain "is", "are",
+**Copula avoidance.** "The gallery features four topics and boasts 3,000 square
+feet" → "The gallery has four topics and 3,000 square feet". Plain "is", "are",
 and "has" are correct; elaborate substitutes (serves as, represents, offers,
 provides a way to) are the tell.
 

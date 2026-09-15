@@ -103,8 +103,8 @@ pub struct OperatorGatewaySummary {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct OperatorSessionSummary {
     pub id: Uuid,
-    pub space_id: Uuid,
-    pub space_name: String,
+    pub topic_id: Uuid,
+    pub topic_name: String,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
@@ -170,7 +170,7 @@ pub struct VariantSelectionHistoryEvent {
 pub struct AssemblyHistoryEntry {
     pub turn_id: Uuid,
     pub session_id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub recorded_at: DateTime<Utc>,
     pub assembly_name: String,
 }
@@ -186,14 +186,14 @@ pub struct OperatorHistoryResponse {
 /// Scope filter for durable agent-definition reads and deletes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AgentDefinitionScopeQuery {
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
 }
 
 /// Whole definition supplied when creating a durable agent.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct CreateAgentDefinitionRequest {
     pub id: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub display_name: String,
     pub description: String,
     pub instructions: String,
@@ -212,7 +212,7 @@ pub struct CreateAgentDefinitionRequest {
 /// Whole replacement supplied when updating a durable agent definition.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct UpdateAgentDefinitionRequest {
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub display_name: String,
     pub description: String,
     pub instructions: String,
@@ -231,7 +231,7 @@ pub struct UpdateAgentDefinitionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AgentDefinitionResponse {
     pub id: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub display_name: String,
     pub description: String,
     pub instructions: String,
@@ -259,10 +259,10 @@ pub struct AgentDefinitionListResponse {
 pub enum EffectiveAgentDefinitionSourceScope {
     BuiltIn,
     Global,
-    Space,
+    Topic,
 }
 
-/// An agent definition available when creating a session in one space.
+/// An agent definition available when creating a session in one topic.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct EffectiveAgentDefinitionResponse {
     pub id: String,
@@ -292,7 +292,7 @@ pub struct EffectiveAgentDefinitionListResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct AgentDefinitionMutationResponse {
     pub agent_id: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub summary: String,
 }
 
@@ -300,7 +300,7 @@ fn default_device_stale_after_secs() -> u64 {
     30
 }
 
-/// Result of regenerating a space's knowledge-base browse mirror — a
+/// Result of regenerating a topic's knowledge-base browse mirror — a
 /// disposable markdown projection of the database-authoritative store.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct KnowledgeMirrorRegenerateResponse {

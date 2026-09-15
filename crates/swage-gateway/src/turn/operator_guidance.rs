@@ -18,9 +18,9 @@ pub(crate) fn operator_guidance_rules(
         push_guidance_rule(&mut rules, root, HierarchyLevel::Global);
     }
     for root in trusted_readable_roots(workspace_policy) {
-        // A workspace is attached to the space, so its guidance carries the
-        // Space level in the prompts element's provenance summary.
-        push_guidance_rule(&mut rules, root, HierarchyLevel::Space);
+        // A workspace is attached to the topic, so its guidance carries the
+        // Topic level in the prompts element's provenance summary.
+        push_guidance_rule(&mut rules, root, HierarchyLevel::Topic);
     }
     rules
 }

@@ -79,15 +79,15 @@ async function listConcurrentSuite(): Promise<void> {
 }
 
 async function openComposer(page: Page): Promise<void> {
-  const openSpace = page.getByRole("button", { name: "Open" });
-  if (await openSpace.isVisible()) await openSpace.click();
+  const openTopic = page.getByRole("button", { name: "Open" });
+  if (await openTopic.isVisible()) await openTopic.click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
 }
 
 async function send(page: Page, prompt: string): Promise<void> {
   await page.goto("/");
-  const openSpace = page.getByRole("button", { name: "Open" });
-  if (await openSpace.isVisible()) await openSpace.click();
+  const openTopic = page.getByRole("button", { name: "Open" });
+  if (await openTopic.isVisible()) await openTopic.click();
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeEnabled();
   await composer.fill(prompt);

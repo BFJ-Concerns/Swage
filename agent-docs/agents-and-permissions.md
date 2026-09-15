@@ -1,5 +1,5 @@
 ---
-description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, and space-targeted session creation
+description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, and topic-targeted session creation
 ---
 
 # Agents and permissions
@@ -12,7 +12,7 @@ A durable agent definition is a DB-stored record (`AgentDefinition` in
 | Field | Purpose |
 |---|---|
 | `id` | Stable agent id; sessions carry it as `sessions.agent_id` |
-| `space_id` | `None` = global; `Some(uuid)` = space-scoped, shadows a global definition with the same id within that space |
+| `topic_id` | `None` = global; `Some(uuid)` = topic-scoped, shadows a global definition with the same id within that topic |
 | `display_name` | Human-readable label |
 | `description` | Free-text description |
 | `instructions` | Appended after operator instructions (never precede them); replaces outright when operator instructions are empty |
@@ -25,7 +25,7 @@ A durable agent definition is a DB-stored record (`AgentDefinition` in
 ### Overlay onto the config cascade
 
 `apply_agent_definition` (in `turn/configuration.rs`) overlays a definition
-onto the session's resolved file config (Global → Space → Agent `.toml`
+onto the session's resolved file config (Global → Topic → Agent `.toml`
 files). The overlay:
 
 1. Appends instructions after operator instructions.
@@ -149,10 +149,10 @@ A fresh installation's effective agent registry holds one entry: the
 shipped default (`"gateway"`, display name "Swage default"). No other
 agent definitions ship with the gateway. The start-conversation picker
 lists this default plus any operator-authored definitions visible to
-the space (via `GET /api/spaces/{spaceId}/agent-definitions`).
+the topic (via `GET /api/topics/{topicId}/agent-definitions`).
 `CreateConversationRequest`'s `agent_id` field selects one of these:
 `"gateway"` or an operator-authored definition visible to the target
-space; the gateway rejects anything else with a validation error.
+topic; the gateway rejects anything else with a validation error.
 
 A shipped workflow's roles (the research sweep's researcher, organiser,
 and synthesist) are bare dispatches inside the workflow script, not
@@ -174,7 +174,7 @@ Two kinds of root are checked, in this order:
    resulting rule carries the `Global` provenance level.
 2. **Trusted, readable workspace roots** — the active workspace and any
    workspace attachments that are both trusted and readable. Each produces
-   a rule at the `Space` provenance level.
+   a rule at the `Topic` provenance level.
 
 A workspace root that is not trusted, or that is trusted but not readable
 (e.g. a write-only attachment), contributes nothing: workspace content
@@ -212,9 +212,9 @@ which appends them after the resolved-instructions rule so the
 ### Visibility in the context inspector
 
 The turn context inspector's prompts element shows the provenance of each
-rule by hierarchy level — e.g. `prompt rules (3 total: 1 Global, 2 Space)`.
+rule by hierarchy level — e.g. `prompt rules (3 total: 1 Global, 2 Topic)`.
 Operator guidance rules from the config root appear as `Global`; those from
-workspace roots appear as `Space`.
+workspace roots appear as `Topic`.
 
 ## Tool permission model
 
@@ -321,24 +321,24 @@ event for audit and inspection. It is not injected into the child's model
 context — enforcement is handled at the dispatch/permission seam via
 `check_permission`, not via prompt text.
 
-## Space-targeted session creation
+## Topic-targeted session creation
 
 `CreateConversationRequest` (`swage-protocol/src/client/conversation.rs`)
 carries `#[serde(deny_unknown_fields)]`. Its only fields are
 `selected_model_id` and `agent_id` (both optional). Any unrecognised field —
-including `space_id` — is rejected at deserialisation as a 422 error. This
+including `topic_id` — is rejected at deserialisation as a 422 error. This
 is a structural guarantee from `deny_unknown_fields`, not a
-space_id-specific validation.
+topic_id-specific validation.
 
-Space-targeted creation uses a separate path-based endpoint:
+Topic-targeted creation uses a separate path-based endpoint:
 
 ```
-POST /api/spaces/{space_id}/sessions
+POST /api/topics/{topic_id}/sessions
 ```
 
-The handler (`create_space_session` in `handlers.rs`) accepts the same
+The handler (`create_topic_session` in `handlers.rs`) accepts the same
 `CreateConversationRequest` body (or no body) and creates the session
-directly in the named space, returning 201 on success or 404 if the space is
+directly in the named topic, returning 201 on success or 404 if the topic is
 not found.
 
 ## Sandbox and approval flow
@@ -422,31 +422,31 @@ a decision (`Approved` or `Rejected`) and a scope.
 |---|---|---|
 | `Once` | None — applies to the single pending call | This call only |
 | `Session` | In-memory `session_approval_grants`, until the gateway exits | Any session in this gateway process |
-| `Permanent` | In-memory + persisted to disk | This space while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
-| `PermanentGlobal` | In-memory + persisted to disk across all spaces | All spaces while the gateway runs; after restart, subject to space- and agent-level `require_approval` configuration |
+| `Permanent` | In-memory + persisted to disk | This topic while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
+| `PermanentGlobal` | In-memory + persisted to disk across all topics | All topics while the gateway runs; after restart, subject to topic- and agent-level `require_approval` configuration |
 
 `Session` is process-scoped, not session-scoped, despite the name.
 `ApprovalGrantKey` carries no session identifier, and `from_approval` sets
-`space_id: None` for tool and hook approvals, so the grant is stored under a
+`topic_id: None` for tool and hook approvals, so the grant is stored under a
 global key. `build_permission_config` drops the matching `require_approval`
 entry whenever that key is present, for every dispatcher built afterwards —
-in any session, any space, until the gateway process exits. Existing
+in any session, any topic, until the gateway process exits. Existing
 dispatchers keep their original config; the grant takes effect on the next
 one built.
 
 For tool approvals, the persisted reach in the table is conditional after a
-restart. Persistence removes the tool from `require_approval` in the space or
-global TOML file. That field uses replacement semantics in the Global → Space
-→ Agent cascade, so an agent file can replace a persisted space list, and a
-space or agent file can replace a persisted global list. The process-local
+restart. Persistence removes the tool from `require_approval` in the topic or
+global TOML file. That field uses replacement semantics in the Global → Topic
+→ Agent cascade, so an agent file can replace a persisted topic list, and a
+topic or agent file can replace a persisted global list. The process-local
 grant masks such a narrower approval requirement until the gateway exits;
 after restart, the narrower configuration takes effect again.
 
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals
 (workspace attachment trust). For tool and location approvals alike,
-`Permanent` grants carry the approving space's `space_id`, while
-`PermanentGlobal` grants use `space_id: None`. `Session` grants are also
-global: tool and hook approvals get `space_id: None` from `from_approval`,
+`Permanent` grants carry the approving topic's `topic_id`, while
+`PermanentGlobal` grants use `topic_id: None`. `Session` grants are also
+global: tool and hook approvals get `topic_id: None` from `from_approval`,
 and location approvals explicitly use a global location key.
 
 ### Timeout and rejection

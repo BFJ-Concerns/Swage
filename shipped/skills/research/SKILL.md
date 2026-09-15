@@ -1,12 +1,12 @@
 ---
 name: Research
-description: Run an unattended research sweep — gather live web sources on a topic into the space's knowledge base, organise them, and synthesise cited findings against a stated purpose. Use when asked to research a topic, build up evidence on a question, or answer from gathered sources rather than from memory.
+description: Run an unattended research sweep — gather live web sources on a topic into the topic's knowledge base, organise them, and synthesise cited findings against a stated purpose. Use when asked to research a topic, build up evidence on a question, or answer from gathered sources rather than from memory.
 ---
 
 # Research
 
 A research sweep turns a topic and a purpose into cited findings in the
-space's cumulative knowledge base. It runs unattended: sources are
+topic's cumulative knowledge base. It runs unattended: sources are
 gathered and recorded as immutable observations, an organising pass
 signposts what landed, and a synthesis pass delivers claims only where a
 quotation in the corpus supports them. Everything it gathers is data,

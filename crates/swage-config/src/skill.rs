@@ -2,7 +2,7 @@
 //! resolution.
 //!
 //! Skills are directories containing a `SKILL.md` file discovered at three
-//! hierarchy levels (global, space, agent). Same-name skills at more
+//! hierarchy levels (global, topic, agent). Same-name skills at more
 //! specific levels shadow less specific ones.
 
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use crate::model::HierarchyLevel;
 ///
 /// Skills are discovered as subdirectories of a `skills/` folder at each
 /// hierarchy level. The directory name is the canonical skill identifier and
-/// must match `[a-z0-9-]+`. More specific levels (Agent > Space > Global)
+/// must match `[a-z0-9-]+`. More specific levels (Agent > Topic > Global)
 /// shadow less specific ones when the same name appears at multiple levels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillDefinition {
@@ -234,7 +234,7 @@ fn parse_skill_frontmatter(raw: &str) -> Result<SkillFrontmatterParts, String> {
 pub fn level_specificity(level: &HierarchyLevel) -> i32 {
     match level {
         HierarchyLevel::Agent => 0,
-        HierarchyLevel::Space => 1,
+        HierarchyLevel::Topic => 1,
         HierarchyLevel::Global => 2,
     }
 }
@@ -248,9 +248,9 @@ pub fn level_specificity(level: &HierarchyLevel) -> i32 {
 /// 4. Parses found `SKILL.md` files via [`parse_skill_file`]
 ///
 /// **Override resolution:** When the same skill name appears at more than one
-/// level, only the most specific version survives (Agent > Space > Global).
+/// level, only the most specific version survives (Agent > Topic > Global).
 ///
-/// **Sort order:** Agent → Space → Global, then alphabetically
+/// **Sort order:** Agent → Topic → Global, then alphabetically
 /// by name within each level.
 ///
 /// Invalid directory names and malformed `SKILL.md` files produce
@@ -415,8 +415,8 @@ mod tests {
             description: "A skill with no display name.".to_string(),
             instructions: String::new(),
             tools: vec![],
-            level: HierarchyLevel::Space,
-            source_path: PathBuf::from("/space/skills/unnamed-skill/SKILL.md"),
+            level: HierarchyLevel::Topic,
+            source_path: PathBuf::from("/topic/skills/unnamed-skill/SKILL.md"),
             shipped: false,
         };
 
@@ -575,7 +575,7 @@ Minimal instructions.
 ",
         );
 
-        let skill = parse_skill_file(&path, "minimal", HierarchyLevel::Space).unwrap();
+        let skill = parse_skill_file(&path, "minimal", HierarchyLevel::Topic).unwrap();
 
         assert_eq!(skill.name, "minimal");
         assert_eq!(
@@ -739,7 +739,7 @@ description: Path check.
 ",
         );
 
-        let skill = parse_skill_file(&path, "path-check", HierarchyLevel::Space).unwrap();
+        let skill = parse_skill_file(&path, "path-check", HierarchyLevel::Topic).unwrap();
 
         assert_eq!(skill.source_path, path);
     }
@@ -847,9 +847,9 @@ The actual instructions.
         );
     }
 
-    /// Invalid directory name (contains space) produces a warning.
+    /// Invalid directory name (contains topic) produces a warning.
     #[test]
-    fn invalid_dir_name_with_space_produces_warning() {
+    fn invalid_dir_name_with_topic_produces_warning() {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("skills").join("my skill")).unwrap();
 
@@ -900,7 +900,7 @@ The actual instructions.
     #[test]
     fn unique_skills_from_multiple_levels_all_returned() {
         let global_dir = TempDir::new().unwrap();
-        let space_dir = TempDir::new().unwrap();
+        let topic_dir = TempDir::new().unwrap();
 
         make_skill(
             global_dir.path(),
@@ -908,14 +908,14 @@ The actual instructions.
             &minimal_skill_md("Global skill."),
         );
         make_skill(
-            space_dir.path(),
-            "space-only",
-            &minimal_skill_md("Space skill."),
+            topic_dir.path(),
+            "topic-only",
+            &minimal_skill_md("Topic skill."),
         );
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Space, space_dir.path()),
+            (HierarchyLevel::Topic, topic_dir.path()),
         ];
         let (skills, warnings) = discover_skills(&levels);
 
@@ -954,27 +954,27 @@ The actual instructions.
         assert_eq!(skills[2].name, "zebra");
     }
 
-    /// Sorting across levels: Agent skills sort before Space, Space before Global.
+    /// Sorting across levels: Agent skills sort before Topic, Topic before Global.
     #[test]
-    fn skills_sorted_agent_before_space_before_global() {
+    fn skills_sorted_agent_before_topic_before_global() {
         let global_dir = TempDir::new().unwrap();
-        let space_dir = TempDir::new().unwrap();
+        let topic_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         make_skill(global_dir.path(), "g-skill", &minimal_skill_md("Global."));
-        make_skill(space_dir.path(), "p-skill", &minimal_skill_md("Space."));
+        make_skill(topic_dir.path(), "p-skill", &minimal_skill_md("Topic."));
         make_skill(agent_dir.path(), "a-skill", &minimal_skill_md("Agent."));
 
         let levels = [
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Space, space_dir.path()),
+            (HierarchyLevel::Topic, topic_dir.path()),
             (HierarchyLevel::Agent, agent_dir.path()),
         ];
         let (skills, _) = discover_skills(&levels);
 
         assert_eq!(skills.len(), 3);
         assert_eq!(skills[0].level, HierarchyLevel::Agent, "agent first");
-        assert_eq!(skills[1].level, HierarchyLevel::Space, "space second");
+        assert_eq!(skills[1].level, HierarchyLevel::Topic, "topic second");
         assert_eq!(skills[2].level, HierarchyLevel::Global, "global last");
     }
 }

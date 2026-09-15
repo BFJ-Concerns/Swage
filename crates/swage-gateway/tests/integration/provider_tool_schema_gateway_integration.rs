@@ -18,7 +18,7 @@ use swage_gateway::{
     tool::{Tool, ToolDispatcher},
 };
 use swage_provider::{LlmProvider, openai::OpenAiProvider, provider::ProviderConfig};
-use swage_storage::{SpaceStore, SqliteStorage, Storage};
+use swage_storage::{SqliteStorage, Storage, TopicStore};
 
 use crate::support::{ProcessEnvGuard, scratch_tempdir, start_live_server};
 
@@ -77,7 +77,7 @@ async fn gateway_turn_projects_registered_union_tool_schema_on_openai_wire() {
     )));
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         ToolDispatcher::allow_all(vec![Arc::new(UnionTool) as Arc<dyn Tool>]),

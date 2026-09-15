@@ -736,7 +736,7 @@ async fn request_sandbox_degradation_approval(
     Ok(outcome)
 }
 
-/// Distilled view of which permission grants the space has actually accepted
+/// Distilled view of which permission grants the topic has actually accepted
 /// across its trusted workspace attachments. Untrusted attachments contribute
 /// nothing.
 
@@ -914,7 +914,7 @@ async fn record_failed_turn_and_release_on_error<T>(
 /// # Flow
 /// 1. Look up the session's default thread (created alongside the session).
 /// 2. Guard: reject if a turn is already Processing for this thread.
-/// 3. Resolve the space for the session; load per-space config and build ToolContext.
+/// 3. Resolve the topic for the session; load per-topic config and build ToolContext.
 /// 4. Create a Turn record (state=Pending), immediately advance to Processing.
 /// 5. Store the user message with thread_id and position.
 /// 6. Build message history from the thread and send a streaming request to the provider.
@@ -1180,7 +1180,7 @@ async fn process_turn_with_composition_and_focus(
         attachments,
     } = input;
 
-    // Step 1: Resolve the space and target thread for this session.
+    // Step 1: Resolve the topic and target thread for this session.
     let mut session = state
         .storage
         .get_session(session_id)
@@ -1223,26 +1223,26 @@ async fn process_turn_with_composition_and_focus(
             .await?;
     }
 
-    // Step 3: Resolve the space for this session so we can load per-space config
+    // Step 3: Resolve the topic for this session so we can load per-topic config
     // and build the ToolContext passed to each tool invocation.
-    let space_id = session.space_id;
+    let topic_id = session.topic_id;
 
-    let space = state
-        .space_store
-        .get(space_id)
+    let topic = state
+        .topic_store
+        .get(topic_id)
         .await?
-        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-    let space_slug = space.slug.clone();
+        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+    let topic_slug = topic.slug.clone();
 
     // Placement identity is durable, but filesystem authority is not. Check
     // the recorded authority root against today's attachment/location grants
     // and replace the cached write bit before assembly or sandbox creation.
     reauthorise_worker_placement_for_turn(state, &mut session).await?;
 
-    // Load space-specific config. Missing space config falls back to the
+    // Load topic-specific config. Missing topic config falls back to the
     // startup config, but present invalid config fails the turn before any
     // user message is written.
-    let config = load_session_config(state, &space_slug, &session.agent_id)?;
+    let config = load_session_config(state, &topic_slug, &session.agent_id)?;
 
     // A durable agent definition, when one exists for this agent, gives the
     // session its character on top of the resolved file config: instructions
@@ -1252,7 +1252,7 @@ async fn process_turn_with_composition_and_focus(
     let config = match crate::service::resolve_effective_agent_definition(
         state.storage.as_ref(),
         &session.agent_id,
-        space_id,
+        topic_id,
     )
     .await
     {
@@ -1277,8 +1277,8 @@ async fn process_turn_with_composition_and_focus(
     let bound_agent_ids = dispatch_bound_agent_ids(session.metadata.as_ref())?;
     let config = apply_dispatch_bounds(
         state,
-        &space_slug,
-        space_id,
+        &topic_slug,
+        topic_id,
         config,
         &bound_agent_ids,
         &format!("worker session {session_id}"),
@@ -1343,14 +1343,14 @@ async fn process_turn_with_composition_and_focus(
         &attachments,
     )?;
 
-    // Skill discovery, space memory loading, and assembly search paths all use
+    // Skill discovery, topic memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.
     let swage_root = resolve_swage_root(state);
 
     let active_skills = load_active_skills_for_agent(
         state,
         session_id,
-        &space_slug,
+        &topic_slug,
         &session.agent_id,
         Some(swage_root),
         true,
@@ -1525,7 +1525,7 @@ async fn process_turn_with_composition_and_focus(
     };
     let assembly_name = context_choices.assembly_name;
     let memory_content = load_memory_for_assembly(&assembly_name, || async {
-        load_space_memory(swage_root, &space_slug).await
+        load_topic_memory(swage_root, &topic_slug).await
     })
     .await;
     let mut session_variables: std::collections::BTreeMap<String, String> =
@@ -1549,7 +1549,7 @@ async fn process_turn_with_composition_and_focus(
     // orientation baseline, so it is resolved before elements are built.
     let workspace_policy = load_trusted_workspace_policy(
         &state.storage,
-        space_id,
+        topic_id,
         session.active_workspace_attachment_id,
     )
     .await;
@@ -1578,23 +1578,23 @@ async fn process_turn_with_composition_and_focus(
                 state.config_root.display()
             )));
         }
-        agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session.id)
+        agent_workspace_from_policy(&state.config_root, &workspace_policy, topic_id, session.id)
     };
 
     let environment =
-        build_session_environment(&space, Some(workspace_root.display().to_string()), &session);
+        build_session_environment(&topic, Some(workspace_root.display().to_string()), &session);
     let available_skills =
-        available_skills_for_agent(&space_slug, &session.agent_id, Some(swage_root));
+        available_skills_for_agent(&topic_slug, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
-    let hierarchy = configuration_hierarchy(swage_root, &space_slug, Some(&session.agent_id));
+    let hierarchy = configuration_hierarchy(swage_root, &topic_slug, Some(&session.agent_id));
 
     let elements = build_assembly_elements(
         &config.instructions,
         operator_guidance,
         active_skills,
         history_messages,
-        memory_content.map(|content| (content, space.name.clone())),
+        memory_content.map(|content| (content, topic.name.clone())),
         environment,
         available_skills,
         config.default_model_id(),
@@ -1614,7 +1614,7 @@ async fn process_turn_with_composition_and_focus(
         &elements,
         &tokeniser,
         Some(swage_root),
-        &space_slug,
+        &topic_slug,
         &session.agent_id,
         &session_variables,
     );
@@ -1655,7 +1655,7 @@ async fn process_turn_with_composition_and_focus(
     append_approved_location_paths(
         &mut allowed_paths,
         &session_approval_grants,
-        space_id,
+        topic_id,
         session_id,
         session.metadata.as_ref(),
     );
@@ -1686,7 +1686,7 @@ async fn process_turn_with_composition_and_focus(
             config: &config,
             agent_config: &agent_config,
             session_metadata: session.metadata.as_ref(),
-            space_id: Some(space_id),
+            topic_id: Some(topic_id),
             active_workspace_attachment_id: session.active_workspace_attachment_id,
             ws_tx: ws_tx.clone(),
             session_id: Some(session_id),
@@ -1803,7 +1803,7 @@ async fn process_turn_with_composition_and_focus(
                         config: &unsandboxed_config,
                         agent_config: &agent_config,
                         session_metadata: session.metadata.as_ref(),
-                        space_id: Some(space_id),
+                        topic_id: Some(topic_id),
                         active_workspace_attachment_id: session.active_workspace_attachment_id,
                         ws_tx: ws_tx.clone(),
                         session_id: Some(session_id),
@@ -1936,7 +1936,7 @@ async fn process_turn_with_composition_and_focus(
         let permissions = build_permission_config(
             &config,
             &state.config,
-            Some(space_id),
+            Some(topic_id),
             Some(session_id),
             &session_approval_grants,
         );
@@ -2043,7 +2043,7 @@ async fn process_turn_with_composition_and_focus(
                 session_id,
                 thread_id,
                 turn_id: prepared_turn_id,
-                space_id: Some(space_id),
+                topic_id: Some(topic_id),
             },
             user_message: before_inbound.canonical_content.clone(),
             assembled_context: assembled_messages,
@@ -2716,7 +2716,7 @@ fn execute_context_assembly(
     elements: &[Box<dyn ContextElement>],
     tokeniser: &TiktokenTokeniser,
     swage_root: Option<&Path>,
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: &str,
     variables: &std::collections::BTreeMap<String, String>,
 ) -> swage_context::report::AssemblyOutput {
@@ -2731,7 +2731,7 @@ fn execute_context_assembly(
     }
 
     let search_levels = swage_root
-        .map(|root| configuration_hierarchy(root, space_slug, Some(agent_id)))
+        .map(|root| configuration_hierarchy(root, topic_slug, Some(agent_id)))
         .unwrap_or_default();
     let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
         .iter()

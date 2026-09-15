@@ -29,8 +29,8 @@ async function request(
   return response;
 }
 
-export async function listSpaceMaterials(spaceId: string): Promise<MaterialRecord[]> {
-  const response = await request(`/api/spaces/${spaceId}/materials`, "GET");
+export async function listTopicMaterials(topicId: string): Promise<MaterialRecord[]> {
+  const response = await request(`/api/topics/${topicId}/materials`, "GET");
   const body = (await response.json()) as { materials: MaterialRecord[] };
   return body.materials;
 }

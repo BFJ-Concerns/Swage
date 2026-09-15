@@ -19,7 +19,7 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState, tool::knowledge::KnowledgeRecordTool};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewWorkflowRun, ObservationStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
+    NewWorkflowRun, ObservationStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
 };
 use tokio::net::TcpListener;
 
@@ -30,12 +30,12 @@ struct InterruptedKnowledgeProvider {
 }
 
 fn crashed_workflow_run(
-    space_id: uuid::Uuid,
+    topic_id: uuid::Uuid,
     source: Option<&str>,
     source_hash: &str,
 ) -> NewWorkflowRun {
     NewWorkflowRun {
-        space_id,
+        topic_id,
         parent_run_id: None,
         parent_seq: None,
         script_version_id: None,
@@ -68,10 +68,10 @@ async fn gateway_boot_recovers_and_wakes_runs_left_running_by_a_crash() {
     let root = scratch_tempdir();
     let runtime = scratch_tempdir();
     let storage = Arc::new(SqliteStorage::open(&root.path().join("swage.db")).unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let replayable = storage
         .create_workflow_run(crashed_workflow_run(
-            space.id,
+            topic.id,
             Some("return null;"),
             "boot-recovery-replayable",
         ))
@@ -79,7 +79,7 @@ async fn gateway_boot_recovers_and_wakes_runs_left_running_by_a_crash() {
         .unwrap();
     let listed_after_recovery = storage
         .create_workflow_run(crashed_workflow_run(
-            space.id,
+            topic.id,
             None,
             "boot-recovery-unreplayable",
         ))
@@ -223,13 +223,13 @@ impl LlmProvider for InterruptedKnowledgeProvider {
 async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_over_http() {
     let root = scratch_tempdir();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let provider = Arc::new(InterruptedKnowledgeProvider {
         rounds: AtomicUsize::new(0),
     });
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![
@@ -246,7 +246,7 @@ async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_o
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
     let started: Value = client
-        .post(format!("{base}/api/spaces/{}/workflow-runs", space.id))
+        .post(format!("{base}/api/topics/{}/workflow-runs", topic.id))
         .json(&json!({
             "source": "return await agent('Record the source', { agent: 'researcher', tools: ['knowledge_record'], maxAttempts: 1 });",
             "args": null,
@@ -265,7 +265,7 @@ async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_o
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let observations = storage.list_observations_by_space(space.id).await.unwrap();
+            let observations = storage.list_observations_by_topic(topic.id).await.unwrap();
             let journal = storage.list_workflow_journal(run_uuid).await.unwrap();
             if observations.len() == 1
                 && journal.len() == 1
@@ -338,7 +338,7 @@ async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_o
 
     assert_eq!(detail["run"]["final_output"], "capture retained");
     assert_eq!(provider.rounds.load(Ordering::SeqCst), 4);
-    let observations = storage.list_observations_by_space(space.id).await.unwrap();
+    let observations = storage.list_observations_by_topic(topic.id).await.unwrap();
     assert_eq!(
         observations.len(),
         1,

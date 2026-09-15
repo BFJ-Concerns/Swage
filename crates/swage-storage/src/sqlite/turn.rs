@@ -368,12 +368,12 @@ mod tests {
     use rusqlite::params;
     use uuid::Uuid;
 
-    use crate::model::{NewSession, NewSpace};
-    use crate::store::{SessionStore, SpaceStore};
+    use crate::model::{NewSession, NewTopic};
+    use crate::store::{SessionStore, TopicStore};
 
     use super::*;
 
-    // Create a space → session → thread chain.
+    // Create a topic → session → thread chain.
     //
     // Threads are inserted via raw SQL because the ThreadStore SQLite
     // implementation lives in a separate task and may not be wired yet.
@@ -384,8 +384,8 @@ mod tests {
 
     async fn make_session_thread() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             })
@@ -393,7 +393,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

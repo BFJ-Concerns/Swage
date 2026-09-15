@@ -7,12 +7,12 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct SkillItem {
-    /// Stable synthetic identifier for a shipped skill in this space.
+    /// Stable synthetic identifier for a shipped skill in this topic.
     pub id: Option<Uuid>,
     pub name: String,
     pub display_name: Option<String>,
     pub description: String,
-    /// Resolved hierarchy level: `agent`, `space`, or `global`.
+    /// Resolved hierarchy level: `agent`, `topic`, or `global`.
     pub level: String,
     pub tools: Vec<String>,
     pub always_active: bool,

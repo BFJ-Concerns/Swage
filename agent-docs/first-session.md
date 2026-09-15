@@ -1,26 +1,26 @@
 ---
-description: First-session walkthrough — open a space, optionally attach and trust a workspace, start a conversation with a chosen agent
+description: First-session walkthrough — open a topic, optionally attach and trust a workspace, start a conversation with a chosen agent
 ---
 
 # First session
 
 After the gateway is running and a provider is configured (README), a
-first session needs only an opened space. Attaching a workspace and
+first session needs only an opened topic. Attaching a workspace and
 trusting it are optional — they give agents file access and project
 guidance, but a conversation can start without either.
 
-## Open a space
+## Open a topic
 
-The web UI opens to the space picker. A fresh install has one space
-(`default`, marked **Default**). Select a space card to preview it, then
+The web UI opens to the topic picker. A fresh install has one topic
+(`default`, marked **Default**). Select a topic card to preview it, then
 select **Open**.
 
-Spaces are created from the space picker; every space carries its own
+Topics are created from the topic picker; every topic carries its own
 conversations, agents, instructions, skills, and workspace attachments.
 
 ## Attach a workspace
 
-Inside the opened space, select **Settings** in the top navigation, then
+Inside the opened topic, select **Settings** in the top navigation, then
 select **Workspaces** in the settings section navigation.
 
 The workspace form takes a filesystem path to an existing repository
@@ -45,7 +45,7 @@ read into agent context until the workspace is trusted.
 
 Select **Trust workspace** on an untrusted attachment. Its configured file
 permissions become active, and the workspace's `AGENTS.md` feeds the agent context for sessions in this
-space.
+topic.
 
 See [Agents and permissions — Operator guidance](agents-and-permissions.md#operator-guidance-agentsmd)
 for how trusted workspace guidance layers into the instruction chain
@@ -54,13 +54,13 @@ instructions).
 
 ## Start a conversation with a chosen agent
 
-The message input area includes an agent picker that lists the space's
+The message input area includes an agent picker that lists the topic's
 effective agent definitions — the shipped default (`"gateway"`, display
 name **Swage default**) plus any operator-authored definitions visible to
-the space. Selecting an agent and submitting the first message creates a
+the topic. Selecting an agent and submitting the first message creates a
 conversation bound to that definition and navigates to it immediately.
 
-The picker queries `GET /api/spaces/{spaceId}/agent-definitions`. The
+The picker queries `GET /api/topics/{topicId}/agent-definitions`. The
 `agent_id` field of `CreateConversationRequest` carries the selection;
 omitting it uses the default. See
 [Agents and permissions — Effective agent registry](agents-and-permissions.md#effective-agent-registry)

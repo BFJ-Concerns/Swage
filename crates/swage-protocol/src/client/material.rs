@@ -10,7 +10,7 @@ use uuid::Uuid;
 pub struct CreateAttachmentRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub filename: String,
     pub mime_type: String,
     pub content_base64: String,
@@ -20,7 +20,7 @@ pub struct AttachmentResponse {
     pub id: Uuid,
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub kind: String,
     pub status: String,
     pub filename: String,
@@ -61,7 +61,7 @@ pub struct QueuedAttachmentResponse {
 pub struct CreateMaterialRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub title: String,
     pub relative_path: String,
     pub mime_type: Option<String>,
@@ -71,7 +71,7 @@ pub struct CreateMaterialRequest {
 pub struct PromoteMaterialRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub relative_path: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -79,7 +79,7 @@ pub struct MaterialResponse {
     pub id: Uuid,
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub source_kind: String,
     pub source_attachment_id: Option<Uuid>,
     pub status: String,

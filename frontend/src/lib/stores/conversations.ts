@@ -12,15 +12,15 @@ export interface ConversationStore {
   readonly conversations: ConversationSummary[];
   readonly activeConversation: ConversationDetail | null;
   readonly isLoading: boolean;
-  loadConversations(spaceId: string): Promise<void>;
+  loadConversations(topicId: string): Promise<void>;
   selectConversation(id: string): Promise<void>;
-  // spaceId is required by the underlying store but optional here so that
+  // topicId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
-  // threading spaceId through every intermediate component.
-  createConversation(spaceId?: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<void>;
+  // threading topicId through every intermediate component.
+  createConversation(topicId?: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   // Drops the active conversation without touching the server — used when the
-  // selected space changes so a conversation from the old space can't linger
+  // selected topic changes so a conversation from the old topic can't linger
   // as the target of the composer.
   clearActiveConversation(): void;
   appendOptimisticUserMessage(message: {
@@ -158,10 +158,10 @@ export function createConversationStore(): ConversationStore {
     // Actions
     // ---------------------------------------------------------------------------
 
-    async loadConversations(spaceId) {
+    async loadConversations(topicId) {
       isLoadingStore.set(true);
       try {
-        const list = await api.listConversations(spaceId);
+        const list = await api.listConversations(topicId);
         conversationsStore.set(sortByRecency(list));
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
@@ -181,17 +181,17 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async createConversation(spaceId, selectedModelId, agentId, effort) {
-      if (!spaceId) {
-        throw new Error("spaceId is required to create a conversation");
+    async createConversation(topicId, selectedModelId, agentId, effort) {
+      if (!topicId) {
+        throw new Error("topicId is required to create a conversation");
       }
 
-      const resp = await api.createConversation(spaceId, selectedModelId, agentId, effort);
+      const resp = await api.createConversation(topicId, selectedModelId, agentId, effort);
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
         id: resp.id,
-        space_id: resp.space_id,
+        topic_id: resp.topic_id,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,

@@ -2,12 +2,12 @@
 import type { Effort } from "./Effort";
 
 /**
- * Request body for the conversation and space-session creation endpoints.
+ * Request body for the conversation and topic-session creation endpoints.
  *
  * Every field is optional and the body itself may be omitted: an absent
  * `agent_id` selects the default `"gateway"` agent, and an absent
  * `selected_model_id` leaves the session's model unselected. A named
  * `agent_id` must be `"gateway"` or an agent definition visible to the
- * target space; the gateway rejects anything else with a validation error.
+ * target topic; the gateway rejects anything else with a validation error.
  */
 export type CreateConversationRequest = { selected_model_id?: string | null, agent_id?: string | null, effort?: Effort | null, };

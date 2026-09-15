@@ -1,7 +1,7 @@
 // Relative timestamp formatting for conversation list entries.
 //
 // Returns short, human-readable strings — "2m ago", "yesterday", "Jan 5" —
-// so the sidebar doesn't waste space on full timestamps.
+// so the sidebar doesn't waste topic on full timestamps.
 
 /**
  * Format an ISO timestamp as a human-readable relative string.

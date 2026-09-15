@@ -18,7 +18,7 @@ use swage_core::{
     Role, StreamChunk, ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
 };
 use swage_provider::LlmProvider;
-use swage_storage::{NewSession, NewThread, SessionStore, SpaceStore, SqliteStorage, ThreadStore};
+use swage_storage::{NewSession, NewThread, SessionStore, SqliteStorage, ThreadStore, TopicStore};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -76,10 +76,10 @@ impl LlmProvider for CountingProvider {
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_caller_compacts_with_the_counting_and_summarising_provider() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "compaction-agent".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -118,7 +118,7 @@ async fn agent_caller_compacts_with_the_counting_and_summarising_provider() {
                     session_id: session.id,
                     thread_id: thread.id,
                     turn_id: Uuid::new_v4(),
-                    space_id: Some(space.id),
+                    topic_id: Some(topic.id),
                 },
                 user_message: "continue after summarising".into(),
                 assembled_context: vec![

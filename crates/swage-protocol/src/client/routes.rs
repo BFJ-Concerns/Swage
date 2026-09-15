@@ -32,7 +32,7 @@ use super::{
         ModelDiscoveryResponse, RestartStatusResponse, SaveProviderSettings, SaveSettingsRequest,
         SettingsResponse,
     },
-    space::{CreateSpaceRequest, SpaceListResponse, SpaceResponse, UpdateSpaceRequest},
+    topic::{CreateTopicRequest, TopicListResponse, TopicResponse, UpdateTopicRequest},
 };
 
 /// HTTP method, as the OpenAPI document spells it.
@@ -150,81 +150,81 @@ fn schema<T: JsonSchema>() -> Option<Cow<'static, str>> {
 pub fn routes() -> Vec<Route> {
     vec![
         Route {
-            operation_id: "list_spaces",
+            operation_id: "list_topics",
             method: Method::Get,
-            path: "/api/spaces",
+            path: "/api/topics",
             path_parameters: vec![],
             query_parameters: vec![],
-            summary: "List every space.",
+            summary: "List every topic.",
             request_optional: false,
 
             request: None,
             response: Response {
                 status: 200,
-                body: schema::<SpaceListResponse>(),
+                body: schema::<TopicListResponse>(),
             },
         },
         Route {
-            operation_id: "create_space",
+            operation_id: "create_topic",
             method: Method::Post,
-            path: "/api/spaces",
+            path: "/api/topics",
             path_parameters: vec![],
             query_parameters: vec![],
-            summary: "Create a space.",
+            summary: "Create a topic.",
             request_optional: false,
 
-            request: schema::<CreateSpaceRequest>(),
+            request: schema::<CreateTopicRequest>(),
             response: Response {
                 status: 201,
-                body: schema::<SpaceResponse>(),
+                body: schema::<TopicResponse>(),
             },
         },
         Route {
-            operation_id: "get_space",
+            operation_id: "get_topic",
             method: Method::Get,
-            path: "/api/spaces/{id}",
+            path: "/api/topics/{id}",
             path_parameters: vec![Parameter {
                 name: "id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Read one space.",
+            summary: "Read one topic.",
             request_optional: false,
 
             request: None,
             response: Response {
                 status: 200,
-                body: schema::<SpaceResponse>(),
+                body: schema::<TopicResponse>(),
             },
         },
         Route {
-            operation_id: "update_space",
+            operation_id: "update_topic",
             method: Method::Put,
-            path: "/api/spaces/{id}",
+            path: "/api/topics/{id}",
             path_parameters: vec![Parameter {
                 name: "id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Update a space's name or description.",
+            summary: "Update a topic's name or description.",
             request_optional: false,
 
-            request: schema::<UpdateSpaceRequest>(),
+            request: schema::<UpdateTopicRequest>(),
             response: Response {
                 status: 200,
-                body: schema::<SpaceResponse>(),
+                body: schema::<TopicResponse>(),
             },
         },
         Route {
-            operation_id: "delete_space",
+            operation_id: "delete_topic",
             method: Method::Delete,
-            path: "/api/spaces/{id}",
+            path: "/api/topics/{id}",
             path_parameters: vec![Parameter {
                 name: "id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Delete a space.",
+            summary: "Delete a topic.",
             request_optional: false,
 
             request: None,
@@ -234,15 +234,15 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
-            operation_id: "list_space_sessions",
+            operation_id: "list_topic_sessions",
             method: Method::Get,
-            path: "/api/spaces/{space_id}/sessions",
+            path: "/api/topics/{topic_id}/sessions",
             path_parameters: vec![Parameter {
-                name: "space_id",
+                name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "List conversations in a space.",
+            summary: "List conversations in a topic.",
             request_optional: false,
 
             request: None,
@@ -252,15 +252,15 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
-            operation_id: "create_space_session",
+            operation_id: "create_topic_session",
             method: Method::Post,
-            path: "/api/spaces/{space_id}/sessions",
+            path: "/api/topics/{topic_id}/sessions",
             path_parameters: vec![Parameter {
-                name: "space_id",
+                name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Create a conversation in a space.",
+            summary: "Create a conversation in a topic.",
             request_optional: true,
 
             request: schema::<CreateConversationRequest>(),
@@ -326,13 +326,13 @@ pub fn routes() -> Vec<Route> {
         Route {
             operation_id: "list_pages",
             method: Method::Get,
-            path: "/api/spaces/{space_id}/pages",
+            path: "/api/topics/{topic_id}/pages",
             path_parameters: vec![Parameter {
-                name: "space_id",
+                name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "List pages in a space.",
+            summary: "List pages in a topic.",
             request_optional: false,
 
             request: None,
@@ -344,13 +344,13 @@ pub fn routes() -> Vec<Route> {
         Route {
             operation_id: "create_page",
             method: Method::Post,
-            path: "/api/spaces/{space_id}/pages",
+            path: "/api/topics/{topic_id}/pages",
             path_parameters: vec![Parameter {
-                name: "space_id",
+                name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Create a page in a space.",
+            summary: "Create a page in a topic.",
             request_optional: false,
 
             request: schema::<CreatePageRequest>(),
@@ -362,13 +362,13 @@ pub fn routes() -> Vec<Route> {
         Route {
             operation_id: "list_page_templates",
             method: Method::Get,
-            path: "/api/spaces/{space_id}/page-templates",
+            path: "/api/topics/{topic_id}/page-templates",
             path_parameters: vec![Parameter {
-                name: "space_id",
+                name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "List page templates in a space.",
+            summary: "List page templates in a topic.",
             request_optional: false,
             request: None,
             response: Response {
@@ -379,13 +379,13 @@ pub fn routes() -> Vec<Route> {
         Route {
             operation_id: "create_page_template",
             method: Method::Post,
-            path: "/api/spaces/{space_id}/page-templates",
+            path: "/api/topics/{topic_id}/page-templates",
             path_parameters: vec![Parameter {
-                name: "space_id",
+                name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Create a page template in a space.",
+            summary: "Create a page template in a topic.",
             request_optional: false,
             request: schema::<CreatePageTemplateRequest>(),
             response: Response {
@@ -727,9 +727,9 @@ mod tests {
     fn path_parameters_render_their_declared_probe_values() {
         let get = routes()
             .into_iter()
-            .find(|route| route.operation_id == "get_space")
+            .find(|route| route.operation_id == "get_topic")
             .unwrap();
-        assert_eq!(get.probe_path(), "/api/spaces/not-a-uuid");
+        assert_eq!(get.probe_path(), "/api/topics/not-a-uuid");
     }
 
     #[test]

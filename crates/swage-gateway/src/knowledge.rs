@@ -2,8 +2,8 @@
 //! raw bodies.
 //!
 //! The knowledge base's SQLite rows hold metadata; the captured bytes live
-//! here, addressed by their SHA-256 under the space data root:
-//! `spaces/<slug>/.swage/knowledge/bodies/<hash[0..2]>/<hash>`. Files are
+//! here, addressed by their SHA-256 under the topic data root:
+//! `topics/<slug>/.swage/knowledge/bodies/<hash[0..2]>/<hash>`. Files are
 //! write-once and never deleted: raw bodies are retained indefinitely so a
 //! better extractor (or eventual OCR) can re-process old captures — lossy
 //! text never becomes the only copy.
@@ -21,10 +21,10 @@ pub struct StoredBody {
     pub byte_count: u64,
 }
 
-fn bodies_root(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
+fn bodies_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
     config_root
-        .join("spaces")
-        .join(space_slug)
+        .join("topics")
+        .join(topic_slug)
         .join(".swage")
         .join("knowledge")
         .join("bodies")
@@ -32,7 +32,7 @@ fn bodies_root(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
 
 fn body_path(
     config_root: &std::path::Path,
-    space_slug: &str,
+    topic_slug: &str,
     sha256: &str,
 ) -> Result<PathBuf, GatewayError> {
     // Addresses come from our own hasher or a validated observation row, but
@@ -43,7 +43,7 @@ fn body_path(
         )));
     }
     let sha256 = sha256.to_ascii_lowercase();
-    Ok(bodies_root(config_root, space_slug)
+    Ok(bodies_root(config_root, topic_slug)
         .join(&sha256[..2])
         .join(sha256))
 }
@@ -52,14 +52,14 @@ fn body_path(
 /// hash to the same path, and an existing file is left untouched.
 pub async fn write_body(
     config_root: &std::path::Path,
-    space_slug: &str,
+    topic_slug: &str,
     bytes: &[u8],
 ) -> Result<StoredBody, GatewayError> {
     let sha256: String = Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let path = body_path(config_root, space_slug, &sha256)?;
+    let path = body_path(config_root, topic_slug, &sha256)?;
 
     if tokio::fs::try_exists(&path)
         .await
@@ -98,10 +98,10 @@ pub async fn write_body(
 /// Read a stored body back by address.
 pub async fn read_body(
     config_root: &std::path::Path,
-    space_slug: &str,
+    topic_slug: &str,
     sha256: &str,
 ) -> Result<Vec<u8>, GatewayError> {
-    let path = body_path(config_root, space_slug, sha256)?;
+    let path = body_path(config_root, topic_slug, sha256)?;
     tokio::fs::read(&path).await.map_err(|error| {
         GatewayError::ValidationError(format!("body {sha256} is not readable: {error}"))
     })

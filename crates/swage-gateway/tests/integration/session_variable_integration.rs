@@ -30,8 +30,8 @@ use swage_gateway::tool::{Tool, ToolDispatcher, ToolRegistry};
 use swage_gateway::tool_executor::GatewayToolContext;
 use swage_provider::LlmProvider;
 use swage_storage::{
-    AuditStore, SessionStore, SessionVariableStore, SpaceStore, SqliteStorage, Storage,
-    ThreadStore, TurnStore,
+    AuditStore, SessionStore, SessionVariableStore, SqliteStorage, Storage, ThreadStore,
+    TopicStore, TurnStore,
 };
 use swage_tool::context::MockToolContext;
 use swage_tool::permission::PermissionConfig;
@@ -152,9 +152,9 @@ async fn real_tool_audits_whole_state_and_updated_values_recompose() {
         ToolDispatcher::allow_all(vec![]),
         None,
     );
-    let space = state.space_store.get_or_create_default().await.unwrap();
-    let session = ConversationService::new(state.storage.clone(), state.space_store.clone())
-        .create_session_in_space_for_agent(space.id, "gateway", None)
+    let topic = state.topic_store.get_or_create_default().await.unwrap();
+    let session = ConversationService::new(state.storage.clone(), state.topic_store.clone())
+        .create_session_in_topic_for_agent(topic.id, "gateway", None)
         .await
         .unwrap();
     let context = host_context(&state, session.id);
@@ -371,7 +371,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     .unwrap();
     let element_path = swage_home
         .path()
-        .join("spaces/default/elements/current-work.md");
+        .join("topics/default/elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).unwrap();
     std::fs::write(&element_path, "Current work: {{task}}").unwrap();
     let mut environment = crate::support::ProcessEnvGuard::new();
@@ -701,7 +701,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
     let swage_home = tempfile::tempdir().unwrap();
     let element_path = swage_home
         .path()
-        .join("spaces/default/elements/current-work.md");
+        .join("topics/default/elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).unwrap();
     std::fs::write(&element_path, "Briefing for {{owner}}: first version").unwrap();
     std::fs::write(
@@ -720,7 +720,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
     environment.set_swage_home(swage_home.path());
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let state = AppState::new(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
@@ -742,7 +742,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
                     "recipient_agent_id": "agent-b",
                     "kind": "delegate",
                     "correlation_id": null,
-                    "space_id": space.id,
+                    "topic_id": topic.id,
                     "sender_turn_id": null,
                     "payload": {
                         "task": task,

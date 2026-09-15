@@ -21,8 +21,8 @@ use swage_provider::LlmProvider;
 use swage_safety::LeakDetector;
 use swage_storage::sqlite::SqliteStorage;
 use swage_storage::{
-    MessageStore, NewSession, NewThread, NewTurn, Session, SessionStore, Space, SpaceStore, Thread,
-    ThreadState, ThreadStore, ToolCallStore, TurnState, TurnStore,
+    MessageStore, NewSession, NewThread, NewTurn, Session, SessionStore, Thread, ThreadState,
+    ThreadStore, ToolCallStore, Topic, TopicStore, TurnState, TurnStore,
 };
 use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::tool::Tool;
@@ -363,14 +363,14 @@ impl Hook for AppendAfterResponseHook {
     }
 }
 
-async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Space, Session, Thread) {
+async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Topic, Session, Thread) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let space = SpaceStore::get_or_create_default(storage.as_ref())
+    let topic = TopicStore::get_or_create_default(storage.as_ref())
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: agent_id.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -386,7 +386,7 @@ async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Space, Sessi
     )
     .await
     .expect("thread");
-    (storage, space, session, thread)
+    (storage, topic, session, thread)
 }
 
 fn resolved_config(agent_id: &str) -> AgentConfig {
@@ -394,7 +394,7 @@ fn resolved_config(agent_id: &str) -> AgentConfig {
 }
 
 fn test_request(
-    space_id: Uuid,
+    topic_id: Uuid,
     session_id: Uuid,
     thread_id: Uuid,
     user_message: &str,
@@ -406,7 +406,7 @@ fn test_request(
             session_id,
             thread_id,
             turn_id: Uuid::new_v4(),
-            space_id: Some(space_id),
+            topic_id: Some(topic_id),
         },
         user_message: user_message.to_string(),
         assembled_context: vec![ChatMessage::new(Role::User, user_message)],
@@ -429,7 +429,7 @@ fn drain_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> 
 async fn streaming_turn_continues_past_ten_tool_rounds() {
     const TOOL_ROUNDS: usize = 25;
 
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let mut rounds = (1..=TOOL_ROUNDS)
         .map(|round| {
             vec![
@@ -466,7 +466,7 @@ async fn streaming_turn_continues_past_ten_tool_rounds() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Keep counting", None),
+            test_request(topic.id, session.id, thread.id, "Keep counting", None),
             event_tx,
         )
         .await
@@ -493,7 +493,7 @@ async fn streaming_turn_continues_past_ten_tool_rounds() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_persists_completed_response_and_raw_input() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "hello ".into(),
@@ -519,7 +519,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Hello agent", None),
+            test_request(topic.id, session.id, thread.id, "Hello agent", None),
             event_tx,
         )
         .await
@@ -574,7 +574,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_ignores_reasoning_chunks_in_visible_response() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Reasoning {
             content: "private thought".into(),
@@ -597,7 +597,7 @@ async fn streaming_turn_ignores_reasoning_chunks_in_visible_response() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Hello agent", None),
+            test_request(topic.id, session.id, thread.id, "Hello agent", None),
             event_tx,
         )
         .await
@@ -631,7 +631,7 @@ async fn streaming_turn_ignores_reasoning_chunks_in_visible_response() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_persists_tool_result_truncation_metadata() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(CompactionStreamingProvider::new(vec![
         vec![
             StreamChunk::ToolUse {
@@ -664,7 +664,7 @@ async fn streaming_turn_persists_tool_result_truncation_metadata() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Use the tool", None),
+            test_request(topic.id, session.id, thread.id, "Use the tool", None),
             event_tx,
         )
         .await
@@ -699,7 +699,7 @@ async fn streaming_turn_persists_tool_result_truncation_metadata() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_compacts_context_before_provider_stream() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(CompactionStreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "done".into(),
@@ -717,7 +717,7 @@ async fn streaming_turn_compacts_context_before_provider_stream() {
         .build()
         .expect("agent");
 
-    let mut request = test_request(space.id, session.id, thread.id, "latest request", None);
+    let mut request = test_request(topic.id, session.id, thread.id, "latest request", None);
     request.assembled_context = vec![
         ChatMessage::new(Role::System, "system"),
         ChatMessage::new(Role::User, "old user"),
@@ -740,7 +740,7 @@ async fn streaming_turn_compacts_context_before_provider_stream() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn native_count_breach_keeps_its_model_and_survives_a_failed_recount() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(NativeCountCompactionProvider::new());
     let mut config = resolved_config("agent-a");
     config.compaction_threshold = swage_agent::CompactionThreshold::TokenCount(20);
@@ -752,7 +752,7 @@ async fn native_count_breach_keeps_its_model_and_survives_a_failed_recount() {
         .build()
         .expect("agent");
 
-    let mut request = test_request(space.id, session.id, thread.id, "latest", None);
+    let mut request = test_request(topic.id, session.id, thread.id, "latest", None);
     request.assembled_context = vec![
         ChatMessage::new(Role::User, "first history message"),
         ChatMessage::new(Role::Assistant, "second history message"),
@@ -784,7 +784,7 @@ async fn native_count_breach_keeps_its_model_and_survives_a_failed_recount() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(CompactionStreamingProvider::new(vec![]));
     let mut config = resolved_config("agent-a");
     config.compaction_threshold = swage_agent::CompactionThreshold::MessageCount(0);
@@ -795,7 +795,7 @@ async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
         .build()
         .expect("agent");
 
-    let mut request = test_request(space.id, session.id, thread.id, "latest request", None);
+    let mut request = test_request(topic.id, session.id, thread.id, "latest request", None);
     request.assembled_context = vec![ChatMessage::new(Role::System, "preserved system prompt")];
 
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
@@ -825,7 +825,7 @@ async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_reuses_existing_pending_turn() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let pending_turn = storage
         .create_turn(NewTurn {
             thread_id: thread.id,
@@ -859,7 +859,7 @@ async fn streaming_turn_reuses_existing_pending_turn() {
     let outbound = agent
         .process_turn_streaming(
             test_request(
-                space.id,
+                topic.id,
                 session.id,
                 thread.id,
                 "Queued input",
@@ -883,7 +883,7 @@ async fn streaming_turn_reuses_existing_pending_turn() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let raw_secret = "sk-proj-abc123def456ghi789jklmnopqrstuvwxyz1234567890ABCDEFGHIJ";
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
@@ -917,7 +917,7 @@ async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Check output", None),
+            test_request(topic.id, session.id, thread.id, "Check output", None),
             event_tx,
         )
         .await
@@ -937,7 +937,7 @@ async fn streaming_turn_applies_after_response_hook_and_leak_scan() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn output_schema_retry_reuses_streaming_runtime() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![
         vec![
             StreamChunk::Delta {
@@ -983,7 +983,7 @@ async fn output_schema_retry_reuses_streaming_runtime() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            test_request(topic.id, session.id, thread.id, "Return JSON", None),
             event_tx,
         )
         .await
@@ -1052,7 +1052,7 @@ async fn output_schema_retry_reuses_streaming_runtime() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn output_schema_accepts_json_after_prose_without_retrying() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "I checked the request. Final answer: {\"answer\":\"ok\"}".into(),
@@ -1079,7 +1079,7 @@ async fn output_schema_accepts_json_after_prose_without_retrying() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            test_request(topic.id, session.id, thread.id, "Return JSON", None),
             event_tx,
         )
         .await
@@ -1097,7 +1097,7 @@ async fn output_schema_accepts_json_after_prose_without_retrying() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn output_schema_uses_the_last_valid_json_value() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "```json\n{\"answer\":\"draft\"}\n```\nFinal: {\"answer\":\"ok\"}".into(),
@@ -1124,7 +1124,7 @@ async fn output_schema_uses_the_last_valid_json_value() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            test_request(topic.id, session.id, thread.id, "Return JSON", None),
             event_tx,
         )
         .await
@@ -1140,7 +1140,7 @@ async fn output_schema_uses_the_last_valid_json_value() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn output_schema_accepts_a_scalar_json_value() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "Final result:\n```json\n\"done\"\n```".into(),
@@ -1159,7 +1159,7 @@ async fn output_schema_accepts_a_scalar_json_value() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Return a string", None),
+            test_request(topic.id, session.id, thread.id, "Return a string", None),
             event_tx,
         )
         .await
@@ -1171,7 +1171,7 @@ async fn output_schema_accepts_a_scalar_json_value() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_anomaly_fails_before_output_schema_retry() {
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::ProviderResponseWitness(ProviderResponseWitness {
             http_status: 200,
@@ -1200,7 +1200,7 @@ async fn provider_anomaly_fails_before_output_schema_retry() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let error = agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            test_request(topic.id, session.id, thread.id, "Return JSON", None),
             event_tx,
         )
         .await
@@ -1237,7 +1237,7 @@ async fn output_schema_declaration_is_scoped_to_schema_configured_turns() {
         ]
     };
 
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let schema_provider = Arc::new(StreamingProvider::new(vec![valid_round()]));
     let schema = json!({
         "type": "object",
@@ -1256,7 +1256,7 @@ async fn output_schema_declaration_is_scoped_to_schema_configured_turns() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = schema_agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Return JSON", None),
+            test_request(topic.id, session.id, thread.id, "Return JSON", None),
             event_tx,
         )
         .await
@@ -1266,7 +1266,7 @@ async fn output_schema_declaration_is_scoped_to_schema_configured_turns() {
     assert_eq!(outbound.structured_output, Some(json!({ "answer": "ok" })));
     assert_eq!(schema_provider.requests()[0].messages.len(), 2);
 
-    let (storage, space, session, thread) = setup_conversation("agent-a").await;
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let plain_provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "ordinary response".into(),
@@ -1284,7 +1284,7 @@ async fn output_schema_declaration_is_scoped_to_schema_configured_turns() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let outbound = plain_agent
         .process_turn_streaming(
-            test_request(space.id, session.id, thread.id, "Respond normally", None),
+            test_request(topic.id, session.id, thread.id, "Respond normally", None),
             event_tx,
         )
         .await

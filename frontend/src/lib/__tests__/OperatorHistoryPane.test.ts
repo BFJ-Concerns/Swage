@@ -66,7 +66,7 @@ describe("OperatorHistoryPane", () => {
       assembly_reports: [{
         turn_id: "turn-1",
         session_id: "session-1",
-        space_id: "space-1",
+        topic_id: "topic-1",
         recorded_at: "2026-08-23T10:02:00Z",
         assembly_name: "balanced",
       }],

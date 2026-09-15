@@ -1,10 +1,10 @@
-//! Knowledge-base tools — the agent's hands on the space's gathered
+//! Knowledge-base tools — the agent's hands on the topic's gathered
 //! external evidence.
 //!
 //! Six tools, separately grantable so read access never implies any kind
 //! of write:
 //!
-//! - **`knowledge_search`** — full-text search over the space's knowledge
+//! - **`knowledge_search`** — full-text search over the topic's knowledge
 //!   base; each hit carries the source it came from and the pinned
 //!   derivation version and offsets a citation needs.
 //! - **`knowledge_record`** — capture content into the knowledge base as a
@@ -17,7 +17,7 @@
 //! - **`knowledge_curate_orientation`** — author and maintain those cards.
 //!
 //! All six are host-only (`requires_device_execution`): they reach live gateway
-//! state and the space's body files. Knowledge content returns as tool
+//! state and the topic's body files. Knowledge content returns as tool
 //! results only — it is gathered external data, never instructions.
 
 use async_trait::async_trait;
@@ -86,11 +86,11 @@ fn required_str<'p>(tool: &str, params: &'p Value, key: &str) -> Result<&'p str,
         .ok_or_else(|| invalid(tool, format!("'{key}' is required")))
 }
 
-/// Resolve the calling session's space: the knowledge base is per space, and
+/// Resolve the calling session's topic: the knowledge base is per topic, and
 /// the session the tool call belongs to says which one. The third element is
 /// the session's journalled-call scope — retry identity for idempotent
 /// writes — absent on anything but a workflow agent-call worker.
-async fn session_space(
+async fn session_topic(
     tool: &str,
     state: &AppState,
     ctx: &dyn ToolContext,
@@ -105,14 +105,14 @@ async fn session_space(
         .await
         .map_err(|error| failed(tool, error))?
         .ok_or_else(|| failed(tool, "the calling session no longer exists"))?;
-    let space = state
-        .space_store
-        .get(session.space_id)
+    let topic = state
+        .topic_store
+        .get(session.topic_id)
         .await
         .map_err(|error| failed(tool, error))?
-        .ok_or_else(|| failed(tool, "the session's space no longer exists"))?;
+        .ok_or_else(|| failed(tool, "the session's topic no longer exists"))?;
     let capture_scope = crate::turn::agent_call_scope(session.metadata.as_ref());
-    Ok((space.id, space.slug.to_string(), capture_scope))
+    Ok((topic.id, topic.slug.to_string(), capture_scope))
 }
 
 // ---------------------------------------------------------------------------
@@ -128,14 +128,14 @@ impl Tool for KnowledgeSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Find evidence for a question in this space's gathered external material by \
+        "Find evidence for a question in this topic's gathered external material by \
          full text. Use knowledge_orient first when you do not yet know what the corpus \
          contains or which vocabulary it uses. Each result here is a passage with the source it came from and a \
          pinned observation and version; record a citation with the knowledge_cite \
          tool, passing those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
          (for what you know about your own work, use agent_memory for your \
-         private records or memory for the space's shared notes)."
+         private records or memory for the topic's shared notes)."
     }
 
     fn parameters(&self) -> Value {
@@ -170,11 +170,11 @@ impl Tool for KnowledgeSearchTool {
             .and_then(Value::as_u64)
             .map_or(10, |n| n.clamp(1, 50) as usize);
 
-        let (space_id, _slug, _scope) = session_space(SEARCH_TOOL, state, ctx).await?;
+        let (topic_id, _slug, _scope) = session_topic(SEARCH_TOOL, state, ctx).await?;
 
         let hits = state
             .storage
-            .search_extractions(space_id, query, limit)
+            .search_extractions(topic_id, query, limit)
             .await
             .map_err(|error| failed(SEARCH_TOOL, error))?;
 
@@ -218,7 +218,7 @@ impl Tool for KnowledgeRecordTool {
     }
 
     fn description(&self) -> &str {
-        "Capture an external source into this space's knowledge base as a \
+        "Capture an external source into this topic's knowledge base as a \
          permanent, citable observation. Supply the source (its URL, a local \
          path, or both), the raw content, and the readable text extracted from \
          it. The capture is immutable: recording the same content twice \
@@ -289,9 +289,9 @@ impl Tool for KnowledgeRecordTool {
             .unwrap_or("text/plain");
 
         let state = gateway_state(RECORD_TOOL, ctx)?;
-        let (space_id, space_slug, capture_scope) = session_space(RECORD_TOOL, state, ctx).await?;
+        let (topic_id, topic_slug, capture_scope) = session_topic(RECORD_TOOL, state, ctx).await?;
 
-        let body = knowledge::write_body(&state.config_root, &space_slug, content.as_bytes())
+        let body = knowledge::write_body(&state.config_root, &topic_slug, content.as_bytes())
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
         let captured_body_sha256 = body.sha256;
@@ -305,7 +305,7 @@ impl Tool for KnowledgeRecordTool {
         let observation = state
             .storage
             .record_observation(NewSourceObservation {
-                space_id,
+                topic_id,
                 origin: ObservationOrigin {
                     url: url.map(str::to_owned),
                     local_path: local_path.map(str::to_owned),
@@ -383,7 +383,7 @@ impl Tool for KnowledgeCurateTool {
     }
 
     fn description(&self) -> &str {
-        "Record a judgement about an observation in this space's knowledge base. \
+        "Record a judgement about an observation in this topic's knowledge base. \
          Mark it as a duplicate of another observation, superseded by another \
          observation, or stale. Judgements are permanent history: a later \
          judgement becomes current without changing either observation."
@@ -450,11 +450,11 @@ impl Tool for KnowledgeCurateTool {
         }
 
         let state = gateway_state(CURATE_TOOL, ctx)?;
-        let (space_id, _slug, _scope) = session_space(CURATE_TOOL, state, ctx).await?;
+        let (topic_id, _slug, _scope) = session_topic(CURATE_TOOL, state, ctx).await?;
         let assertion = state
             .storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id,
                 kind,
                 target_observation_id,
@@ -485,7 +485,7 @@ impl Tool for KnowledgeCiteTool {
     }
 
     fn description(&self) -> &str {
-        "Record an exact quoted passage from this space's knowledge base as a \
+        "Record an exact quoted passage from this topic's knowledge base as a \
          durable citation. Supply the observation and version returned by \
          search plus the exact quote. The platform locates and verifies the \
          quote; paraphrased or absent text is refused."
@@ -530,11 +530,11 @@ impl Tool for KnowledgeCiteTool {
         let quoted_text = required_str(CITE_TOOL, &params, "quote")?.to_owned();
 
         let state = gateway_state(CITE_TOOL, ctx)?;
-        let (space_id, _slug, _scope) = session_space(CITE_TOOL, state, ctx).await?;
+        let (topic_id, _slug, _scope) = session_topic(CITE_TOOL, state, ctx).await?;
         let citation = state
             .storage
             .add_citation(NewKnowledgeCitation {
-                space_id,
+                topic_id,
                 observation_id,
                 derivation_version,
                 quoted_text,
@@ -567,7 +567,7 @@ impl Tool for KnowledgeOrientTool {
     }
 
     fn description(&self) -> &str {
-        "Discover this space's evidence-backed orientation cards before choosing corpus vocabulary. Call without a query on first contact; once useful terms are known, an optional query searches cards. Cards are derived signposts, not evidence: use knowledge_search independently to inspect and cite the underlying observations."
+        "Discover this topic's evidence-backed orientation cards before choosing corpus vocabulary. Call without a query on first contact; once useful terms are known, an optional query searches cards. Cards are derived signposts, not evidence: use knowledge_search independently to inspect and cite the underlying observations."
     }
 
     fn parameters(&self) -> Value {
@@ -587,7 +587,7 @@ impl Tool for KnowledgeOrientTool {
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(ORIENT_TOOL, ctx)?;
-        let (space_id, _, _) = session_space(ORIENT_TOOL, state, ctx).await?;
+        let (topic_id, _, _) = session_topic(ORIENT_TOOL, state, ctx).await?;
         let limit = params
             .get("limit")
             .and_then(Value::as_u64)
@@ -598,7 +598,7 @@ impl Tool for KnowledgeOrientTool {
             .filter(|value| !value.trim().is_empty());
         let cards = state
             .storage
-            .find_orientation_cards(space_id, query, limit)
+            .find_orientation_cards(topic_id, query, limit)
             .await
             .map_err(|error| failed(ORIENT_TOOL, error))?
             .into_iter()
@@ -628,7 +628,7 @@ impl Tool for KnowledgeCurateOrientationTool {
     }
 
     fn description(&self) -> &str {
-        "Maintain this space's evidence-backed orientation cards. Author creates an immutable card grounded in source observations. Supersede and retire append terminal lifecycle records; use supersede when another active card should replace the old signpost."
+        "Maintain this topic's evidence-backed orientation cards. Author creates an immutable card grounded in source observations. Supersede and retire append terminal lifecycle records; use supersede when another active card should replace the old signpost."
     }
 
     fn parameters(&self) -> Value {
@@ -715,7 +715,7 @@ impl Tool for KnowledgeCurateOrientationTool {
         };
 
         let state = gateway_state(CURATE_ORIENTATION_TOOL, ctx)?;
-        let (space_id, _, _) = session_space(CURATE_ORIENTATION_TOOL, state, ctx).await?;
+        let (topic_id, _, _) = session_topic(CURATE_ORIENTATION_TOOL, state, ctx).await?;
         let session_id = ctx.session_id().parse::<Uuid>().ok();
         match operation {
             "author" => {
@@ -725,7 +725,7 @@ impl Tool for KnowledgeCurateOrientationTool {
                     .storage
                     .create_orientation_card(
                         NewOrientationCard {
-                            space_id,
+                            topic_id,
                             title,
                             content,
                             authored_by: ctx.agent_id().to_owned(),
@@ -743,7 +743,7 @@ impl Tool for KnowledgeCurateOrientationTool {
                 let record = state
                     .storage
                     .supersede_orientation_card(
-                        space_id,
+                        topic_id,
                         card_id.expect("supersede parameters validated card_id"),
                         replacement_card_id.expect("supersede parameters validated replacement"),
                         ctx.agent_id().to_owned(),
@@ -759,7 +759,7 @@ impl Tool for KnowledgeCurateOrientationTool {
                 let record = state
                     .storage
                     .retire_orientation_card(
-                        space_id,
+                        topic_id,
                         card_id.expect("retire parameters validated card_id"),
                         ctx.agent_id().to_owned(),
                         session_id,
@@ -785,8 +785,8 @@ mod tests {
     use crate::turn::tests::MockProvider;
     use swage_provider::LlmProvider;
     use swage_storage::{
-        AuditStore, CitationStore, NewOrientationCard, NewSession, NewSourceObservation, NewSpace,
-        ObservationStore, OrientationCardStore, SessionStore, SpaceStore, SqliteStorage,
+        AuditStore, CitationStore, NewOrientationCard, NewSession, NewSourceObservation, NewTopic,
+        ObservationStore, OrientationCardStore, SessionStore, SqliteStorage, TopicStore,
     };
 
     #[tokio::test(flavor = "multi_thread")]
@@ -806,12 +806,12 @@ mod tests {
     async fn record_dedups_retries_through_the_sessions_call_scope() {
         let root = tempfile::tempdir().unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         // A workflow agent-call worker: the dispatch stamped the journalled
         // call's identity into the session metadata.
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "researcher".into(),
                 metadata: Some(json!({
                     (crate::turn::AGENT_CALL_SCOPE_METADATA_KEY): "entry-77"
@@ -824,7 +824,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(first["observation_id"], retried["observation_id"]);
         assert_eq!(retried["version"], first["version"]);
         assert_eq!(retried["searchable"], true);
-        let observations = storage.list_observations_by_space(space.id).await.unwrap();
+        let observations = storage.list_observations_by_topic(topic.id).await.unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].capture_scope.as_deref(), Some("entry-77"));
         let latest = storage
@@ -1032,9 +1032,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn orientation_tools_run_the_scoped_lifecycle_and_record_the_session() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
-        let other_space = storage
-            .create(NewSpace {
+        let topic = storage.get_or_create_default().await.unwrap();
+        let other_topic = storage
+            .create(NewTopic {
                 name: "Other knowledge".into(),
                 slug: "other-knowledge".into(),
             })
@@ -1042,7 +1042,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "curator".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -1051,7 +1051,7 @@ mod tests {
             .unwrap();
         let observation = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/local-evidence".into()),
                     local_path: None,
@@ -1066,7 +1066,7 @@ mod tests {
             .unwrap();
         let other_observation = storage
             .record_observation(NewSourceObservation {
-                space_id: other_space.id,
+                topic_id: other_topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/foreign-evidence".into()),
                     local_path: None,
@@ -1082,7 +1082,7 @@ mod tests {
         let foreign_card = storage
             .create_orientation_card(
                 NewOrientationCard {
-                    space_id: other_space.id,
+                    topic_id: other_topic.id,
                     title: "Foreign vocabulary".into(),
                     content: "Must remain outside this session's authority".into(),
                     authored_by: "other-curator".into(),
@@ -1096,7 +1096,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -1193,7 +1193,7 @@ mod tests {
         ));
         assert_eq!(
             storage
-                .find_orientation_cards(other_space.id, None, 20)
+                .find_orientation_cards(other_topic.id, None, 20)
                 .await
                 .unwrap()
                 .len(),
@@ -1260,10 +1260,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cite_delegates_to_host_storage_and_refuses_fabricated_quotes() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "researcher".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -1272,7 +1272,7 @@ mod tests {
             .unwrap();
         let observation = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/evidence".into()),
                     local_path: None,
@@ -1296,7 +1296,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -1349,10 +1349,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn supersession_retires_the_subject_and_preserves_the_preferred_target() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "curator".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -1361,7 +1361,7 @@ mod tests {
             .unwrap();
         let subject = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/subject".into()),
                     local_path: None,
@@ -1376,7 +1376,7 @@ mod tests {
             .unwrap();
         let target = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/target".into()),
                     local_path: None,
@@ -1408,7 +1408,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -1440,7 +1440,7 @@ mod tests {
         assert_eq!(result["kind"], json!("superseded-by"));
 
         let hits = storage
-            .search_extractions(space.id, "Zorbulator", 10)
+            .search_extractions(topic.id, "Zorbulator", 10)
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);

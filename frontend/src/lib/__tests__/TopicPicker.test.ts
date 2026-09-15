@@ -2,14 +2,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
-import SpacePicker from "../components/SpacePicker.svelte";
-import type { SpaceStore } from "../stores/spaces";
-import type { Space } from "../types";
+import TopicPicker from "../components/TopicPicker.svelte";
+import type { TopicStore } from "../stores/topics";
+import type { Topic } from "../types";
 
 type MountedComponent = ReturnType<typeof mount>;
 
-const space: Space = {
-  id: "space-1",
+const topic: Topic = {
+  id: "topic-1",
   name: "Research",
   slug: "research",
   description: "",
@@ -17,21 +17,21 @@ const space: Space = {
   created_at: "2026-05-26T10:00:00Z",
 };
 
-function spaceStore(): SpaceStore {
+function topicStore(): TopicStore {
   return {
-    get spaces() { return [space]; },
-    get currentSpace() { return null; },
-    get recentSpaces() { return []; },
+    get topics() { return [topic]; },
+    get currentTopic() { return null; },
+    get recentTopics() { return []; },
     get isLoading() { return false; },
-    loadSpaces: async () => {},
-    selectSpace: async () => {},
-    closeSpace: () => {},
-    createSpace: async () => {},
-    deleteSpace: async () => {},
+    loadTopics: async () => {},
+    selectTopic: async () => {},
+    closeTopic: () => {},
+    createTopic: async () => {},
+    deleteTopic: async () => {},
   };
 }
 
-describe("SpacePicker", () => {
+describe("TopicPicker", () => {
   let component: MountedComponent | undefined;
 
   afterEach(() => {
@@ -40,38 +40,38 @@ describe("SpacePicker", () => {
     document.body.innerHTML = "";
   });
 
-  it("routes the space card settings button to space settings", () => {
-    const onOpenSpaceSettings = vi.fn();
-    component = mount(SpacePicker, {
+  it("routes the topic card settings button to topic settings", () => {
+    const onOpenTopicSettings = vi.fn();
+    component = mount(TopicPicker, {
       target: document.body,
-      props: { spaceStore: spaceStore(), onOpenSpaceSettings },
+      props: { topicStore: topicStore(), onOpenTopicSettings },
     });
 
-    (document.querySelector(".space-settings") as HTMLElement).click();
+    (document.querySelector(".topic-settings") as HTMLElement).click();
 
-    expect(onOpenSpaceSettings).toHaveBeenCalledWith(space);
+    expect(onOpenTopicSettings).toHaveBeenCalledWith(topic);
   });
 
   it("renders Open as a real sibling button, not a nested span", () => {
     // UI audit f-2: Open and Settings must be first-class <button> siblings of
     // the card container, never nested interactive widgets inside a button.
-    component = mount(SpacePicker, {
+    component = mount(TopicPicker, {
       target: document.body,
-      props: { spaceStore: spaceStore() },
+      props: { topicStore: topicStore() },
     });
 
     const openBtn = document.querySelector(".open-btn");
     expect(openBtn).toBeInstanceOf(HTMLButtonElement);
     // The card itself is no longer a button — it's a container.
-    expect(document.querySelector(".space-card")).not.toBeInstanceOf(HTMLButtonElement);
+    expect(document.querySelector(".topic-card")).not.toBeInstanceOf(HTMLButtonElement);
     // No nested role="button" spans remain.
     expect(document.querySelectorAll('[role="button"]')).toHaveLength(0);
   });
 
-  it("describes the conversation and workspace-folder grouping spaces provide", () => {
-    component = mount(SpacePicker, {
+  it("describes the conversation and workspace-folder grouping topics provide", () => {
+    component = mount(TopicPicker, {
       target: document.body,
-      props: { spaceStore: spaceStore() },
+      props: { topicStore: topicStore() },
     });
 
     expect(document.body.textContent).toContain("keeps its conversations together");

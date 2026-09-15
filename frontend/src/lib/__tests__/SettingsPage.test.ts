@@ -153,9 +153,9 @@ function emptySettings(): SettingsResponse {
   };
 }
 
-function createdSchedule(spaceId: string): Schedule {
+function createdSchedule(topicId: string): Schedule {
   return makeSchedule({
-    session: { policy: "fresh", space_id: spaceId, agent_id: "gateway" },
+    session: { policy: "fresh", topic_id: topicId, agent_id: "gateway" },
     next_run_at: "2026-08-21T10:00:00Z",
     created_at: "2026-08-20T10:00:00Z",
     updated_at: "2026-08-20T10:00:00Z",
@@ -276,7 +276,7 @@ describe("SettingsPage", () => {
             id: "export-1",
             created_at: "2026-05-26T10:00:00Z",
             size_bytes: 2048,
-            spaces: 1,
+            topics: 1,
             workspaces: 2,
             sessions: 3,
             secrets: 1,
@@ -292,7 +292,7 @@ describe("SettingsPage", () => {
             id: "export-2",
             created_at: "2026-05-26T10:05:00Z",
             size_bytes: 512,
-            spaces: 1,
+            topics: 1,
             workspaces: 0,
             sessions: 0,
             secrets: 0,
@@ -449,33 +449,33 @@ describe("SettingsPage", () => {
     window.removeEventListener("swage:display-preferences-changed", onPreferenceChange);
   });
 
-  it("lists effective agent definitions for the selected space", async () => {
+  it("lists effective agent definitions for the selected topic", async () => {
     component = mount(SettingsPage, {
       target: document.body,
-      props: { tab: "agents", spaceId: "selected-space" },
+      props: { tab: "agents", topicId: "selected-topic" },
     });
     await flushUi();
 
-    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-space");
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("selected-topic");
   });
 
   it("loads settings alongside the command catalogue so later mutable tabs are ready", async () => {
     component = mount(SettingsPage, {
       target: document.body,
-      props: { tab: "commands", spaceId: "selected-space" },
+      props: { tab: "commands", topicId: "selected-topic" },
     });
     await flushUi();
 
-    expect(skillsApi.listSkills).toHaveBeenCalledWith("selected-space");
+    expect(skillsApi.listSkills).toHaveBeenCalledWith("selected-topic");
     expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain("Commands");
   });
 
-  it("creates a fresh schedule in the selected space", async () => {
-    vi.mocked(workflowApi.createSchedule).mockResolvedValue(createdSchedule("selected-space"));
+  it("creates a fresh schedule in the selected topic", async () => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(createdSchedule("selected-topic"));
     component = mount(SettingsPage, {
       target: document.body,
-      props: { tab: "automation", spaceId: "selected-space" },
+      props: { tab: "automation", topicId: "selected-topic" },
     });
     await flushUi();
 
@@ -489,17 +489,17 @@ describe("SettingsPage", () => {
     expect(workflowApi.createSchedule).toHaveBeenCalledWith({
       message: "Review the queue.",
       spec: { kind: "interval", every: "every 1 hours" },
-      session: { policy: "fresh", space_id: "selected-space", agent_id: "gateway" },
+      session: { policy: "fresh", topic_id: "selected-topic", agent_id: "gateway" },
       routing: null,
       gate: null,
     });
-    expect(document.body.textContent).not.toContain("Select a space before scheduling work.");
+    expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
   });
 
-  it("blocks fresh schedule creation when no space is selected", async () => {
+  it("blocks fresh schedule creation when no topic is selected", async () => {
     component = mount(SettingsPage, {
       target: document.body,
-      props: { tab: "automation", spaceId: null },
+      props: { tab: "automation", topicId: null },
     });
     await flushUi();
 
@@ -510,7 +510,7 @@ describe("SettingsPage", () => {
     buttonNamed("Create schedule").click();
     await flushUi();
 
-    expect(document.body.textContent).toContain("Select a space before scheduling work.");
+    expect(document.body.textContent).toContain("Select a topic before scheduling work.");
     expect(workflowApi.createSchedule).not.toHaveBeenCalled();
   });
 });

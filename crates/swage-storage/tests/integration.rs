@@ -7,9 +7,9 @@
 use uuid::Uuid;
 
 use swage_core::{Role, compact_tool_arguments_for_model, compact_tool_result_for_model};
-use swage_storage::model::NewSpace;
+use swage_storage::model::NewTopic;
 use swage_storage::store::{
-    MessageStore, SessionStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore,
+    MessageStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
 };
 use swage_storage::{
     NewMessage, NewSession, NewThread, NewToolCall, NewTurn, SqliteStorage, ThreadState, TurnState,
@@ -22,31 +22,31 @@ use swage_storage::{
 const AGENT_A: &str = "agent_alpha";
 const AGENT_B: &str = "agent_beta";
 
-/// Create an in-memory SqliteStorage with a space and return (storage, space_id).
+/// Create an in-memory SqliteStorage with a topic and return (storage, topic_id).
 async fn setup() -> (SqliteStorage, Uuid) {
     let storage = SqliteStorage::in_memory().expect("in-memory should succeed");
-    let space = SpaceStore::create(
+    let topic = TopicStore::create(
         &storage,
-        NewSpace {
+        NewTopic {
             name: "integration-test".into(),
             slug: "integration-test".into(),
         },
     )
     .await
-    .expect("create space");
-    (storage, space.id)
+    .expect("create topic");
+    (storage, topic.id)
 }
 
-/// Build a full entity hierarchy: space → session → thread → turn → message + tool call.
+/// Build a full entity hierarchy: topic → session → thread → turn → message + tool call.
 /// Returns all IDs for verification.
 async fn create_full_hierarchy(
     storage: &SqliteStorage,
-    space_id: Uuid,
+    topic_id: Uuid,
     agent_id: &str,
 ) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
     let session = storage
         .create_session(NewSession {
-            space_id,
+            topic_id,
             agent_id: agent_id.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -139,18 +139,18 @@ async fn full_hierarchy_survives_reconnection() {
     // Step 1: create all entities and drop the connection.
     let (session_id, thread_id, turn_id, message_id, tool_call_id) = {
         let storage = SqliteStorage::open(&db_path).expect("open");
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             &storage,
-            NewSpace {
+            NewTopic {
                 name: "roundtrip".into(),
                 slug: "roundtrip".into(),
             },
         )
         .await
-        .expect("create space");
+        .expect("create topic");
 
         // Storage dropped here — connection closed.
-        create_full_hierarchy(&storage, space.id, AGENT_A).await
+        create_full_hierarchy(&storage, topic.id, AGENT_A).await
     };
 
     // Step 2: reconnect and verify everything is readable.
@@ -197,11 +197,11 @@ async fn full_hierarchy_survives_reconnection() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_id_isolation_across_entity_types() {
-    let (storage, space_id) = setup().await;
+    let (storage, topic_id) = setup().await;
 
     // Create hierarchies for two different agents.
-    create_full_hierarchy(&storage, space_id, AGENT_A).await;
-    create_full_hierarchy(&storage, space_id, AGENT_B).await;
+    create_full_hierarchy(&storage, topic_id, AGENT_A).await;
+    create_full_hierarchy(&storage, topic_id, AGENT_B).await;
 
     // Sessions: each agent should see only their own.
     let sessions_a = storage
@@ -243,25 +243,25 @@ async fn agent_id_isolation_across_entity_types() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Cascade deletion from space level
+// Test 3: Cascade deletion from topic level
 //
 // Spans: ikjg (migrations with FK cascades), all store impls
 //
-// Proves: "Data model" — deleting a space cascades through
+// Proves: "Data model" — deleting a topic cascades through
 //         sessions → threads → turns → messages and tool calls.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cascade_deletion_from_space() {
-    let (storage, space_id) = setup().await;
+async fn cascade_deletion_from_topic() {
+    let (storage, topic_id) = setup().await;
     let (session_id, thread_id, turn_id, message_id, tool_call_id) =
-        create_full_hierarchy(&storage, space_id, AGENT_A).await;
+        create_full_hierarchy(&storage, topic_id, AGENT_A).await;
 
-    // Delete the space — everything underneath should cascade.
-    let deleted = SpaceStore::delete(&storage, space_id)
+    // Delete the topic — everything underneath should cascade.
+    let deleted = TopicStore::delete(&storage, topic_id)
         .await
-        .expect("delete space");
-    assert!(deleted, "space should exist and be deleted");
+        .expect("delete topic");
+    assert!(deleted, "topic should exist and be deleted");
 
     // Verify all children are gone.
     assert!(
@@ -313,10 +313,10 @@ async fn cascade_deletion_from_space() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thread_state_machine_enforced() {
-    let (storage, space_id) = setup().await;
+    let (storage, topic_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            space_id,
+            topic_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -408,10 +408,10 @@ async fn thread_state_machine_enforced() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn turn_recovery_finds_pending_and_processing() {
-    let (storage, space_id) = setup().await;
+    let (storage, topic_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            space_id,
+            topic_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -502,22 +502,22 @@ async fn turn_recovery_finds_pending_and_processing() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Default space cannot be deleted
+// Test 6: Default topic cannot be deleted
 //
-// Spans: ikjg (migrations/seeding), space SQL impl
+// Spans: ikjg (migrations/seeding), topic SQL impl
 //
-// Proves: "Data model" — deleting the default space is rejected.
+// Proves: "Data model" — deleting the default topic is rejected.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_space_cannot_be_deleted() {
+async fn default_topic_cannot_be_deleted() {
     let storage = SqliteStorage::in_memory().expect("in-memory");
     let default = storage.get_or_create_default().await.expect("get default");
 
-    let err = SpaceStore::delete(&storage, default.id).await.unwrap_err();
+    let err = TopicStore::delete(&storage, default.id).await.unwrap_err();
     assert!(
         matches!(err, swage_core::StorageError::ConstraintViolation(_)),
-        "deleting default space should return ConstraintViolation, got: {err:?}"
+        "deleting default topic should return ConstraintViolation, got: {err:?}"
     );
 }
 
@@ -532,10 +532,10 @@ async fn default_space_cannot_be_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn messages_ordered_within_thread() {
-    let (storage, space_id) = setup().await;
+    let (storage, topic_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            space_id,
+            topic_id,
             agent_id: AGENT_A.to_string(),
             metadata: None,
             active_workspace_attachment_id: None,

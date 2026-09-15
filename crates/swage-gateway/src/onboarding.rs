@@ -9,7 +9,7 @@ use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLink
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
     NewWorkspaceAttachment, ScheduleCreator, ScheduleKind, ScheduleStatus, SessionPolicy,
-    model::{Space, SpaceSlug},
+    model::{Topic, TopicSlug},
 };
 
 use crate::{
@@ -23,7 +23,7 @@ pub struct CreateChannelLinkRequest {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
 }
@@ -33,7 +33,7 @@ pub struct ChannelLinkResponse {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -74,7 +74,7 @@ pub struct RedeemDevicePairingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayRecoveryBundle {
     pub version: u32,
-    pub spaces: Vec<RecoverySpaceRecord>,
+    pub topics: Vec<RecoveryTopicRecord>,
     #[serde(default)]
     pub workspaces: Vec<RecoveryWorkspaceRecord>,
     pub sessions: Vec<RecoverySessionRecord>,
@@ -98,7 +98,7 @@ pub struct ImportGatewayRecoveryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoverySpaceRecord {
+pub struct RecoveryTopicRecord {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
@@ -108,7 +108,7 @@ pub struct RecoverySpaceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryWorkspaceRecord {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub label: String,
     pub path: String,
     pub permissions: Vec<String>,
@@ -118,7 +118,7 @@ pub struct RecoveryWorkspaceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoverySessionRecord {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub agent_id: String,
     pub metadata: Option<serde_json::Value>,
     pub active_workspace_attachment_id: Option<Uuid>,
@@ -144,7 +144,7 @@ pub struct RecoveryChannelLinkRecord {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -169,7 +169,7 @@ pub struct RecoveryScheduleRecord {
     pub status: String,
     pub kind: String,
     pub expression: String,
-    /// Space/session ids inside the policy refer to the exporting gateway;
+    /// Topic/session ids inside the policy refer to the exporting gateway;
     /// import remaps them onto the freshly created rows.
     pub session_policy: SessionPolicy,
     pub creator: ScheduleCreator,
@@ -188,7 +188,7 @@ fn map_channel_link_response(link: ChannelLink) -> ChannelLinkResponse {
         integration: link.integration,
         account: link.account,
         conversation: link.conversation,
-        space_id: link.space_id,
+        topic_id: link.topic_id,
         agent_id: link.agent_id,
         session_id: link.session_id,
         home_target: link.home_target,
@@ -229,12 +229,12 @@ pub async fn create_channel_link(
         ));
     }
 
-    let space =
-        match request.space_id {
-            Some(space_id) => state.space_store.get(space_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("space {space_id} not found"))
+    let topic =
+        match request.topic_id {
+            Some(topic_id) => state.topic_store.get(topic_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("topic {topic_id} not found"))
             })?,
-            None => state.space_store.get_or_create_default().await?,
+            None => state.topic_store.get_or_create_default().await?,
         };
     let agent_id = request.agent_id.unwrap_or_else(|| "gateway".to_string());
     let metadata = serde_json::json!({
@@ -247,7 +247,7 @@ pub async fn create_channel_link(
     let session = state
         .storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: agent_id.clone(),
             metadata: Some(metadata),
             active_workspace_attachment_id: None,
@@ -267,7 +267,7 @@ pub async fn create_channel_link(
             integration: integration.as_metadata_value().to_string(),
             account: request.account,
             conversation: request.conversation,
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id,
             session_id: Some(session.id),
             home_target: request
@@ -308,7 +308,7 @@ pub async fn create_channel_link_code(
         link_code.clone(),
         ChannelLinkCodeRecord {
             integration: request.integration,
-            space_id: request.space_id,
+            topic_id: request.topic_id,
             agent_id: request.agent_id,
             home_target: request.home_target,
             expires_at,
@@ -378,17 +378,17 @@ pub async fn redeem_device_pairing_code(
 pub async fn export_gateway_recovery_bundle(
     state: &AppState,
 ) -> Result<GatewayRecoveryBundle, GatewayError> {
-    let spaces = state.space_store.list_all().await?;
+    let topics = state.topic_store.list_all().await?;
     let mut workspaces = Vec::new();
     let mut sessions = Vec::new();
-    for space in &spaces {
+    for topic in &topics {
         workspaces.extend(
             state
                 .storage
-                .list_workspace_attachments_by_space(space.id)
+                .list_workspace_attachments_by_topic(topic.id)
                 .await?,
         );
-        sessions.extend(state.storage.list_by_space(space.id).await?);
+        sessions.extend(state.storage.list_by_topic(topic.id).await?);
     }
 
     let channel_links = state.storage.list_channel_links().await?;
@@ -398,20 +398,20 @@ pub async fn export_gateway_recovery_bundle(
 
     let bundle = GatewayRecoveryBundle {
         version: 1,
-        spaces: spaces
+        topics: topics
             .into_iter()
-            .map(|space| RecoverySpaceRecord {
-                id: space.id,
-                name: space.name,
-                slug: space.slug.to_string(),
-                is_default: space.is_default,
+            .map(|topic| RecoveryTopicRecord {
+                id: topic.id,
+                name: topic.name,
+                slug: topic.slug.to_string(),
+                is_default: topic.is_default,
             })
             .collect(),
         workspaces: workspaces
             .into_iter()
             .map(|workspace| RecoveryWorkspaceRecord {
                 id: workspace.id,
-                space_id: workspace.space_id,
+                topic_id: workspace.topic_id,
                 label: workspace.label,
                 path: workspace.path,
                 permissions: workspace.permissions,
@@ -422,7 +422,7 @@ pub async fn export_gateway_recovery_bundle(
             .into_iter()
             .map(|session| RecoverySessionRecord {
                 id: session.id,
-                space_id: session.space_id,
+                topic_id: session.topic_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
                 active_workspace_attachment_id: session.active_workspace_attachment_id,
@@ -458,7 +458,7 @@ pub async fn export_gateway_recovery_bundle(
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                space_id: link.space_id,
+                topic_id: link.topic_id,
                 agent_id: link.agent_id,
                 session_id: link.session_id,
                 home_target: link.home_target,
@@ -538,7 +538,7 @@ async fn record_recovery_export(
         id: Uuid::new_v4(),
         created_at: Utc::now(),
         size_bytes,
-        spaces: bundle.spaces.len(),
+        topics: bundle.topics.len(),
         workspaces: bundle.workspaces.len(),
         sessions: bundle.sessions.len(),
         secrets: bundle.secrets.len(),
@@ -562,21 +562,21 @@ pub async fn import_gateway_recovery_bundle(
 ) -> Result<(), GatewayError> {
     ensure_fresh_import_target(state).await?;
 
-    let mut space_map = HashMap::new();
-    for space in bundle.spaces {
-        let space_id = space.id;
-        let imported = import_space(state, space).await?;
-        space_map.insert(space_id, imported.id);
+    let mut topic_map = HashMap::new();
+    for topic in bundle.topics {
+        let topic_id = topic.id;
+        let imported = import_topic(state, topic).await?;
+        topic_map.insert(topic_id, imported.id);
     }
 
     for workspace in bundle.workspaces {
         state
             .storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                space_id: *space_map.get(&workspace.space_id).ok_or_else(|| {
+                topic_id: *topic_map.get(&workspace.topic_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "workspace referenced unknown space {}",
-                        workspace.space_id
+                        "workspace referenced unknown topic {}",
+                        workspace.topic_id
                     ))
                 })?,
                 label: workspace.label,
@@ -592,10 +592,10 @@ pub async fn import_gateway_recovery_bundle(
         let imported = state
             .storage
             .create_session(NewSession {
-                space_id: *space_map.get(&session.space_id).ok_or_else(|| {
+                topic_id: *topic_map.get(&session.topic_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "session referenced unknown space {}",
-                        session.space_id
+                        "session referenced unknown topic {}",
+                        session.topic_id
                     ))
                 })?,
                 agent_id: session.agent_id.clone(),
@@ -641,10 +641,10 @@ pub async fn import_gateway_recovery_bundle(
                 integration: link.integration,
                 account: link.account,
                 conversation: link.conversation,
-                space_id: *space_map.get(&link.space_id).ok_or_else(|| {
+                topic_id: *topic_map.get(&link.topic_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "channel link referenced unknown space {}",
-                        link.space_id
+                        "channel link referenced unknown topic {}",
+                        link.topic_id
                     ))
                 })?,
                 agent_id: link.agent_id,
@@ -674,13 +674,13 @@ pub async fn import_gateway_recovery_bundle(
     }
 
     for schedule in bundle.schedules {
-        // The policy's space/session ids belong to the exporting gateway;
+        // The policy's topic/session ids belong to the exporting gateway;
         // remap them onto the rows this import just created.
         let session_policy = match schedule.session_policy {
-            SessionPolicy::Fresh { space_id, agent_id } => SessionPolicy::Fresh {
-                space_id: *space_map.get(&space_id).ok_or_else(|| {
+            SessionPolicy::Fresh { topic_id, agent_id } => SessionPolicy::Fresh {
+                topic_id: *topic_map.get(&topic_id).ok_or_else(|| {
                     GatewayError::ValidationError(format!(
-                        "schedule referenced unknown space {space_id}"
+                        "schedule referenced unknown topic {topic_id}"
                     ))
                 })?,
                 agent_id,
@@ -739,19 +739,19 @@ pub async fn import_gateway_recovery_bundle(
 }
 
 async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError> {
-    let spaces = state.space_store.list_all().await?;
-    let has_non_default_spaces = spaces.iter().any(|space| !space.is_default);
-    let default_space = spaces
+    let topics = state.topic_store.list_all().await?;
+    let has_non_default_topics = topics.iter().any(|topic| !topic.is_default);
+    let default_topic = topics
         .iter()
-        .find(|space| space.is_default)
+        .find(|topic| topic.is_default)
         .cloned()
-        .or_else(|| spaces.first().cloned());
-    let has_sessions = if let Some(space) = default_space {
-        !state.storage.list_by_space(space.id).await?.is_empty()
+        .or_else(|| topics.first().cloned());
+    let has_sessions = if let Some(topic) = default_topic {
+        !state.storage.list_by_topic(topic.id).await?.is_empty()
     } else {
         false
     };
-    if has_non_default_spaces
+    if has_non_default_topics
         || has_sessions
         || !state.storage.list_channel_links().await?.is_empty()
         || !state.storage.list_devices().await?.is_empty()
@@ -764,20 +764,20 @@ async fn ensure_fresh_import_target(state: &AppState) -> Result<(), GatewayError
     Ok(())
 }
 
-async fn import_space(state: &AppState, space: RecoverySpaceRecord) -> Result<Space, GatewayError> {
-    let slug = SpaceSlug::new(space.slug).map_err(GatewayError::ValidationError)?;
-    if space.is_default {
-        let default_space = state.space_store.get_or_create_default().await?;
+async fn import_topic(state: &AppState, topic: RecoveryTopicRecord) -> Result<Topic, GatewayError> {
+    let slug = TopicSlug::new(topic.slug).map_err(GatewayError::ValidationError)?;
+    if topic.is_default {
+        let default_topic = state.topic_store.get_or_create_default().await?;
         state
-            .space_store
-            .update(default_space.id, Some(space.name), None, Some(slug))
+            .topic_store
+            .update(default_topic.id, Some(topic.name), None, Some(slug))
             .await
             .map_err(Into::into)
     } else {
         state
-            .space_store
-            .create(swage_storage::NewSpace {
-                name: space.name,
+            .topic_store
+            .create(swage_storage::NewTopic {
+                name: topic.name,
                 slug,
             })
             .await

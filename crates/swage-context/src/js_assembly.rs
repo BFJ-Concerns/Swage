@@ -2,7 +2,7 @@
 //! the stable assembly-name surface.
 //!
 //! A named assembly is a `<name>.js` file in the config hierarchy
-//! (`assemblies/` under global, space, or agent — the most specific wins).
+//! (`assemblies/` under global, topic, or agent — the most specific wins).
 //! The script runs in a caged QuickJS runtime — no IO, no network, no
 //! timers, no randomness — and composes the turn's context from the typed
 //! elements the gateway built. Assemblies compose context; they never call
@@ -84,7 +84,7 @@ pub fn resolve_js_assembly(
     if swage_core::validate_context_assembly_name(name).is_err() {
         return None;
     }
-    // Later entries are more specific (global → space → agent); search in
+    // Later entries are more specific (global → topic → agent); search in
     // reverse so the most specific hit wins.
     search_levels.iter().rev().find_map(|(_, base)| {
         let candidate = base.join("assemblies").join(format!("{name}.js"));
@@ -905,8 +905,8 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             Box::new(OrientationElement::new(
                 SessionEnvironment {
-                    space_name: String::new(),
-                    space_description: String::new(),
+                    topic_name: String::new(),
+                    topic_description: String::new(),
                     working_directory: None,
                     started_at: chrono::Utc::now(),
                     channel: None,
@@ -983,7 +983,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> =
             vec![Box::new(BriefingElement::new(ResolvedNamedElement {
                 name: "current-work".into(),
-                level: HierarchyLevel::Space,
+                level: HierarchyLevel::Topic,
                 path: "elements/current-work.md".into(),
                 content: "Task: {{task}}".into(),
             }))];
@@ -1036,8 +1036,8 @@ mod tests {
         vec![
             Box::new(OrientationElement::new(
                 SessionEnvironment {
-                    space_name: "Atelier".into(),
-                    space_description: String::new(),
+                    topic_name: "Atelier".into(),
+                    topic_description: String::new(),
                     working_directory: None,
                     started_at: chrono::Utc::now(),
                     channel: None,
@@ -1721,8 +1721,8 @@ mod tests {
     fn resolution_prefers_the_most_specific_level() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("global");
-        let space = dir.path().join("space");
-        for base in [&global, &space] {
+        let topic = dir.path().join("topic");
+        for base in [&global, &topic] {
             let assemblies = base.join("assemblies");
             std::fs::create_dir_all(&assemblies).unwrap();
             std::fs::write(assemblies.join("focus.js"), "// present").unwrap();
@@ -1730,12 +1730,12 @@ mod tests {
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, global.as_path()),
-            (HierarchyLevel::Space, space.as_path()),
+            (HierarchyLevel::Topic, topic.as_path()),
         ];
         let resolved = resolve_js_assembly("focus", &levels).unwrap();
         assert!(
-            resolved.starts_with(&space),
-            "the space-level assembly shadows the global one"
+            resolved.starts_with(&topic),
+            "the topic-level assembly shadows the global one"
         );
     }
 

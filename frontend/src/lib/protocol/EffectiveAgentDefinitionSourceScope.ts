@@ -3,4 +3,4 @@
 /**
  * Where an effective agent definition comes from.
  */
-export type EffectiveAgentDefinitionSourceScope = "built_in" | "global" | "space";
+export type EffectiveAgentDefinitionSourceScope = "built_in" | "global" | "topic";

@@ -35,7 +35,7 @@ pub(crate) trait DeliveryCapability: Send + Sync {
 
 pub(crate) async fn capability_from_grant(
     state: Option<AppState>,
-    space_id: Uuid,
+    topic_id: Uuid,
     storage: Arc<dyn Storage>,
     grant: Option<&Value>,
     requested_target: Option<&str>,
@@ -62,7 +62,7 @@ pub(crate) async fn capability_from_grant(
         Some("page") => Ok(Arc::new(
             PageDeliveryCapability::from_grant(
                 state.ok_or_else(|| "page delivery needs gateway state".to_string())?,
-                space_id,
+                topic_id,
                 target,
             )
             .await?,
@@ -77,7 +77,7 @@ struct PageDeliveryCapability {
 }
 
 impl PageDeliveryCapability {
-    async fn from_grant(state: AppState, space_id: Uuid, target: &Value) -> Result<Self, String> {
+    async fn from_grant(state: AppState, topic_id: Uuid, target: &Value) -> Result<Self, String> {
         let page_id = target
             .get("page_id")
             .and_then(Value::as_str)
@@ -90,8 +90,8 @@ impl PageDeliveryCapability {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("no page with id {page_id}"))?;
-        if page.space_id != space_id {
-            return Err("page delivery target is not in the workflow's space".into());
+        if page.topic_id != topic_id {
+            return Err("page delivery target is not in the workflow's topic".into());
         }
         Ok(Self { state, page_id })
     }
@@ -244,7 +244,7 @@ mod tests {
 
     use axum::{Router, http::HeaderMap, routing::post};
     use swage_protocol::client::{page::CreatePageRequest, websocket::ServerEvent};
-    use swage_storage::{NewSpace, PageStore, SpaceStore, SqliteStorage, Storage};
+    use swage_storage::{NewTopic, PageStore, SqliteStorage, Storage, TopicStore};
 
     use super::*;
     use crate::secret::CreateSecretRequest;
@@ -252,7 +252,7 @@ mod tests {
     fn state(storage: Arc<SqliteStorage>) -> AppState {
         AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            storage as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -332,9 +332,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn page_delivery_writes_a_page_module_and_announces_its_location() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             storage.as_ref(),
-            NewSpace {
+            NewTopic {
                 name: "Delivery".into(),
                 slug: "delivery".into(),
             },
@@ -344,7 +344,7 @@ mod tests {
         let state = state(Arc::clone(&storage));
         let page = crate::page::create_page(
             &state,
-            space.id,
+            topic.id,
             CreatePageRequest {
                 title: "Daily delivery".into(),
                 template_id: None,
@@ -360,7 +360,7 @@ mod tests {
         }]);
         let capability = capability_from_grant(
             Some(state.clone()),
-            space.id,
+            topic.id,
             Arc::clone(&storage) as Arc<dyn Storage>,
             Some(&grant),
             Some("daily-page"),
@@ -403,20 +403,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn page_delivery_refuses_a_page_outside_the_workflow_space() {
+    async fn page_delivery_refuses_a_page_outside_the_workflow_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let workflow_space = SpaceStore::create(
+        let workflow_topic = TopicStore::create(
             storage.as_ref(),
-            NewSpace {
+            NewTopic {
                 name: "Workflow".into(),
                 slug: "workflow".into(),
             },
         )
         .await
         .unwrap();
-        let other_space = SpaceStore::create(
+        let other_topic = TopicStore::create(
             storage.as_ref(),
-            NewSpace {
+            NewTopic {
                 name: "Other".into(),
                 slug: "other".into(),
             },
@@ -426,7 +426,7 @@ mod tests {
         let state = state(Arc::clone(&storage));
         let page = crate::page::create_page(
             &state,
-            other_space.id,
+            other_topic.id,
             CreatePageRequest {
                 title: "Other page".into(),
                 template_id: None,
@@ -442,17 +442,17 @@ mod tests {
 
         let result = capability_from_grant(
             Some(state),
-            workflow_space.id,
+            workflow_topic.id,
             Arc::clone(&storage) as Arc<dyn Storage>,
             Some(&grant),
             Some("other-page"),
         )
         .await;
         let error = match result {
-            Ok(_) => panic!("a workflow cannot deliver to another space's page"),
+            Ok(_) => panic!("a workflow cannot deliver to another topic's page"),
             Err(error) => error,
         };
-        assert!(error.contains("workflow's space"));
+        assert!(error.contains("workflow's topic"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

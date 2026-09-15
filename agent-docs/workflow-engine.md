@@ -314,7 +314,7 @@ closing_remaining, usage_unavailable_calls}`. The terminal budget record
 written at run completion carries the same per-route shape.
 
 Validation at `start_run`: every `per_route` key must name a provider entry
-in the space's configuration; `reserved_closing_tokens` on a route requires
+in the topic's configuration; `reserved_closing_tokens` on a route requires
 `max_total_tokens` on the same route and cannot exceed it.
 
 ### Two partitions
@@ -776,7 +776,7 @@ Three surfaces expose the terminal account:
 3. **`workflow_run_account` tool** — a gateway tool
    (`crates/swage-gateway/src/tool/workflow_run_account.rs`) that reads
    the terminal account for one run. Scoped to the caller's session
-   space: a run in another space reads as absent. Returns
+   topic: a run in another topic reads as absent. Returns
    `{ run_id, script_name, state, ended: true, account }` when the run
    has ended, or `{ ended: false, note }` when it has not.
 
@@ -801,11 +801,11 @@ is preserved.
 ## Carried workflows
 
 A workflow script may be carried by a skill rather than authored as a
-space row. The `WorkflowScript` wire type carries a `carrying_skill`
+topic row. The `WorkflowScript` wire type carries a `carrying_skill`
 field (`Option<String>`) naming the skill that provides the workflow
 when it is not a standalone authored row. A carried workflow is
 immutable in place; an operator can shadow it by authoring a same-named
-workflow in the space.
+workflow in the topic.
 
 Each shipped skill carries its own workflows: the development-process
 skills — commission, maestro, assembly, and shakedown — carry their

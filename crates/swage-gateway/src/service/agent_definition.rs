@@ -20,11 +20,11 @@ use swage_storage::Storage;
 /// trail's.
 pub struct AgentDefinitionChange {
     pub agent_id: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub summary: String,
 }
 
-/// A definition that can actually be selected for a new session in a space.
+/// A definition that can actually be selected for a new session in a topic.
 pub struct EffectiveAgentDefinition {
     pub definition: NewAgentDefinition,
     pub is_builtin: bool,
@@ -33,7 +33,7 @@ pub struct EffectiveAgentDefinition {
 fn gateway_definition() -> NewAgentDefinition {
     NewAgentDefinition {
         id: "gateway".into(),
-        space_id: None,
+        topic_id: None,
         display_name: "Swage default".into(),
         description: "The shipped default agent".into(),
         instructions: String::new(),
@@ -47,14 +47,14 @@ fn gateway_definition() -> NewAgentDefinition {
 
 /// Resolve the single definition every runtime consumer should use.
 ///
-/// Authored space and global rows retain storage's established precedence.
+/// Authored topic and global rows retain storage's established precedence.
 /// The shipped `gateway` default is the only definition that exists without
 /// a row: nothing else ships as a global definition (a shipped workflow's
 /// roles live inside its script as bare dispatches).
 pub async fn resolve_effective_agent_definition(
     storage: &dyn Storage,
     agent_id: &str,
-    space_id: Uuid,
+    topic_id: Uuid,
 ) -> Result<Option<EffectiveAgentDefinition>, GatewayError> {
     if agent_id == "gateway" {
         return Ok(Some(EffectiveAgentDefinition {
@@ -63,19 +63,19 @@ pub async fn resolve_effective_agent_definition(
         }));
     }
     Ok(storage
-        .resolve_agent_definition(agent_id, space_id)
+        .resolve_agent_definition(agent_id, topic_id)
         .await
         .map_err(GatewayError::from)?
         .map(stored_definition))
 }
 
-/// Read the effective registry for a space. Space definitions shadow global
-/// definitions with the same id; definitions from every other space remain
+/// Read the effective registry for a topic. Topic definitions shadow global
+/// definitions with the same id; definitions from every other topic remain
 /// invisible. The shipped gateway agent is the only entry present without a
 /// row.
 pub async fn effective_agent_definitions(
     storage: &dyn Storage,
-    space_id: Uuid,
+    topic_id: Uuid,
 ) -> Result<Vec<EffectiveAgentDefinition>, GatewayError> {
     let mut effective = BTreeMap::new();
     for definition in storage
@@ -86,7 +86,7 @@ pub async fn effective_agent_definitions(
         effective.insert(definition.id.clone(), stored_definition(definition));
     }
     for definition in storage
-        .list_agent_definitions(Some(space_id))
+        .list_agent_definitions(Some(topic_id))
         .await
         .map_err(GatewayError::from)?
     {
@@ -109,7 +109,7 @@ fn stored_definition(definition: swage_storage::AgentDefinition) -> EffectiveAge
     EffectiveAgentDefinition {
         definition: NewAgentDefinition {
             id: definition.id,
-            space_id: definition.space_id,
+            topic_id: definition.topic_id,
             display_name: definition.display_name,
             description: definition.description,
             instructions: definition.instructions,
@@ -132,31 +132,31 @@ pub async fn upsert_agent_definition(
 ) -> Result<AgentDefinitionChange, GatewayError> {
     validate_definition(&definition)?;
 
-    let prior = snapshot_definition(state, &definition.id, definition.space_id).await?;
+    let prior = snapshot_definition(state, &definition.id, definition.topic_id).await?;
     let action_word = if prior.is_some() {
         "updated"
     } else {
         "created"
     };
     let scope = definition
-        .space_id
-        .map_or_else(|| "globally".to_string(), |id| format!("in space {id}"));
+        .topic_id
+        .map_or_else(|| "globally".to_string(), |id| format!("in topic {id}"));
     let summary = format!("{action_word} agent definition '{}' {scope}", definition.id);
 
     let agent_id = definition.id.clone();
-    let space_id = definition.space_id;
+    let topic_id = definition.topic_id;
     state
         .storage
         .upsert_agent_definition(definition)
         .await
         .map_err(GatewayError::from)?;
-    let new_state = snapshot_definition(state, &agent_id, space_id).await?;
+    let new_state = snapshot_definition(state, &agent_id, topic_id).await?;
 
     record_config_change(
         state,
         ConfigChange {
             entity_kind: "agent_definition",
-            entity_id: &scoped_entity_id(&agent_id, space_id),
+            entity_id: &scoped_entity_id(&agent_id, topic_id),
             action: "upsert_agent_definition",
             source,
             session_id,
@@ -169,7 +169,7 @@ pub async fn upsert_agent_definition(
 
     Ok(AgentDefinitionChange {
         agent_id,
-        space_id,
+        topic_id,
         summary,
     })
 }
@@ -178,7 +178,7 @@ pub async fn upsert_agent_definition(
 pub async fn delete_agent_definition(
     state: &AppState,
     agent_id: &str,
-    space_id: Option<Uuid>,
+    topic_id: Option<Uuid>,
     source: &str,
     session_id: Option<Uuid>,
 ) -> Result<AgentDefinitionChange, GatewayError> {
@@ -188,10 +188,10 @@ pub async fn delete_agent_definition(
         ));
     }
 
-    let prior = snapshot_definition(state, agent_id, space_id).await?;
+    let prior = snapshot_definition(state, agent_id, topic_id).await?;
     let removed = state
         .storage
-        .delete_agent_definition(agent_id, space_id)
+        .delete_agent_definition(agent_id, topic_id)
         .await
         .map_err(GatewayError::from)?;
     if !removed {
@@ -205,7 +205,7 @@ pub async fn delete_agent_definition(
         state,
         ConfigChange {
             entity_kind: "agent_definition",
-            entity_id: &scoped_entity_id(agent_id, space_id),
+            entity_id: &scoped_entity_id(agent_id, topic_id),
             action: "delete_agent_definition",
             source,
             session_id,
@@ -218,7 +218,7 @@ pub async fn delete_agent_definition(
 
     Ok(AgentDefinitionChange {
         agent_id: agent_id.to_owned(),
-        space_id,
+        topic_id,
         summary,
     })
 }
@@ -286,11 +286,11 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
 async fn snapshot_definition(
     state: &AppState,
     agent_id: &str,
-    space_id: Option<Uuid>,
+    topic_id: Option<Uuid>,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
     let definitions = state
         .storage
-        .list_agent_definitions(space_id)
+        .list_agent_definitions(topic_id)
         .await
         .map_err(GatewayError::from)?;
     Ok(definitions
@@ -300,11 +300,11 @@ async fn snapshot_definition(
 }
 
 /// Agent ids are unique only within a scope, so the recorded identity
-/// carries the scope — a global `assistant` and a space-scoped `assistant`
+/// carries the scope — a global `assistant` and a topic-scoped `assistant`
 /// must never share an audit identity.
-fn scoped_entity_id(id: &str, space_id: Option<Uuid>) -> String {
-    match space_id {
-        Some(space) => format!("{id}@{space}"),
+fn scoped_entity_id(id: &str, topic_id: Option<Uuid>) -> String {
+    match topic_id {
+        Some(topic) => format!("{id}@{topic}"),
         None => format!("{id}@global"),
     }
 }
@@ -312,12 +312,12 @@ fn scoped_entity_id(id: &str, space_id: Option<Uuid>) -> String {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
-    use swage_storage::{AgentDefinitionStore, NewSpace, SpaceStore, SqliteStorage};
+    use swage_storage::{AgentDefinitionStore, NewTopic, SqliteStorage, TopicStore};
 
     fn definition(id: &str) -> NewAgentDefinition {
         NewAgentDefinition {
             id: id.into(),
-            space_id: None,
+            topic_id: None,
             display_name: "Test agent".into(),
             description: String::new(),
             instructions: String::new(),
@@ -401,14 +401,14 @@ mod validation_tests {
     async fn effective_registry_merges_scopes_around_the_shipped_default() {
         let storage = SqliteStorage::in_memory().unwrap();
         let current = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Current".into(),
                 slug: "current".into(),
             })
             .await
             .unwrap();
         let other = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Other".into(),
                 slug: "other".into(),
             })
@@ -419,14 +419,14 @@ mod validation_tests {
         global.instructions = "global".into();
         storage.upsert_agent_definition(global).await.unwrap();
         let mut local = definition("shared");
-        local.space_id = Some(current.id);
+        local.topic_id = Some(current.id);
         local.instructions = "local".into();
         storage.upsert_agent_definition(local).await.unwrap();
         let mut global_only = definition("global-only");
         global_only.instructions = "visible globally".into();
         storage.upsert_agent_definition(global_only).await.unwrap();
         let mut foreign = definition("foreign");
-        foreign.space_id = Some(other.id);
+        foreign.topic_id = Some(other.id);
         storage.upsert_agent_definition(foreign).await.unwrap();
 
         let effective = effective_agent_definitions(&storage, current.id)
@@ -450,9 +450,9 @@ mod validation_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_fresh_store_holds_only_the_shipped_default() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
 
-        let effective = effective_agent_definitions(&storage, space.id)
+        let effective = effective_agent_definitions(&storage, topic.id)
             .await
             .unwrap();
         assert_eq!(effective.len(), 1);
@@ -461,7 +461,7 @@ mod validation_tests {
 
         for role in ["researcher", "organiser", "synthesist"] {
             assert!(
-                resolve_effective_agent_definition(&storage, role, space.id)
+                resolve_effective_agent_definition(&storage, role, topic.id)
                     .await
                     .unwrap()
                     .is_none(),

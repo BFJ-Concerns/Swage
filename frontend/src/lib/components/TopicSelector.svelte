@@ -1,19 +1,19 @@
-<!-- Space selector — interactive dropdown with space management. -->
+<!-- Topic selector — interactive dropdown with topic management. -->
 <script lang="ts">
-  import type { SpaceStore } from "../stores/spaces";
+  import type { TopicStore } from "../stores/topics";
   import { onMount, onDestroy } from "svelte";
 
   interface Props {
     // Injected by App.svelte once all stores are wired. Optional so AppLayout
     // can render without crashing before the wiring is complete (same pattern
     // as ConversationList).
-    spaceStore?: SpaceStore;
-    // Callback invoked after the active space changes, so App.svelte can
-    // reload conversations for the newly selected space.
-    onSpaceChange?: () => void;
+    topicStore?: TopicStore;
+    // Callback invoked after the active topic changes, so App.svelte can
+    // reload conversations for the newly selected topic.
+    onTopicChange?: () => void;
   }
 
-  let { spaceStore, onSpaceChange }: Props = $props();
+  let { topicStore, onTopicChange }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Local state
@@ -27,7 +27,7 @@
   let createError = $state<string | null>(null);
   let isCreating = $state(false);
 
-  // Track which space is awaiting inline delete confirmation.
+  // Track which topic is awaiting inline delete confirmation.
   let pendingDelete = $state<string | null>(null);
 
   // ---------------------------------------------------------------------------
@@ -69,54 +69,54 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Space selection
+  // Topic selection
   // ---------------------------------------------------------------------------
 
-  async function selectSpace(id: string) {
-    if (!spaceStore) return;
+  async function selectTopic(id: string) {
+    if (!topicStore) return;
     closeDropdown();
-    await spaceStore.selectSpace(id);
-    onSpaceChange?.();
+    await topicStore.selectTopic(id);
+    onTopicChange?.();
   }
 
   // ---------------------------------------------------------------------------
-  // Space creation
+  // Topic creation
   // ---------------------------------------------------------------------------
 
   async function submitCreate(event: Event) {
     event.preventDefault();
-    if (!spaceStore || !newName.trim()) return;
+    if (!topicStore || !newName.trim()) return;
 
     isCreating = true;
     createError = null;
 
     try {
-      await spaceStore.createSpace(newName.trim());
-      onSpaceChange?.();
+      await topicStore.createTopic(newName.trim());
+      onTopicChange?.();
       closeDropdown();
     } catch (err) {
       // Surface API error messages, such as duplicate names.
-      createError = err instanceof Error ? err.message : "Failed to create space";
+      createError = err instanceof Error ? err.message : "Failed to create topic";
     } finally {
       isCreating = false;
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Space deletion
+  // Topic deletion
   // ---------------------------------------------------------------------------
 
   function requestDelete(id: string, event: MouseEvent) {
-    // Prevent the click from bubbling up to the space-item and selecting it.
+    // Prevent the click from bubbling up to the topic-item and selecting it.
     event.stopPropagation();
     pendingDelete = id;
   }
 
   async function confirmDelete(id: string, event: MouseEvent) {
     event.stopPropagation();
-    if (!spaceStore) return;
-    await spaceStore.deleteSpace(id);
-    onSpaceChange?.();
+    if (!topicStore) return;
+    await topicStore.deleteTopic(id);
+    onTopicChange?.();
     pendingDelete = null;
   }
 
@@ -130,43 +130,43 @@
   // ---------------------------------------------------------------------------
 
   // The label to show on the selector button.
-  const currentName = $derived(spaceStore?.currentSpace?.name ?? "default");
+  const currentName = $derived(topicStore?.currentTopic?.name ?? "default");
 </script>
 
 <!--
   Restyled for the riso shell. In the new design this control sits in the
-  navy ink-coloured space-head (cream typography). The space *name* is shown
+  navy ink-coloured topic-head (cream typography). The topic *name* is shown
   by the parent (AppLayout's <h2 class="name">), so this control becomes a
   small "switch / new" affordance underneath.
 
-  TODO(debt): replace with a back-arrow that returns to a dedicated space
-  picker route, plus a ▾ menu for space-scoped settings.
-  Blocked by: space picker route not yet implemented.
+  TODO(debt): replace with a back-arrow that returns to a dedicated topic
+  picker route, plus a ▾ menu for topic-scoped settings.
+  Blocked by: topic picker route not yet implemented.
 -->
-<div class="space-selector">
-  <button class="toggle-btn" onclick={toggleDropdown} title="Switch space">
+<div class="topic-selector">
+  <button class="toggle-btn" onclick={toggleDropdown} title="Switch topic">
     <span class="value">Switch — {currentName}</span>
     <span class="caret" class:open={isOpen}>▾</span>
   </button>
 
-  {#if isOpen && spaceStore}
-    <div class="space-dropdown">
-      <!-- Space list -->
-      <ul class="space-list">
-        {#each spaceStore.spaces as space (space.id)}
-          {@const isActive = spaceStore.currentSpace?.id === space.id}
-          {@const isDefault = space.name === "default"}
-          {@const isPendingDelete = pendingDelete === space.id}
+  {#if isOpen && topicStore}
+    <div class="topic-dropdown">
+      <!-- Topic list -->
+      <ul class="topic-list">
+        {#each topicStore.topics as topic (topic.id)}
+          {@const isActive = topicStore.currentTopic?.id === topic.id}
+          {@const isDefault = topic.name === "default"}
+          {@const isPendingDelete = pendingDelete === topic.id}
 
           <li
-            class="space-item"
+            class="topic-item"
             class:active={isActive}
           >
             <button
-              class="space-select-btn"
-              onclick={() => selectSpace(space.id)}
+              class="topic-select-btn"
+              onclick={() => selectTopic(topic.id)}
             >
-              <span class="space-name">{space.name}</span>
+              <span class="topic-name">{topic.name}</span>
             </button>
 
             {#if isPendingDelete}
@@ -174,19 +174,19 @@
               <span class="delete-confirm">
                 <button
                   class="confirm-delete-btn"
-                  onclick={(e) => confirmDelete(space.id, e)}
+                  onclick={(e) => confirmDelete(topic.id, e)}
                 >Delete</button>
                 <button class="cancel-delete-btn" onclick={cancelDelete}>
                   Cancel
                 </button>
               </span>
             {:else if !isDefault}
-              <!-- Default space cannot be deleted. -->
+              <!-- Default topic cannot be deleted. -->
               <button
-                class="delete-space-btn"
-                title="Delete space"
-                aria-label={`Delete space ${space.name}`}
-                onclick={(e) => requestDelete(space.id, e)}
+                class="delete-topic-btn"
+                title="Delete topic"
+                aria-label={`Delete topic ${topic.name}`}
+                onclick={(e) => requestDelete(topic.id, e)}
               >
                 <span aria-hidden="true">×</span>
               </button>
@@ -201,13 +201,13 @@
       {#if showCreateForm}
         <!-- Inline create form -->
         <form
-          class="create-space-form"
+          class="create-topic-form"
           onsubmit={submitCreate}
         >
           <input
             type="text"
             name="name"
-            placeholder="Space name"
+            placeholder="Topic name"
             bind:value={newName}
             required
           />
@@ -229,10 +229,10 @@
         </form>
       {:else}
         <button
-          class="create-space-btn"
+          class="create-topic-btn"
           onclick={() => { showCreateForm = true; }}
         >
-          + New space
+          + New topic
         </button>
       {/if}
     </div>
@@ -242,11 +242,11 @@
 <style>
   /*
     The selector inherits its colour context from its parent: when in the
-    navy space-head, "color: inherit" gives cream type; when in the picker
+    navy topic-head, "color: inherit" gives cream type; when in the picker
     nav (paper background), it gives navy ink. The dropdown opens below the
-    space-head and uses the riso-block treatment.
+    topic-head and uses the riso-block treatment.
   */
-  .space-selector {
+  .topic-selector {
     margin-top: 12px;
     position: relative;
     font-family: var(--font-mono);
@@ -294,7 +294,7 @@
   }
 
   /* Dropdown: a riso-block panel that drops below the toggle. */
-  .space-dropdown {
+  .topic-dropdown {
     position: absolute;
     top: calc(100% + 6px);
     left: 0;
@@ -306,7 +306,7 @@
     isolation: isolate;
   }
 
-  .space-dropdown::after {
+  .topic-dropdown::after {
     content: "";
     position: absolute;
     inset: 0;
@@ -318,14 +318,14 @@
     pointer-events: none;
   }
 
-  /* Space list rows. */
-  .space-list {
+  /* Topic list rows. */
+  .topic-list {
     list-style: none;
     margin: 0;
     padding: 0;
   }
 
-  .space-item {
+  .topic-item {
     display: flex;
     align-items: center;
     padding: 9px 14px;
@@ -335,20 +335,20 @@
     color: var(--ink);
   }
 
-  .space-item:last-child {
+  .topic-item:last-child {
     border-bottom: none;
   }
 
-  .space-item:hover {
+  .topic-item:hover {
     background: color-mix(in srgb, var(--ink) 8%, transparent);
   }
 
-  .space-item.active {
+  .topic-item.active {
     background: var(--ink);
     color: var(--paper);
   }
 
-  .space-select-btn {
+  .topic-select-btn {
     flex: 1;
     min-width: 0;
     background: none;
@@ -362,7 +362,7 @@
     letter-spacing: inherit;
   }
 
-  .space-name {
+  .topic-name {
     flex: 1;
     overflow: hidden;
     white-space: nowrap;
@@ -371,7 +371,7 @@
 
   /* Delete controls — always rendered so touch and keyboard can reach them,
      low-contrast until hover/focus. UI audit f-4. */
-  .delete-space-btn {
+  .delete-topic-btn {
     background: none;
     border: none;
     color: inherit;
@@ -385,13 +385,13 @@
     transition: opacity 120ms ease, color 120ms ease;
   }
 
-  .delete-space-btn:hover,
-  .delete-space-btn:focus-visible {
+  .delete-topic-btn:hover,
+  .delete-topic-btn:focus-visible {
     opacity: 1;
     color: var(--ink-orange);
   }
 
-  .delete-space-btn:focus-visible {
+  .delete-topic-btn:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
@@ -438,7 +438,7 @@
     margin: 4px 0;
   }
 
-  .create-space-btn {
+  .create-topic-btn {
     width: 100%;
     padding: 9px 14px;
     background: none;
@@ -453,12 +453,12 @@
     cursor: pointer;
   }
 
-  .create-space-btn:hover {
+  .create-topic-btn:hover {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
 
-  /* Create-space form. */
-  .create-space-form {
+  /* Create-topic form. */
+  .create-topic-form {
     padding: 12px 14px;
     display: flex;
     flex-direction: column;
@@ -466,7 +466,7 @@
     border-top: 1px dotted var(--rule-soft);
   }
 
-  .create-space-form input {
+  .create-topic-form input {
     width: 100%;
     padding: 8px 10px;
     border: 1px solid var(--ink);
@@ -476,7 +476,7 @@
     color: var(--ink);
   }
 
-  .create-space-form input:focus {
+  .create-topic-form input:focus {
     outline: none;
     background: color-mix(in srgb, var(--accent) 6%, transparent);
   }

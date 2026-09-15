@@ -158,16 +158,16 @@ mod tests {
     fn every_route_renders_one_typed_function() {
         let rendered = render();
         assert!(rendered.contains(
-            "export async function listSpaces(): Promise<SpaceListResponse> {\n  return request<SpaceListResponse>(\"GET\", `/api/spaces`);\n}"
+            "export async function listTopics(): Promise<TopicListResponse> {\n  return request<TopicListResponse>(\"GET\", `/api/topics`);\n}"
         ));
         assert!(rendered.contains(
-            "export async function createSpace(body: CreateSpaceRequest): Promise<SpaceResponse> {\n  return request<SpaceResponse>(\"POST\", `/api/spaces`, body);\n}"
+            "export async function createTopic(body: CreateTopicRequest): Promise<TopicResponse> {\n  return request<TopicResponse>(\"POST\", `/api/topics`, body);\n}"
         ));
         assert!(rendered.contains(
-            "export async function getSpace(id: string): Promise<SpaceResponse> {\n  return request<SpaceResponse>(\"GET\", `/api/spaces/${encodeURIComponent(id)}`);\n}"
+            "export async function getTopic(id: string): Promise<TopicResponse> {\n  return request<TopicResponse>(\"GET\", `/api/topics/${encodeURIComponent(id)}`);\n}"
         ));
         assert!(rendered.contains(
-            "export async function deleteSpace(id: string): Promise<void> {\n  return request<void>(\"DELETE\", `/api/spaces/${encodeURIComponent(id)}`);\n}"
+            "export async function deleteTopic(id: string): Promise<void> {\n  return request<void>(\"DELETE\", `/api/topics/${encodeURIComponent(id)}`);\n}"
         ));
         assert!(rendered.contains(
             "export async function deletePageAnnotation(annotationId: string): Promise<DeletePageAnnotationResponse> {\n  return request<DeletePageAnnotationResponse>(\"DELETE\", `/api/page-annotations/${encodeURIComponent(annotationId)}`);\n}"
@@ -179,12 +179,12 @@ mod tests {
         let rendered = render();
         assert_eq!(
             rendered
-                .matches("import type { SpaceResponse } from \"./SpaceResponse\";")
+                .matches("import type { TopicResponse } from \"./TopicResponse\";")
                 .count(),
             1
         );
         assert!(
-            rendered.contains("import type { CreateSpaceRequest } from \"./CreateSpaceRequest\";")
+            rendered.contains("import type { CreateTopicRequest } from \"./CreateTopicRequest\";")
         );
         assert!(rendered.contains("import { ApiError } from \"../api/error\";"));
     }
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn names_become_camel_case() {
-        assert_eq!(camel("list_spaces"), "listSpaces");
+        assert_eq!(camel("list_topics"), "listTopics");
         assert_eq!(camel("id"), "id");
         assert_eq!(camel("workspace_id"), "workspaceId");
     }

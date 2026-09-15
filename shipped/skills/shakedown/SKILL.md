@@ -33,7 +33,7 @@ would re-decide staffing per call, and as concurrent single workers when
 it is small. The carried wave scripts — `driver-wave` (one driver per
 prepared black-box workspace) and `judgement-wave` (baseline sweeps and
 deep passes over imported evidence), started by name — are the default
-scripted shape; a campaign authors its own (saved to the space, or
+scripted shape; a campaign authors its own (saved to the topic, or
 inline) only where a wave's shape genuinely departs from them. Staffing
 lives in the campaign record's staffing table — per dispatch class,
 carrying the per-charter variations and escalations charters.md
@@ -171,7 +171,7 @@ never a quiet extension. Every close writes the closing report
 (`build/qa/report.md`), which leads with the **merge recommendation**
 under the floor rule — no Critical or High finding unresolved means
 merge-ready by default, and the seat deviates only with recorded
-reasoning — and is delivered to the user (a page in the space, or the
+reasoning — and is delivered to the user (a page in the topic, or the
 conversation), the annexe copy remaining the artefact of record. Under PR
 mode, a merge-ready close also releases the promotion PR — its body
 brought current first — and merges it only with fully green CI; any
@@ -223,7 +223,7 @@ state — minutes while sessions are due to land, far longer during quiet
 stretches; a wake that finds nothing due spends attention for no gain, so
 err long when quiet. A campaign run unattended across sessions rides a
 standing schedule instead (the `schedule` tool, fresh session, gated on
-the space's open runs): each segment re-reads the campaign record and
+the topic's open runs): each segment re-reads the campaign record and
 resumes from artefacts alone. A turn ended with no wake armed is the
 campaign dying silently.
 

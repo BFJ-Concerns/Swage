@@ -11,7 +11,7 @@ use super::{ClientEvent, ServerEvent, error_codes};
 
 /// Discover skills available to a session.
 ///
-/// Resolves the Swage root, looks up the session's space slug and agent id,
+/// Resolves the Swage root, looks up the session's topic slug and agent id,
 /// builds the config hierarchy, and delegates to [`crate::skill::SkillManager`].
 /// Infrastructure failures are returned to the caller so slash-command and
 /// explicit activation flows can surface the real problem instead of treating
@@ -20,7 +20,7 @@ pub(crate) async fn discover_available_for_session(
     state: &AppState,
     session_id: Uuid,
 ) -> Result<Vec<swage_config::skill::SkillDefinition>, String> {
-    // Fetch session to get space_id and agent_id.
+    // Fetch session to get topic_id and agent_id.
     let session = match state.storage.get_session(session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -36,9 +36,9 @@ pub(crate) async fn discover_available_for_session(
     };
 
     let root = skill_root_for_session(session_id).unwrap_or_else(|| state.config_root.clone());
-    crate::skill::discover_available_for_space(
+    crate::skill::discover_available_for_topic(
         state,
-        session.space_id,
+        session.topic_id,
         Some(&session.agent_id),
         &root,
     )

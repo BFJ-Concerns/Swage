@@ -796,7 +796,7 @@ Dispatched-work output, staged options, and the directories carried
 workflows write to live under `<scratch>`. The contract and everything
 meant to persist live in the annexe repo.
 
-`<scratch>` is the space's scratch area — the session working directory
+`<scratch>` is the topic's scratch area — the session working directory
 the runtime provisions when no workspace is attached; name a directory
 under it per dispatch via the placement option (`cwd`).
 

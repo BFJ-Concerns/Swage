@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn three_level_chain_respects_priority() {
         // global: host=10.0.0.1, port=3000
-        // space: model=claude-opus
+        // topic: model=claude-opus
         // agent: port=4000
         let global = PartialConfig {
             server: Some(PartialServerConfig {
@@ -1045,10 +1045,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let space = partial_with_default_model_id("claude-opus");
+        let topic = partial_with_default_model_id("claude-opus");
         let agent = partial_with_server_port(4000);
 
-        let merged = merge_chain(vec![global, space, agent]);
+        let merged = merge_chain(vec![global, topic, agent]);
 
         // Agent overrides global's port
         let server = merged.server.expect("server should exist");
@@ -1059,12 +1059,12 @@ mod tests {
         );
         assert_eq!(server.port, Some(4000), "agent overrides global port");
 
-        // Space's model survives
+        // Topic's model survives
         let models = merged.models.expect("models should exist");
         assert_eq!(
             models.default_model_id.as_deref(),
             Some("claude-opus"),
-            "space model survives"
+            "topic model survives"
         );
     }
 
@@ -1636,7 +1636,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let space = PartialConfig {
+        let topic = PartialConfig {
             output: Some(PartialOutputConfig {
                 schema: None,
                 max_retries: Some(2),
@@ -1651,7 +1651,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resolved = resolve(merge_chain(vec![global, space, agent]));
+        let resolved = resolve(merge_chain(vec![global, topic, agent]));
         // Agent's values win at every level.
         assert_eq!(
             resolved.output.schema,
@@ -1701,7 +1701,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let space = PartialConfig {
+        let topic = PartialConfig {
             hitl: Some(PartialHitlConfig {
                 timeout: Some(600),
                 timeout_policy: None,
@@ -1715,8 +1715,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let resolved = resolve(merge_chain(vec![global, space, agent]));
-        assert_eq!(resolved.hitl.timeout, 600, "space timeout wins over global");
+        let resolved = resolve(merge_chain(vec![global, topic, agent]));
+        assert_eq!(resolved.hitl.timeout, 600, "topic timeout wins over global");
         assert_eq!(
             resolved.hitl.timeout_policy,
             ApprovalTimeoutPolicy::Interrupt,

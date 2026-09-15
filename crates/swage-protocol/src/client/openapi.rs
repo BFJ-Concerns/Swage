@@ -145,16 +145,16 @@ mod tests {
         let schemas = document["components"]["schemas"]
             .as_object()
             .expect("component schemas");
-        assert!(schemas.contains_key("SpaceResponse"));
+        assert!(schemas.contains_key("TopicResponse"));
         assert!(schemas.contains_key("ApiErrorBody"));
-        let create = &document["paths"]["/api/spaces"]["post"];
+        let create = &document["paths"]["/api/topics"]["post"];
         assert_eq!(
             create["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/CreateSpaceRequest"
+            "#/components/schemas/CreateTopicRequest"
         );
         assert_eq!(
             create["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/SpaceResponse"
+            "#/components/schemas/TopicResponse"
         );
         assert_eq!(
             create["responses"]["default"]["$ref"],
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn a_bodiless_success_and_path_parameters_render() {
         let document = document();
-        let delete = &document["paths"]["/api/spaces/{id}"]["delete"];
+        let delete = &document["paths"]["/api/topics/{id}"]["delete"];
         assert_eq!(
             delete["responses"]["204"]["description"],
             "Success, no body."

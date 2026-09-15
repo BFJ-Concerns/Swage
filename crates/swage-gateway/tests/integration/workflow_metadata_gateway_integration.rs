@@ -9,7 +9,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SpaceStore, SqliteStorage, Storage};
+use swage_storage::{SqliteStorage, Storage, TopicStore};
 use tokio::net::TcpListener;
 
 use crate::support::{ProcessEnvGuard, scratch_tempdir};
@@ -44,10 +44,10 @@ async fn workflow_metadata_and_explicit_updates_persist_through_live_gateway_req
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -60,7 +60,7 @@ async fn workflow_metadata_and_explicit_updates_persist_through_live_gateway_req
     });
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
-    let created: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"request-name","description":"request description","source":"export const meta = { enabled: false, empty: null, retries: 3, name: \"header-name\", description: \"header description\" }; return \"created\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let created: Value = client.post(format!("{base}/api/topics/{}/workflow-scripts", topic.id)).json(&json!({"name":"request-name","description":"request description","source":"export const meta = { enabled: false, empty: null, retries: 3, name: \"header-name\", description: \"header description\" }; return \"created\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     assert_eq!(created["name"], "header-name");
     assert_eq!(created["description"], "header description");
     let updated: Value = client.put(format!("{base}/api/workflow-scripts/{}", created["id"].as_str().unwrap())).json(&json!({"description":"ignored request description","source":"export const meta = { enabled: false, empty: null, retries: 4, name: \"updated-header-name\", description: \"updated header description\" }; return \"updated\";","delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();

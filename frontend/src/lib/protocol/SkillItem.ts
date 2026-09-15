@@ -2,11 +2,11 @@
 
 export type SkillItem = {
 /**
- * Stable synthetic identifier for a shipped skill in this space.
+ * Stable synthetic identifier for a shipped skill in this topic.
  */
 id: string | null, name: string, display_name: string | null, description: string,
 /**
- * Resolved hierarchy level: `agent`, `space`, or `global`.
+ * Resolved hierarchy level: `agent`, `topic`, or `global`.
  */
 level: string, tools: Array<string>, always_active: boolean,
 /**

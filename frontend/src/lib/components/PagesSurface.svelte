@@ -1,5 +1,5 @@
 <!--
-  Pages — the space's agent-run work surfaces. A page is a stack of module
+  Pages — the topic's agent-run work surfaces. A page is a stack of module
   instances; the document module renders markdown source. Each module carries
   the notes hung on it — the shared reference the user and the agent both
   point at instead of describing a location to each other. Agents mutate
@@ -13,14 +13,14 @@
 
   interface Props {
     store: PagesStore;
-    spaceId: string;
+    topicId: string;
   }
 
-  let { store, spaceId }: Props = $props();
+  let { store, topicId }: Props = $props();
 
   let newTitle = $state("");
   // The template a new page is forked from, "" for a blank page. The picker
-  // reads the space's templates; it never mutates them.
+  // reads the topic's templates; it never mutates them.
   let newTemplateId = $state("");
   // The module currently being edited by the user, if any.
   let editingModuleId = $state<string | null>(null);
@@ -30,10 +30,10 @@
   let annotationBody = $state("");
 
   $effect(() => {
-    // A template belongs to one space: switching spaces must not carry a
-    // selection the new space's picker never offered into the next create.
+    // A template belongs to one topic: switching topics must not carry a
+    // selection the new topic's picker never offered into the next create.
     newTemplateId = "";
-    void store.loadPages(spaceId);
+    void store.loadPages(topicId);
   });
 
   function renderDocument(source: string): string {
@@ -49,7 +49,7 @@
     const templateId = newTemplateId;
     newTitle = "";
     newTemplateId = "";
-    await store.createPage(spaceId, title, templateId || undefined);
+    await store.createPage(topicId, title, templateId || undefined);
   }
 
   function startEditing(moduleId: string, source: string): void {

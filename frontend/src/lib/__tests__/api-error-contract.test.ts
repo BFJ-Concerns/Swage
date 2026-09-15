@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listEffectiveAgentDefinitions } from "../api/agent-definitions";
 import { ApiError } from "../api/error";
-import { listSpaceMaterials, setMaterialsBaseUrl } from "../api/materials";
+import { listTopicMaterials, setMaterialsBaseUrl } from "../api/materials";
 import { fetchOperatorOverview, setOperatorBaseUrl } from "../api/operator";
 import { listPages, setBaseUrl as setPagesBaseUrl } from "../api/pages";
 import { listSkills } from "../api/skills";
-import { listSpaceWorkspaces, setSpacesBaseUrl } from "../api/spaces";
+import { listTopicWorkspaces, setTopicsBaseUrl } from "../api/topics";
 import { fetchTurnContext, setBaseUrl as setTurnsBaseUrl } from "../api/turns";
 import { fetchVoiceCapabilities, setWorkflowBaseUrl } from "../api/workflows";
 import { listConversations, setBaseUrl as setConversationsBaseUrl } from "../api/conversations";
@@ -16,13 +16,13 @@ function failedResponse(body: BodyInit, status: number): Response {
 }
 
 const wrappers = [
-  { name: "conversations", request: () => listConversations("space-1") },
-  { name: "pages", request: () => listPages("space-1") },
+  { name: "conversations", request: () => listConversations("topic-1") },
+  { name: "pages", request: () => listPages("topic-1") },
   { name: "operator", request: () => fetchOperatorOverview() },
-  { name: "agent definitions", request: () => listEffectiveAgentDefinitions("space-1") },
-  { name: "materials", request: () => listSpaceMaterials("space-1") },
-  { name: "skills", request: () => listSkills("space-1") },
-  { name: "space workspaces", request: () => listSpaceWorkspaces("space-1") },
+  { name: "agent definitions", request: () => listEffectiveAgentDefinitions("topic-1") },
+  { name: "materials", request: () => listTopicMaterials("topic-1") },
+  { name: "skills", request: () => listSkills("topic-1") },
+  { name: "topic workspaces", request: () => listTopicWorkspaces("topic-1") },
   { name: "turn context", request: () => fetchTurnContext("turn-1") },
   { name: "workflows", request: () => fetchVoiceCapabilities() },
 ] as const;
@@ -33,7 +33,7 @@ beforeEach(() => {
   setPagesBaseUrl("");
   setOperatorBaseUrl("");
   setMaterialsBaseUrl("");
-  setSpacesBaseUrl("");
+  setTopicsBaseUrl("");
   setTurnsBaseUrl("");
   setWorkflowBaseUrl("");
 });

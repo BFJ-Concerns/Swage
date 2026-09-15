@@ -1,13 +1,13 @@
-// HTTP API client for space CRUD and space-scoped session operations.
+// HTTP API client for topic CRUD and topic-scoped session operations.
 //
 // Wraps the gateway's REST endpoints with typed request/response handling.
 // All functions throw on HTTP errors so callers can handle failures uniformly.
 
 import type {
-  Space,
-  CreateSpaceRequest,
+  Topic,
+  CreateTopicRequest,
   CreateWorkspaceAttachmentRequest,
-  UpdateSpaceRequest,
+  UpdateTopicRequest,
   UpdateWorkspaceTrustRequest,
   WorkspaceAttachment,
   ConversationSummary,
@@ -18,10 +18,10 @@ import { ApiError } from "./error";
 
 // Base URL prepended to every request. Defaults to "" so requests resolve to
 // the same origin — the Vite dev proxy then forwards /api/* to the gateway.
-// Override with setSpacesBaseUrl() for testing or alternative deployments.
+// Override with setTopicsBaseUrl() for testing or alternative deployments.
 let baseUrl = "";
 
-export function setSpacesBaseUrl(url: string): void {
+export function setTopicsBaseUrl(url: string): void {
   baseUrl = url;
   generated.setClientBaseUrl(url);
 }
@@ -58,93 +58,93 @@ async function request(
 }
 
 // ---------------------------------------------------------------------------
-// Space CRUD — served by the generated client (frontend/src/lib/protocol/client.ts),
+// Topic CRUD — served by the generated client (frontend/src/lib/protocol/client.ts),
 // rendered from the protocol route manifest; these wrappers only adapt the
 // view type and the list unwrapping.
 // ---------------------------------------------------------------------------
 
-/** Fetch all spaces. */
-export async function listSpaces(): Promise<Space[]> {
-  const body = await generated.listSpaces();
-  return body.spaces;
+/** Fetch all topics. */
+export async function listTopics(): Promise<Topic[]> {
+  const body = await generated.listTopics();
+  return body.topics;
 }
 
-/** Create a new space and return its metadata. */
-export async function createSpace(
-  req: CreateSpaceRequest,
-): Promise<Space> {
-  return generated.createSpace({ description: "", ...req });
+/** Create a new topic and return its metadata. */
+export async function createTopic(
+  req: CreateTopicRequest,
+): Promise<Topic> {
+  return generated.createTopic({ description: "", ...req });
 }
 
 /** Fetch a single space by ID. */
-export async function getSpace(id: string): Promise<Space> {
-  return generated.getSpace(id);
+export async function getTopic(id: string): Promise<Topic> {
+  return generated.getTopic(id);
 }
 
-/** Update a space's metadata and return the updated record. */
-export async function updateSpace(
+/** Update a topic's metadata and return the updated record. */
+export async function updateTopic(
   id: string,
-  req: UpdateSpaceRequest,
-): Promise<Space> {
-  return generated.updateSpace(id, req);
+  req: UpdateTopicRequest,
+): Promise<Topic> {
+  return generated.updateTopic(id, req);
 }
 
 /**
- * Delete a space by ID.
+ * Delete a topic by ID.
  *
  * The gateway returns 204 No Content on success — there is no response body
  * to parse.
  */
-export async function deleteSpace(id: string): Promise<void> {
-  await generated.deleteSpace(id);
+export async function deleteTopic(id: string): Promise<void> {
+  await generated.deleteTopic(id);
 }
 
-export async function listSpaceWorkspaces(
-  spaceId: string,
+export async function listTopicWorkspaces(
+  topicId: string,
 ): Promise<WorkspaceAttachment[]> {
-  const response = await request(`/api/spaces/${spaceId}/workspaces`, "GET");
+  const response = await request(`/api/topics/${topicId}/workspaces`, "GET");
   const body = (await response.json()) as { workspaces: WorkspaceAttachment[] };
   return body.workspaces;
 }
 
-export async function attachSpaceWorkspace(
-  spaceId: string,
+export async function attachTopicWorkspace(
+  topicId: string,
   req: CreateWorkspaceAttachmentRequest,
 ): Promise<WorkspaceAttachment> {
-  const response = await request(`/api/spaces/${spaceId}/workspaces`, "POST", req);
+  const response = await request(`/api/topics/${topicId}/workspaces`, "POST", req);
   return response.json() as Promise<WorkspaceAttachment>;
 }
 
-export async function updateSpaceWorkspaceTrust(
-  spaceId: string,
+export async function updateTopicWorkspaceTrust(
+  topicId: string,
   workspaceId: string,
   req: UpdateWorkspaceTrustRequest,
 ): Promise<WorkspaceAttachment> {
   const response = await request(
-    `/api/spaces/${spaceId}/workspaces/${workspaceId}/trust`,
+    `/api/topics/${topicId}/workspaces/${workspaceId}/trust`,
     "PUT",
     req,
   );
   return response.json() as Promise<WorkspaceAttachment>;
 }
 
-export async function detachSpaceWorkspace(
-  spaceId: string,
+export async function detachTopicWorkspace(
+  topicId: string,
   workspaceId: string,
 ): Promise<void> {
-  await request(`/api/spaces/${spaceId}/workspaces/${workspaceId}`, "DELETE");
+  await request(`/api/topics/${topicId}/workspaces/${workspaceId}`, "DELETE");
 }
 
 // ---------------------------------------------------------------------------
-// Space-scoped session operations
+// Topic-scoped session operations
 // ---------------------------------------------------------------------------
 
-/** Fetch all sessions belonging to a space. */
-export async function listSpaceSessions(
-  spaceId: string,
+/** Fetch all sessions belonging to a topic. */
+export async function listTopicSessions(
+  topicId: string,
 ): Promise<ConversationSummary[]> {
   const response = await request(
-    `/api/spaces/${spaceId}/sessions`,
+    `/api/topics/${topicId}/sessions`,
     "GET",
   );
   // Gateway wraps the array in { conversations: [...] }.
@@ -154,12 +154,12 @@ export async function listSpaceSessions(
   return body.conversations;
 }
 
-/** Create a new session within a space and return its metadata. */
-export async function createSpaceSession(
-  spaceId: string,
+/** Create a new session within a topic and return its metadata. */
+export async function createTopicSession(
+  topicId: string,
 ): Promise<ConversationResponse> {
   const response = await request(
-    `/api/spaces/${spaceId}/sessions`,
+    `/api/topics/${topicId}/sessions`,
     "POST",
   );
   return response.json() as Promise<ConversationResponse>;

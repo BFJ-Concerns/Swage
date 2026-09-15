@@ -118,7 +118,7 @@ async fn start_test_server(
     let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
@@ -139,7 +139,7 @@ async fn start_file_backed_test_server(
     let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
@@ -230,8 +230,8 @@ async fn run_turn_and_collect_tool_result(
     if let Some(workspace_root) = workspace_root {
         let response = reqwest::Client::new()
             .post(format!(
-                "http://{addr}/api/spaces/{}/workspaces",
-                conversation.space_id
+                "http://{addr}/api/topics/{}/workspaces",
+                conversation.topic_id
             ))
             .json(&json!({
                 "path": workspace_root,

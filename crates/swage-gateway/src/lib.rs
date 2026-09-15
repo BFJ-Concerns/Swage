@@ -1,7 +1,7 @@
 //! Swage gateway — HTTP and WebSocket server for the Swage platform.
 //!
 //! The gateway is the primary runtime surface of Swage. It exposes a REST API
-//! for conversation and space management, a WebSocket interface for streaming
+//! for conversation and topic management, a WebSocket interface for streaming
 //! agent turns in real time, and an embedded Svelte SPA served from the same
 //! process.
 //!
@@ -9,7 +9,7 @@
 //!
 //! | Module | Responsibility |
 //! |--------|----------------|
-//! | [`handlers`] | HTTP route handlers for conversations, spaces, and health |
+//! | [`handlers`] | HTTP route handlers for conversations, topics, and health |
 //! | [`websocket`] | WebSocket upgrade and bidirectional message protocol |
 //! | [`turn`] | Agent turn orchestration: provider streaming, tool dispatch, storage |
 //! | [`tool`] | Tool dispatch pipeline with permission checks and rate limiting |

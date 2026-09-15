@@ -22,7 +22,7 @@ use swage_gateway::{attachment, server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{SessionStore, SpaceStore, Storage},
+    store::{SessionStore, Storage, TopicStore},
 };
 
 struct MockProvider;
@@ -62,7 +62,7 @@ fn test_state(db_path: &Path) -> (AppState, Arc<SqliteStorage>) {
     let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -126,7 +126,7 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
-    let space_id = session.space_id;
+    let topic_id = session.topic_id;
 
     let (create_status, create_body) = post_json(
         &router,
@@ -188,16 +188,16 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
         &router,
         &format!("/api/materials/{material_id}/promote"),
         json!({
-            "scope_kind": "space",
-            "space_id": space_id,
+            "scope_kind": "topic",
+            "topic_id": topic_id,
             "relative_path": "shared/draft.md"
         }),
     )
     .await;
     assert_eq!(promote_status, StatusCode::OK);
-    assert_eq!(promote_body["scope_kind"], "space");
+    assert_eq!(promote_body["scope_kind"], "topic");
     assert!(promote_body["session_id"].is_null());
-    assert_eq!(promote_body["space_id"], space_id.to_string());
+    assert_eq!(promote_body["topic_id"], topic_id.to_string());
     let promoted_path = promote_body["absolute_path"].as_str().unwrap();
     assert!(!Path::new(restored_path).exists());
     assert_eq!(
@@ -215,13 +215,13 @@ async fn materials_can_be_created_read_archived_restored_and_promoted() {
             .is_empty()
     );
 
-    let (space_list_status, space_list_body) =
-        get_json(&router, &format!("/api/spaces/{space_id}/materials")).await;
-    assert_eq!(space_list_status, StatusCode::OK);
-    let space_materials = space_list_body["materials"].as_array().unwrap();
-    assert_eq!(space_materials.len(), 1);
-    assert_eq!(space_materials[0]["id"], material_id);
-    assert_eq!(space_materials[0]["relative_path"], "shared/draft.md");
+    let (topic_list_status, topic_list_body) =
+        get_json(&router, &format!("/api/topics/{topic_id}/materials")).await;
+    assert_eq!(topic_list_status, StatusCode::OK);
+    let topic_materials = topic_list_body["materials"].as_array().unwrap();
+    assert_eq!(topic_materials.len(), 1);
+    assert_eq!(topic_materials[0]["id"], material_id);
+    assert_eq!(topic_materials[0]["relative_path"], "shared/draft.md");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -279,7 +279,7 @@ async fn attachment_ingested_and_manual_materials_share_one_surface() {
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
     let session = storage.get_session(session_id).await.unwrap().unwrap();
-    let space_id = session.space_id;
+    let topic_id = session.topic_id;
 
     let (manual_status, manual_body) = post_json(
         &router,
@@ -330,8 +330,8 @@ async fn attachment_ingested_and_manual_materials_share_one_surface() {
                 .starts_with("attachments/")
     }));
 
-    let (space_list_status, space_list_body) =
-        get_json(&router, &format!("/api/spaces/{space_id}/materials")).await;
-    assert_eq!(space_list_status, StatusCode::OK);
-    assert!(space_list_body["materials"].as_array().unwrap().is_empty());
+    let (topic_list_status, topic_list_body) =
+        get_json(&router, &format!("/api/topics/{topic_id}/materials")).await;
+    assert_eq!(topic_list_status, StatusCode::OK);
+    assert!(topic_list_body["materials"].as_array().unwrap().is_empty());
 }

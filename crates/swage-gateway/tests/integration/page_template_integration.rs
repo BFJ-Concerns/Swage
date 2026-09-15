@@ -3,8 +3,8 @@
 //! A template seeds a new page's modules and is recorded as its origin. The
 //! fork is a real page from birth: what the fork does to its modules never
 //! reaches the template, and the template is never projected into pages
-//! already forked from it. Templates are space-local, so a template of
-//! another space is not a template this space can fork from.
+//! already forked from it. Templates are topic-local, so a template of
+//! another topic is not a template this topic can fork from.
 
 #![allow(clippy::unwrap_used)]
 
@@ -24,7 +24,7 @@ use swage_storage::store::PageStore;
 fn router_over(storage: Arc<SqliteStorage>) -> Router {
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -105,23 +105,23 @@ async fn http_json(
     )
 }
 
-async fn make_space(router: &Router, slug: &str) -> String {
-    let (status, space) = http_json(
+async fn make_topic(router: &Router, slug: &str) -> String {
+    let (status, topic) = http_json(
         router,
         "POST",
-        "/api/spaces",
+        "/api/topics",
         Some(json!({ "name": slug, "slug": slug })),
     )
     .await;
-    assert!(status.is_success(), "space create: {space}");
-    space["id"].as_str().unwrap().to_string()
+    assert!(status.is_success(), "topic create: {topic}");
+    topic["id"].as_str().unwrap().to_string()
 }
 
-async fn make_template(router: &Router, space_id: &str) -> String {
+async fn make_template(router: &Router, topic_id: &str) -> String {
     let (status, template) = http_json(
         router,
         "POST",
-        &format!("/api/spaces/{space_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/page-templates"),
         Some(json!({
             "name": "Standup",
             "modules": [
@@ -138,13 +138,13 @@ async fn make_template(router: &Router, space_id: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_created_from_a_template_is_seeded_and_records_its_origin() {
     let (router, _storage) = make_test_router();
-    let space_id = make_space(&router, "fork-seed").await;
-    let template_id = make_template(&router, &space_id).await;
+    let topic_id = make_topic(&router, "fork-seed").await;
+    let template_id = make_template(&router, &topic_id).await;
 
     let (status, page) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/pages"),
+        &format!("/api/topics/{topic_id}/pages"),
         Some(json!({ "title": "Monday standup", "template_id": template_id })),
     )
     .await;
@@ -189,13 +189,13 @@ async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
 
     let (page_id, template_id, seeded_module_id) = {
         let (router, _storage) = make_file_backed_router(&db_path);
-        let space_id = make_space(&router, "fork-seed-on-disk").await;
-        let template_id = make_template(&router, &space_id).await;
+        let topic_id = make_topic(&router, "fork-seed-on-disk").await;
+        let template_id = make_template(&router, &topic_id).await;
 
         let (status, page) = http_json(
             &router,
             "POST",
-            &format!("/api/spaces/{space_id}/pages"),
+            &format!("/api/topics/{topic_id}/pages"),
             Some(json!({ "title": "Monday standup", "template_id": template_id })),
         )
         .await;
@@ -273,12 +273,12 @@ async fn a_fork_is_seeded_on_a_database_file_and_the_seeded_rows_persist() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_created_without_a_template_is_blank_and_has_no_lineage() {
     let (router, _storage) = make_test_router();
-    let space_id = make_space(&router, "blank-page").await;
+    let topic_id = make_topic(&router, "blank-page").await;
 
     let (status, page) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/pages"),
+        &format!("/api/topics/{topic_id}/pages"),
         Some(json!({ "title": "Scratch" })),
     )
     .await;
@@ -290,25 +290,25 @@ async fn a_page_created_without_a_template_is_blank_and_has_no_lineage() {
 #[tokio::test(flavor = "multi_thread")]
 async fn listing_templates_returns_only_the_requested_spaces_summaries() {
     let (router, _storage) = make_test_router();
-    let first_space = make_space(&router, "first-template-space").await;
-    let second_space = make_space(&router, "second-template-space").await;
-    let first_template = make_template(&router, &first_space).await;
-    let second_template = make_template(&router, &second_space).await;
+    let first_topic = make_topic(&router, "first-template-topic").await;
+    let second_topic = make_topic(&router, "second-template-topic").await;
+    let first_template = make_template(&router, &first_topic).await;
+    let second_template = make_template(&router, &second_topic).await;
 
-    for (space_id, template_id) in [
-        (&first_space, &first_template),
-        (&second_space, &second_template),
+    for (topic_id, template_id) in [
+        (&first_topic, &first_template),
+        (&second_topic, &second_template),
     ] {
         let (status, body) = http_json(
             &router,
             "GET",
-            &format!("/api/spaces/{space_id}/page-templates"),
+            &format!("/api/topics/{topic_id}/page-templates"),
             None,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "template list: {body}");
         let templates = body["templates"].as_array().unwrap();
-        assert_eq!(templates.len(), 1, "only this space's template is listed");
+        assert_eq!(templates.len(), 1, "only this topic's template is listed");
         assert_eq!(templates[0]["id"].as_str(), Some(template_id.as_str()));
         assert_eq!(templates[0]["name"].as_str(), Some("Standup"));
         assert!(
@@ -321,13 +321,13 @@ async fn listing_templates_returns_only_the_requested_spaces_summaries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
     let (router, _storage) = make_test_router();
-    let space_id = make_space(&router, "fork-divergence").await;
-    let template_id = make_template(&router, &space_id).await;
+    let topic_id = make_topic(&router, "fork-divergence").await;
+    let template_id = make_template(&router, &topic_id).await;
 
     let (_, page) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/pages"),
+        &format!("/api/topics/{topic_id}/pages"),
         Some(json!({ "title": "Monday standup", "template_id": template_id })),
     )
     .await;
@@ -368,7 +368,7 @@ async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
     let (status, _) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/page-templates"),
         Some(json!({
             "name": "Standup v2",
             "modules": [{ "kind": "document", "source": "## Today" }]
@@ -386,26 +386,26 @@ async fn editing_a_forked_page_leaves_the_template_it_came_from_untouched() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_template_from_another_space_is_rejected_before_a_page_lands() {
+async fn a_template_from_another_topic_is_rejected_before_a_page_lands() {
     let (router, _storage) = make_test_router();
-    let owner = make_space(&router, "template-owner").await;
-    let other = make_space(&router, "template-outsider").await;
+    let owner = make_topic(&router, "template-owner").await;
+    let other = make_topic(&router, "template-outsider").await;
     let template_id = make_template(&router, &owner).await;
 
     let (status, body) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{other}/pages"),
+        &format!("/api/topics/{other}/pages"),
         Some(json!({ "title": "Borrowed", "template_id": template_id })),
     )
     .await;
     assert_eq!(
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "templates are space-local: {body}"
+        "templates are topic-local: {body}"
     );
 
-    let (_, pages) = http_json(&router, "GET", &format!("/api/spaces/{other}/pages"), None).await;
+    let (_, pages) = http_json(&router, "GET", &format!("/api/topics/{other}/pages"), None).await;
     assert!(
         pages["pages"].as_array().unwrap().is_empty(),
         "the rejected fork left no page behind"
@@ -415,12 +415,12 @@ async fn a_template_from_another_space_is_rejected_before_a_page_lands() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unknown_template_is_rejected_before_a_page_lands() {
     let (router, _storage) = make_test_router();
-    let space_id = make_space(&router, "unknown-template").await;
+    let topic_id = make_topic(&router, "unknown-template").await;
 
     let (status, body) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/pages"),
+        &format!("/api/topics/{topic_id}/pages"),
         Some(json!({
             "title": "Nowhere",
             "template_id": "99999999-9999-4999-8999-999999999999"
@@ -432,7 +432,7 @@ async fn an_unknown_template_is_rejected_before_a_page_lands() {
     let (_, pages) = http_json(
         &router,
         "GET",
-        &format!("/api/spaces/{space_id}/pages"),
+        &format!("/api/topics/{topic_id}/pages"),
         None,
     )
     .await;
@@ -442,12 +442,12 @@ async fn an_unknown_template_is_rejected_before_a_page_lands() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_template_seeding_an_unrenderable_module_kind_is_rejected() {
     let (router, _storage) = make_test_router();
-    let space_id = make_space(&router, "bad-kind").await;
+    let topic_id = make_topic(&router, "bad-kind").await;
 
     let (status, body) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/page-templates"),
         Some(json!({
             "name": "Broken",
             "modules": [{ "kind": "spreadsheet", "source": "" }]
@@ -459,7 +459,7 @@ async fn a_template_seeding_an_unrenderable_module_kind_is_rejected() {
     let (_, templates) = http_json(
         &router,
         "GET",
-        &format!("/api/spaces/{space_id}/page-templates"),
+        &format!("/api/topics/{topic_id}/page-templates"),
         None,
     )
     .await;
@@ -474,13 +474,13 @@ async fn template_creation_and_the_fork_each_land_an_audit_event() {
     use swage_storage::store::AuditStore;
 
     let (router, storage) = make_test_router();
-    let space_id = make_space(&router, "fork-provenance").await;
-    let template_id = make_template(&router, &space_id).await;
+    let topic_id = make_topic(&router, "fork-provenance").await;
+    let template_id = make_template(&router, &topic_id).await;
 
     let (_, page) = http_json(
         &router,
         "POST",
-        &format!("/api/spaces/{space_id}/pages"),
+        &format!("/api/topics/{topic_id}/pages"),
         Some(json!({ "title": "Monday standup", "template_id": template_id })),
     )
     .await;

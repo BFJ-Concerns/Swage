@@ -107,15 +107,15 @@ impl Tool for RunEventPostTool {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use swage_storage::{NewWorkflowRun, SpaceStore, SqliteStorage, Storage, WorkflowStore};
+    use swage_storage::{NewWorkflowRun, SqliteStorage, Storage, TopicStore, WorkflowStore};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn tool_derives_agent_attribution_from_its_context() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -138,7 +138,7 @@ mod tests {
             .unwrap();
         let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

@@ -1,5 +1,5 @@
 /**
- * Tests for the HTTP API client for space CRUD and space-scoped sessions.
+ * Tests for the HTTP API client for topic CRUD and topic-scoped sessions.
  *
  * All network calls are intercepted via a global fetch mock so these tests
  * run in isolation without a live gateway. Each test verifies the correct
@@ -9,19 +9,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import {
-  listSpaces,
-  createSpace,
-  getSpace,
-  updateSpace,
-  deleteSpace,
-  listSpaceWorkspaces,
-  attachSpaceWorkspace,
-  updateSpaceWorkspaceTrust,
-  detachSpaceWorkspace,
-  listSpaceSessions,
-  createSpaceSession,
-  setSpacesBaseUrl,
-} from "../api/spaces";
+  listTopics,
+  createTopic,
+  getTopic,
+  updateTopic,
+  deleteTopic,
+  listTopicWorkspaces,
+  attachTopicWorkspace,
+  updateTopicWorkspaceTrust,
+  detachTopicWorkspace,
+  listTopicSessions,
+  createTopicSession,
+  setTopicsBaseUrl,
+} from "../api/topics";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,7 +45,7 @@ beforeEach(() => {
   // Replace the global fetch with a vitest spy so tests control responses.
   vi.stubGlobal("fetch", vi.fn());
   // Ensure base URL is reset to same-origin default between tests.
-  setSpacesBaseUrl("");
+  setTopicsBaseUrl("");
 });
 
 afterEach(() => {
@@ -56,20 +56,20 @@ afterEach(() => {
 // Sample fixtures
 // ---------------------------------------------------------------------------
 
-const sampleSpace = {
+const sampleTopic = {
   id: "proj-1",
-  name: "My Space",
+  name: "My Topic",
   description: "",
   is_default: false,
-  slug: "my-space",
+  slug: "my-topic",
   created_at: "2026-01-01T00:00:00Z",
 };
 
 const sampleWorkspace = {
   id: "workspace-1",
-  space_id: "proj-1",
+  topic_id: "proj-1",
   label: "Codebase",
-  path: "/home/user/my-space",
+  path: "/home/user/my-topic",
   permissions: ["read", "write"],
   is_trusted: false,
   created_at: "2026-01-01T00:00:00Z",
@@ -84,154 +84,154 @@ const sampleSession = {
 };
 
 // ---------------------------------------------------------------------------
-// listSpaces
+// listTopics
 // ---------------------------------------------------------------------------
 
-describe("listSpaces", () => {
-  it("sends GET /api/spaces and unwraps the spaces array", async () => {
+describe("listTopics", () => {
+  it("sends GET /api/topics and unwraps the topics array", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(
-      mockResponse({ spaces: [sampleSpace] }),
+      mockResponse({ topics: [sampleTopic] }),
     );
 
-    const result = await listSpaces();
+    const result = await listTopics();
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces", { method: "GET" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics", { method: "GET" });
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe("proj-1");
-    expect(result[0].slug).toBe("my-space");
+    expect(result[0].slug).toBe("my-topic");
   });
 
-  it("returns an empty array when there are no spaces", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ spaces: [] }));
+  it("returns an empty array when there are no topics", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ topics: [] }));
 
-    const result = await listSpaces();
+    const result = await listTopics();
     expect(result).toEqual([]);
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 500));
-    await expect(listSpaces()).rejects.toThrow("500");
+    await expect(listTopics()).rejects.toThrow("500");
   });
 });
 
 // ---------------------------------------------------------------------------
-// createSpace
+// createTopic
 // ---------------------------------------------------------------------------
 
-describe("createSpace", () => {
-  it("sends POST /api/spaces with JSON body and returns the new space", async () => {
+describe("createTopic", () => {
+  it("sends POST /api/topics with JSON body and returns the new topic", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockResponse(sampleSpace, 201));
+    fetchMock.mockResolvedValueOnce(mockResponse(sampleTopic, 201));
 
-    const result = await createSpace({ name: "My Space" });
+    const result = await createTopic({ name: "My Topic" });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/spaces",
+      "/api/topics",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // The generated client sends the wire contract whole: the view
         // type's optional description is the wire's required one.
-        body: JSON.stringify({ description: "", name: "My Space" }),
+        body: JSON.stringify({ description: "", name: "My Topic" }),
       }),
     );
     expect(result.id).toBe("proj-1");
-    expect(result.slug).toBe("my-space");
+    expect(result.slug).toBe("my-topic");
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 422));
-    await expect(createSpace({ name: "Bad" })).rejects.toThrow("422");
+    await expect(createTopic({ name: "Bad" })).rejects.toThrow("422");
   });
 });
 
 // ---------------------------------------------------------------------------
-// getSpace
+// getTopic
 // ---------------------------------------------------------------------------
 
-describe("getSpace", () => {
-  it("sends GET /api/spaces/:id and returns a Space", async () => {
+describe("getTopic", () => {
+  it("sends GET /api/topics/:id and returns a Topic", async () => {
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValueOnce(mockResponse(sampleSpace));
+    fetchMock.mockResolvedValueOnce(mockResponse(sampleTopic));
 
-    const result = await getSpace("proj-1");
+    const result = await getTopic("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1", {
       method: "GET",
     });
     expect(result.id).toBe("proj-1");
-    expect(result.slug).toBe("my-space");
+    expect(result.slug).toBe("my-topic");
   });
 
   it("throws on 404", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 404));
-    await expect(getSpace("missing")).rejects.toThrow("404");
+    await expect(getTopic("missing")).rejects.toThrow("404");
   });
 });
 
 // ---------------------------------------------------------------------------
-// updateSpace
+// updateTopic
 // ---------------------------------------------------------------------------
 
-describe("updateSpace", () => {
-  it("sends PUT /api/spaces/:id with JSON body and returns the updated space", async () => {
+describe("updateTopic", () => {
+  it("sends PUT /api/topics/:id with JSON body and returns the updated topic", async () => {
     const fetchMock = vi.mocked(fetch);
-    const updated = { ...sampleSpace, name: "Renamed", description: "Ops space" };
+    const updated = { ...sampleTopic, name: "Renamed", description: "Ops topic" };
     fetchMock.mockResolvedValueOnce(mockResponse(updated));
 
-    const result = await updateSpace("proj-1", {
+    const result = await updateTopic("proj-1", {
       name: "Renamed",
-      description: "Ops space",
+      description: "Ops topic",
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/spaces/proj-1",
+      "/api/topics/proj-1",
       expect.objectContaining({
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: "Renamed", description: "Ops space" }),
+        body: JSON.stringify({ name: "Renamed", description: "Ops topic" }),
       }),
     );
     expect(result.name).toBe("Renamed");
-    expect(result.description).toBe("Ops space");
+    expect(result.description).toBe("Ops topic");
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 400));
-    await expect(updateSpace("proj-1", {})).rejects.toThrow("400");
+    await expect(updateTopic("proj-1", {})).rejects.toThrow("400");
   });
 });
 
-describe("space workspaces", () => {
-  it("lists workspace attachments for a space", async () => {
+describe("topic workspaces", () => {
+  it("lists workspace attachments for a topic", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse({ workspaces: [sampleWorkspace] }));
 
-    const result = await listSpaceWorkspaces("proj-1");
+    const result = await listTopicWorkspaces("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/workspaces", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1/workspaces", {
       method: "GET",
     });
-    expect(result[0].path).toBe("/home/user/my-space");
+    expect(result[0].path).toBe("/home/user/my-topic");
   });
 
-  it("attaches a workspace to a space", async () => {
+  it("attaches a workspace to a topic", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse(sampleWorkspace, 201));
 
-    await attachSpaceWorkspace("proj-1", {
-      path: "/home/user/my-space",
+    await attachTopicWorkspace("proj-1", {
+      path: "/home/user/my-topic",
       label: "Codebase",
       permissions: ["read", "write"],
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/spaces/proj-1/workspaces",
+      "/api/topics/proj-1/workspaces",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
-          path: "/home/user/my-space",
+          path: "/home/user/my-topic",
           label: "Codebase",
           permissions: ["read", "write"],
         }),
@@ -245,10 +245,10 @@ describe("space workspaces", () => {
       mockResponse({ ...sampleWorkspace, is_trusted: true }),
     );
 
-    await updateSpaceWorkspaceTrust("proj-1", "workspace-1", { is_trusted: true });
+    await updateTopicWorkspaceTrust("proj-1", "workspace-1", { is_trusted: true });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/spaces/proj-1/workspaces/workspace-1/trust",
+      "/api/topics/proj-1/workspaces/workspace-1/trust",
       expect.objectContaining({
         method: "PUT",
         body: JSON.stringify({ is_trusted: true }),
@@ -260,28 +260,28 @@ describe("space workspaces", () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(mockResponse(null, 204));
 
-    await detachSpaceWorkspace("proj-1", "workspace-1");
+    await detachTopicWorkspace("proj-1", "workspace-1");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/spaces/proj-1/workspaces/workspace-1",
+      "/api/topics/proj-1/workspaces/workspace-1",
       { method: "DELETE" },
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// deleteSpace
+// deleteTopic
 // ---------------------------------------------------------------------------
 
-describe("deleteSpace", () => {
-  it("sends DELETE /api/spaces/:id and returns undefined", async () => {
+describe("deleteTopic", () => {
+  it("sends DELETE /api/topics/:id and returns undefined", async () => {
     const fetchMock = vi.mocked(fetch);
     // Gateway returns 204 No Content on successful delete.
     fetchMock.mockResolvedValueOnce(mockResponse(null, 204));
 
-    const result = await deleteSpace("proj-1");
+    const result = await deleteTopic("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1", {
       method: "DELETE",
     });
     expect(result).toBeUndefined();
@@ -289,24 +289,24 @@ describe("deleteSpace", () => {
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 403));
-    await expect(deleteSpace("proj-1")).rejects.toThrow("403");
+    await expect(deleteTopic("proj-1")).rejects.toThrow("403");
   });
 });
 
 // ---------------------------------------------------------------------------
-// listSpaceSessions
+// listTopicSessions
 // ---------------------------------------------------------------------------
 
-describe("listSpaceSessions", () => {
-  it("sends GET /api/spaces/:id/sessions and unwraps the conversations array", async () => {
+describe("listTopicSessions", () => {
+  it("sends GET /api/topics/:id/sessions and unwraps the conversations array", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValueOnce(
       mockResponse({ conversations: [sampleSession] }),
     );
 
-    const result = await listSpaceSessions("proj-1");
+    const result = await listTopicSessions("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/sessions", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1/sessions", {
       method: "GET",
     });
     expect(result).toHaveLength(1);
@@ -315,38 +315,38 @@ describe("listSpaceSessions", () => {
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 404));
-    await expect(listSpaceSessions("missing")).rejects.toThrow("404");
+    await expect(listTopicSessions("missing")).rejects.toThrow("404");
   });
 });
 
 // ---------------------------------------------------------------------------
-// createSpaceSession
+// createTopicSession
 // ---------------------------------------------------------------------------
 
-describe("createSpaceSession", () => {
-  it("sends POST /api/spaces/:id/sessions and returns the new session", async () => {
+describe("createTopicSession", () => {
+  it("sends POST /api/topics/:id/sessions and returns the new session", async () => {
     const fetchMock = vi.mocked(fetch);
     const created = {
       id: "sess-new",
-      space_id: "proj-1",
+      topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
     };
     fetchMock.mockResolvedValueOnce(mockResponse(created, 201));
 
-    const result = await createSpaceSession("proj-1");
+    const result = await createTopicSession("proj-1");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/spaces/proj-1/sessions",
+      "/api/topics/proj-1/sessions",
       expect.objectContaining({ method: "POST" }),
     );
     expect(result.id).toBe("sess-new");
-    expect(result.space_id).toBe("proj-1");
+    expect(result.topic_id).toBe("proj-1");
   });
 
   it("throws on non-2xx response", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockResponse({}, 500));
-    await expect(createSpaceSession("proj-1")).rejects.toThrow("500");
+    await expect(createTopicSession("proj-1")).rejects.toThrow("500");
   });
 });
 
@@ -354,15 +354,15 @@ describe("createSpaceSession", () => {
 // Configurable base URL
 // ---------------------------------------------------------------------------
 
-describe("setSpacesBaseUrl", () => {
+describe("setTopicsBaseUrl", () => {
   it("prepends the base URL to all requests", async () => {
-    setSpacesBaseUrl("http://localhost:3000");
-    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ spaces: [] }));
+    setTopicsBaseUrl("http://localhost:3000");
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ topics: [] }));
 
-    await listSpaces();
+    await listTopics();
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      "http://localhost:3000/api/spaces",
+      "http://localhost:3000/api/topics",
       expect.objectContaining({ method: "GET" }),
     );
   });

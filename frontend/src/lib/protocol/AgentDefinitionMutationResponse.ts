@@ -5,4 +5,4 @@
  * change — prior and new state under a named action — lives in the audit
  * trail.
  */
-export type AgentDefinitionMutationResponse = { agent_id: string, space_id: string | null, summary: string, };
+export type AgentDefinitionMutationResponse = { agent_id: string, topic_id: string | null, summary: string, };

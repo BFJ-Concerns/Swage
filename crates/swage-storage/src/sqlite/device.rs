@@ -127,8 +127,8 @@ impl DeviceStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewDeviceRegistration, NewSession, NewSpace};
-    use crate::store::{DeviceStore, SessionStore, SpaceStore};
+    use crate::model::{NewDeviceRegistration, NewSession, NewTopic};
+    use crate::store::{DeviceStore, SessionStore, TopicStore};
 
     use super::*;
 
@@ -177,8 +177,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn find_session_by_channel_origin_returns_matching_session() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "test".into(),
                 slug: "test".into(),
             })
@@ -187,7 +187,7 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: Some(serde_json::json!({
                     "channel_origin": {

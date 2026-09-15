@@ -43,14 +43,14 @@ fn load_card(
     card_id: Uuid,
 ) -> rusqlite::Result<Option<OrientationCard>> {
     let row = conn.query_row(
-        "SELECT id, space_id, title, content, authored_by, created_at FROM orientation_cards WHERE id = ?1",
+        "SELECT id, topic_id, title, content, authored_by, created_at FROM orientation_cards WHERE id = ?1",
         params![card_id.to_string()],
         |row| Ok((uuid(&row.get::<_, String>(0)?)?, uuid(&row.get::<_, String>(1)?)?, row.get(2)?, row.get(3)?, row.get(4)?, datetime(&row.get::<_, String>(5)?)?)),
     ).optional()?;
-    row.map(|(id, space_id, title, content, authored_by, created_at)| {
+    row.map(|(id, topic_id, title, content, authored_by, created_at)| {
         Ok(OrientationCard {
             id,
-            space_id,
+            topic_id,
             title,
             content,
             authored_by,
@@ -90,9 +90,9 @@ impl OrientationCardStore for SqliteStorage {
                     entity: "SourceObservation".into(),
                     id: observation_id.to_string(),
                 })?;
-            if observation.space_id != card.space_id {
+            if observation.topic_id != card.topic_id {
                 return Err(StorageError::ConstraintViolation(
-                    "all orientation-card evidence must belong to the card's space".into(),
+                    "all orientation-card evidence must belong to the card's topic".into(),
                 ));
             }
             if !observations.contains(observation_id) {
@@ -104,20 +104,20 @@ impl OrientationCardStore for SqliteStorage {
             let id = Uuid::new_v4();
             let anchor_id = Uuid::new_v4();
             let now = Utc::now();
-            transaction.execute("INSERT INTO orientation_cards (id, space_id, title, content, authored_by, evidence_anchor_id, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id.to_string(), card.space_id.to_string(), card.title, card.content, card.authored_by, anchor_id.to_string(), now.to_rfc3339()])?;
+            transaction.execute("INSERT INTO orientation_cards (id, topic_id, title, content, authored_by, evidence_anchor_id, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id.to_string(), card.topic_id.to_string(), card.title, card.content, card.authored_by, anchor_id.to_string(), now.to_rfc3339()])?;
             for (index, observation_id) in observations.iter().enumerate() {
                 let link_id = if index == 0 { anchor_id } else { Uuid::new_v4() };
-                transaction.execute("INSERT INTO orientation_card_observations (id, card_id, space_id, observation_id) VALUES (?1,?2,?3,?4)", params![link_id.to_string(), id.to_string(), card.space_id.to_string(), observation_id.to_string()])?;
+                transaction.execute("INSERT INTO orientation_card_observations (id, card_id, topic_id, observation_id) VALUES (?1,?2,?3,?4)", params![link_id.to_string(), id.to_string(), card.topic_id.to_string(), observation_id.to_string()])?;
             }
             transaction.execute("INSERT INTO audit_events (id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at) VALUES (?1,?2,'orientation_card',?3,'created',?4,?5,?6)", params![Uuid::new_v4().to_string(), session_id.map(|id| id.to_string()), id.to_string(), format!("{} authored an orientation card", card.authored_by), serde_json::json!({"actor": card.authored_by, "observation_ids": observations}).to_string(), now.to_rfc3339()])?;
             transaction.commit()?;
-            Ok(OrientationCard { id, space_id: card.space_id, title: card.title, content: card.content, authored_by: card.authored_by, observation_ids: observations, created_at: now })
+            Ok(OrientationCard { id, topic_id: card.topic_id, title: card.title, content: card.content, authored_by: card.authored_by, observation_ids: observations, created_at: now })
         }).await
     }
 
     async fn find_orientation_cards(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OrientationCard>, StorageError> {
@@ -127,15 +127,15 @@ impl OrientationCardStore for SqliteStorage {
             .map(str::to_owned);
         self.with_conn(move |conn| {
             let sql = if query.is_some() {
-                "SELECT c.id FROM orientation_card_fts f JOIN orientation_cards c ON c.rowid=f.rowid LEFT JOIN orientation_card_lifecycle l ON l.card_id=c.id WHERE c.space_id=?1 AND l.id IS NULL AND orientation_card_fts MATCH ?2 ORDER BY bm25(orientation_card_fts), c.created_at DESC LIMIT ?3"
+                "SELECT c.id FROM orientation_card_fts f JOIN orientation_cards c ON c.rowid=f.rowid LEFT JOIN orientation_card_lifecycle l ON l.card_id=c.id WHERE c.topic_id=?1 AND l.id IS NULL AND orientation_card_fts MATCH ?2 ORDER BY bm25(orientation_card_fts), c.created_at DESC LIMIT ?3"
             } else {
-                "SELECT c.id FROM orientation_cards c LEFT JOIN orientation_card_lifecycle l ON l.card_id=c.id WHERE c.space_id=?1 AND l.id IS NULL ORDER BY c.created_at DESC LIMIT ?3"
+                "SELECT c.id FROM orientation_cards c LEFT JOIN orientation_card_lifecycle l ON l.card_id=c.id WHERE c.topic_id=?1 AND l.id IS NULL ORDER BY c.created_at DESC LIMIT ?3"
             };
             let mut statement = conn.prepare(sql)?;
             let ids = if let Some(query) = query {
-                statement.query_map(params![space_id.to_string(), query, limit as i64], |row| uuid(&row.get::<_, String>(0)?))?.collect::<rusqlite::Result<Vec<_>>>()?
+                statement.query_map(params![topic_id.to_string(), query, limit as i64], |row| uuid(&row.get::<_, String>(0)?))?.collect::<rusqlite::Result<Vec<_>>>()?
             } else {
-                statement.query_map(params![space_id.to_string(), rusqlite::types::Null, limit as i64], |row| uuid(&row.get::<_, String>(0)?))?.collect::<rusqlite::Result<Vec<_>>>()?
+                statement.query_map(params![topic_id.to_string(), rusqlite::types::Null, limit as i64], |row| uuid(&row.get::<_, String>(0)?))?.collect::<rusqlite::Result<Vec<_>>>()?
             };
             ids.into_iter().map(|id| load_card(conn, id).map(Option::unwrap)).collect()
         }).await
@@ -143,14 +143,14 @@ impl OrientationCardStore for SqliteStorage {
 
     async fn supersede_orientation_card(
         &self,
-        expected_space_id: Uuid,
+        expected_topic_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Uuid,
         actor: String,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCardLifecycle, StorageError> {
         self.append_orientation_lifecycle(
-            expected_space_id,
+            expected_topic_id,
             card_id,
             Some(replacement_card_id),
             actor,
@@ -161,12 +161,12 @@ impl OrientationCardStore for SqliteStorage {
 
     async fn retire_orientation_card(
         &self,
-        expected_space_id: Uuid,
+        expected_topic_id: Uuid,
         card_id: Uuid,
         actor: String,
         session_id: Option<Uuid>,
     ) -> Result<OrientationCardLifecycle, StorageError> {
-        self.append_orientation_lifecycle(expected_space_id, card_id, None, actor, session_id)
+        self.append_orientation_lifecycle(expected_topic_id, card_id, None, actor, session_id)
             .await
     }
 }
@@ -174,7 +174,7 @@ impl OrientationCardStore for SqliteStorage {
 impl SqliteStorage {
     async fn append_orientation_lifecycle(
         &self,
-        expected_space_id: Uuid,
+        expected_topic_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Option<Uuid>,
         actor: String,
@@ -188,13 +188,13 @@ impl SqliteStorage {
         self.with_conn(move |conn| {
             let transaction = conn.unchecked_transaction()?;
             let card = load_card(&transaction, card_id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
-            if card.space_id != expected_space_id { return Err(rusqlite::Error::ToSqlConversionFailure("orientation card must belong to the calling space".into())); }
+            if card.topic_id != expected_topic_id { return Err(rusqlite::Error::ToSqlConversionFailure("orientation card must belong to the calling topic".into())); }
             if transaction.query_row("SELECT 1 FROM orientation_card_lifecycle WHERE card_id=?1", params![card_id.to_string()], |_| Ok(())).optional()?.is_some() {
                 return Err(rusqlite::Error::ToSqlConversionFailure("orientation card already has a terminal lifecycle record".into()));
             }
             if let Some(replacement_id) = replacement_card_id {
                 let replacement = load_card(&transaction, replacement_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-                if replacement.space_id != expected_space_id { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must belong to the calling space".into())); }
+                if replacement.topic_id != expected_topic_id { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must belong to the calling topic".into())); }
                 if transaction.query_row("SELECT 1 FROM orientation_card_lifecycle WHERE card_id=?1", params![replacement_id.to_string()], |_| Ok(())).optional()?.is_some() { return Err(rusqlite::Error::ToSqlConversionFailure("replacement card must be active".into())); }
             }
             let record = OrientationCardLifecycle { id: Uuid::new_v4(), card_id, kind: if replacement_card_id.is_some() { OrientationCardLifecycleKind::Superseded } else { OrientationCardLifecycleKind::Retired }, replacement_card_id, actor, created_at: Utc::now() };
@@ -210,13 +210,13 @@ impl SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SpaceStore;
-    use crate::{NewSourceObservation, NewSpace, ObservationOrigin};
+    use crate::store::TopicStore;
+    use crate::{NewSourceObservation, NewTopic, ObservationOrigin};
 
     async fn fixture() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "Orientation".into(),
                 slug: "orientation".into(),
             })
@@ -224,7 +224,7 @@ mod tests {
             .unwrap();
         let observation = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/evidence".into()),
                     local_path: None,
@@ -245,19 +245,19 @@ mod tests {
             )
             .await
             .unwrap();
-        (storage, space.id, observation.id)
+        (storage, topic.id, observation.id)
     }
 
     async fn card(
         storage: &SqliteStorage,
-        space_id: Uuid,
+        topic_id: Uuid,
         observation_id: Uuid,
         title: &str,
     ) -> OrientationCard {
         storage
             .create_orientation_card(
                 NewOrientationCard {
-                    space_id,
+                    topic_id,
                     title: title.into(),
                     content: "Marsupial corpus orientation".into(),
                     authored_by: "agent-alpha".into(),
@@ -270,12 +270,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn evidence_is_required_and_must_share_the_space() {
-        let (storage, space_id, observation_id) = fixture().await;
+    async fn evidence_is_required_and_must_share_the_topic() {
+        let (storage, topic_id, observation_id) = fixture().await;
         let empty = storage
             .create_orientation_card(
                 NewOrientationCard {
-                    space_id,
+                    topic_id,
                     title: "Title".into(),
                     content: "Content".into(),
                     authored_by: "agent".into(),
@@ -286,16 +286,16 @@ mod tests {
             .await;
         assert!(matches!(empty, Err(StorageError::ConstraintViolation(_))));
         let other = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Other".into(),
                 slug: "other".into(),
             })
             .await
             .unwrap();
-        let cross_space = storage
+        let cross_topic = storage
             .create_orientation_card(
                 NewOrientationCard {
-                    space_id: other.id,
+                    topic_id: other.id,
                     title: "Title".into(),
                     content: "Content".into(),
                     authored_by: "agent".into(),
@@ -305,17 +305,17 @@ mod tests {
             )
             .await;
         assert!(matches!(
-            cross_space,
+            cross_topic,
             Err(StorageError::ConstraintViolation(_))
         ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn schema_binds_an_evidence_anchor_to_its_card_and_space() {
-        let (storage, space_id, observation_id) = fixture().await;
+    async fn schema_binds_an_evidence_anchor_to_its_card_and_topic() {
+        let (storage, topic_id, observation_id) = fixture().await;
         let second_observation = storage
             .record_observation(NewSourceObservation {
-                space_id,
+                topic_id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/second-evidence".into()),
                     local_path: None,
@@ -331,7 +331,7 @@ mod tests {
         let existing = storage
             .create_orientation_card(
                 NewOrientationCard {
-                    space_id,
+                    topic_id,
                     title: "Existing card".into(),
                     content: "Existing orientation".into(),
                     authored_by: "agent".into(),
@@ -352,23 +352,23 @@ mod tests {
             .await
             .unwrap();
         let result = storage.with_conn(move |conn| {
-            conn.execute("INSERT INTO orientation_cards (id,space_id,title,content,authored_by,evidence_anchor_id,created_at) VALUES (?1,?2,'title','content','actor',?3,?4)", params![Uuid::new_v4().to_string(), space_id.to_string(), unrelated_link_id, Utc::now().to_rfc3339()])?;
+            conn.execute("INSERT INTO orientation_cards (id,topic_id,title,content,authored_by,evidence_anchor_id,created_at) VALUES (?1,?2,'title','content','actor',?3,?4)", params![Uuid::new_v4().to_string(), topic_id.to_string(), unrelated_link_id, Utc::now().to_rfc3339()])?;
             Ok(())
         }).await;
         assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
 
         let other = storage
-            .create(NewSpace {
-                name: "Other evidence space".into(),
-                slug: "other-evidence-space".into(),
+            .create(NewTopic {
+                name: "Other evidence topic".into(),
+                slug: "other-evidence-topic".into(),
             })
             .await
             .unwrap();
         let other_observation = storage
             .record_observation(NewSourceObservation {
-                space_id: other.id,
+                topic_id: other.id,
                 origin: ObservationOrigin {
-                    url: Some("https://example.test/cross-space-evidence".into()),
+                    url: Some("https://example.test/cross-topic-evidence".into()),
                     local_path: None,
                 },
                 retrieved_at: Utc::now(),
@@ -379,35 +379,35 @@ mod tests {
             })
             .await
             .unwrap();
-        let cross_space = storage.with_conn(move |conn| {
-            conn.execute("INSERT INTO orientation_card_observations (id,card_id,space_id,observation_id) VALUES (?1,?2,?3,?4)", params![Uuid::new_v4().to_string(), existing.id.to_string(), space_id.to_string(), other_observation.id.to_string()])?;
+        let cross_topic = storage.with_conn(move |conn| {
+            conn.execute("INSERT INTO orientation_card_observations (id,card_id,topic_id,observation_id) VALUES (?1,?2,?3,?4)", params![Uuid::new_v4().to_string(), existing.id.to_string(), topic_id.to_string(), other_observation.id.to_string()])?;
             Ok(())
         }).await;
         assert!(matches!(
-            cross_space,
+            cross_topic,
             Err(StorageError::ConstraintViolation(_))
         ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn trigger_indexes_cards_and_relation_has_no_citation_fields() {
-        let (storage, space_id, observation_id) = fixture().await;
-        let created = card(&storage, space_id, observation_id, "Quokka field guide").await;
+        let (storage, topic_id, observation_id) = fixture().await;
+        let created = card(&storage, topic_id, observation_id, "Quokka field guide").await;
         storage.with_conn(move |conn| {
             let found: String = conn.query_row("SELECT c.id FROM orientation_card_fts f JOIN orientation_cards c ON c.rowid=f.rowid WHERE orientation_card_fts MATCH 'quokka'", [], |row| row.get(0))?;
             assert_eq!(found, created.id.to_string());
             let columns = conn.prepare("PRAGMA table_info(orientation_card_observations)")?.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            assert_eq!(columns, vec!["id", "card_id", "space_id", "observation_id"]);
+            assert_eq!(columns, vec!["id", "card_id", "topic_id", "observation_id"]);
             Ok(())
         }).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn orientation_rows_are_append_only() {
-        let (storage, space_id, observation_id) = fixture().await;
-        let created = card(&storage, space_id, observation_id, "Immutable card").await;
+        let (storage, topic_id, observation_id) = fixture().await;
+        let created = card(&storage, topic_id, observation_id, "Immutable card").await;
         let lifecycle = storage
-            .retire_orientation_card(space_id, created.id, "agent-beta".into(), None)
+            .retire_orientation_card(topic_id, created.id, "agent-beta".into(), None)
             .await
             .unwrap();
 
@@ -485,12 +485,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn queryless_and_fts_find_only_active_cards_while_evidence_stays_searchable() {
-        let (storage, space_id, observation_id) = fixture().await;
-        let first = card(&storage, space_id, observation_id, "Quokka field guide").await;
-        let replacement = card(&storage, space_id, observation_id, "Updated quokka guide").await;
+        let (storage, topic_id, observation_id) = fixture().await;
+        let first = card(&storage, topic_id, observation_id, "Quokka field guide").await;
+        let replacement = card(&storage, topic_id, observation_id, "Updated quokka guide").await;
         storage
             .supersede_orientation_card(
-                space_id,
+                topic_id,
                 first.id,
                 replacement.id,
                 "agent-beta".into(),
@@ -499,7 +499,7 @@ mod tests {
             .await
             .unwrap();
         let active = storage
-            .find_orientation_cards(space_id, None, 20)
+            .find_orientation_cards(topic_id, None, 20)
             .await
             .unwrap();
         assert_eq!(
@@ -508,7 +508,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .find_orientation_cards(space_id, Some("quokka"), 20)
+                .find_orientation_cards(topic_id, Some("quokka"), 20)
                 .await
                 .unwrap()
                 .len(),
@@ -516,26 +516,26 @@ mod tests {
         );
         assert_eq!(
             storage
-                .search_extractions(space_id, "underlying", 10)
+                .search_extractions(topic_id, "underlying", 10)
                 .await
                 .unwrap()[0]
                 .observation_id,
             observation_id
         );
         storage
-            .retire_orientation_card(space_id, replacement.id, "agent-beta".into(), None)
+            .retire_orientation_card(topic_id, replacement.id, "agent-beta".into(), None)
             .await
             .unwrap();
         assert!(
             storage
-                .find_orientation_cards(space_id, None, 20)
+                .find_orientation_cards(topic_id, None, 20)
                 .await
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
             storage
-                .search_extractions(space_id, "quokkas", 10)
+                .search_extractions(topic_id, "quokkas", 10)
                 .await
                 .unwrap()
                 .len(),
@@ -543,7 +543,7 @@ mod tests {
         );
         assert!(
             storage
-                .retire_orientation_card(space_id, replacement.id, "agent-beta".into(), None)
+                .retire_orientation_card(topic_id, replacement.id, "agent-beta".into(), None)
                 .await
                 .is_err()
         );
@@ -552,10 +552,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn authorship_and_lifecycle_are_present_in_the_unified_audit() {
         use crate::store::AuditStore;
-        let (storage, space_id, observation_id) = fixture().await;
-        let created = card(&storage, space_id, observation_id, "Audit card").await;
+        let (storage, topic_id, observation_id) = fixture().await;
+        let created = card(&storage, topic_id, observation_id, "Audit card").await;
         storage
-            .retire_orientation_card(space_id, created.id, "agent-beta".into(), None)
+            .retire_orientation_card(topic_id, created.id, "agent-beta".into(), None)
             .await
             .unwrap();
         let events = storage.list_audit_events().await.unwrap();

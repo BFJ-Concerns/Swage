@@ -16,13 +16,13 @@ use crate::store::ObservationStore;
 // Row mapping
 // ---------------------------------------------------------------------------
 
-const OBSERVATION_COLUMNS: &str = "id, space_id, origin_url, origin_local_path, retrieved_at,
+const OBSERVATION_COLUMNS: &str = "id, topic_id, origin_url, origin_local_path, retrieved_at,
      body_sha256, body_bytes, media_type, capture_scope, created_at";
 
 fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceObservation> {
     Ok(SourceObservation {
         id: parse_uuid(&row.get::<_, String>(0)?)?,
-        space_id: parse_uuid(&row.get::<_, String>(1)?)?,
+        topic_id: parse_uuid(&row.get::<_, String>(1)?)?,
         origin: ObservationOrigin {
             url: row.get(2)?,
             local_path: row.get(3)?,
@@ -39,7 +39,7 @@ fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceObserva
 fn row_to_capture(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceCapture> {
     Ok(SourceCapture {
         observation_id: parse_uuid(&row.get::<_, String>(0)?)?,
-        space_id: parse_uuid(&row.get::<_, String>(1)?)?,
+        topic_id: parse_uuid(&row.get::<_, String>(1)?)?,
         origin: ObservationOrigin {
             url: row.get(2)?,
             local_path: row.get(3)?,
@@ -59,13 +59,13 @@ fn record_source_capture(
     };
     conn.execute(
         "INSERT OR IGNORE INTO source_captures (
-             id, observation_id, space_id, origin_url, origin_local_path,
+             id, observation_id, topic_id, origin_url, origin_local_path,
              capture_scope, captured_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             Uuid::new_v4().to_string(),
             observation_id.to_string(),
-            observation.space_id.to_string(),
+            observation.topic_id.to_string(),
             observation.origin.url,
             observation.origin.local_path,
             scope,
@@ -116,15 +116,15 @@ impl ObservationStore for SqliteStorage {
             if let Some(scope) = observation.capture_scope.as_deref()
                 && let Some(existing) = conn
                     .query_row(
-                        "SELECT o.id, o.space_id, o.origin_url, o.origin_local_path,
+                        "SELECT o.id, o.topic_id, o.origin_url, o.origin_local_path,
                                     o.retrieved_at, o.body_sha256, o.body_bytes, o.media_type,
                                     o.capture_scope, o.created_at
                              FROM source_captures c
                              JOIN source_observations o ON o.id = c.observation_id
-                             WHERE c.space_id = ?1 AND c.capture_scope = ?2
+                             WHERE c.topic_id = ?1 AND c.capture_scope = ?2
                                AND c.origin_url IS ?3 AND c.origin_local_path IS ?4",
                         params![
-                            observation.space_id.to_string(),
+                            observation.topic_id.to_string(),
                             scope,
                             observation.origin.url,
                             observation.origin.local_path,
@@ -136,16 +136,16 @@ impl ObservationStore for SqliteStorage {
                 return Ok(existing);
             }
 
-            // Identical bodies within a space deduplicate to the existing
+            // Identical bodies within a topic deduplicate to the existing
             // observation so evidence identity never forks: two captures of
             // the same bytes are one piece of evidence, whatever fetched them.
             if let Some(existing) = conn
                 .query_row(
                     &format!(
                         "SELECT {OBSERVATION_COLUMNS} FROM source_observations
-                         WHERE space_id = ?1 AND body_sha256 = ?2"
+                         WHERE topic_id = ?1 AND body_sha256 = ?2"
                     ),
-                    params![observation.space_id.to_string(), &observation.body_sha256],
+                    params![observation.topic_id.to_string(), &observation.body_sha256],
                     row_to_observation,
                 )
                 .optional()?
@@ -158,12 +158,12 @@ impl ObservationStore for SqliteStorage {
             let now = Utc::now();
             conn.execute(
                 "INSERT INTO source_observations (
-                     id, space_id, origin_url, origin_local_path, retrieved_at,
+                     id, topic_id, origin_url, origin_local_path, retrieved_at,
                      body_sha256, body_bytes, media_type, capture_scope, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id.to_string(),
-                    observation.space_id.to_string(),
+                    observation.topic_id.to_string(),
                     observation.origin.url,
                     observation.origin.local_path,
                     observation.retrieved_at.to_rfc3339(),
@@ -179,7 +179,7 @@ impl ObservationStore for SqliteStorage {
 
             Ok(SourceObservation {
                 id,
-                space_id: observation.space_id,
+                topic_id: observation.topic_id,
                 origin: observation.origin,
                 retrieved_at: observation.retrieved_at,
                 body_sha256: observation.body_sha256,
@@ -204,16 +204,16 @@ impl ObservationStore for SqliteStorage {
         .await
     }
 
-    async fn list_observations_by_space(
+    async fn list_observations_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<SourceObservation>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {OBSERVATION_COLUMNS} FROM source_observations
-                 WHERE space_id = ?1 ORDER BY retrieved_at DESC"
+                 WHERE topic_id = ?1 ORDER BY retrieved_at DESC"
             ))?;
-            let rows = stmt.query_map(params![space_id.to_string()], row_to_observation)?;
+            let rows = stmt.query_map(params![topic_id.to_string()], row_to_observation)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .await
@@ -221,7 +221,7 @@ impl ObservationStore for SqliteStorage {
 
     async fn list_source_captures_by_scopes(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         capture_scopes: Vec<String>,
     ) -> Result<Vec<SourceCapture>, StorageError> {
         if capture_scopes.is_empty() {
@@ -232,13 +232,13 @@ impl ObservationStore for SqliteStorage {
                 .collect::<Vec<_>>()
                 .join(", ");
             let query = format!(
-                "SELECT observation_id, space_id, origin_url, origin_local_path,
+                "SELECT observation_id, topic_id, origin_url, origin_local_path,
                         capture_scope, captured_at FROM source_captures
-                 WHERE space_id = ?1 AND capture_scope IN ({placeholders})
+                 WHERE topic_id = ?1 AND capture_scope IN ({placeholders})
                  ORDER BY captured_at DESC"
             );
             let mut parameters = Vec::with_capacity(capture_scopes.len() + 1);
-            parameters.push(space_id.to_string());
+            parameters.push(topic_id.to_string());
             parameters.extend(capture_scopes);
             let mut statement = conn.prepare(&query)?;
             let rows =
@@ -357,7 +357,7 @@ impl ObservationStore for SqliteStorage {
 
     async fn search_extractions(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         query: &str,
         limit: usize,
     ) -> Result<Vec<KnowledgeSearchHit>, StorageError> {
@@ -388,7 +388,7 @@ impl ObservationStore for SqliteStorage {
                  JOIN extraction_derivations d ON d.rowid = extraction_fts.rowid
                  JOIN source_observations o ON o.id = d.observation_id
                  WHERE extraction_fts MATCH ?1
-                   AND o.space_id = ?2
+                   AND o.topic_id = ?2
                    AND d.version = (
                        SELECT MAX(version) FROM extraction_derivations
                        WHERE observation_id = d.observation_id
@@ -413,7 +413,7 @@ impl ObservationStore for SqliteStorage {
                 let rows = stmt.query_map(
                     params![
                         fts_query,
-                        space_id.to_string(),
+                        topic_id.to_string(),
                         i64::try_from(limit).unwrap_or(i64::MAX)
                     ],
                     |row| {
@@ -456,24 +456,24 @@ impl ObservationStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CurationAssertionKind, NewCurationAssertion, NewSpace};
-    use crate::store::{CurationAssertionStore, SpaceStore};
+    use crate::model::{CurationAssertionKind, NewCurationAssertion, NewTopic};
+    use crate::store::{CurationAssertionStore, TopicStore};
 
-    async fn storage_with_space() -> (SqliteStorage, Uuid) {
+    async fn storage_with_topic() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "research".into(),
                 slug: "research".into(),
             })
             .await
             .unwrap();
-        (storage, space.id)
+        (storage, topic.id)
     }
 
-    fn new_observation(space_id: Uuid, url: &str, body_sha256: &str) -> NewSourceObservation {
+    fn new_observation(topic_id: Uuid, url: &str, body_sha256: &str) -> NewSourceObservation {
         NewSourceObservation {
-            space_id,
+            topic_id,
             origin: ObservationOrigin {
                 url: Some(url.into()),
                 local_path: None,
@@ -488,10 +488,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn record_and_get_observation() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
 
         let recorded = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "aa11"))
             .await
             .unwrap();
 
@@ -505,17 +505,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn identical_body_in_same_space_deduplicates() {
-        let (storage, space_id) = storage_with_space().await;
+    async fn identical_body_in_same_topic_deduplicates() {
+        let (storage, topic_id) = storage_with_topic().await;
 
         let first = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "aa11"))
             .await
             .unwrap();
         // Same bytes fetched again — different URL, same body hash.
         let second = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://mirror.example/a",
                 "aa11",
             ))
@@ -530,15 +530,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn same_scope_and_origin_deduplicates_across_differing_bodies() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
 
-        let mut first = new_observation(space_id, "https://example.org/a", "aa11");
+        let mut first = new_observation(topic_id, "https://example.org/a", "aa11");
         first.capture_scope = Some("call-1".into());
         let first = storage.record_observation(first).await.unwrap();
 
         // The same journalled call re-runs after an interruption and fetches
         // the same page again; the live body differs between attempts.
-        let mut retried = new_observation(space_id, "https://example.org/a", "cc33");
+        let mut retried = new_observation(topic_id, "https://example.org/a", "cc33");
         retried.capture_scope = Some("call-1".into());
         let retried = storage.record_observation(retried).await.unwrap();
 
@@ -548,7 +548,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .list_observations_by_space(space_id)
+                .list_observations_by_topic(topic_id)
                 .await
                 .unwrap()
                 .len(),
@@ -558,13 +558,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn same_scope_different_origin_records_separately() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
 
-        let mut first = new_observation(space_id, "https://example.org/a", "aa11");
+        let mut first = new_observation(topic_id, "https://example.org/a", "aa11");
         first.capture_scope = Some("call-1".into());
         let first = storage.record_observation(first).await.unwrap();
 
-        let mut second = new_observation(space_id, "https://example.org/b", "bb22");
+        let mut second = new_observation(topic_id, "https://example.org/b", "bb22");
         second.capture_scope = Some("call-1".into());
         let second = storage.record_observation(second).await.unwrap();
 
@@ -576,15 +576,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn different_scopes_re_observe_the_same_origin() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
 
-        let mut first = new_observation(space_id, "https://example.org/a", "aa11");
+        let mut first = new_observation(topic_id, "https://example.org/a", "aa11");
         first.capture_scope = Some("call-1".into());
         let first = storage.record_observation(first).await.unwrap();
 
         // A later sweep captures the same origin with changed content: a
         // legitimate re-observation, not a retry.
-        let mut later = new_observation(space_id, "https://example.org/a", "dd44");
+        let mut later = new_observation(topic_id, "https://example.org/a", "dd44");
         later.capture_scope = Some("call-2".into());
         let later = storage.record_observation(later).await.unwrap();
 
@@ -593,14 +593,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn scopeless_captures_keep_body_only_dedup() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
 
         let first = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "aa11"))
             .await
             .unwrap();
         let second = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "ee55"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "ee55"))
             .await
             .unwrap();
 
@@ -612,9 +612,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn originless_observation_is_rejected() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
 
-        let mut observation = new_observation(space_id, "unused", "bb22");
+        let mut observation = new_observation(topic_id, "unused", "bb22");
         observation.origin = ObservationOrigin {
             url: None,
             local_path: None,
@@ -626,9 +626,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn extraction_versions_ascend_and_never_mutate() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let observation = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "aa11"))
             .await
             .unwrap();
 
@@ -656,9 +656,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn latest_extraction_returns_newest_version_or_none() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let observation = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "aa11"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "aa11"))
             .await
             .unwrap();
 
@@ -691,7 +691,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn extraction_for_unknown_observation_is_not_found() {
-        let (storage, _space_id) = storage_with_space().await;
+        let (storage, _topic_id) = storage_with_topic().await;
 
         let result = storage
             .add_extraction(Uuid::new_v4(), "text".into(), "extractor".into())
@@ -701,10 +701,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_finds_newest_derivation_and_locates_snippet() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let observation = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/iron",
                 "cc33",
             ))
@@ -729,7 +729,7 @@ mod tests {
             .unwrap();
 
         let hits = storage
-            .search_extractions(space_id, "tension", 10)
+            .search_extractions(topic_id, "tension", 10)
             .await
             .unwrap();
 
@@ -756,10 +756,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_matches_non_contiguous_terms_and_locates_snippet() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let observation = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/bees",
                 "multi-word-query",
             ))
@@ -772,7 +772,7 @@ mod tests {
             .unwrap();
 
         let hits = storage
-            .search_extractions(space_id, "waggle dance angular error averaging", 10)
+            .search_extractions(topic_id, "waggle dance angular error averaging", 10)
             .await
             .unwrap();
 
@@ -789,10 +789,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_still_matches_a_single_term() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let observation = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/metals",
                 "single-term-query",
             ))
@@ -808,7 +808,7 @@ mod tests {
             .unwrap();
 
         let hits = storage
-            .search_extractions(space_id, "bronze", 10)
+            .search_extractions(topic_id, "bronze", 10)
             .await
             .unwrap();
 
@@ -818,10 +818,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_falls_back_to_ranked_any_term_only_after_no_all_term_match() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let strong_match = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/strong",
                 "fallback-strong",
             ))
@@ -837,7 +837,7 @@ mod tests {
             .unwrap();
         let partial_match = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/partial",
                 "fallback-partial",
             ))
@@ -853,14 +853,14 @@ mod tests {
             .unwrap();
 
         let precise_hits = storage
-            .search_extractions(space_id, "honeybee direction", 10)
+            .search_extractions(topic_id, "honeybee direction", 10)
             .await
             .unwrap();
         assert_eq!(precise_hits.len(), 1, "partial matches stay excluded");
         assert_eq!(precise_hits[0].observation_id, strong_match.id);
 
         let fallback_hits = storage
-            .search_extractions(space_id, "honeybee absent", 10)
+            .search_extractions(topic_id, "honeybee absent", 10)
             .await
             .unwrap();
         assert_eq!(fallback_hits.len(), 2, "any-term fallback returns matches");
@@ -869,11 +869,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn search_with_only_whitespace_returns_no_hits() {
-        let (storage, space_id) = storage_with_space().await;
+    async fn search_with_only_whitetopic_returns_no_hits() {
+        let (storage, topic_id) = storage_with_topic().await;
 
         let hits = storage
-            .search_extractions(space_id, " \t\n ", 10)
+            .search_extractions(topic_id, " \t\n ", 10)
             .await
             .expect("empty term list does not reach the FTS5 parser");
 
@@ -882,10 +882,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_keeps_observation_retired_when_latest_assertion_is_stale() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let observation = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/current",
                 "latest-state-subject",
             ))
@@ -893,7 +893,7 @@ mod tests {
             .unwrap();
         let preferred = storage
             .record_observation(new_observation(
-                space_id,
+                topic_id,
                 "https://example.org/preferred",
                 "latest-state-target",
             ))
@@ -910,7 +910,7 @@ mod tests {
 
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: observation.id,
                 kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(preferred.id),
@@ -919,7 +919,7 @@ mod tests {
             .unwrap();
         assert!(
             storage
-                .search_extractions(space_id, "distinctive effective state", 10)
+                .search_extractions(topic_id, "distinctive effective state", 10)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -928,7 +928,7 @@ mod tests {
 
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: observation.id,
                 kind: CurationAssertionKind::Stale,
                 target_observation_id: None,
@@ -937,7 +937,7 @@ mod tests {
             .unwrap();
         assert!(
             storage
-                .search_extractions(space_id, "distinctive effective state", 10)
+                .search_extractions(topic_id, "distinctive effective state", 10)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -946,10 +946,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn search_is_space_scoped() {
-        let (storage, space_id) = storage_with_space().await;
-        let other_space = storage
-            .create(NewSpace {
+    async fn search_is_topic_scoped() {
+        let (storage, topic_id) = storage_with_topic().await;
+        let other_topic = storage
+            .create(NewTopic {
                 name: "other".into(),
                 slug: "other".into(),
             })
@@ -957,7 +957,7 @@ mod tests {
             .unwrap();
 
         let observation = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "dd44"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "dd44"))
             .await
             .unwrap();
         storage
@@ -966,17 +966,17 @@ mod tests {
             .unwrap();
 
         let hits = storage
-            .search_extractions(other_space.id, "bronze", 10)
+            .search_extractions(other_topic.id, "bronze", 10)
             .await
             .unwrap();
-        assert!(hits.is_empty(), "another space's evidence is invisible");
+        assert!(hits.is_empty(), "another topic's evidence is invisible");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_treats_query_as_text_not_syntax() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let literal_match = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "ee55"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "ee55"))
             .await
             .unwrap();
         storage
@@ -988,7 +988,7 @@ mod tests {
             .await
             .unwrap();
         let operator_broadened_match = storage
-            .record_observation(new_observation(space_id, "https://example.org/b", "ff66"))
+            .record_observation(new_observation(topic_id, "https://example.org/b", "ff66"))
             .await
             .unwrap();
         storage
@@ -1003,7 +1003,7 @@ mod tests {
         // Operators and malformed syntax are literal terms: OR cannot broaden
         // the match, and the unmatched quote cannot make MATCH fail to parse.
         let hits = storage
-            .search_extractions(space_id, "corpus OR \"unclosed", 10)
+            .search_extractions(topic_id, "corpus OR \"unclosed", 10)
             .await
             .expect("malformed query syntax is matched as text, not executed");
 
@@ -1013,9 +1013,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn search_fallback_treats_query_as_text_not_syntax() {
-        let (storage, space_id) = storage_with_space().await;
+        let (storage, topic_id) = storage_with_topic().await;
         let literal_match = storage
-            .record_observation(new_observation(space_id, "https://example.org/a", "gg77"))
+            .record_observation(new_observation(topic_id, "https://example.org/a", "gg77"))
             .await
             .unwrap();
         storage
@@ -1027,7 +1027,7 @@ mod tests {
             .await
             .unwrap();
         let operator_broadened_match = storage
-            .record_observation(new_observation(space_id, "https://example.org/b", "hh88"))
+            .record_observation(new_observation(topic_id, "https://example.org/b", "hh88"))
             .await
             .unwrap();
         storage
@@ -1040,7 +1040,7 @@ mod tests {
             .unwrap();
 
         let hits = storage
-            .search_extractions(space_id, "absent OR \"unclosed missing", 10)
+            .search_extractions(topic_id, "absent OR \"unclosed missing", 10)
             .await
             .expect("fallback syntax is matched as text, not executed");
 

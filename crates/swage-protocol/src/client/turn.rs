@@ -71,7 +71,7 @@ pub struct SendMessageRequest {
     pub recipient_agent_id: String,
     pub kind: String,
     pub correlation_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub sender_turn_id: Option<Uuid>,
     #[ts(type = "unknown")]
     pub payload: serde_json::Value,

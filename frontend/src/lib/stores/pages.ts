@@ -1,4 +1,4 @@
-// Pages store — the space's agent-run tabs and the one currently open.
+// Pages store — the topic's agent-run tabs and the one currently open.
 //
 // The store owns its own live route: it opens the work-surface signal channel
 // on creation, so an open page hears about changes whether or not the person
@@ -22,10 +22,10 @@ export interface PagesStore {
   readonly pages: PageSummary[];
   readonly activePage: PageResponse | null;
   readonly templates: PageTemplateSummary[];
-  loadPages(spaceId: string): Promise<void>;
+  loadPages(topicId: string): Promise<void>;
   openPage(pageId: string): Promise<void>;
   closePage(): void;
-  createPage(spaceId: string, title: string, templateId?: string): Promise<void>;
+  createPage(topicId: string, title: string, templateId?: string): Promise<void>;
   templateName(templateId: string): string | null;
   writeModule(
     pageId: string,
@@ -58,7 +58,7 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
   const activePageState = fromStore(activePageStore);
   const templatesState = fromStore(templatesStore);
 
-  let currentSpaceId: string | null = null;
+  let currentTopicId: string | null = null;
 
   async function refreshActive(pageId: string): Promise<void> {
     const page = await pagesApi.getPage(pageId);
@@ -77,9 +77,9 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
         // manual open retries.
       });
     }
-    if (currentSpaceId) {
+    if (currentTopicId) {
       void pagesApi
-        .listPages(currentSpaceId)
+        .listPages(currentTopicId)
         .then((response) => pagesStore.set(response.pages))
         .catch(() => {});
     }
@@ -105,22 +105,22 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
       return templatesState.current;
     },
 
-    async loadPages(spaceId: string): Promise<void> {
-      if (currentSpaceId !== null && currentSpaceId !== spaceId) {
-        // A space switch closes the previous space's page — the surface
-        // must never leave another space's page visible and writable.
+    async loadPages(topicId: string): Promise<void> {
+      if (currentTopicId !== null && currentTopicId !== topicId) {
+        // A topic switch closes the previous topic's page — the surface
+        // must never leave another topic's page visible and writable.
         activePageStore.set(null);
-        // The picker must not offer a previous space's templates while this
-        // space's request is still in flight.
+        // The picker must not offer a previous topic's templates while this
+        // topic's request is still in flight.
         templatesStore.set([]);
       }
-      currentSpaceId = spaceId;
-      const response = await pagesApi.listPages(spaceId);
-      if (spaceId !== currentSpaceId) return;
+      currentTopicId = topicId;
+      const response = await pagesApi.listPages(topicId);
+      if (topicId !== currentTopicId) return;
       pagesStore.set(response.pages);
-      // Templates are space-local: the picker only ever offers this space's.
-      const templates = await pagesApi.listPageTemplates(spaceId);
-      if (spaceId !== currentSpaceId) return;
+      // Templates are topic-local: the picker only ever offers this topic's.
+      const templates = await pagesApi.listPageTemplates(topicId);
+      if (topicId !== currentTopicId) return;
       templatesStore.set(templates.templates);
     },
 
@@ -133,18 +133,18 @@ export function createPagesStore(options?: PagesStoreOptions): PagesStore {
     },
 
     async createPage(
-      spaceId: string,
+      topicId: string,
       title: string,
       templateId?: string,
     ): Promise<void> {
-      const page = await pagesApi.createPage(spaceId, title, templateId);
-      const response = await pagesApi.listPages(spaceId);
+      const page = await pagesApi.createPage(topicId, title, templateId);
+      const response = await pagesApi.listPages(topicId);
       pagesStore.set(response.pages);
       activePageStore.set(page);
     },
 
     templateName(templateId: string): string | null {
-      // The recorded origin is an id; the space's loaded templates give it a
+      // The recorded origin is an id; the topic's loaded templates give it a
       // name. A template that no longer exists resolves to nothing, and the
       // caller shows the bare id rather than losing the lineage.
       const template = templatesState.current.find(

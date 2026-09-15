@@ -18,7 +18,7 @@ function runWith(call: WorkflowAgentCallDetail): WorkflowRunDetailResponse {
   return {
     run: {
       id: "run-1",
-      space_id: "space-1",
+      topic_id: "topic-1",
       parent_run_id: null,
       parent_seq: null,
       script_id: null,

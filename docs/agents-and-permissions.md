@@ -16,14 +16,14 @@ session its character — its instructions, model preference, tool permissions,
 skills, and optional output schema. Each definition carries a stable `id`
 that sessions reference.
 
-Definitions can be **global** or **space-scoped**. A space-scoped definition
-with the same id as a global one shadows it within that space, so the same
-agent id can behave differently per space without requiring separate ids.
+Definitions can be **global** or **topic-scoped**. A topic-scoped definition
+with the same id as a global one shadows it within that topic, so the same
+agent id can behave differently per topic without requiring separate ids.
 
 ### How the overlay works
 
 When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Space → Agent `.toml` files) into a `ResolvedConfig`, then
+cascade (Global → Topic → Agent `.toml` files) into a `ResolvedConfig`, then
 overlays the agent definition on top. The overlay:
 
 - **Instructions** are appended after operator instructions, preserving the
@@ -136,9 +136,9 @@ research sweep's researcher, organiser, and synthesist) are bare dispatches
 inside the workflow script, not standalone definitions.
 
 The start-conversation picker in the web UI lists this default plus any
-operator-authored definitions visible to the space. The `agent_id` field of
+operator-authored definitions visible to the topic. The `agent_id` field of
 `CreateConversationRequest` selects one of these — `"gateway"` or an
-operator-authored definition visible to the target space; the gateway
+operator-authored definition visible to the target topic; the gateway
 rejects anything else with a validation error.
 
 ## Operator guidance (`AGENTS.md`)
@@ -180,7 +180,7 @@ skipped — guidance never fails a turn.
 
 The turn context inspector's prompts element shows the provenance of each
 instruction rule by hierarchy level. Operator guidance from the config root
-appears as "Global"; guidance from workspace roots appears as "Space".
+appears as "Global"; guidance from workspace roots appears as "Topic".
 
 ## Tool permission model
 
@@ -277,24 +277,24 @@ and emitted as part of the `ContextAssembled` event for audit and inspection.
 It is not injected into the child's model context — enforcement is handled at
 the dispatch and permission seam (`check_permission`), not via prompt text.
 
-## Space-targeted session creation
+## Topic-targeted session creation
 
-A session is created in a specific space through a path-based endpoint:
+A session is created in a specific topic through a path-based endpoint:
 
 ```
-POST /api/spaces/{space_id}/sessions
+POST /api/topics/{topic_id}/sessions
 ```
 
 The request body is the same `CreateConversationRequest` used elsewhere
 (with optional `selected_model_id` and `agent_id` fields), or it can be
-omitted entirely. The endpoint returns 201 on success or 404 if the space is
+omitted entirely. The endpoint returns 201 on success or 404 if the topic is
 not found.
 
-There is no `space_id` field in the request body. `CreateConversationRequest`
+There is no `topic_id` field in the request body. `CreateConversationRequest`
 carries `deny_unknown_fields` — any unrecognised field in the JSON body,
-`space_id` included, is rejected at deserialisation as a 422 error. This is
+`topic_id` included, is rejected at deserialisation as a 422 error. This is
 a structural guarantee from serde's `deny_unknown_fields` attribute, not a
-space_id-specific validation check: the same rejection applies to any
+topic_id-specific validation check: the same rejection applies to any
 unexpected field.
 
 ## Sandbox isolation
@@ -392,22 +392,22 @@ reaches.
 |---|---|---|
 | `Once` | None | The single pending call only |
 | `Session` | In-memory, until the gateway exits | All matching calls in any session in this gateway process |
-| `Permanent` | In-memory and persisted to disk | All matching calls in this space while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
-| `PermanentGlobal` | In-memory and persisted to disk across all spaces | All matching calls everywhere while the gateway runs; after restart, subject to space- and agent-level `require_approval` configuration |
+| `Permanent` | In-memory and persisted to disk | All matching calls in this topic while the gateway runs; after restart, subject to agent-level `require_approval` configuration |
+| `PermanentGlobal` | In-memory and persisted to disk across all topics | All matching calls everywhere while the gateway runs; after restart, subject to topic- and agent-level `require_approval` configuration |
 
 `Session` reaches further than its name suggests. The grant is not recorded
-against the session that approved it, or against a space: it is held in the
+against the session that approved it, or against a topic: it is held in the
 gateway process and consulted whenever a new turn dispatcher is built. Every
-turn started after the approval — in any conversation, in any space — will
+turn started after the approval — in any conversation, in any topic — will
 run that tool without prompting, until the gateway is restarted. Turns
 already under way keep the permissions they started with. If you want an
 approval confined to the work in front of you, `Once` is the only scope that
 gives it.
 
 For tool approvals, permanent persistence removes the tool from the
-`require_approval` list in the selected space or global TOML file. That list
-uses replacement semantics in the Global → Space → Agent cascade. An agent
-file can therefore restore a gate persisted at space scope, and a space or
+`require_approval` list in the selected topic or global TOML file. That list
+uses replacement semantics in the Global → Topic → Agent cascade. An agent
+file can therefore restore a gate persisted at topic scope, and a topic or
 agent file can restore one persisted globally. The in-memory grant masks that
 narrower requirement until the gateway exits; after a restart, the narrower
 configuration applies again.
@@ -415,7 +415,7 @@ configuration applies again.
 `Permanent` and `PermanentGlobal` also handle location-scoped approvals —
 trusting a workspace attachment so that file operations within it no longer
 prompt. For tool and location approvals alike, `Permanent` applies only in
-the approving space, while `PermanentGlobal` applies across all spaces.
+the approving topic, while `PermanentGlobal` applies across all topics.
 
 ### Timeout behaviour
 

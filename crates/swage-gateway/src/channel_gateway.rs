@@ -194,7 +194,7 @@ async fn handle_inbound(
     routing: DeliveryRoutingRequest,
 ) -> Result<ChannelInboundResponse, GatewayError> {
     let session_id =
-        ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultSpace)
+        ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultTopic)
             .await?;
     let response = run_channel_turn(state, session_id, text).await?;
     let targets = deliver_channel_response(
@@ -216,7 +216,7 @@ async fn handle_inbound(
 
 #[derive(Debug, Clone, Copy)]
 enum SessionResolutionPolicy {
-    AllowDefaultSpace,
+    AllowDefaultTopic,
     LinkedOnly,
 }
 
@@ -271,7 +271,7 @@ async fn ensure_session_for_origin(
         let session = state
             .storage
             .create_session(NewSession {
-                space_id: link.space_id,
+                topic_id: link.topic_id,
                 agent_id: link.agent_id.clone(),
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
@@ -296,7 +296,7 @@ async fn ensure_session_for_origin(
                 integration: origin.integration.as_metadata_value().to_string(),
                 account: origin.account.clone(),
                 conversation: origin.conversation.clone(),
-                space_id: link.space_id,
+                topic_id: link.topic_id,
                 agent_id: link.agent_id,
                 session_id: Some(session.id),
                 home_target: link.home_target,
@@ -319,11 +319,11 @@ async fn ensure_session_for_origin(
         )));
     }
 
-    let space = state.space_store.get_or_create_default().await?;
+    let topic = state.topic_store.get_or_create_default().await?;
     let session = state
         .storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: Some(serde_json::json!({
                 "channel_origin": {
@@ -686,9 +686,9 @@ async fn deliver_to_target(
             let page = state.storage.get_page(*page_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("no page with id {page_id}"))
             })?;
-            if page.space_id != session.space_id {
+            if page.topic_id != session.topic_id {
                 return Err(GatewayError::ValidationError(format!(
-                    "page delivery target {page_id} is not in the session's space"
+                    "page delivery target {page_id} is not in the session's topic"
                 )));
             }
             crate::page::write_page_module(
@@ -803,7 +803,7 @@ mod tests {
     use super::*;
     use crate::turn::tests::make_state_with_session;
     use swage_core::{FinishReason, StreamChunk};
-    use swage_storage::{SessionStore, SpaceStore};
+    use swage_storage::{SessionStore, TopicStore};
     use tokio::net::TcpListener;
 
     #[test]
@@ -929,13 +929,13 @@ mod tests {
     async fn channel_status_counts_only_sent_deliveries() {
         let (mut state, _) = make_state_with_session(vec![]).await;
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let session_id = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -944,7 +944,7 @@ mod tests {
             .expect("session")
             .id;
         state.storage = storage.clone();
-        state.space_store = storage;
+        state.topic_store = storage;
         let target = DeliveryTarget::Channel {
             integration: ExternalChannelIntegration::DevDm,
             account: "workspace".into(),

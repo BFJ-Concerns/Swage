@@ -1,6 +1,6 @@
 //! Named operator context — reusable Markdown briefings from the config hierarchy.
 //!
-//! Files live at `elements/<name>.md` under global, space, or agent config
+//! Files live at `elements/<name>.md` under global, topic, or agent config
 //! roots. Resolution is deterministic and most-specific-wins. Filesystem work
 //! happens before construction; model-facing rendering lives separately in
 //! the function-named briefing element.
@@ -120,12 +120,12 @@ mod tests {
 
     fn levels<'a>(
         global: &'a Path,
-        space: &'a Path,
+        topic: &'a Path,
         agent: &'a Path,
     ) -> Vec<(HierarchyLevel, &'a Path)> {
         vec![
             (HierarchyLevel::Global, global),
-            (HierarchyLevel::Space, space),
+            (HierarchyLevel::Topic, topic),
             (HierarchyLevel::Agent, agent),
         ]
     }
@@ -153,20 +153,20 @@ mod tests {
     }
 
     #[test]
-    fn agent_shadows_space_which_shadows_global() {
+    fn agent_shadows_topic_which_shadows_global() {
         let root = tempfile::tempdir().unwrap();
         let global = root.path();
-        let space = global.join("spaces/demo");
-        let agent = space.join("agents/worker");
+        let topic = global.join("topics/demo");
+        let agent = topic.join("agents/worker");
         for (base, text) in [
             (&global.to_path_buf(), "global"),
-            (&space, "space"),
+            (&topic, "topic"),
             (&agent, "agent"),
         ] {
             std::fs::create_dir_all(base.join("elements")).unwrap();
             std::fs::write(base.join("elements/layout.md"), text).unwrap();
         }
-        let hierarchy = levels(global, &space, &agent);
+        let hierarchy = levels(global, &topic, &agent);
         let resolved = resolve_named_element("layout", &hierarchy)
             .unwrap()
             .unwrap();
@@ -178,9 +178,9 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .content,
-            "space"
+            "topic"
         );
-        std::fs::remove_file(space.join("elements/layout.md")).unwrap();
+        std::fs::remove_file(topic.join("elements/layout.md")).unwrap();
         assert_eq!(
             resolve_named_element("layout", &hierarchy)
                 .unwrap()
@@ -194,18 +194,18 @@ mod tests {
     fn discovery_returns_each_effective_name_once_in_stable_order() {
         let root = tempfile::tempdir().unwrap();
         let global = root.path();
-        let space = global.join("spaces/demo");
-        let agent = space.join("agents/worker");
-        for base in [global, &space, &agent] {
+        let topic = global.join("topics/demo");
+        let agent = topic.join("agents/worker");
+        for base in [global, &topic, &agent] {
             std::fs::create_dir_all(base.join("elements")).unwrap();
         }
         std::fs::write(global.join("elements/zeta.md"), "global zeta").unwrap();
-        std::fs::write(space.join("elements/alpha.md"), "space alpha").unwrap();
+        std::fs::write(topic.join("elements/alpha.md"), "topic alpha").unwrap();
         std::fs::write(agent.join("elements/zeta.md"), "agent zeta").unwrap();
         std::fs::write(agent.join("elements/Not-Valid.md"), "ignored").unwrap();
         std::fs::write(agent.join("elements/memory.md"), "also ignored").unwrap();
 
-        let resolved = discover_named_elements(&levels(global, &space, &agent)).unwrap();
+        let resolved = discover_named_elements(&levels(global, &topic, &agent)).unwrap();
         assert_eq!(
             resolved
                 .iter()

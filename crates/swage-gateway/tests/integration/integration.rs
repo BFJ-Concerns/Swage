@@ -192,7 +192,7 @@ async fn start_test_server_with_dispatcher(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         dispatcher,
@@ -506,18 +506,18 @@ async fn stream_cancellation_preserves_partial_response() {
 async fn startup_recovery_marks_orphaned_turns() {
     use swage_storage::{
         NewSession,
-        store::{SessionStore, SpaceStore, ThreadStore, TurnStore},
+        store::{SessionStore, ThreadStore, TopicStore, TurnStore},
     };
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
-    // Get the default space (seeded by migration).
-    let space = storage.get_or_create_default().await.unwrap();
+    // Get the default topic (seeded by migration).
+    let topic = storage.get_or_create_default().await.unwrap();
 
     // Session 1: an orphaned Processing turn (simulates a crash mid-turn).
     let session_orphan = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -547,7 +547,7 @@ async fn startup_recovery_marks_orphaned_turns() {
     // Session 2: a completed turn (control case — should not be touched).
     let session_ok = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,

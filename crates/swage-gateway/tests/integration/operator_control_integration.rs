@@ -31,7 +31,7 @@ use swage_protocol::client::schedule::{
 use swage_provider::LlmProvider;
 use swage_storage::{
     ApprovalKind, NewApprovalRequest, NewDeliveryRecord, NewTurn, SqliteStorage, TurnState,
-    store::{SpaceStore, Storage},
+    store::{Storage, TopicStore},
 };
 
 use crate::support::ProcessEnvGuard;
@@ -78,7 +78,7 @@ fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -160,7 +160,7 @@ async fn agent_definition_http_crud_records_every_mutation() {
     let router = build_router(state.clone());
     let create = json!({
         "id": "researcher",
-        "space_id": null,
+        "topic_id": null,
         "display_name": "Researcher",
         "description": "Finds evidence",
         "instructions": "Gather and cite evidence.",
@@ -182,7 +182,7 @@ async fn agent_definition_http_crud_records_every_mutation() {
     assert_eq!(listed["definitions"][0]["output_max_retries"], 2);
 
     let update = json!({
-        "space_id": null,
+        "topic_id": null,
         "display_name": "Research Lead",
         "description": "Finds decisive evidence",
         "instructions": "Gather, verify, and cite evidence.",
@@ -256,34 +256,34 @@ async fn agent_definition_http_crud_records_every_mutation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn effective_agent_definition_endpoint_selects_the_requested_space() {
+async fn effective_agent_definition_endpoint_selects_the_requested_topic() {
     let router = build_router(test_state());
-    let (_, current) = post_json(&router, "/api/spaces", json!({ "name": "Current" })).await;
-    let (_, other) = post_json(&router, "/api/spaces", json!({ "name": "Other" })).await;
+    let (_, current) = post_json(&router, "/api/topics", json!({ "name": "Current" })).await;
+    let (_, other) = post_json(&router, "/api/topics", json!({ "name": "Other" })).await;
     let current_id = current["id"].as_str().unwrap();
     let other_id = other["id"].as_str().unwrap();
 
     for definition in [
         json!({
-            "id": "shared", "space_id": null, "display_name": "Global shared",
+            "id": "shared", "topic_id": null, "display_name": "Global shared",
             "description": "", "instructions": "global", "model_id": null,
             "tool_permissions": null, "skills": [], "output_schema": null,
             "output_max_retries": null
         }),
         json!({
-            "id": "shared", "space_id": current_id, "display_name": "Space shared",
-            "description": "", "instructions": "space winner", "model_id": null,
+            "id": "shared", "topic_id": current_id, "display_name": "Topic shared",
+            "description": "", "instructions": "topic winner", "model_id": null,
             "tool_permissions": null, "skills": [], "output_schema": null,
             "output_max_retries": null
         }),
         json!({
-            "id": "foreign", "space_id": other_id, "display_name": "Foreign",
-            "description": "", "instructions": "other space", "model_id": null,
+            "id": "foreign", "topic_id": other_id, "display_name": "Foreign",
+            "description": "", "instructions": "other topic", "model_id": null,
             "tool_permissions": null, "skills": [], "output_schema": null,
             "output_max_retries": null
         }),
         json!({
-            "id": "researcher", "space_id": null, "display_name": "Authored researcher",
+            "id": "researcher", "topic_id": null, "display_name": "Authored researcher",
             "description": "", "instructions": "authored winner", "model_id": null,
             "tool_permissions": null, "skills": [], "output_schema": null,
             "output_max_retries": null
@@ -296,7 +296,7 @@ async fn effective_agent_definition_endpoint_selects_the_requested_space() {
 
     let (status, body) = get_json(
         &router,
-        &format!("/api/spaces/{current_id}/agent-definitions"),
+        &format!("/api/topics/{current_id}/agent-definitions"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -308,8 +308,8 @@ async fn effective_agent_definition_endpoint_selects_the_requested_space() {
     assert_eq!(definitions[1]["instructions"], "authored winner");
     assert_eq!(definitions[1]["source_scope"], "global");
     assert_eq!(definitions[2]["id"], "shared");
-    assert_eq!(definitions[2]["instructions"], "space winner");
-    assert_eq!(definitions[2]["source_scope"], "space");
+    assert_eq!(definitions[2]["instructions"], "topic winner");
+    assert_eq!(definitions[2]["source_scope"], "topic");
     assert!(
         definitions
             .iter()

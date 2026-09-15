@@ -23,7 +23,7 @@ use swage_storage::{
     NewSchedule, NewScheduleRun, NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind,
     ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy,
     SqliteStorage, TurnState,
-    store::{ScheduleStore, SessionStore, SpaceStore, Storage, ThreadStore, TurnStore},
+    store::{ScheduleStore, SessionStore, Storage, ThreadStore, TopicStore, TurnStore},
 };
 
 struct MockProvider;
@@ -61,7 +61,7 @@ impl LlmProvider for MockProvider {
 fn test_state(storage: Arc<SqliteStorage>) -> AppState {
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -94,10 +94,10 @@ async fn get_json(router: &Router, uri: &str) -> (StatusCode, Value) {
 }
 
 async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -113,7 +113,7 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     )
     .await
     .unwrap();
-    (space.id, session.id, thread.id)
+    (topic.id, session.id, thread.id)
 }
 
 async fn seed_thread(storage: &Arc<SqliteStorage>, session_id: Uuid) -> Uuid {
@@ -166,7 +166,7 @@ async fn operator_runs_report_live_statuses_across_turn_states() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_space_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_topic_id, session_id, thread_id) = seed_session(&storage).await;
     let awaiting_thread_id = seed_thread(&storage, session_id).await;
     let delegating_thread_id = seed_thread(&storage, session_id).await;
     let stuck_thread_id = seed_thread(&storage, session_id).await;
@@ -268,7 +268,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
 
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
     let state = test_state(Arc::clone(&storage));
-    let (_space_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_topic_id, session_id, thread_id) = seed_session(&storage).await;
 
     let completed_turn = storage
         .create_turn(NewTurn {
@@ -396,7 +396,7 @@ async fn operator_run_detail_tracks_live_execution_into_history() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_space_id, _session_id, thread_id) = seed_session(&storage).await;
+    let (_topic_id, _session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {

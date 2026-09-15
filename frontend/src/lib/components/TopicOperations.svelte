@@ -10,12 +10,12 @@
   import type { VoiceCapabilitiesResponse } from "../protocol/VoiceCapabilitiesResponse";
 
   interface Props {
-    spaceId: string | null;
+    topicId: string | null;
     sessionId: string | null;
     onChanged?: () => void | Promise<void>;
   }
 
-  let { spaceId, sessionId, onChanged }: Props = $props();
+  let { topicId, sessionId, onChanged }: Props = $props();
 
   let noteTitle = $state("");
   let noteContent = $state("");
@@ -29,10 +29,10 @@
   let busyAction = $state<string | null>(null);
 
   const effectiveNoteScope = $derived(
-    noteScope === "session" && sessionId ? "session" : "space",
+    noteScope === "session" && sessionId ? "session" : "topic",
   );
   const effectiveAttachmentScope = $derived(
-    attachmentScope === "session" && sessionId ? "session" : "space",
+    attachmentScope === "session" && sessionId ? "session" : "topic",
   );
   const canUseSessionWorkflow = $derived(Boolean(sessionId));
 
@@ -64,7 +64,7 @@
       notice = await task();
       await onChanged?.();
     } catch (error) {
-      errorMessage = error instanceof Error ? error.message : "Space operation failed.";
+      errorMessage = error instanceof Error ? error.message : "Topic operation failed.";
     } finally {
       busyAction = null;
     }
@@ -80,7 +80,7 @@
 
   async function saveMaterialNote(): Promise<void> {
     await runAction("material", async () => {
-      if (!spaceId) throw new Error("Select a space before saving material.");
+      if (!topicId) throw new Error("Select a topic before saving material.");
       const title = noteTitle.trim();
       const content = noteContent.trim();
       if (!title || !content) {
@@ -90,7 +90,7 @@
       await createMaterial({
         scope_kind: effectiveNoteScope,
         session_id: effectiveNoteScope === "session" && sessionId ? sessionId : undefined,
-        space_id: effectiveNoteScope === "space" ? spaceId : undefined,
+        topic_id: effectiveNoteScope === "topic" ? topicId : undefined,
         title,
         relative_path: buildRelativePath(title, effectiveNoteScope),
         mime_type: "text/markdown",
@@ -101,13 +101,13 @@
       noteContent = "";
       return effectiveNoteScope === "session"
         ? "Saved material beside the active conversation."
-        : "Saved material for the space workspace.";
+        : "Saved material for the topic workspace.";
     });
   }
 
   async function queueAttachment(): Promise<void> {
     await runAction("attachment", async () => {
-      if (!spaceId) throw new Error("Select a space before attaching material.");
+      if (!topicId) throw new Error("Select a topic before attaching material.");
       if (!selectedFile) throw new Error("Choose a file before queueing ingestion.");
 
       const bytes = new Uint8Array(await selectedFile.arrayBuffer());
@@ -115,7 +115,7 @@
         scope_kind: effectiveAttachmentScope,
         session_id:
           effectiveAttachmentScope === "session" && sessionId ? sessionId : undefined,
-        space_id: effectiveAttachmentScope === "space" ? spaceId : undefined,
+        topic_id: effectiveAttachmentScope === "topic" ? topicId : undefined,
         filename: selectedFile.name,
         mime_type: selectedFile.type || "application/octet-stream",
         content_base64: bytesToBase64(bytes),
@@ -144,8 +144,8 @@
 
 <section class="rail-panel operations-panel">
   <div class="panel-heading">
-    <h3>Space operations</h3>
-    <span>{canUseSessionWorkflow ? "live" : "space only"}</span>
+    <h3>Topic operations</h3>
+    <span>{canUseSessionWorkflow ? "live" : "topic only"}</span>
   </div>
 
   {#if errorMessage}
@@ -159,7 +159,7 @@
     <section class="operation-card">
       <div>
         <strong>Capture material</strong>
-        <p>Write directly into session or space-managed material.</p>
+        <p>Write directly into session or topic-managed material.</p>
       </div>
       <div class="scope-toggle" role="tablist" aria-label="Material scope">
         <button
@@ -170,10 +170,10 @@
           Session
         </button>
         <button
-          class:active={effectiveNoteScope === "space"}
-          onclick={() => (noteScope = "space")}
+          class:active={effectiveNoteScope === "topic"}
+          onclick={() => (noteScope = "topic")}
         >
-          Space
+          Topic
         </button>
       </div>
       <label>
@@ -185,10 +185,10 @@
         <textarea
           bind:value={noteContent}
           rows="5"
-          placeholder="Capture a constraint, checklist, or space note."
+          placeholder="Capture a constraint, checklist, or topic note."
         ></textarea>
       </label>
-      <button class="primary" onclick={saveMaterialNote} disabled={busyAction === "material" || !spaceId}>
+      <button class="primary" onclick={saveMaterialNote} disabled={busyAction === "material" || !topicId}>
         {busyAction === "material" ? "Saving..." : "Save material"}
       </button>
     </section>
@@ -207,17 +207,17 @@
           Session
         </button>
         <button
-          class:active={effectiveAttachmentScope === "space"}
-          onclick={() => (attachmentScope = "space")}
+          class:active={effectiveAttachmentScope === "topic"}
+          onclick={() => (attachmentScope = "topic")}
         >
-          Space
+          Topic
         </button>
       </div>
       <label>
         <span>File</span>
         <input type="file" onchange={handleFileChange} />
       </label>
-      <button class="primary" onclick={queueAttachment} disabled={busyAction === "attachment" || !spaceId}>
+      <button class="primary" onclick={queueAttachment} disabled={busyAction === "attachment" || !topicId}>
         {busyAction === "attachment" ? "Queueing..." : "Queue ingestion"}
       </button>
     </section>

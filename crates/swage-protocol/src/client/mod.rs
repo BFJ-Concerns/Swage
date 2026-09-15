@@ -17,7 +17,7 @@ pub mod routes;
 pub mod schedule;
 pub mod settings;
 pub mod skill;
-pub mod space;
+pub mod topic;
 pub mod turn;
 pub mod typescript_client;
 pub mod voice;
@@ -44,7 +44,7 @@ pub struct ClientSurface {
     synthesise_speech: voice::SynthesiseSpeechRequest,
     synthesise_speech_response: voice::SynthesiseSpeechResponse,
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
-    create_space_request: space::CreateSpaceRequest,
+    create_topic_request: topic::CreateTopicRequest,
     create_page_request: page::CreatePageRequest,
     write_page_module_request: page::WritePageModuleRequest,
     create_page_annotation_request: page::CreatePageAnnotationRequest,
@@ -55,11 +55,11 @@ pub struct ClientSurface {
     create_page_template_request: page::CreatePageTemplateRequest,
     page_template: page::PageTemplateResponse,
     page_template_list: page::PageTemplateListResponse,
-    update_space_request: space::UpdateSpaceRequest,
-    space_list: space::SpaceListResponse,
-    create_workspace_attachment_request: space::CreateWorkspaceAttachmentRequest,
-    update_workspace_trust_request: space::UpdateWorkspaceTrustRequest,
-    workspace_attachment_list: space::WorkspaceAttachmentListResponse,
+    update_topic_request: topic::UpdateTopicRequest,
+    topic_list: topic::TopicListResponse,
+    create_workspace_attachment_request: topic::CreateWorkspaceAttachmentRequest,
+    update_workspace_trust_request: topic::UpdateWorkspaceTrustRequest,
+    workspace_attachment_list: topic::WorkspaceAttachmentListResponse,
     channel_link_code_response: channel::ChannelLinkCodeResponse,
     create_conversation_request: conversation::CreateConversationRequest,
     create_conversation_branch_request: conversation::CreateConversationBranchRequest,

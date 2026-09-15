@@ -3,10 +3,10 @@
 /**
  * Which session each run executes in.
  *
- * - `fresh` — every run creates a new session in `space_id` for
+ * - `fresh` — every run creates a new session in `topic_id` for
  *   `agent_id`, with a deliberately assembled opening context (the
  *   schedule's message plus the previous run's outcome).
  * - `continuation` — every run continues the named session, executing as
  *   whatever agent that session has at run time.
  */
-export type SessionPolicy = { "policy": "fresh", space_id: string, agent_id: string, } | { "policy": "continuation", session_id: string, };
+export type SessionPolicy = { "policy": "fresh", topic_id: string, agent_id: string, } | { "policy": "continuation", session_id: string, };

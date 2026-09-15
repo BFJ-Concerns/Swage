@@ -1,4 +1,4 @@
-//! MemoryTool — read and write persistent per-space memory files.
+//! MemoryTool — read and write persistent per-topic memory files.
 //!
 //! The memory directory is derived from the tool context's working directory:
 //! `{working_directory}/.swage/memory`. This keeps the tool stateless and
@@ -62,7 +62,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Read and write the space's shared memory files — named markdown notes that persist in the space and are visible to every agent working there. For private records only you will search later, use the agent_memory tool instead."
+        "Read and write the topic's shared memory files — named markdown notes that persist in the topic and are visible to every agent working there. For private records only you will search later, use the agent_memory tool instead."
     }
 
     fn parameters(&self) -> Value {
@@ -360,7 +360,7 @@ mod tests {
         );
         assert!(
             validate_file_name("hello world").is_some(),
-            "space should be rejected"
+            "topic should be rejected"
         );
     }
 

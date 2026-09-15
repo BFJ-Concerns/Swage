@@ -1,4 +1,4 @@
-//! Spaces and their attached workspaces.
+//! Topics and their attached workspaces.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -7,7 +7,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct CreateSpaceRequest {
+pub struct CreateTopicRequest {
     pub name: String,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -15,7 +15,7 @@ pub struct CreateSpaceRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
-pub struct UpdateSpaceRequest {
+pub struct UpdateTopicRequest {
     #[ts(optional)]
     pub name: Option<String>,
     #[ts(optional)]
@@ -23,7 +23,7 @@ pub struct UpdateSpaceRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SpaceResponse {
+pub struct TopicResponse {
     pub id: Uuid,
     pub name: String,
     pub description: String,
@@ -33,8 +33,8 @@ pub struct SpaceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SpaceListResponse {
-    pub spaces: Vec<SpaceResponse>,
+pub struct TopicListResponse {
+    pub topics: Vec<TopicResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -64,7 +64,7 @@ pub struct UpdateWorkspaceTrustRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct WorkspaceAttachmentResponse {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub label: String,
     pub path: String,
     pub canonical_path: String,

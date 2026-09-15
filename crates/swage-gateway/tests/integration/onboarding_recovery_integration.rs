@@ -21,7 +21,7 @@ use swage_gateway::{
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{SpaceStore, Storage},
+    store::{Storage, TopicStore},
 };
 use swage_tool::context::MockToolContext;
 use swage_tool::tool::Tool;
@@ -122,7 +122,7 @@ async fn start_test_server(
     let config = swage_config::ResolvedConfig::default();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
@@ -193,8 +193,8 @@ async fn recovery_exports_are_listed_and_downloadable() {
     let exports = list_body["exports"].as_array().unwrap();
     assert_eq!(exports.len(), 1);
     assert_eq!(
-        exports[0]["spaces"],
-        json!(export_body["spaces"].as_array().unwrap().len())
+        exports[0]["topics"],
+        json!(export_body["topics"].as_array().unwrap().len())
     );
     assert!(exports[0]["size_bytes"].as_u64().unwrap() > 0);
 

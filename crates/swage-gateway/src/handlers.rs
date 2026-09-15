@@ -58,8 +58,8 @@ use crate::{
     service::{
         ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
         ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
-        CreateSpaceRequest, CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse,
-        SpaceService, UpdateSpaceRequest, UpdateWorkspaceTrustRequest,
+        CreateTopicRequest, CreateWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
+        TopicService, UpdateTopicRequest, UpdateWorkspaceTrustRequest,
         WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse, WorkspaceAttachmentService,
     },
     settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
@@ -273,7 +273,7 @@ fn agent_definition_response(
 ) -> AgentDefinitionResponse {
     AgentDefinitionResponse {
         id: definition.id,
-        space_id: definition.space_id,
+        topic_id: definition.topic_id,
         display_name: definition.display_name,
         description: definition.description,
         instructions: definition.instructions,
@@ -293,7 +293,7 @@ pub async fn list_agent_definitions(
 ) -> Result<Json<AgentDefinitionListResponse>, ApiError> {
     let definitions = state
         .storage
-        .list_agent_definitions(query.space_id)
+        .list_agent_definitions(query.topic_id)
         .await
         .map_err(GatewayError::from)?
         .into_iter()
@@ -304,9 +304,9 @@ pub async fn list_agent_definitions(
 
 pub async fn list_effective_agent_definitions(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
-    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), space_id)
+    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), topic_id)
         .await?
         .into_iter()
         .map(effective_agent_definition_response)
@@ -320,8 +320,8 @@ fn effective_agent_definition_response(
     let definition = effective.definition;
     let source_scope = if effective.is_builtin {
         EffectiveAgentDefinitionSourceScope::BuiltIn
-    } else if definition.space_id.is_some() {
-        EffectiveAgentDefinitionSourceScope::Space
+    } else if definition.topic_id.is_some() {
+        EffectiveAgentDefinitionSourceScope::Topic
     } else {
         EffectiveAgentDefinitionSourceScope::Global
     };
@@ -346,7 +346,7 @@ fn new_agent_definition(
 ) -> swage_storage::NewAgentDefinition {
     swage_storage::NewAgentDefinition {
         id,
-        space_id: request.space_id,
+        topic_id: request.topic_id,
         display_name: request.display_name,
         description: request.description,
         instructions: request.instructions,
@@ -363,7 +363,7 @@ fn mutation_response(
 ) -> AgentDefinitionMutationResponse {
     AgentDefinitionMutationResponse {
         agent_id: change.agent_id,
-        space_id: change.space_id,
+        topic_id: change.topic_id,
         summary: change.summary,
     }
 }
@@ -375,7 +375,7 @@ pub async fn create_agent_definition(
     let definition = new_agent_definition(
         request.id,
         UpdateAgentDefinitionRequest {
-            space_id: request.space_id,
+            topic_id: request.topic_id,
             display_name: request.display_name,
             description: request.description,
             instructions: request.instructions,
@@ -414,7 +414,7 @@ pub async fn delete_agent_definition(
     let change = crate::service::delete_agent_definition(
         &state,
         &agent_id,
-        query.space_id,
+        query.topic_id,
         "operator_http",
         None,
     )
@@ -568,13 +568,13 @@ pub async fn list_session_attachments(
     ))
 }
 
-/// `GET /api/spaces/:id/attachments` — list space-scoped attachments.
-pub async fn list_space_attachments(
+/// `GET /api/topics/:id/attachments` — list topic-scoped attachments.
+pub async fn list_topic_attachments(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AttachmentListResponse>, ApiError> {
     Ok(Json(
-        crate::attachment::list_space_attachments(&state, id).await?,
+        crate::attachment::list_topic_attachments(&state, id).await?,
     ))
 }
 
@@ -627,13 +627,13 @@ pub async fn list_session_materials(
     ))
 }
 
-/// `GET /api/spaces/:id/materials` — list space-scoped managed materials.
-pub async fn list_space_materials(
+/// `GET /api/topics/:id/materials` — list topic-scoped managed materials.
+pub async fn list_topic_materials(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MaterialListResponse>, ApiError> {
     Ok(Json(
-        crate::material::list_space_materials(&state, id).await?,
+        crate::material::list_topic_materials(&state, id).await?,
     ))
 }
 
@@ -927,7 +927,7 @@ pub async fn create_conversation(
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store)
+    let svc = ConversationService::new(state.storage, state.topic_store)
         .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
@@ -941,7 +941,7 @@ pub async fn list_conversations(
     State(state): State<AppState>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store)
+    let svc = ConversationService::new(state.storage, state.topic_store)
         .with_config(config, state.config_root);
     let conversations = svc.list_conversations().await?;
     Ok(Json(ConversationListResponse { conversations }))
@@ -954,37 +954,37 @@ pub async fn get_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ConversationDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let svc = ConversationService::new(state.storage, state.topic_store);
     let detail = svc.get_conversation(id).await?;
     Ok(Json(detail))
 }
 
-/// `GET /api/spaces/:space_id/sessions` — list sessions for a space.
+/// `GET /api/topics/:topic_id/sessions` — list sessions for a topic.
 ///
-/// Returns 200 with `{ conversations: [...] }`, or 404 if the space is not found.
-pub async fn list_space_sessions(
+/// Returns 200 with `{ conversations: [...] }`, or 404 if the topic is not found.
+pub async fn list_topic_sessions(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<ConversationListResponse>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
-    let conversations = svc.list_sessions_by_space(space_id).await?;
+    let svc = ConversationService::new(state.storage, state.topic_store);
+    let conversations = svc.list_sessions_by_topic(topic_id).await?;
     Ok(Json(ConversationListResponse { conversations }))
 }
 
-/// `POST /api/spaces/:space_id/sessions` — create a session in a space.
+/// `POST /api/topics/:topic_id/sessions` — create a session in a topic.
 ///
-/// Returns 201 Created with the new session's metadata, or 404 if the space is not found.
-pub async fn create_space_session(
+/// Returns 201 Created with the new session's metadata, or 404 if the topic is not found.
+pub async fn create_topic_session(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     payload: Option<Json<CreateConversationRequest>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
-    let svc = ConversationService::new(state.storage, state.space_store)
+    let svc = ConversationService::new(state.storage, state.topic_store)
         .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
-        .create_session_in_space_from_request(space_id, request)
+        .create_session_in_topic_from_request(topic_id, request)
         .await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -996,115 +996,115 @@ pub async fn delete_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let svc = ConversationService::new(state.storage, state.topic_store);
     svc.delete_conversation(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
-// Space handlers
+// Topic handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /api/spaces` — create a new space.
+/// `POST /api/topics` — create a new topic.
 ///
-/// Returns 201 Created with the space's metadata, or 409/422 on error.
-pub async fn create_space(
+/// Returns 201 Created with the topic's metadata, or 409/422 on error.
+pub async fn create_topic(
     State(state): State<AppState>,
-    Json(req): Json<CreateSpaceRequest>,
+    Json(req): Json<CreateTopicRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = SpaceService::new(state.space_store, state.config_root);
-    let resp = svc.create_space(req).await?;
+    let svc = TopicService::new(state.topic_store, state.config_root);
+    let resp = svc.create_topic(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
-/// `GET /api/spaces` — list all spaces.
+/// `GET /api/topics` — list all topics.
 ///
-/// Returns 200 with `{ spaces: [...] }`.
-pub async fn list_spaces(
+/// Returns 200 with `{ topics: [...] }`.
+pub async fn list_topics(
     State(state): State<AppState>,
-) -> Result<Json<SpaceListResponse>, ApiError> {
-    let svc = SpaceService::new(state.space_store, state.config_root);
-    let resp = svc.list_spaces().await?;
+) -> Result<Json<TopicListResponse>, ApiError> {
+    let svc = TopicService::new(state.topic_store, state.config_root);
+    let resp = svc.list_topics().await?;
     Ok(Json(resp))
 }
 
-/// `GET /api/spaces/:id` — get a space by ID.
+/// `GET /api/topics/:id` — get a topic by ID.
 ///
-/// Returns 200 with the space, or 404 if not found.
-pub async fn get_space(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<SpaceResponse>, ApiError> {
-    let svc = SpaceService::new(state.space_store, state.config_root);
-    let resp = svc.get_space(id).await?;
-    Ok(Json(resp))
-}
-
-/// `PUT /api/spaces/:id` — partially update a space.
-///
-/// Returns 200 with the updated space, 404 if not found, or 422/409 on error.
-pub async fn update_space(
+/// Returns 200 with the topic, or 404 if not found.
+pub async fn get_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateSpaceRequest>,
-) -> Result<Json<SpaceResponse>, ApiError> {
-    let svc = SpaceService::new(state.space_store, state.config_root);
-    let resp = svc.update_space(id, req).await?;
+) -> Result<Json<TopicResponse>, ApiError> {
+    let svc = TopicService::new(state.topic_store, state.config_root);
+    let resp = svc.get_topic(id).await?;
     Ok(Json(resp))
 }
 
-/// `DELETE /api/spaces/:id` — delete a space.
+/// `PUT /api/topics/:id` — partially update a topic.
+///
+/// Returns 200 with the updated topic, 404 if not found, or 422/409 on error.
+pub async fn update_topic(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateTopicRequest>,
+) -> Result<Json<TopicResponse>, ApiError> {
+    let svc = TopicService::new(state.topic_store, state.config_root);
+    let resp = svc.update_topic(id, req).await?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /api/topics/:id` — delete a topic.
 ///
 /// Returns 204 No Content on success, 404 if not found, or 409 if refusing
-/// to delete the default space.
-pub async fn delete_space(
+/// to delete the default topic.
+pub async fn delete_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = SpaceService::new(state.space_store, state.config_root);
-    svc.delete_space(id).await?;
+    let svc = TopicService::new(state.topic_store, state.config_root);
+    svc.delete_topic(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/spaces/:id/workspaces` — list workspaces attached to a space.
-pub async fn list_space_workspaces(
+/// `GET /api/topics/:id/workspaces` — list workspaces attached to a topic.
+pub async fn list_topic_workspaces(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<WorkspaceAttachmentListResponse>, ApiError> {
     let svc = WorkspaceAttachmentService::from_state(state);
-    Ok(Json(svc.list_workspaces(space_id).await?))
+    Ok(Json(svc.list_workspaces(topic_id).await?))
 }
 
-/// `POST /api/spaces/:id/workspaces` — attach an external workspace.
-pub async fn attach_space_workspace(
+/// `POST /api/topics/:id/workspaces` — attach an external workspace.
+pub async fn attach_topic_workspace(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     Json(req): Json<CreateWorkspaceAttachmentRequest>,
 ) -> Result<(StatusCode, Json<WorkspaceAttachmentResponse>), ApiError> {
     let svc = WorkspaceAttachmentService::from_state(state);
     Ok((
         StatusCode::CREATED,
-        Json(svc.attach_workspace(space_id, req).await?),
+        Json(svc.attach_workspace(topic_id, req).await?),
     ))
 }
 
-/// `PUT /api/spaces/:space_id/workspaces/:workspace_id/trust` — set workspace trust.
-pub async fn update_space_workspace_trust(
+/// `PUT /api/topics/:topic_id/workspaces/:workspace_id/trust` — set workspace trust.
+pub async fn update_topic_workspace_trust(
     State(state): State<AppState>,
-    Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Path((topic_id, workspace_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateWorkspaceTrustRequest>,
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
     let svc = WorkspaceAttachmentService::from_state(state);
-    Ok(Json(svc.set_trust(space_id, workspace_id, req).await?))
+    Ok(Json(svc.set_trust(topic_id, workspace_id, req).await?))
 }
 
-/// `DELETE /api/spaces/:space_id/workspaces/:workspace_id` — detach a workspace.
-pub async fn detach_space_workspace(
+/// `DELETE /api/topics/:topic_id/workspaces/:workspace_id` — detach a workspace.
+pub async fn detach_topic_workspace(
     State(state): State<AppState>,
-    Path((space_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Path((topic_id, workspace_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     let svc = WorkspaceAttachmentService::from_state(state);
-    svc.detach_workspace(space_id, workspace_id).await?;
+    svc.detach_workspace(topic_id, workspace_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1114,7 +1114,7 @@ pub async fn create_conversation_branch(
     Path(session_id): Path<Uuid>,
     Json(req): Json<CreateConversationBranchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let svc = ConversationService::new(state.storage, state.topic_store);
     let resp = svc.create_branch(session_id, req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1124,7 +1124,7 @@ pub async fn list_conversation_branches(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<Vec<ConversationBranchResponse>>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let svc = ConversationService::new(state.storage, state.topic_store);
     let resp = svc.list_branches(session_id).await?;
     Ok(Json(resp))
 }
@@ -1134,7 +1134,7 @@ pub async fn get_thread_detail(
     State(state): State<AppState>,
     Path(thread_id): Path<Uuid>,
 ) -> Result<Json<ConversationThreadDetail>, ApiError> {
-    let svc = ConversationService::new(state.storage, state.space_store);
+    let svc = ConversationService::new(state.storage, state.topic_store);
     let resp = svc.get_thread_detail(thread_id).await?;
     Ok(Json(resp))
 }
@@ -1146,21 +1146,21 @@ pub async fn get_thread_detail(
 /// Query parameters for `GET /api/skills`.
 #[derive(Debug, Deserialize)]
 pub struct SkillsQueryParams {
-    /// ID of the space to list skills for (required).
-    pub space_id: Uuid,
+    /// ID of the topic to list skills for (required).
+    pub topic_id: Uuid,
     /// Agent ID to include agent-level skills. When provided, the agent's
     /// directory is searched for a `skills/` folder.
     pub agent_id: Option<String>,
 }
 
-/// `GET /api/skills` — list skills available for a space/agent combination.
+/// `GET /api/skills` — list skills available for a topic/agent combination.
 ///
-/// Resolves skills from the Swage config hierarchy (global → space → agent),
+/// Resolves skills from the Swage config hierarchy (global → topic → agent),
 /// applying override rules when the same skill name appears at multiple levels.
 /// Returns 200 with `{ skills: [...] }`, sorted agent-first then alphabetically.
 ///
-/// Returns 404 if `space_id` does not correspond to a known space.
-/// Returns 400 if `space_id` is missing or not a valid UUID (axum `Query`
+/// Returns 404 if `topic_id` does not correspond to a known topic.
+/// Returns 400 if `topic_id` is missing or not a valid UUID (axum `Query`
 /// extractor enforces this automatically).
 ///
 /// When the Swage config root directory does not exist (e.g. on a fresh
@@ -1172,15 +1172,15 @@ pub async fn list_skills(
 ) -> Result<Json<SkillListResponse>, ApiError> {
     use swage_config::HierarchyLevel;
 
-    // Verify the space exists — return 404 for unknown IDs.
-    let space = state
-        .space_store
-        .get(params.space_id)
+    // Verify the topic exists — return 404 for unknown IDs.
+    let topic = state
+        .topic_store
+        .get(params.topic_id)
         .await
         .map_err(|e| ApiError::from(GatewayError::Storage(e)))?
         .ok_or({
-            ApiError::from(GatewayError::SpaceNotFound {
-                id: params.space_id,
+            ApiError::from(GatewayError::TopicNotFound {
+                id: params.topic_id,
             })
         })?;
 
@@ -1188,7 +1188,7 @@ pub async fn list_skills(
     let root = state.config_root.clone();
 
     let skills =
-        crate::skill::discover_available_for_scope(&root, &space.slug, params.agent_id.as_deref());
+        crate::skill::discover_available_for_scope(&root, &topic.slug, params.agent_id.as_deref());
 
     let skill_items: Vec<SkillItem> = skills
         .into_iter()
@@ -1196,14 +1196,14 @@ pub async fn list_skills(
             let always_active = s.level == HierarchyLevel::Agent;
             let level = match s.level {
                 HierarchyLevel::Agent => "agent",
-                HierarchyLevel::Space => "space",
+                HierarchyLevel::Topic => "topic",
                 HierarchyLevel::Global => "global",
             };
             SkillItem {
                 id: s.shipped.then(|| {
                     let shipped = crate::shipped_skills::find_by_name(&s.name)
                         .expect("shipped definition has a catalogue entry");
-                    crate::shipped_skills::id(params.space_id, shipped.name)
+                    crate::shipped_skills::id(params.topic_id, shipped.name)
                 }),
                 name: s.name,
                 display_name: s.display_name,
@@ -1506,11 +1506,11 @@ pub async fn send_agent_message(
         .kind
         .parse::<MessageKind>()
         .map_err(|e| ApiError::validation(e.to_string()))?;
-    let space_id = req.space_id;
+    let topic_id = req.topic_id;
 
-    if kind == MessageKind::Delegate && space_id.is_none() {
+    if kind == MessageKind::Delegate && topic_id.is_none() {
         return Err(ApiError::validation(
-            "delegate messages require space_id so execution uses the correct space configuration"
+            "delegate messages require topic_id so execution uses the correct topic configuration"
                 .to_string(),
         ));
     }
@@ -1535,7 +1535,7 @@ pub async fn send_agent_message(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     if msg.kind == MessageKind::Delegate {
-        let execution_space_id = space_id.expect("delegate space_id was validated before storage");
+        let execution_topic_id = topic_id.expect("delegate topic_id was validated before storage");
         let state_for_task = state.clone();
         let msg_for_task = msg.clone();
         tokio::spawn(async move {
@@ -1543,7 +1543,7 @@ pub async fn send_agent_message(
             if let Err(error) = Box::pin(execute_external_delegate_message(
                 state_for_task.clone(),
                 msg_for_task,
-                execution_space_id,
+                execution_topic_id,
                 sender_turn_id,
             ))
             .await
@@ -1573,22 +1573,22 @@ pub async fn send_agent_message(
 async fn execute_external_delegate_message(
     state: AppState,
     delegate_msg: swage_storage::model::AgentMessage,
-    space_id: Uuid,
+    topic_id: Uuid,
     sender_turn_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     use std::sync::Arc;
 
     use swage_agent::{DelegationExecutor, MessageRouter};
 
-    let space = state
-        .space_store
-        .get(space_id)
+    let topic = state
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .ok_or_else(|| ApiError::not_found("space", space_id))?;
+        .ok_or_else(|| ApiError::not_found("topic", topic_id))?;
 
     let target_resolved =
-        crate::turn::load_session_config(&state, &space.slug, &delegate_msg.recipient_agent_id)
+        crate::turn::load_session_config(&state, &topic.slug, &delegate_msg.recipient_agent_id)
             .map_err(|error| ApiError::internal(error.to_string()))?;
     let mut bound_agent_ids = match sender_turn_id {
         Some(turn_id) => crate::turn::dispatch_bound_agent_ids_for_turn(&state, turn_id)
@@ -1605,8 +1605,8 @@ async fn execute_external_delegate_message(
     };
     let effective_target_resolved = crate::turn::apply_dispatch_bounds(
         &state,
-        &space.slug,
-        space_id,
+        &topic.slug,
+        topic_id,
         target_resolved.clone(),
         &bound_agent_ids,
         &format!("delegated agent {:?}", delegate_msg.recipient_agent_id),
@@ -1629,12 +1629,12 @@ async fn execute_external_delegate_message(
     );
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let mut target_agent_config = crate::turn::build_agent_config_for_space_workspace(
+    let mut target_agent_config = crate::turn::build_agent_config_for_topic_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
         None,
-        space_id,
+        topic_id,
         sender_turn_id.unwrap_or_else(Uuid::new_v4),
         active_workspace_attachment_id,
     )
@@ -1654,7 +1654,7 @@ async fn execute_external_delegate_message(
             config: &effective_target_resolved,
             agent_config: &target_agent_config,
             session_metadata: None,
-            space_id: Some(space_id),
+            topic_id: Some(topic_id),
             active_workspace_attachment_id: None,
             ws_tx: silent_ws_tx.clone(),
             session_id: None,
@@ -1682,7 +1682,7 @@ async fn execute_external_delegate_message(
         active_delegations: swage_agent::active_delegations(),
         context_assembler: crate::turn::delegated_context_assembler(
             state.clone(),
-            space.clone(),
+            topic.clone(),
             target_resolved.clone(),
             delegate_msg.recipient_agent_id.clone(),
             target_agent_config.working_directory.display().to_string(),
@@ -1699,7 +1699,7 @@ async fn execute_external_delegate_message(
         .execute_delegation(
             &delegate_msg,
             sender_turn_id,
-            space_id,
+            topic_id,
             target_agent_config,
             target_context_transfer_config,
             Some(dispatcher_build.dispatcher),
@@ -2139,7 +2139,7 @@ mod tests {
     use uuid::Uuid;
 
     use swage_provider::LlmProvider;
-    use swage_storage::store::{MessageStore, SessionStore, SpaceStore, Storage, TurnStore};
+    use swage_storage::store::{MessageStore, SessionStore, Storage, TopicStore, TurnStore};
 
     use super::*;
     use crate::{
@@ -2181,7 +2181,7 @@ mod tests {
     ) -> (Router, Arc<MockStorage>) {
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -2215,13 +2215,13 @@ mod tests {
     #[test]
     fn effective_agent_response_maps_each_source_scope() {
         fn effective(
-            space_id: Option<Uuid>,
+            topic_id: Option<Uuid>,
             is_builtin: bool,
         ) -> crate::service::EffectiveAgentDefinition {
             crate::service::EffectiveAgentDefinition {
                 definition: swage_storage::NewAgentDefinition {
                     id: "agent".into(),
-                    space_id,
+                    topic_id,
                     display_name: "Agent".into(),
                     description: String::new(),
                     instructions: String::new(),
@@ -2246,7 +2246,7 @@ mod tests {
         assert_eq!(
             effective_agent_definition_response(effective(Some(Uuid::new_v4()), false))
                 .source_scope,
-            EffectiveAgentDefinitionSourceScope::Space
+            EffectiveAgentDefinitionSourceScope::Topic
         );
     }
 
@@ -2400,13 +2400,13 @@ mod tests {
         );
         assert_eq!(turn_rows[0]["turn_id"], turn_id.to_string());
 
-        let default_space = storage
+        let default_topic = storage
             .get_or_create_default()
             .await
-            .expect("get default space");
+            .expect("get default topic");
         let sent_message = client
-            .send_agent_message_in_space(
-                default_space.id,
+            .send_agent_message_in_topic(
+                default_topic.id,
                 "agent-a",
                 "agent-b",
                 "delegate",
@@ -2669,13 +2669,13 @@ mod tests {
             spawn_live_server(provider as Arc<dyn LlmProvider>, storage).await;
 
         let client = GatewayClient::new(&base_url);
-        let default_space = storage
+        let default_topic = storage
             .get_or_create_default()
             .await
-            .expect("get default space");
+            .expect("get default topic");
         let sent_message = client
-            .send_agent_message_in_space(
-                default_space.id,
+            .send_agent_message_in_topic(
+                default_topic.id,
                 "agent-a",
                 "agent-b",
                 "delegate",
@@ -2713,10 +2713,10 @@ mod tests {
         use swage_storage::Storage;
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -2740,7 +2740,7 @@ mod tests {
         let error = Box::pin(execute_external_delegate_message(
             state.clone(),
             malformed,
-            space.id,
+            topic.id,
             None,
         ))
         .await
@@ -2761,7 +2761,7 @@ mod tests {
             .await
             .expect("valid delegate message");
         let error = Box::pin(execute_external_delegate_message(
-            state, valid, space.id, None,
+            state, valid, topic.id, None,
         ))
         .await
         .expect_err("unconsumed dispatcher failure proves malformed input provisioned nothing");
@@ -2832,17 +2832,17 @@ mod tests {
             ],
         ]);
         let storage = Arc::new(MockStorage::new());
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("create default space");
+            .expect("create default topic");
         let executions = Arc::new(AtomicUsize::new(0));
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.require_approval =
             vec![swage_config::RequireApprovalEntry::Simple("echo".into())];
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![Arc::new(CountingEchoTool(Arc::clone(
@@ -2864,7 +2864,7 @@ mod tests {
                             "sender_agent_id": "agent-a",
                             "recipient_agent_id": "agent-b",
                             "kind": "delegate",
-                            "space_id": space.id,
+                            "topic_id": topic.id,
                             "payload": { "task": "Use echo" }
                         })
                         .to_string(),
@@ -2926,34 +2926,34 @@ mod tests {
         ]]);
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("get default space");
+            .expect("get default topic");
         let swage_home = SwageHomeGuard::new();
         let target_skill_dir = swage_home
             .path()
-            .join("spaces/default/agents/agent-b/skills/external-specialist");
+            .join("topics/default/agents/agent-b/skills/external-specialist");
         std::fs::create_dir_all(&target_skill_dir).expect("create target skill directory");
         std::fs::write(
             target_skill_dir.join("SKILL.md"),
             "---\ndescription: External specialist behaviour\n---\nUse the external specialist skill.\n",
         )
         .expect("write target skill");
-        let space_element = swage_home
+        let topic_element = swage_home
             .path()
-            .join("spaces/default/elements/current-work.md");
-        std::fs::create_dir_all(space_element.parent().unwrap())
-            .expect("create space element directory");
-        std::fs::write(&space_element, "Shared child grounding; task is {{task}}.")
-            .expect("write space context element");
+            .join("topics/default/elements/current-work.md");
+        std::fs::create_dir_all(topic_element.parent().unwrap())
+            .expect("create topic element directory");
+        std::fs::write(&topic_element, "Shared child grounding; task is {{task}}.")
+            .expect("write topic context element");
         let config = swage_config::ResolvedConfig {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
         };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -2974,7 +2974,7 @@ mod tests {
         Box::pin(execute_external_delegate_message(
             state,
             delegate_msg,
-            space.id,
+            topic.id,
             None,
         ))
         .await
@@ -3012,7 +3012,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|element| element["name"] == "current-work"),
-            "external delegated assembly report should identify the space context element"
+            "external delegated assembly report should identify the topic context element"
         );
         let child_audit = storage
             .list_audit_events_by_session(child_sessions[0].id)
@@ -3044,7 +3044,7 @@ mod tests {
             "external delegated provider request should include platform identity: {request_text}"
         );
         assert!(
-            request_text.contains("Space: the default space")
+            request_text.contains("Topic: the default topic")
                 && request_text.contains("Working directory:")
                 && request_text.contains("Session started:"),
             "external delegated provider request should include the child session's place: {request_text}"
@@ -3056,7 +3056,7 @@ mod tests {
         );
         assert!(
             request_text.contains("Shared child grounding; task is ⟦unset:task⟧."),
-            "external delegated provider request should include the rendered space context element: {request_text}"
+            "external delegated provider request should include the rendered topic context element: {request_text}"
         );
     }
 
@@ -3093,10 +3093,10 @@ mod tests {
         ]);
         let storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("get default space");
+            .expect("get default topic");
         let swage_home = SwageHomeGuard::new();
         for (agent_id, allowed_tools) in [
             ("agent-a", "[\"shared\"]"),
@@ -3104,7 +3104,7 @@ mod tests {
         ] {
             let agent_dir = swage_home
                 .path()
-                .join("spaces/default/agents")
+                .join("topics/default/agents")
                 .join(agent_id);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
@@ -3118,7 +3118,7 @@ mod tests {
 
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -3142,7 +3142,7 @@ mod tests {
         Box::pin(execute_external_delegate_message(
             state,
             delegate_msg,
-            space.id,
+            topic.id,
             None,
         ))
         .await
@@ -3210,7 +3210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_delegate_message_requires_space_id_before_persisting() {
+    async fn post_delegate_message_requires_topic_id_before_persisting() {
         use swage_storage::store::AgentMessageStore;
 
         let (router, storage) = make_router();
@@ -3239,8 +3239,8 @@ mod tests {
         assert!(
             body["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("require space_id")),
-            "validation error should explain the missing space context: {body:?}"
+                .is_some_and(|message| message.contains("require topic_id")),
+            "validation error should explain the missing topic context: {body:?}"
         );
         assert!(
             storage
@@ -3363,7 +3363,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
-        assert!(body["space_id"].is_string());
+        assert!(body["topic_id"].is_string());
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
     }
@@ -3378,7 +3378,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/conversations")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"space_id":"not-a-target"}"#))
+                    .body(axum::body::Body::from(r#"{"topic_id":"not-a-target"}"#))
                     .unwrap(),
             )
             .await
@@ -3392,7 +3392,7 @@ mod tests {
         assert!(
             body["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("space_id")),
+                .is_some_and(|message| message.contains("topic_id")),
             "rejection should name the unknown field: {body}"
         );
     }
@@ -3982,7 +3982,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/spaces
+    // POST /api/topics
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -3992,9 +3992,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"name":"My Space"}"#))
+                    .body(axum::body::Body::from(r#"{"name":"My Topic"}"#))
                     .unwrap(),
             )
             .await
@@ -4004,7 +4004,7 @@ mod tests {
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
         assert!(body["slug"].is_string(), "response should have a slug");
-        assert_eq!(body["name"].as_str().unwrap(), "My Space");
+        assert_eq!(body["name"].as_str().unwrap(), "My Topic");
     }
 
     #[tokio::test]
@@ -4014,7 +4014,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":""}"#))
                     .unwrap(),
@@ -4035,7 +4035,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Dup"}"#))
                     .unwrap(),
@@ -4048,7 +4048,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Dup"}"#))
                     .unwrap(),
@@ -4060,7 +4060,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/spaces
+    // GET /api/topics
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -4070,7 +4070,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4079,16 +4079,16 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        // At least the seeded default space.
-        assert!(body["spaces"].is_array());
+        // At least the seeded default topic.
+        assert!(body["topics"].is_array());
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/spaces/:id
+    // GET /api/topics/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_space_by_id_returns_200() {
+    async fn get_topic_by_id_returns_200() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -4096,7 +4096,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Fetched"}"#))
                     .unwrap(),
@@ -4110,7 +4110,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/spaces/{id}"))
+                    .uri(format!("/api/topics/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4123,14 +4123,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_space_nonexistent_returns_404() {
+    async fn get_topic_nonexistent_returns_404() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/spaces/{missing}"))
+                    .uri(format!("/api/topics/{missing}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4140,11 +4140,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PUT /api/spaces/:id
+    // PUT /api/topics/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn put_space_returns_200_with_updated_fields() {
+    async fn put_topic_returns_200_with_updated_fields() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -4152,7 +4152,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Original"}"#))
                     .unwrap(),
@@ -4166,7 +4166,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/spaces/{id}"))
+                    .uri(format!("/api/topics/{id}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Renamed"}"#))
                     .unwrap(),
@@ -4180,14 +4180,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_space_nonexistent_returns_404() {
+    async fn put_topic_nonexistent_returns_404() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/spaces/{missing}"))
+                    .uri(format!("/api/topics/{missing}"))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"X"}"#))
                     .unwrap(),
@@ -4198,11 +4198,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // DELETE /api/spaces/:id
+    // DELETE /api/topics/:id
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn delete_space_returns_204() {
+    async fn delete_topic_returns_204() {
         let (router, _) = make_router();
 
         let create_resp = router
@@ -4210,7 +4210,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/spaces")
+                    .uri("/api/topics")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"name":"Deletable"}"#))
                     .unwrap(),
@@ -4224,7 +4224,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/spaces/{id}"))
+                    .uri(format!("/api/topics/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4235,23 +4235,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_default_space_returns_409() {
-        use crate::service::SpaceService;
+    async fn delete_default_topic_returns_409() {
+        use crate::service::TopicService;
 
         let (router, storage) = make_router();
-        // Get the default space's ID.
-        let svc = SpaceService::new(
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        // Get the default topic's ID.
+        let svc = TopicService::new(
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             std::path::PathBuf::from(".swage"),
         );
-        let default_space = svc.space_store.get_or_create_default().await.unwrap();
-        let id = default_space.id;
+        let default_topic = svc.topic_store.get_or_create_default().await.unwrap();
+        let id = default_topic.id;
 
         let resp = router
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/spaces/{id}"))
+                    .uri(format!("/api/topics/{id}"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4262,26 +4262,26 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GET /api/spaces/:space_id/sessions
+    // GET /api/topics/:topic_id/sessions
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn get_space_sessions_returns_200_with_array() {
+    async fn get_topic_sessions_returns_200_with_array() {
         let (router, storage) = make_router();
 
-        // Create a named space directly in storage.
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "my-space".into(),
-                slug: "my-space".into(),
+        // Create a named topic directly in storage.
+        let topic = storage
+            .create(swage_storage::model::NewTopic {
+                name: "my-topic".into(),
+                slug: "my-topic".into(),
             })
             .await
             .unwrap();
 
-        // Add two sessions to that space.
+        // Add two sessions to that topic.
         storage
             .create_session(swage_storage::model::NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4290,7 +4290,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4302,7 +4302,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/spaces/{}/sessions", space.id))
+                    .uri(format!("/api/topics/{}/sessions", topic.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4317,20 +4317,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_space_sessions_scopes_to_space() {
+    async fn get_topic_sessions_scopes_to_topic() {
         let (router, storage) = make_router();
 
-        let space_a = storage
-            .create(swage_storage::model::NewSpace {
-                name: "space-a".into(),
-                slug: "space-a".into(),
+        let topic_a = storage
+            .create(swage_storage::model::NewTopic {
+                name: "topic-a".into(),
+                slug: "topic-a".into(),
             })
             .await
             .unwrap();
-        let space_b = storage
-            .create(swage_storage::model::NewSpace {
-                name: "space-b".into(),
-                slug: "space-b".into(),
+        let topic_b = storage
+            .create(swage_storage::model::NewTopic {
+                name: "topic-b".into(),
+                slug: "topic-b".into(),
             })
             .await
             .unwrap();
@@ -4338,7 +4338,7 @@ mod tests {
         // One session in A, two in B.
         storage
             .create_session(swage_storage::model::NewSession {
-                space_id: space_a.id,
+                topic_id: topic_a.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4347,7 +4347,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                space_id: space_b.id,
+                topic_id: topic_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4356,7 +4356,7 @@ mod tests {
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                space_id: space_b.id,
+                topic_id: topic_b.id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4368,7 +4368,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/spaces/{}/sessions", space_a.id))
+                    .uri(format!("/api/topics/{}/sessions", topic_a.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4377,12 +4377,12 @@ mod tests {
 
         let body = body_json(resp).await;
         let list = body["conversations"].as_array().unwrap();
-        // Only sessions belonging to space A.
+        // Only sessions belonging to topic A.
         assert_eq!(list.len(), 1);
     }
 
     #[tokio::test]
-    async fn get_space_sessions_returns_404_for_unknown_space() {
+    async fn get_topic_sessions_returns_404_for_unknown_topic() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
 
@@ -4390,7 +4390,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/spaces/{missing}/sessions"))
+                    .uri(format!("/api/topics/{missing}/sessions"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4403,17 +4403,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // POST /api/spaces/:space_id/sessions
+    // POST /api/topics/:topic_id/sessions
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_space_sessions_returns_201_with_json() {
+    async fn post_topic_sessions_returns_201_with_json() {
         let (router, storage) = make_router();
 
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "my-space".into(),
-                slug: "my-space".into(),
+        let topic = storage
+            .create(swage_storage::model::NewTopic {
+                name: "my-topic".into(),
+                slug: "my-topic".into(),
             })
             .await
             .unwrap();
@@ -4422,7 +4422,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/spaces/{}/sessions", space.id))
+                    .uri(format!("/api/topics/{}/sessions", topic.id))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4432,17 +4432,17 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string());
-        // Session should be associated with the specified space.
-        assert_eq!(body["space_id"].as_str().unwrap(), space.id.to_string());
+        // Session should be associated with the specified topic.
+        assert_eq!(body["topic_id"].as_str().unwrap(), topic.id.to_string());
     }
 
     #[tokio::test]
-    async fn post_space_sessions_rejects_unknown_request_fields() {
+    async fn post_topic_sessions_rejects_unknown_request_fields() {
         let (router, storage) = make_router();
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "strict-request-space".into(),
-                slug: "strict-request-space".into(),
+        let topic = storage
+            .create(swage_storage::model::NewTopic {
+                name: "strict-request-topic".into(),
+                slug: "strict-request-topic".into(),
             })
             .await
             .unwrap();
@@ -4451,9 +4451,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/spaces/{}/sessions", space.id))
+                    .uri(format!("/api/topics/{}/sessions", topic.id))
                     .header("content-type", "application/json")
-                    .body(axum::body::Body::from(r#"{"space_id":"not-a-target"}"#))
+                    .body(axum::body::Body::from(r#"{"topic_id":"not-a-target"}"#))
                     .unwrap(),
             )
             .await
@@ -4467,18 +4467,18 @@ mod tests {
         assert!(
             body["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("space_id")),
+                .is_some_and(|message| message.contains("topic_id")),
             "rejection should name the unknown field: {body}"
         );
     }
 
     #[tokio::test]
-    async fn post_space_sessions_accepts_documented_request_fields() {
+    async fn post_topic_sessions_accepts_documented_request_fields() {
         let (router, storage) = make_router();
-        let space = storage
-            .create(swage_storage::model::NewSpace {
-                name: "documented-fields-space".into(),
-                slug: "documented-fields-space".into(),
+        let topic = storage
+            .create(swage_storage::model::NewTopic {
+                name: "documented-fields-topic".into(),
+                slug: "documented-fields-topic".into(),
             })
             .await
             .unwrap();
@@ -4487,7 +4487,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/spaces/{}/sessions", space.id))
+                    .uri(format!("/api/topics/{}/sessions", topic.id))
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         r#"{"selected_model_id":"test-model","agent_id":"gateway"}"#,
@@ -4499,12 +4499,12 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
-        assert_eq!(body["space_id"], space.id.to_string());
+        assert_eq!(body["topic_id"], topic.id.to_string());
         assert_eq!(body["selected_model_id"], "test-model");
     }
 
     #[tokio::test]
-    async fn post_space_sessions_returns_404_for_unknown_space() {
+    async fn post_topic_sessions_returns_404_for_unknown_topic() {
         let (router, _) = make_router();
         let missing = Uuid::new_v4();
 
@@ -4512,7 +4512,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/spaces/{missing}/sessions"))
+                    .uri(format!("/api/topics/{missing}/sessions"))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -4678,10 +4678,10 @@ mod tests {
         use swage_storage::store::{AuditStore, ContextSnapshotStore, TurnStore};
 
         let (router, storage) = make_router();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "operator".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4913,7 +4913,7 @@ mod tests {
         let shutdown_signal = CancellationToken::new();
         let mut state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -5032,7 +5032,7 @@ mod tests {
         let report = swage_protocol::client::context::AssemblyReport {
             total_tokens: 1024,
             tool_scope: Some(serde_json::json!({
-                "effective_root": "/var/lib/swage/scratch/spaces/example/sessions/example",
+                "effective_root": "/var/lib/swage/scratch/topics/example/sessions/example",
             })),
             ..Default::default()
         };
@@ -5058,7 +5058,7 @@ mod tests {
         assert_eq!(body["report"]["total_tokens"].as_i64().unwrap(), 1024);
         assert_eq!(
             body["report"]["tool_scope"]["effective_root"],
-            "/var/lib/swage/scratch/spaces/example/sessions/example"
+            "/var/lib/swage/scratch/topics/example/sessions/example"
         );
     }
 }

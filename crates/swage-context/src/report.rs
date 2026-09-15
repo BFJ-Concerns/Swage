@@ -310,7 +310,7 @@ mod tests {
             priority: 50,
             named_assembly: Some(NamedAssemblyReport {
                 assembly_name: "summarise".to_string(),
-                resolved_level: "space".to_string(),
+                resolved_level: "topic".to_string(),
                 child_elements: vec![
                     ElementReport {
                         name: "history".to_string(),
@@ -338,7 +338,7 @@ mod tests {
             .named_assembly
             .expect("named_assembly should be Some");
         assert_eq!(named.assembly_name, "summarise");
-        assert_eq!(named.resolved_level, "space");
+        assert_eq!(named.resolved_level, "topic");
         assert_eq!(named.child_elements.len(), 2);
         assert_eq!(named.child_elements[0].name, "history");
         assert_eq!(named.child_elements[1].name, "prompts");

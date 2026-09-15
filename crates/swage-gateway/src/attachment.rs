@@ -42,9 +42,9 @@ pub async fn create_attachment(
             let session_id = request.session_id.ok_or_else(|| {
                 GatewayError::ValidationError("session attachments require session_id".into())
             })?;
-            if request.space_id.is_some() {
+            if request.topic_id.is_some() {
                 return Err(GatewayError::ValidationError(
-                    "session attachments must not set space_id".into(),
+                    "session attachments must not set topic_id".into(),
                 ));
             }
             state
@@ -53,17 +53,17 @@ pub async fn create_attachment(
                 .await?
                 .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
         }
-        AttachmentScopeKind::Space => {
-            let space_id = request.space_id.ok_or_else(|| {
-                GatewayError::ValidationError("space attachments require space_id".into())
+        AttachmentScopeKind::Topic => {
+            let topic_id = request.topic_id.ok_or_else(|| {
+                GatewayError::ValidationError("topic attachments require topic_id".into())
             })?;
             if request.session_id.is_some() {
                 return Err(GatewayError::ValidationError(
-                    "space attachments must not set session_id".into(),
+                    "topic attachments must not set session_id".into(),
                 ));
             }
-            state.space_store.get(space_id).await?.ok_or_else(|| {
-                GatewayError::ValidationError(format!("space {space_id} not found"))
+            state.topic_store.get(topic_id).await?.ok_or_else(|| {
+                GatewayError::ValidationError(format!("topic {topic_id} not found"))
             })?;
         }
     }
@@ -87,7 +87,7 @@ pub async fn create_attachment(
                 id: attachment_id,
                 scope_kind,
                 session_id: request.session_id,
-                space_id: request.space_id,
+                topic_id: request.topic_id,
                 kind,
                 filename: request.filename,
                 mime_type: request.mime_type,
@@ -125,16 +125,16 @@ pub async fn list_session_attachments(
     })
 }
 
-pub async fn list_space_attachments(
+pub async fn list_topic_attachments(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
 ) -> Result<AttachmentListResponse, GatewayError> {
     state
-        .space_store
-        .get(space_id)
+        .topic_store
+        .get(topic_id)
         .await?
-        .ok_or_else(|| GatewayError::ValidationError(format!("space {space_id} not found")))?;
-    let attachments = state.storage.list_attachments_by_space(space_id).await?;
+        .ok_or_else(|| GatewayError::ValidationError(format!("topic {topic_id} not found")))?;
+    let attachments = state.storage.list_attachments_by_topic(topic_id).await?;
     Ok(AttachmentListResponse {
         attachments: map_attachments(state, attachments).await?,
     })
@@ -319,7 +319,7 @@ async fn map_attachment(
         id: attachment.id,
         scope_kind: attachment.scope_kind.to_string(),
         session_id: attachment.session_id,
-        space_id: attachment.space_id,
+        topic_id: attachment.topic_id,
         kind: attachment.kind.to_string(),
         status: attachment.status.to_string(),
         filename: attachment.filename,

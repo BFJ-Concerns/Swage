@@ -8,13 +8,13 @@ use uuid::Uuid;
 
 use super::delivery::{DeliveryTarget, ExternalChannelIntegration};
 
-/// Request a short-lived code that links a channel conversation to a space.
+/// Request a short-lived code that links a channel conversation to a topic.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct CreateChannelLinkCodeRequest {
     pub integration: ExternalChannelIntegration,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub agent_id: Option<String>,

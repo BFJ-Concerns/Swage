@@ -27,16 +27,16 @@ use swage_storage::{
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
         Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
         NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial,
-        NewMessage, NewSchedule, NewScheduleRun, NewSession, NewSpace, NewThread, NewToolCall,
+        NewMessage, NewSchedule, NewScheduleRun, NewSession, NewThread, NewToolCall, NewTopic,
         NewTurn, NewWorkspaceAttachment, PageAnnotation, Schedule, ScheduleRun, ScheduleRunState,
-        ScheduleRunUpdate, ScheduleStatus, Session, Space, SpaceSlug, Thread, ThreadState,
-        ToolCallRecord, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
+        ScheduleRunUpdate, ScheduleStatus, Session, Thread, ThreadState, ToolCallRecord, Topic,
+        TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
-        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, SpaceStore,
-        TaskDefinitionStore, ThreadStore, ToolCallStore, TurnStore, WorkspaceAttachmentStore,
+        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, TaskDefinitionStore,
+        ThreadStore, ToolCallStore, TopicStore, TurnStore, WorkspaceAttachmentStore,
     },
 };
 
@@ -1605,7 +1605,7 @@ impl swage_storage::SessionVariableStore for MockStorage {
 
 #[derive(Default)]
 pub(crate) struct InMemoryDb {
-    pub(crate) spaces: HashMap<Uuid, Space>,
+    pub(crate) topics: HashMap<Uuid, Topic>,
     pub(crate) thread_branches: Vec<swage_storage::ThreadBranch>,
     pub(crate) approval_memory: std::collections::HashSet<(Uuid, String, String)>,
     pub(crate) sessions: HashMap<Uuid, Session>,
@@ -1744,49 +1744,49 @@ impl MockStorage {
 }
 
 #[async_trait]
-impl SpaceStore for MockStorage {
-    async fn create(&self, space: NewSpace) -> Result<Space, StorageError> {
-        let p = Space {
+impl TopicStore for MockStorage {
+    async fn create(&self, topic: NewTopic) -> Result<Topic, StorageError> {
+        let p = Topic {
             id: Uuid::new_v4(),
-            name: space.name,
+            name: topic.name,
             description: String::new(),
             is_default: false,
-            slug: space.slug,
+            slug: topic.slug,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        self.db.lock().await.spaces.insert(p.id, p.clone());
+        self.db.lock().await.topics.insert(p.id, p.clone());
         Ok(p)
     }
 
-    async fn get(&self, id: Uuid) -> Result<Option<Space>, StorageError> {
-        Ok(self.db.lock().await.spaces.get(&id).cloned())
+    async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError> {
+        Ok(self.db.lock().await.topics.get(&id).cloned())
     }
 
-    async fn get_by_name(&self, name: &str) -> Result<Option<Space>, StorageError> {
+    async fn get_by_name(&self, name: &str) -> Result<Option<Topic>, StorageError> {
         Ok(self
             .db
             .lock()
             .await
-            .spaces
+            .topics
             .values()
             .find(|p| p.name == name)
             .cloned())
     }
 
-    async fn get_or_create_default(&self) -> Result<Space, StorageError> {
+    async fn get_or_create_default(&self) -> Result<Topic, StorageError> {
         if let Some(p) = self
             .db
             .lock()
             .await
-            .spaces
+            .topics
             .values()
-            .find(|space| space.is_default)
+            .find(|topic| topic.is_default)
             .cloned()
         {
             return Ok(p);
         }
-        let space = Space {
+        let topic = Topic {
             id: Uuid::new_v4(),
             name: "default".to_string(),
             description: String::new(),
@@ -1795,22 +1795,22 @@ impl SpaceStore for MockStorage {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        self.db.lock().await.spaces.insert(space.id, space.clone());
-        Ok(space)
+        self.db.lock().await.topics.insert(topic.id, topic.clone());
+        Ok(topic)
     }
 
-    async fn list_all(&self) -> Result<Vec<Space>, StorageError> {
-        let mut spaces: Vec<Space> = self.db.lock().await.spaces.values().cloned().collect();
-        spaces.sort_by_key(|p| p.created_at);
-        Ok(spaces)
+    async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
+        let mut topics: Vec<Topic> = self.db.lock().await.topics.values().cloned().collect();
+        topics.sort_by_key(|p| p.created_at);
+        Ok(topics)
     }
 
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Space>, StorageError> {
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Topic>, StorageError> {
         Ok(self
             .db
             .lock()
             .await
-            .spaces
+            .topics
             .values()
             .find(|p| p.slug == slug)
             .cloned())
@@ -1821,12 +1821,12 @@ impl SpaceStore for MockStorage {
         id: Uuid,
         name: Option<String>,
         description: Option<String>,
-        slug: Option<SpaceSlug>,
-    ) -> Result<Space, StorageError> {
+        slug: Option<TopicSlug>,
+    ) -> Result<Topic, StorageError> {
         let mut db = self.db.lock().await;
-        match db.spaces.get_mut(&id) {
+        match db.topics.get_mut(&id) {
             None => Err(StorageError::NotFound {
-                entity: "Space".into(),
+                entity: "Topic".into(),
                 id: id.to_string(),
             }),
             Some(p) => {
@@ -1847,12 +1847,12 @@ impl SpaceStore for MockStorage {
 
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
         let mut db = self.db.lock().await;
-        match db.spaces.get(&id) {
+        match db.topics.get(&id) {
             None => Ok(false),
             Some(p) if p.name == "default" => Err(StorageError::ConstraintViolation(
-                "cannot delete the default space".into(),
+                "cannot delete the default topic".into(),
             )),
-            _ => Ok(db.spaces.remove(&id).is_some()),
+            _ => Ok(db.topics.remove(&id).is_some()),
         }
     }
 }
@@ -1862,7 +1862,7 @@ impl SessionStore for MockStorage {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError> {
         let s = Session {
             id: Uuid::new_v4(),
-            space_id: session.space_id,
+            topic_id: session.topic_id,
             agent_id: session.agent_id,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -1878,14 +1878,14 @@ impl SessionStore for MockStorage {
         Ok(self.db.lock().await.sessions.get(&id).cloned())
     }
 
-    async fn list_by_space(&self, space_id: Uuid) -> Result<Vec<Session>, StorageError> {
+    async fn list_by_topic(&self, topic_id: Uuid) -> Result<Vec<Session>, StorageError> {
         Ok(self
             .db
             .lock()
             .await
             .sessions
             .values()
-            .filter(|s| s.space_id == space_id)
+            .filter(|s| s.topic_id == topic_id)
             .cloned()
             .collect())
     }
@@ -2006,7 +2006,7 @@ impl WorkspaceAttachmentStore for MockStorage {
         let now = chrono::Utc::now();
         let record = WorkspaceAttachment {
             id: Uuid::new_v4(),
-            space_id: workspace.space_id,
+            topic_id: workspace.topic_id,
             label: workspace.label,
 
             path: workspace.path.clone(),
@@ -2033,9 +2033,9 @@ impl WorkspaceAttachmentStore for MockStorage {
         Ok(self.db.lock().await.workspace_attachments.get(&id).cloned())
     }
 
-    async fn list_workspace_attachments_by_space(
+    async fn list_workspace_attachments_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
         let mut workspaces = self
             .db
@@ -2043,7 +2043,7 @@ impl WorkspaceAttachmentStore for MockStorage {
             .await
             .workspace_attachments
             .values()
-            .filter(|workspace| workspace.space_id == space_id)
+            .filter(|workspace| workspace.topic_id == topic_id)
             .cloned()
             .collect::<Vec<_>>();
         workspaces.sort_by_key(|workspace| workspace.created_at);
@@ -2086,9 +2086,9 @@ impl WorkspaceAttachmentStore for MockStorage {
         Ok(workspace.clone())
     }
 
-    async fn set_space_default_workspace(
+    async fn set_topic_default_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Option<Uuid>,
     ) -> Result<(), StorageError> {
         let mut db = self.db.lock().await;
@@ -2099,14 +2099,14 @@ impl WorkspaceAttachmentStore for MockStorage {
                     id: workspace_id.to_string(),
                 }
             })?;
-            if workspace.space_id != space_id {
+            if workspace.topic_id != topic_id {
                 return Err(StorageError::ConstraintViolation(format!(
-                    "workspace attachment {workspace_id} does not belong to space {space_id}"
+                    "workspace attachment {workspace_id} does not belong to topic {topic_id}"
                 )));
             }
         }
         for workspace in db.workspace_attachments.values_mut() {
-            if workspace.space_id == space_id {
+            if workspace.topic_id == topic_id {
                 workspace.is_default = Some(workspace.id) == workspace_id;
                 workspace.updated_at = chrono::Utc::now();
             }
@@ -2187,7 +2187,7 @@ impl ChannelLinkStore for MockStorage {
             integration: link.integration,
             account: link.account,
             conversation: link.conversation,
-            space_id: link.space_id,
+            topic_id: link.topic_id,
             agent_id: link.agent_id,
             session_id: link.session_id,
             home_target: link.home_target,
@@ -2549,7 +2549,7 @@ impl AttachmentStore for MockStorage {
             id: attachment.id,
             scope_kind: attachment.scope_kind,
             session_id: attachment.session_id,
-            space_id: attachment.space_id,
+            topic_id: attachment.topic_id,
             kind: attachment.kind,
             status: AttachmentStatus::Pending,
             filename: attachment.filename,
@@ -2600,9 +2600,9 @@ impl AttachmentStore for MockStorage {
         Ok(attachments)
     }
 
-    async fn list_attachments_by_space(
+    async fn list_attachments_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError> {
         let mut attachments: Vec<Attachment> = self
             .db
@@ -2610,7 +2610,7 @@ impl AttachmentStore for MockStorage {
             .await
             .attachments
             .values()
-            .filter(|attachment| attachment.space_id == Some(space_id))
+            .filter(|attachment| attachment.topic_id == Some(topic_id))
             .cloned()
             .collect();
         attachments.sort_by_key(|attachment| attachment.created_at);
@@ -2786,7 +2786,7 @@ impl MaterialStore for MockStorage {
             id: material.id,
             scope_kind: material.scope_kind,
             session_id: material.session_id,
-            space_id: material.space_id,
+            topic_id: material.topic_id,
             source_kind: material.source_kind,
             source_attachment_id: material.source_attachment_id,
             status: MaterialStatus::Active,
@@ -2841,7 +2841,7 @@ impl MaterialStore for MockStorage {
         Ok(materials)
     }
 
-    async fn list_materials_by_space(&self, space_id: Uuid) -> Result<Vec<Material>, StorageError> {
+    async fn list_materials_by_topic(&self, topic_id: Uuid) -> Result<Vec<Material>, StorageError> {
         let mut materials: Vec<Material> = self
             .db
             .lock()
@@ -2849,8 +2849,8 @@ impl MaterialStore for MockStorage {
             .materials
             .values()
             .filter(|material| {
-                material.space_id == Some(space_id)
-                    && material.scope_kind == AttachmentScopeKind::Space
+                material.topic_id == Some(topic_id)
+                    && material.scope_kind == AttachmentScopeKind::Topic
             })
             .cloned()
             .collect();
@@ -2915,7 +2915,7 @@ impl MaterialStore for MockStorage {
         id: Uuid,
         scope_kind: AttachmentScopeKind,
         session_id: Option<Uuid>,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
         relative_path: &str,
     ) -> Result<Material, StorageError> {
         let mut db = self.db.lock().await;
@@ -2928,7 +2928,7 @@ impl MaterialStore for MockStorage {
             })?;
         material.scope_kind = scope_kind;
         material.session_id = session_id;
-        material.space_id = space_id;
+        material.topic_id = topic_id;
         material.relative_path = relative_path.to_string();
         material.status = MaterialStatus::Active;
         material.archived_at = None;
@@ -3169,7 +3169,7 @@ impl swage_storage::PageStore for MockStorage {
     async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Page>, StorageError> {
         unimplemented!()
     }
-    async fn list_pages_by_space(&self, _: Uuid) -> Result<Vec<swage_storage::Page>, StorageError> {
+    async fn list_pages_by_topic(&self, _: Uuid) -> Result<Vec<swage_storage::Page>, StorageError> {
         unimplemented!()
     }
     async fn create_page_module(
@@ -3212,7 +3212,7 @@ impl swage_storage::PageStore for MockStorage {
     ) -> Result<Option<swage_storage::PageTemplate>, StorageError> {
         unimplemented!()
     }
-    async fn list_page_templates_by_space(
+    async fn list_page_templates_by_topic(
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::PageTemplate>, StorageError> {
@@ -3452,9 +3452,9 @@ impl ContextSnapshotStore for MockStorage {
             .map(|(report_json, _)| report_json.clone()))
     }
 
-    async fn list_snapshots_by_space(
+    async fn list_snapshots_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         limit: usize,
     ) -> Result<Vec<swage_storage::ContextSnapshotRecord>, StorageError> {
         self.last_snapshot_list_limit.store(limit, Ordering::SeqCst);
@@ -3470,13 +3470,13 @@ impl ContextSnapshotStore for MockStorage {
             let Some(session) = db.sessions.get(&thread.session_id) else {
                 continue;
             };
-            if session.space_id != space_id {
+            if session.topic_id != topic_id {
                 continue;
             }
             records.push(swage_storage::ContextSnapshotRecord {
                 turn_id: *turn_id,
                 session_id: session.id,
-                space_id,
+                topic_id,
                 created_at: *created_at,
                 report_json: report_json.clone(),
             });
@@ -4009,7 +4009,7 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
     ) -> Result<swage_storage::AgentMemoryRecord, StorageError> {
         let record = swage_storage::AgentMemoryRecord {
             id: record.id,
-            space_id: record.space_id,
+            topic_id: record.topic_id,
             session_id: record.session_id,
             turn_id: record.turn_id,
             agent_id: record.agent_id,
@@ -4043,7 +4043,7 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
 
     async fn list_agent_memories(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         agent_id: Option<&str>,
         session_id: Option<Uuid>,
         query: Option<&str>,
@@ -4056,7 +4056,7 @@ impl swage_storage::store::AgentMemoryStore for MockStorage {
             .await
             .agent_memories
             .iter()
-            .filter(|record| record.space_id == space_id)
+            .filter(|record| record.topic_id == topic_id)
             .filter(|record| agent_id.is_none_or(|id| record.agent_id == id))
             .filter(|record| session_id.is_none_or(|id| record.session_id == id))
             .filter(|record| {
@@ -4152,7 +4152,7 @@ impl swage_storage::store::ObservationStore for MockStorage {
         unimplemented!("turn tests do not exercise the knowledge base")
     }
 
-    async fn list_observations_by_space(
+    async fn list_observations_by_topic(
         &self,
         _: uuid::Uuid,
     ) -> Result<Vec<swage_storage::SourceObservation>, StorageError> {
@@ -4210,7 +4210,7 @@ impl swage_storage::store::CurationAssertionStore for MockStorage {
         unimplemented!("turn tests do not exercise knowledge curation")
     }
 
-    async fn effective_curation_by_space(
+    async fn effective_curation_by_topic(
         &self,
         _: uuid::Uuid,
     ) -> Result<Vec<swage_storage::CurationAssertion>, StorageError> {
@@ -4539,10 +4539,10 @@ async fn session_config_uses_root_retained_at_state_construction() {
     let constructed_root = tempfile::tempdir().expect("constructed config root");
     let redirected_root = tempfile::tempdir().expect("redirected config root");
     for (root, ttl) in [(&constructed_root, 111_u64), (&redirected_root, 222_u64)] {
-        let space_dir = root.path().join("spaces/default");
-        std::fs::create_dir_all(&space_dir).expect("create space config directory");
+        let topic_dir = root.path().join("topics/default");
+        std::fs::create_dir_all(&topic_dir).expect("create topic config directory");
         std::fs::write(
-            space_dir.join("config.toml"),
+            topic_dir.join("config.toml"),
             format!("[communication]\nmessage_ttl_secs = {ttl}\n"),
         )
         .expect("write discriminating session config");
@@ -4569,10 +4569,10 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     let root = SwageHomeGuard::new();
     let normal_skill = root
         .path()
-        .join("spaces/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+        .join("topics/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
     let reserved_skill = root
         .path()
-        .join("spaces/default/agents")
+        .join("topics/default/agents")
         .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .join("skills/reserved-agent-skill/SKILL.md");
     for (path, instructions) in [
@@ -4592,13 +4592,13 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     }
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4608,7 +4608,7 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     let session_id = session.id;
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -4617,8 +4617,8 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     );
     let (available, warnings) = crate::skill::SkillManager::discover_available(
         root.path(),
-        &root.path().join("spaces/default"),
-        Some(&root.path().join("spaces/default/agents/gateway")),
+        &root.path().join("topics/default"),
+        Some(&root.path().join("topics/default/agents/gateway")),
     );
     assert!(
         warnings.is_empty(),
@@ -4674,10 +4674,10 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
     let root = SwageHomeGuard::new();
     let normal_skill = root
         .path()
-        .join("spaces/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+        .join("topics/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
     let reserved_skill = root
         .path()
-        .join("spaces/default/agents")
+        .join("topics/default/agents")
         .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .join("skills/reserved-agent-skill/SKILL.md");
     for (path, instructions) in [
@@ -4697,15 +4697,15 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
     }
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let mut session_ids = Vec::new();
     for agent_id in ["gateway", swage_config::RESERVED_WORKFLOW_AGENT_ID] {
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: agent_id.to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -4743,7 +4743,7 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
     ]);
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -4802,16 +4802,16 @@ async fn make_state_with_storage_and_root(
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,
 ) -> (AppState, Uuid) {
-    // Create the default space via SpaceStore.
-    let space = storage
+    // Create the default topic via TopicStore.
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
 
     // Create a session.
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4833,14 +4833,14 @@ async fn make_state_with_storage_and_root(
 
     let provider = Arc::new(MockProvider::new(provider_chunks));
     let storage_backend = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-    let space_store = Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>;
+    let topic_store = Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>;
     let provider = provider as Arc<dyn LlmProvider>;
     let config = swage_config::ResolvedConfig::default();
     let tool_dispatcher = crate::tool::ToolDispatcher::allow_all(vec![]);
     let state = match config_root {
         Some(config_root) => AppState::new_with_config_root(
             storage_backend,
-            space_store,
+            topic_store,
             provider,
             config,
             tool_dispatcher,
@@ -4849,7 +4849,7 @@ async fn make_state_with_storage_and_root(
         ),
         None => AppState::new(
             storage_backend,
-            space_store,
+            topic_store,
             provider,
             config,
             tool_dispatcher,
@@ -4875,14 +4875,14 @@ async fn make_state_with_config_and_storage(
     config: swage_config::ResolvedConfig,
     storage: Arc<MockStorage>,
 ) -> (AppState, Uuid) {
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -4904,7 +4904,7 @@ async fn make_state_with_config_and_storage(
     let provider = Arc::new(MockProvider::new(provider_chunks));
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -5142,7 +5142,7 @@ async fn full_turn_stores_messages_and_completes() {
     let (state, session_id) = make_state_with_session(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let (turn_result, memory_loads) = Box::pin(observe_space_memory_loads(process_turn(
+    let (turn_result, memory_loads) = Box::pin(observe_topic_memory_loads(process_turn(
         &state,
         session_id,
         None,
@@ -5155,7 +5155,7 @@ async fn full_turn_stores_messages_and_completes() {
     turn_result.expect("turn should complete without error");
     assert_eq!(
         memory_loads, 0,
-        "a full turn using the default assembly must not reach the space-memory loading seam"
+        "a full turn using the default assembly must not reach the topic-memory loading seam"
     );
 
     let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -5203,14 +5203,14 @@ async fn full_turn_stores_messages_and_completes() {
 async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let storage = Arc::new(MockStorage::new());
 
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -5231,7 +5231,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
 
     let state = Arc::new(AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -5293,7 +5293,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -5310,13 +5310,13 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
 #[tokio::test]
 async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     let storage = Arc::new(MockStorage::new());
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -5338,7 +5338,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     let stream_polled = Arc::new(Notify::new());
     let state = Arc::new(AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(EmptyPendingProvider {
             stream_polled: Arc::clone(&stream_polled),
         }) as Arc<dyn LlmProvider>,
@@ -5381,7 +5381,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -5451,7 +5451,7 @@ async fn cancelled_before_next_tool_persists_completed_round_text() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -5518,7 +5518,7 @@ async fn cancelled_before_next_round_persists_completed_round_text() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -5600,7 +5600,7 @@ async fn cancelled_during_later_stream_persists_all_accumulated_text() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -5673,7 +5673,7 @@ async fn cancelled_hook_approval_persists_completed_round_text() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -6425,7 +6425,7 @@ async fn unattended_turn_accepts_an_active_workspace_when_scratch_root_is_relati
         .expect("session");
     let attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: session.space_id,
+            topic_id: session.topic_id,
             label: "configured workspace".into(),
             path: workspace.path().to_string_lossy().into_owned(),
             permissions: vec!["read".into(), "write".into()],
@@ -6612,14 +6612,14 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
 async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
 
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -6640,7 +6640,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -6660,14 +6660,14 @@ pub(crate) async fn make_state_with_capturing_tools(
 ) {
     let storage = Arc::new(MockStorage::new());
 
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
 
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -6690,7 +6690,7 @@ pub(crate) async fn make_state_with_capturing_tools(
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -6924,13 +6924,13 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     ];
 
     let storage = Arc::new(MockStorage::new());
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -6954,7 +6954,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![Arc::new(BlockingMockTool {
@@ -7017,7 +7017,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
 
     let conversation = crate::service::ConversationService::new(
         Arc::clone(&state.storage),
-        Arc::clone(&state.space_store),
+        Arc::clone(&state.topic_store),
     )
     .get_conversation(session_id)
     .await
@@ -7397,13 +7397,13 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -7445,7 +7445,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -7572,13 +7572,13 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -7630,7 +7630,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -7733,13 +7733,13 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -7840,7 +7840,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -7924,13 +7924,13 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
 
@@ -8021,7 +8021,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -8363,7 +8363,7 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
 
 #[tokio::test]
 async fn approval_resumption_keeps_structured_tool_messages() {
-    // Another test's space context element would otherwise reach this turn
+    // Another test's topic context element would otherwise reach this turn
     // through the process-wide swage home, adding a sixth message.
     let _home = crate::test_support::SwageHomeGuard::isolate();
     let round_1 = vec![
@@ -8551,7 +8551,7 @@ async fn approval_resumption_keeps_structured_tool_messages() {
 async fn assert_delegation_fails_before_child_creation(
     state: &AppState,
     root_turn_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     task_definition_id: Option<&str>,
     request_id: &str,
     expected_error: &str,
@@ -8577,7 +8577,7 @@ async fn assert_delegation_fails_before_child_creation(
             request_id,
             "gateway",
             root_turn_id,
-            space_id,
+            topic_id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -8605,13 +8605,13 @@ async fn assert_delegation_fails_before_child_creation(
 #[tokio::test(flavor = "multi_thread")]
 async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: dispatch_bound_metadata(&["upstream".to_string()]),
             active_workspace_attachment_id: None,
@@ -8631,7 +8631,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "gateway".into(),
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
             display_name: "Gateway".into(),
             description: String::new(),
             instructions: String::new(),
@@ -8648,7 +8648,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "upstream".into(),
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
             display_name: "Upstream".into(),
             description: String::new(),
             instructions: String::new(),
@@ -8665,7 +8665,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "agent-b".into(),
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
             display_name: "Agent B".into(),
             description: String::new(),
             instructions: String::new(),
@@ -8807,18 +8807,18 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "Delegated owner: {{owner}}",
     )
     .expect("write delegated briefing");
-    let space_skill_dir = swage_home
+    let topic_skill_dir = swage_home
         .path()
-        .join("spaces/default/skills/foreground-only");
-    std::fs::create_dir_all(&space_skill_dir).expect("create foreground skill directory");
+        .join("topics/default/skills/foreground-only");
+    std::fs::create_dir_all(&topic_skill_dir).expect("create foreground skill directory");
     std::fs::write(
-        space_skill_dir.join("SKILL.md"),
+        topic_skill_dir.join("SKILL.md"),
         "---\ndescription: Foreground only\n---\nUse the parent foreground skill.\n",
     )
     .expect("write foreground skill");
     let declared_skill_dir = swage_home
         .path()
-        .join("spaces/default/skills/definition-declared");
+        .join("topics/default/skills/definition-declared");
     std::fs::create_dir_all(&declared_skill_dir).expect("create declared skill directory");
     std::fs::write(
         declared_skill_dir.join("SKILL.md"),
@@ -8827,7 +8827,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     .expect("write declared skill");
     let requested_skill_dir = swage_home
         .path()
-        .join("spaces/default/skills/delegated-specialist");
+        .join("topics/default/skills/delegated-specialist");
     std::fs::create_dir_all(&requested_skill_dir)
         .expect("create requested delegated skill directory");
     std::fs::write(
@@ -8837,7 +8837,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .expect("write requested delegated skill");
     let agent_skill_dir = swage_home
         .path()
-        .join("spaces/default/agents/agent-b/skills/agent-owned-specialist");
+        .join("topics/default/agents/agent-b/skills/agent-owned-specialist");
     std::fs::create_dir_all(&agent_skill_dir)
         .expect("create delegated agent-level skill directory");
     std::fs::write(
@@ -8858,7 +8858,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig {
             models: swage_config::ModelCatalogConfig {
@@ -9205,7 +9205,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "delegated provider request should include platform identity: {child_request_text}"
     );
     assert!(
-        child_request_text.contains("Space: the default space")
+        child_request_text.contains("Topic: the default topic")
             && child_request_text.contains("Working directory:")
             && child_request_text.contains("Session started:"),
         "delegated provider request should include the child session's place: {child_request_text}"
@@ -9316,7 +9316,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     assert_delegation_fails_before_child_creation(
         &state,
         root_turn.id,
-        space.id,
+        topic.id,
         Some("missing-task"),
         "missing-task-delegate",
         "no task definition 'missing-task' exists",
@@ -9324,14 +9324,14 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     )
     .await;
 
-    let sender_config_dir = swage_home.path().join("spaces/default/agents/gateway");
+    let sender_config_dir = swage_home.path().join("topics/default/agents/gateway");
     std::fs::create_dir_all(&sender_config_dir).expect("create sender config directory");
     std::fs::write(sender_config_dir.join("config.toml"), "not valid toml =")
         .expect("write broken dispatch-bound config");
     assert_delegation_fails_before_child_creation(
         &state,
         root_turn.id,
-        space.id,
+        topic.id,
         None,
         "missing-lineage-delegate",
         "failed to load dispatch bound",
@@ -9344,15 +9344,15 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
 async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     // This fixture needs an authored restrictive parent; `gateway` always
     // resolves to its shipped definition and intentionally ignores stored rows.
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "agent-a".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -9371,7 +9371,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "agent-a".into(),
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
             display_name: "Agent A".into(),
             description: String::new(),
             instructions: String::new(),
@@ -9389,7 +9389,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "agent-b".into(),
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
             display_name: "Agent B".into(),
             description: String::new(),
             instructions: String::new(),
@@ -9443,7 +9443,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         dispatcher,
@@ -9562,13 +9562,13 @@ async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalate
 #[tokio::test(flavor = "multi_thread")]
 async fn completed_detached_result_reaches_parent_next_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -9601,7 +9601,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
         ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         dispatcher,
@@ -9780,13 +9780,13 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
     std::fs::write(attachment.join("readable.txt"), "delegated readable proof")
         .expect("readable fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -9847,7 +9847,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
     ]);
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -9865,7 +9865,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         .expect("location approval grants")
         .insert(crate::state::ApprovalGrantKey::location(
             None,
-            Some(space.id),
+            Some(topic.id),
             attachment.to_string_lossy(),
             "read",
         ));
@@ -9884,7 +9884,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
             "read-only-placement-delegate",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -9943,13 +9943,13 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
 async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "agent-a".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -9979,7 +9979,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         storage
             .upsert_agent_definition(swage_storage::NewAgentDefinition {
                 id: agent_id.into(),
-                space_id: Some(space.id),
+                topic_id: Some(topic.id),
                 display_name: agent_id.into(),
                 description: String::new(),
                 instructions: String::new(),
@@ -10023,7 +10023,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -10053,7 +10053,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             "delegate-first",
             "agent-a",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10103,7 +10103,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
                 "delegate-concurrent",
                 "agent-a",
                 parent_turn.id,
-                space.id,
+                topic.id,
                 CancellationToken::new(),
                 DelegateCompletionMode::Wait,
             )
@@ -10144,7 +10144,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             "delegate-second",
             "agent-a",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10192,7 +10192,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             "delegate-third",
             "agent-a",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10263,7 +10263,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             "delegate-mismatch",
             "agent-a",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10296,13 +10296,13 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
 async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
     let _swage_home = SwageHomeGuard::isolate();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "agent-a".into(),
             metadata: Some(serde_json::json!({
                 WORKFLOW_CALL_TOOLS_METADATA_KEY: ["delegate"],
@@ -10334,7 +10334,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
         storage
             .upsert_agent_definition(swage_storage::NewAgentDefinition {
                 id: agent_id.into(),
-                space_id: Some(space.id),
+                topic_id: Some(topic.id),
                 display_name: agent_id.into(),
                 description: String::new(),
                 instructions: String::new(),
@@ -10370,7 +10370,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
     ]);
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -10394,7 +10394,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             "workflow-bounded-delegate",
             "agent-a",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10455,7 +10455,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
 async fn delegated_skill_selection_is_carried_by_the_composition_once() {
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
     for skill in ["validated-skill", "composition-skill"] {
-        let skill_dir = swage_home.path().join("spaces/default/skills").join(skill);
+        let skill_dir = swage_home.path().join("topics/default/skills").join(skill);
         std::fs::create_dir_all(&skill_dir).expect("create delegated skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -10465,13 +10465,13 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
     }
     let _guard = SwageHomeGuard::set_to(swage_home.path());
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -10500,7 +10500,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
     storage
         .upsert_agent_definition(swage_storage::NewAgentDefinition {
             id: "agent-b".into(),
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
             display_name: "Agent B".into(),
             description: String::new(),
             instructions: String::new(),
@@ -10514,7 +10514,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         .expect("target agent definition");
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![
             StreamChunk::Delta {
                 content: "delegated".into(),
@@ -10545,7 +10545,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
             "composition-skill-owner",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Detach,
         )
@@ -10571,10 +10571,10 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
 async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again() {
     let fixture = tempfile::tempdir().expect("delegation fixture");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     storage
         .upsert_task_definition(swage_storage::NewTaskDefinition {
             id: "delegation-only".into(),
@@ -10590,7 +10590,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
         .expect("store task permission overlay");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -10662,7 +10662,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
     ]);
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -10689,7 +10689,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
             "outer-task-delegate",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10744,13 +10744,13 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
     std::fs::create_dir(&default_workspace).expect("default workspace");
     std::fs::create_dir(&placed_workspace).expect("placed workspace");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let default_attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
+            topic_id: topic.id,
             label: "writable default".into(),
             path: default_workspace.to_string_lossy().into_owned(),
             permissions: vec!["read".into(), "write".into()],
@@ -10760,7 +10760,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         .expect("grant writable default");
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
+            topic_id: topic.id,
             label: "placed read-only".into(),
             path: placed_workspace.to_string_lossy().into_owned(),
             permissions: vec!["read".into()],
@@ -10770,7 +10770,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         .expect("grant read-only placement");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: Some(default_attachment.id),
@@ -10842,7 +10842,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
     ]);
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -10869,7 +10869,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
             "outer-placed-delegate",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -10918,13 +10918,13 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
     init_test_git_repository(&repo);
 
     let storage = Arc::new(MockStorage::new());
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let repo_attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
+            topic_id: topic.id,
             label: "worktree source".into(),
             path: repo.to_string_lossy().into_owned(),
             permissions: vec!["read".into(), "write".into()],
@@ -10934,7 +10934,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .expect("grant worktree source");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: Some(repo_attachment.id),
@@ -11009,7 +11009,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         )];
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -11038,7 +11038,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             "wait-worktree-delegate-call",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -11082,7 +11082,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             "worktree-delegate-call",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Detach,
         )
@@ -11199,7 +11199,7 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
             "failed-worktree-delegate-call",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Detach,
         )
@@ -11256,13 +11256,13 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
 #[tokio::test(flavor = "multi_thread")]
 async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -11299,7 +11299,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let placement_fixture = tempfile::tempdir().expect("placement fixture");
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -11314,7 +11314,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     init_test_git_repository(delegated_cwd.path());
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
+            topic_id: topic.id,
             label: "delegated cwd".into(),
             path: delegated_cwd.path().to_string_lossy().into_owned(),
             permissions: vec!["read".into(), "write".into()],
@@ -11337,7 +11337,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             "detached-placement-delegate",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Detach,
         )
@@ -11376,7 +11376,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             "denied-placement-delegate",
             "gateway",
             parent_turn.id,
-            space.id,
+            topic.id,
             CancellationToken::new(),
             DelegateCompletionMode::Wait,
         )
@@ -11514,7 +11514,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
 // -----------------------------------------------------------------------
 
 // -----------------------------------------------------------------------
-// Space context and config resolution tests
+// Topic context and config resolution tests
 // -----------------------------------------------------------------------
 
 struct CapturingProvider {
@@ -11599,10 +11599,10 @@ async fn make_storage_with_session_metadata(
     metadata: Option<serde_json::Value>,
 ) -> (Arc<MockStorage>, Uuid) {
     let storage = Arc::new(MockStorage::new());
-    let space = storage.get_or_create_default().await.expect("space");
+    let topic = storage.get_or_create_default().await.expect("topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata,
             active_workspace_attachment_id: None,
@@ -11655,7 +11655,7 @@ async fn capture_provider_effort_for_selected_model(
     }
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -11835,7 +11835,7 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
     );
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -11966,7 +11966,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![capture_tool as Arc<dyn crate::tool::Tool>]),
@@ -11999,7 +11999,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 }
 
 #[tokio::test]
-async fn process_turn_resolves_config_per_space_and_completes_turn() {
+async fn process_turn_resolves_config_per_topic_and_completes_turn() {
     let chunks = vec![
         StreamChunk::Delta {
             content: "Hello".into(),
@@ -12011,18 +12011,18 @@ async fn process_turn_resolves_config_per_space_and_completes_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
 
     let storage = Arc::new(MockStorage::new());
-    let space = SpaceStore::create(
+    let topic = TopicStore::create(
         &*storage,
-        swage_storage::model::NewSpace {
-            name: "Test Config Space".to_string(),
-            slug: "test-config-resolution-no-space-toml".into(),
+        swage_storage::model::NewTopic {
+            name: "Test Config Topic".to_string(),
+            slug: "test-config-resolution-no-topic-toml".into(),
         },
     )
     .await
-    .expect("create test space");
+    .expect("create test topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -12042,7 +12042,7 @@ async fn process_turn_resolves_config_per_space_and_completes_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12088,7 +12088,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12174,7 +12174,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
     let (storage, session_id) = make_storage_with_session().await;
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12226,7 +12226,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
     );
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12331,7 +12331,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
     );
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12480,7 +12480,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12536,7 +12536,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -12669,7 +12669,7 @@ async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
     );
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12848,7 +12848,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -13031,19 +13031,19 @@ fn gateway_advertisement_filter_keeps_remote_capability_with_matching_workspace(
 #[tokio::test]
 async fn tool_context_working_directory_is_passed_during_tool_execution() {
     let storage = Arc::new(MockStorage::new());
-    let space = SpaceStore::create(
+    let topic = TopicStore::create(
         &*storage,
-        NewSpace {
-            name: "my-space".to_string(),
-            slug: "my-space".into(),
+        NewTopic {
+            name: "my-topic".to_string(),
+            slug: "my-topic".into(),
         },
     )
     .await
-    .expect("create space");
+    .expect("create topic");
 
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -13085,7 +13085,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![
@@ -13483,9 +13483,9 @@ fn build_permission_config_for_test(config: &swage_config::ResolvedConfig) -> Pe
 }
 
 #[test]
-fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
-    let matching_space_id = Uuid::new_v4();
-    let other_space_id = Uuid::new_v4();
+fn topic_scoped_approval_grant_only_removes_gate_for_matching_topic() {
+    let matching_topic_id = Uuid::new_v4();
+    let other_topic_id = Uuid::new_v4();
     let mut config = swage_config::ResolvedConfig::default();
     config.tools.permissions.require_approval =
         vec![swage_config::model::RequireApprovalEntry::Simple(
@@ -13494,21 +13494,21 @@ fn space_scoped_approval_grant_only_removes_gate_for_matching_space() {
 
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
         session_id: None,
-        space_id: Some(matching_space_id),
+        topic_id: Some(matching_topic_id),
         kind: swage_storage::model::ApprovalKind::Tool,
         name: "file_write".into(),
         access: None,
     }]);
 
     let matching =
-        super::build_permission_config(&config, &config, Some(matching_space_id), None, &grants);
+        super::build_permission_config(&config, &config, Some(matching_topic_id), None, &grants);
     let other =
-        super::build_permission_config(&config, &config, Some(other_space_id), None, &grants);
-    let no_space = super::build_permission_config(&config, &config, None, None, &grants);
+        super::build_permission_config(&config, &config, Some(other_topic_id), None, &grants);
+    let no_topic = super::build_permission_config(&config, &config, None, None, &grants);
 
     assert!(matching.require_approval.is_empty());
     assert_eq!(other.require_approval.len(), 1);
-    assert_eq!(no_space.require_approval.len(), 1);
+    assert_eq!(no_topic.require_approval.len(), 1);
 }
 
 #[test]
@@ -13522,7 +13522,7 @@ fn session_scoped_approval_grant_only_removes_gate_for_granting_session() {
         )];
     let grants = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
         session_id: Some(granting_session_id),
-        space_id: None,
+        topic_id: None,
         kind: swage_storage::model::ApprovalKind::Tool,
         name: "file_write".into(),
         access: None,
@@ -13561,7 +13561,7 @@ async fn session_scoped_location_grant_only_authorises_granting_sessions_workers
 
     let authorised = resolve_authorised_worker_directory(
         &state,
-        granting_session.space_id,
+        granting_session.topic_id,
         Uuid::new_v4(),
         Some(granting_session_id),
         None,
@@ -13574,7 +13574,7 @@ async fn session_scoped_location_grant_only_authorises_granting_sessions_workers
 
     let error = resolve_authorised_worker_directory(
         &state,
-        granting_session.space_id,
+        granting_session.topic_id,
         Uuid::new_v4(),
         Some(other_session_id),
         None,
@@ -13589,9 +13589,9 @@ async fn session_scoped_location_grant_only_authorises_granting_sessions_workers
 #[tokio::test]
 async fn workspace_summary_is_empty_when_no_attachments_exist() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let space_id = Uuid::new_v4();
+    let topic_id = Uuid::new_v4();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, topic_id).await;
 
     assert!(!summary.has_read);
     assert!(!summary.has_write);
@@ -13600,10 +13600,10 @@ async fn workspace_summary_is_empty_when_no_attachments_exist() {
 #[tokio::test]
 async fn workspace_summary_ignores_untrusted_attachments() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let space_id = Uuid::new_v4();
+    let topic_id = Uuid::new_v4();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
+            topic_id,
             label: "untrusted".into(),
             path: "/tmp/untrusted".into(),
             permissions: vec!["read".into(), "write".into()],
@@ -13612,7 +13612,7 @@ async fn workspace_summary_ignores_untrusted_attachments() {
         .await
         .unwrap();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, topic_id).await;
 
     assert!(
         !summary.has_read,
@@ -13627,10 +13627,10 @@ async fn workspace_summary_ignores_untrusted_attachments() {
 #[tokio::test]
 async fn workspace_summary_combines_grants_across_trusted_attachments() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let space_id = Uuid::new_v4();
+    let topic_id = Uuid::new_v4();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
+            topic_id,
             label: "read-only".into(),
             path: "/tmp/read".into(),
             permissions: vec!["read".into()],
@@ -13640,7 +13640,7 @@ async fn workspace_summary_combines_grants_across_trusted_attachments() {
         .unwrap();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
+            topic_id,
             label: "write-only".into(),
             path: "/tmp/write".into(),
             permissions: vec!["write".into()],
@@ -13649,7 +13649,7 @@ async fn workspace_summary_combines_grants_across_trusted_attachments() {
         .await
         .unwrap();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, space_id).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, topic_id).await;
 
     assert!(summary.has_read);
     assert!(summary.has_write);
@@ -13679,7 +13679,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
             .expect("location grants");
         grants.insert(crate::state::ApprovalGrantKey::location(
             None,
-            Some(session.space_id),
+            Some(session.topic_id),
             placement.path().to_string_lossy(),
             "write",
         ));
@@ -13705,7 +13705,7 @@ async fn durable_worker_placement_rederives_write_and_fails_closed_after_revocat
         grants.clear();
         grants.insert(crate::state::ApprovalGrantKey::location(
             None,
-            Some(session.space_id),
+            Some(session.topic_id),
             placement.path().to_string_lossy(),
             "read",
         ));
@@ -13764,7 +13764,7 @@ async fn named_child_placement_rederives_revoked_write_access() {
 
     let current = super::delegation::reauthorise_named_child_placement(
         &state,
-        session.space_id,
+        session.topic_id,
         Uuid::new_v4(),
         session_id,
         None,
@@ -13780,13 +13780,13 @@ async fn named_child_placement_rederives_revoked_write_access() {
 }
 
 #[tokio::test]
-async fn workspace_summary_only_aggregates_target_space() {
+async fn workspace_summary_only_aggregates_target_topic() {
     let storage: Arc<dyn swage_storage::store::Storage> = Arc::new(MockStorage::new());
-    let target_space = Uuid::new_v4();
-    let other_space = Uuid::new_v4();
+    let target_topic = Uuid::new_v4();
+    let other_topic = Uuid::new_v4();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: other_space,
+            topic_id: other_topic,
             label: "other".into(),
             path: "/tmp/other".into(),
             permissions: vec!["read".into(), "write".into()],
@@ -13795,7 +13795,7 @@ async fn workspace_summary_only_aggregates_target_space() {
         .await
         .unwrap();
 
-    let summary = summarise_trusted_workspace_permissions(&storage, target_space).await;
+    let summary = summarise_trusted_workspace_permissions(&storage, target_topic).await;
 
     assert!(!summary.has_read);
     assert!(!summary.has_write);
@@ -13989,7 +13989,7 @@ fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing(
 
     assert!(
         policy.deny.is_empty(),
-        "missing space workspace grants must inherit global permissions rather than denying"
+        "missing topic workspace grants must inherit global permissions rather than denying"
     );
 }
 
@@ -14009,11 +14009,11 @@ fn permission_config_does_not_duplicate_already_denied_tools() {
 }
 
 /// Test-shaped orientation inputs: a bare environment for a non-channel
-/// session in an unnamed space.
+/// session in an unnamed topic.
 fn test_environment() -> swage_context::orientation::SessionEnvironment {
     swage_context::orientation::SessionEnvironment {
-        space_name: String::new(),
-        space_description: String::new(),
+        topic_name: String::new(),
+        topic_description: String::new(),
         working_directory: None,
         started_at: chrono::Utc::now(),
         channel: None,
@@ -14036,7 +14036,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         vec![],
         history,
-        Some((String::new(), "My Space".to_string())),
+        Some((String::new(), "My Topic".to_string())),
         test_environment(),
         vec![],
         "claude-test-model",
@@ -14117,7 +14117,7 @@ async fn default_assembly_does_not_invoke_memory_loader() {
 #[tokio::test]
 async fn named_assembly_loads_memory_and_can_compose_it() {
     let memory = load_memory_for_assembly("memory-aware", || async {
-        "Important space context".to_string()
+        "Important topic context".to_string()
     })
     .await;
     let elements = build_assembly_elements(
@@ -14125,7 +14125,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         vec![],
         vec![],
         vec![],
-        memory.map(|content| (content, "My Space".to_string())),
+        memory.map(|content| (content, "My Topic".to_string())),
         test_environment(),
         vec![],
         "claude-test-model",
@@ -14157,7 +14157,7 @@ async fn named_assembly_loads_memory_and_can_compose_it() {
         output
             .messages
             .iter()
-            .any(|message| message.text_content().contains("Important space context")),
+            .any(|message| message.text_content().contains("Important topic context")),
         "a named assembly should be able to compose the loaded memory element"
     );
     assert!(
@@ -14190,18 +14190,18 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let _guard = SwageHomeGuard::set_to(swage_home.path());
 
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
     let element_path = swage_home
         .path()
-        .join("spaces")
-        .join(&space.slug)
+        .join("topics")
+        .join(&topic.slug)
         .join("elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).expect("create element directory");
     std::fs::write(&element_path, "Task: {{task}}; owner: {{owner}}")
-        .expect("write space briefing");
+        .expect("write topic briefing");
     std::fs::write(
         element_path.parent().unwrap().join("unrequested.md"),
         "This briefing must not be composed",
@@ -14209,7 +14209,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     .expect("write unrequested briefing");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "delegate".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -14230,7 +14230,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     config.instructions = "Task: {{task}}; owner: {{owner}}".into();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         config.clone(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -14252,7 +14252,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let (context_event_tx, _context_event_rx) = mpsc::unbounded_channel();
     let assembler = crate::turn::delegation::delegated_context_assembler(
         state,
-        space,
+        topic,
         config,
         "delegate".into(),
         "/workspace".into(),
@@ -14302,7 +14302,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     );
 
     std::fs::write(&element_path, "Updated task: {{task}}; owner: {{owner}}")
-        .expect("edit space briefing");
+        .expect("edit topic briefing");
     session_value_dispatcher
         .dispatch(
             "session_values",
@@ -14343,8 +14343,8 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         vec![],
         vec![],
         Some((
-            "Important space context".to_string(),
-            "My Space".to_string(),
+            "Important topic context".to_string(),
+            "My Topic".to_string(),
         )),
         test_environment(),
         vec![],
@@ -14371,7 +14371,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         }
     });
     assert!(
-        text.is_some_and(|t| t.contains("Important space context")),
+        text.is_some_and(|t| t.contains("Important topic context")),
         "memory message should contain the provided content"
     );
 }
@@ -14405,7 +14405,7 @@ fn operator_guidance_reads_global_before_trusted_workspace() {
     assert_eq!(rules[0].source_level, HierarchyLevel::Global);
     assert_eq!(rules[0].file_path, config_root.path().join("AGENTS.md"));
     assert_eq!(rules[1].content, "WORKSPACE GUIDANCE");
-    assert_eq!(rules[1].source_level, HierarchyLevel::Space);
+    assert_eq!(rules[1].source_level, HierarchyLevel::Topic);
     assert_eq!(rules[1].file_path, workspace.path().join("AGENTS.md"));
 }
 
@@ -14483,10 +14483,10 @@ async fn operator_guidance_honours_trust_from_stored_attachments() {
 
     let mut rules_by_trust = Vec::new();
     for is_trusted in [false, true] {
-        let space_id = Uuid::new_v4();
+        let topic_id = Uuid::new_v4();
         let attachment = storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                space_id,
+                topic_id,
                 label: "workspace".into(),
                 path: workspace.path().display().to_string(),
                 permissions: vec!["read".into()],
@@ -14495,7 +14495,7 @@ async fn operator_guidance_honours_trust_from_stored_attachments() {
             .await
             .unwrap();
 
-        let policy = load_trusted_workspace_policy(&storage, space_id, Some(attachment.id)).await;
+        let policy = load_trusted_workspace_policy(&storage, topic_id, Some(attachment.id)).await;
         rules_by_trust.push(operator_guidance_rules(None, &policy));
     }
 
@@ -14519,11 +14519,11 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
     let config_root = tempfile::tempdir().unwrap();
     let file = workspace.path().join("private.txt");
     std::fs::write(&file, "workspace-only-content").unwrap();
-    let space_id = Uuid::new_v4();
+    let topic_id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
     let attachment = storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id,
+            topic_id,
             label: "workspace".into(),
             path: workspace.path().display().to_string(),
             permissions: vec!["read".into(), "write".into()],
@@ -14532,7 +14532,7 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
         .await
         .unwrap();
     storage
-        .set_space_default_workspace(space_id, Some(attachment.id))
+        .set_topic_default_workspace(topic_id, Some(attachment.id))
         .await
         .unwrap();
 
@@ -14543,9 +14543,9 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
             .unwrap();
         assert_eq!(stored.permissions, vec!["read", "write"]);
         for selected in [None, Some(attachment.id)] {
-            let policy = load_trusted_workspace_policy(&storage, space_id, selected).await;
+            let policy = load_trusted_workspace_policy(&storage, topic_id, selected).await;
             let (root, paths) =
-                agent_workspace_from_policy(config_root.path(), &policy, space_id, session_id);
+                agent_workspace_from_policy(config_root.path(), &policy, topic_id, session_id);
             let mut context =
                 swage_tool::context::MockToolContext::new("reader", session_id.to_string());
             context.working_directory = root;
@@ -14610,25 +14610,25 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
     );
 }
 
-/// load_space_memory returns an empty string when the space has no
+/// load_topic_memory returns an empty string when the topic has no
 /// memory directory.
 #[tokio::test]
-async fn load_space_memory_returns_empty_when_dir_absent() {
+async fn load_topic_memory_returns_empty_when_dir_absent() {
     let dir = tempfile::tempdir().unwrap();
     // No memory directory created — the helper should not panic.
-    let result = load_space_memory(dir.path(), "no-such-space").await;
+    let result = load_topic_memory(dir.path(), "no-such-topic").await;
     assert!(
         result.is_empty(),
         "should return empty string when memory dir is absent"
     );
 }
 
-/// load_space_memory reads all .md files from the memory directory and
+/// load_topic_memory reads all .md files from the memory directory and
 /// joins them in alphabetical filename order.
 #[tokio::test]
-async fn load_space_memory_concatenates_md_files_alphabetically() {
+async fn load_topic_memory_concatenates_md_files_alphabetically() {
     let dir = tempfile::tempdir().unwrap();
-    let memory_dir = dir.path().join("spaces").join("my-space").join("memory");
+    let memory_dir = dir.path().join("topics").join("my-topic").join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
 
     // b_notes sorts after a_context.
@@ -14637,7 +14637,7 @@ async fn load_space_memory_concatenates_md_files_alphabetically() {
     // Non-.md file must not be included.
     std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
 
-    let result = load_space_memory(dir.path(), "my-space").await;
+    let result = load_topic_memory(dir.path(), "my-topic").await;
 
     assert!(
         result.contains("First file content"),
@@ -14661,17 +14661,17 @@ async fn load_space_memory_concatenates_md_files_alphabetically() {
     );
 }
 
-/// load_space_memory skips files with only whitespace content.
+/// load_topic_memory skips files with only whitespace content.
 #[tokio::test]
-async fn load_space_memory_skips_empty_files() {
+async fn load_topic_memory_skips_empty_files() {
     let dir = tempfile::tempdir().unwrap();
-    let memory_dir = dir.path().join("spaces").join("my-space").join("memory");
+    let memory_dir = dir.path().join("topics").join("my-topic").join("memory");
     std::fs::create_dir_all(&memory_dir).unwrap();
 
     std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
     std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
 
-    let result = load_space_memory(dir.path(), "my-space").await;
+    let result = load_topic_memory(dir.path(), "my-topic").await;
 
     assert!(result.contains("Real content"));
     assert!(
@@ -14863,7 +14863,7 @@ async fn context_assembled_precedes_first_token() {
                     .and_then(|scope| scope.get("effective_root")),
                 Some(&serde_json::json!(managed_scratch_workspace(
                     &state.config_root,
-                    session.space_id,
+                    session.topic_id,
                     session_id
                 ))),
                 "live turn diagnostics must report the root passed to tools"
@@ -14935,7 +14935,7 @@ async fn assembly_report_persisted_as_context_snapshot() {
         parsed["tool_scope"]["effective_root"],
         serde_json::json!(managed_scratch_workspace(
             &state.config_root,
-            session.space_id,
+            session.topic_id,
             session_id
         )),
         "turn diagnostics must record the root passed to tools"
@@ -16226,10 +16226,10 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
             finish_reason: None,
         },
     ]]);
-    let space = storage.get_or_create_default().await.expect("space");
+    let topic = storage.get_or_create_default().await.expect("topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -16247,7 +16247,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
     .expect("thread");
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
         vision_capable_config(),
         crate::tool::ToolDispatcher::allow_all(vec![]),

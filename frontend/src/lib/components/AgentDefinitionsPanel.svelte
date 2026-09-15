@@ -3,10 +3,10 @@
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
 
   interface Props {
-    spaceId: string | null;
+    topicId: string | null;
   }
 
-  let { spaceId }: Props = $props();
+  let { topicId }: Props = $props();
   let definitions = $state<EffectiveAgentDefinitionResponse[]>([]);
   let selectedId = $state("");
   let loading = $state(false);
@@ -16,14 +16,14 @@
   const selected = $derived(definitions.find((definition) => definition.id === selectedId) ?? null);
 
   $effect(() => {
-    const currentSpaceId = spaceId;
+    const currentTopicId = topicId;
     const generation = ++loadGeneration;
     definitions = [];
     selectedId = "";
     error = null;
-    if (!currentSpaceId) return;
+    if (!currentTopicId) return;
     loading = true;
-    void listEffectiveAgentDefinitions(currentSpaceId)
+    void listEffectiveAgentDefinitions(currentTopicId)
       .then((loaded) => {
         if (generation !== loadGeneration) return;
         definitions = loaded;
@@ -40,7 +40,7 @@
 
   function sourceLabel(definition: EffectiveAgentDefinitionResponse): string {
     if (definition.source_scope === "built_in") return "Built-in default";
-    if (definition.source_scope === "space") return "This space";
+    if (definition.source_scope === "topic") return "This topic";
     return "Global";
   }
 
@@ -50,14 +50,14 @@
 </script>
 
 <section class="agent-definitions" aria-label="Agent definitions">
-  {#if !spaceId}
-    <p class="empty">Select a space to inspect its effective agent definitions.</p>
+  {#if !topicId}
+    <p class="empty">Select a topic to inspect its effective agent definitions.</p>
   {:else if loading}
     <p class="loading">Loading agent definitions…</p>
   {:else if error}
     <p class="error" role="alert">{error}</p>
   {:else if definitions.length === 0}
-    <p class="empty">No agent definitions are available for this space.</p>
+    <p class="empty">No agent definitions are available for this topic.</p>
   {:else}
     <div class="definition-list" role="list" aria-label="Effective agent definitions">
       {#each definitions as definition (definition.id)}

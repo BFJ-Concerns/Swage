@@ -18,7 +18,7 @@ impl Tool for AgentMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Your own private memory: save an insight, preference, procedure, or outcome now, search for it in any future session, or review how a remembered item changed over time. Records here are yours alone — for notes shared with everyone working in the space, use the memory tool instead."
+        "Your own private memory: save an insight, preference, procedure, or outcome now, search for it in any future session, or review how a remembered item changed over time. Records here are yours alone — for notes shared with everyone working in the topic, use the memory tool instead."
     }
 
     fn parameters(&self) -> Value {
@@ -157,7 +157,7 @@ impl AgentMemoryTool {
             .storage()
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                space_id: session.space_id,
+                topic_id: session.topic_id,
                 session_id: session.id,
                 turn_id,
                 agent_id: ctx.agent_id().to_string(),
@@ -213,7 +213,7 @@ impl AgentMemoryTool {
         let records = gateway_ctx
             .storage()
             .list_agent_memories(
-                session.space_id,
+                session.topic_id,
                 agent_id,
                 session_scope,
                 query.as_deref(),
@@ -246,7 +246,7 @@ impl AgentMemoryTool {
             })?;
         let memories = gateway_ctx
             .storage()
-            .list_agent_memories(session.space_id, Some(ctx.agent_id()), None, None, limit)
+            .list_agent_memories(session.topic_id, Some(ctx.agent_id()), None, None, limit)
             .await
             .map_err(storage_error(self.name()))?;
         let audit_events = gateway_ctx
@@ -379,7 +379,7 @@ fn storage_error(name: &str) -> impl FnOnce(swage_core::StorageError) -> ToolErr
 fn memory_to_json(record: &AgentMemoryRecord) -> Value {
     json!({
         "id": record.id,
-        "space_id": record.space_id,
+        "topic_id": record.topic_id,
         "session_id": record.session_id,
         "turn_id": record.turn_id,
         "agent_id": record.agent_id,
@@ -406,7 +406,7 @@ mod tests {
     use swage_storage::{
         NewAgentMemoryRecord, NewAuditEvent, NewSession, NewThread, NewTurn, SqliteStorage,
         TurnState,
-        store::{AgentMemoryStore, AuditStore, SessionStore, SpaceStore, ThreadStore, TurnStore},
+        store::{AgentMemoryStore, AuditStore, SessionStore, ThreadStore, TopicStore, TurnStore},
     };
     use swage_tool::context::MockToolContext;
 
@@ -433,10 +433,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn remember_and_recall_persist_memory() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -499,7 +499,7 @@ mod tests {
         );
 
         let persisted = storage
-            .list_agent_memories(space.id, Some("agent-a"), None, None, 10)
+            .list_agent_memories(topic.id, Some("agent-a"), None, None, 10)
             .await
             .unwrap();
         assert_eq!(persisted.len(), 1);
@@ -509,10 +509,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn history_filters_secret_events_and_recall_respects_scope_boundaries() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -541,7 +541,7 @@ mod tests {
         storage
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                space_id: space.id,
+                topic_id: topic.id,
                 session_id: session.id,
                 turn_id: turn.id,
                 agent_id: "agent-a".into(),
@@ -558,7 +558,7 @@ mod tests {
         storage
             .create_agent_memory(NewAgentMemoryRecord {
                 id: Uuid::new_v4(),
-                space_id: space.id,
+                topic_id: topic.id,
                 session_id: session.id,
                 turn_id: turn.id,
                 agent_id: "agent-b".into(),

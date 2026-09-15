@@ -123,14 +123,14 @@ impl SkillActivationStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewSession, NewSpace};
+    use crate::model::{NewSession, NewTopic};
     use crate::sqlite::SqliteStorage;
-    use crate::store::{SessionStore, SkillActivationStore, SpaceStore};
+    use crate::store::{SessionStore, SkillActivationStore, TopicStore};
 
     async fn make_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             })
@@ -138,7 +138,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -242,8 +242,8 @@ mod tests {
         let (storage, session_a) = make_session().await;
 
         // Create a second session in the same storage instance.
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "q".into(),
                 slug: "q".into(),
             })
@@ -251,7 +251,7 @@ mod tests {
             .unwrap();
         let session_b = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent2".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

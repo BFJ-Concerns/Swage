@@ -3,14 +3,14 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A space discovered by scanning the Swage directory skeleton.
+/// A topic discovered by scanning the Swage directory skeleton.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DiscoveredSpace {
-    /// Directory name used as the space identifier.
+pub struct DiscoveredTopic {
+    /// Directory name used as the topic identifier.
     pub name: String,
-    /// Absolute path to the space directory.
+    /// Absolute path to the topic directory.
     pub path: PathBuf,
-    /// Names of agents discovered under the space's `agents/` sub-directory.
+    /// Names of agents discovered under the topic's `agents/` sub-directory.
     pub agents: Vec<String>,
 }
 
@@ -69,21 +69,21 @@ fn subdirectory_names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Scan `{space_dir}/agents/` for subdirectories.
-pub fn discover_agents(space_dir: &Path) -> Vec<String> {
-    subdirectory_names(&space_dir.join("agents"))
+/// Scan `{topic_dir}/agents/` for subdirectories.
+pub fn discover_agents(topic_dir: &Path) -> Vec<String> {
+    subdirectory_names(&topic_dir.join("agents"))
         .into_iter()
         .filter(|name| name != RESERVED_WORKFLOW_AGENT_ID)
         .collect()
 }
 
-/// Scan `{root}/spaces/` for subdirectories.
-pub fn discover_spaces(root: &Path) -> Vec<DiscoveredSpace> {
-    subdirectory_names(&root.join("spaces"))
+/// Scan `{root}/topics/` for subdirectories.
+pub fn discover_topics(root: &Path) -> Vec<DiscoveredTopic> {
+    subdirectory_names(&root.join("topics"))
         .into_iter()
         .map(|name| {
-            let path = root.join("spaces").join(&name);
-            DiscoveredSpace {
+            let path = root.join("topics").join(&name);
+            DiscoveredTopic {
                 agents: discover_agents(&path),
                 name,
                 path,
@@ -92,7 +92,7 @@ pub fn discover_spaces(root: &Path) -> Vec<DiscoveredSpace> {
         .collect()
 }
 
-/// Full discovery: returns all spaces and their agents under `root`.
-pub fn discover(root: &Path) -> Vec<DiscoveredSpace> {
-    discover_spaces(root)
+/// Full discovery: returns all topics and their agents under `root`.
+pub fn discover(root: &Path) -> Vec<DiscoveredTopic> {
+    discover_topics(root)
 }

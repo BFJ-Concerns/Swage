@@ -66,10 +66,10 @@ mod session_variable_integration;
 mod skills_endpoint_integration;
 #[path = "integration/skills_integration.rs"]
 mod skills_integration;
-#[path = "integration/space_integration.rs"]
-mod space_integration;
 #[path = "integration/tool_approval_integration.rs"]
 mod tool_approval_integration;
+#[path = "integration/topic_integration.rs"]
+mod topic_integration;
 #[path = "integration/tui_cli_integration.rs"]
 mod tui_cli_integration;
 #[path = "integration/turn_model_gateway_integration.rs"]
