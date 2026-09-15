@@ -22,9 +22,9 @@ impl CurationAssertionStore for SqliteStorage {
                 entity: "SourceObservation".into(),
                 id: assertion.observation_id.to_string(),
             })?;
-        if observation.space_id != assertion.space_id {
+        if observation.topic_id != assertion.topic_id {
             return Err(StorageError::ConstraintViolation(
-                "the observation does not belong to the assertion's space".into(),
+                "the observation does not belong to the assertion's topic".into(),
             ));
         }
 
@@ -55,9 +55,9 @@ impl CurationAssertionStore for SqliteStorage {
                         entity: "SourceObservation".into(),
                         id: target_id.to_string(),
                     })?;
-            if target.space_id != assertion.space_id {
+            if target.topic_id != assertion.topic_id {
                 return Err(StorageError::ConstraintViolation(
-                    "the target observation does not belong to the assertion's space".into(),
+                    "the target observation does not belong to the assertion's topic".into(),
                 ));
             }
         }
@@ -65,7 +65,7 @@ impl CurationAssertionStore for SqliteStorage {
         self.with_conn(move |conn| {
             let record = CurationAssertion {
                 id: Uuid::new_v4(),
-                space_id: assertion.space_id,
+                topic_id: assertion.topic_id,
                 observation_id: assertion.observation_id,
                 kind: assertion.kind,
                 target_observation_id: assertion.target_observation_id,
@@ -73,11 +73,11 @@ impl CurationAssertionStore for SqliteStorage {
             };
             conn.execute(
                 "INSERT INTO knowledge_curation_assertions (
-                     id, space_id, observation_id, kind, target_observation_id, created_at
+                     id, topic_id, observation_id, kind, target_observation_id, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     record.id.to_string(),
-                    record.space_id.to_string(),
+                    record.topic_id.to_string(),
                     record.observation_id.to_string(),
                     record.kind.to_string(),
                     record.target_observation_id.map(|id| id.to_string()),
@@ -89,18 +89,18 @@ impl CurationAssertionStore for SqliteStorage {
         .await
     }
 
-    async fn effective_curation_by_space(
+    async fn effective_curation_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<CurationAssertion>, StorageError> {
         self.with_conn(move |conn| {
             // Newest assertion per observation, by the same latest-rowid rule
             // the search filter treats as effective state.
             let mut stmt = conn.prepare(
-                "SELECT a.id, a.space_id, a.observation_id, a.kind,
+                "SELECT a.id, a.topic_id, a.observation_id, a.kind,
                         a.target_observation_id, a.created_at
                  FROM knowledge_curation_assertions a
-                 WHERE a.space_id = ?1
+                 WHERE a.topic_id = ?1
                    AND a.rowid = (
                        SELECT MAX(latest.rowid)
                        FROM knowledge_curation_assertions latest
@@ -108,7 +108,7 @@ impl CurationAssertionStore for SqliteStorage {
                    )
                  ORDER BY a.observation_id",
             )?;
-            let rows = stmt.query_map(params![space_id.to_string()], |row| {
+            let rows = stmt.query_map(params![topic_id.to_string()], |row| {
                 let parse_uuid = |value: String| {
                     value.parse::<Uuid>().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -120,7 +120,7 @@ impl CurationAssertionStore for SqliteStorage {
                 };
                 Ok(CurationAssertion {
                     id: parse_uuid(row.get::<_, String>(0)?)?,
-                    space_id: parse_uuid(row.get::<_, String>(1)?)?,
+                    topic_id: parse_uuid(row.get::<_, String>(1)?)?,
                     observation_id: parse_uuid(row.get::<_, String>(2)?)?,
                     kind: row.get::<_, String>(3)?.parse().map_err(|error: String| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -153,29 +153,29 @@ impl CurationAssertionStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NewSourceObservation, NewSpace, ObservationOrigin};
-    use crate::store::{ObservationStore, SpaceStore};
+    use crate::model::{NewSourceObservation, NewTopic, ObservationOrigin};
+    use crate::store::{ObservationStore, TopicStore};
 
-    async fn storage_with_space() -> (SqliteStorage, Uuid) {
+    async fn storage_with_topic() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "research".into(),
                 slug: "research".into(),
             })
             .await
             .unwrap();
-        (storage, space.id)
+        (storage, topic.id)
     }
 
     async fn observation(
         storage: &SqliteStorage,
-        space_id: Uuid,
+        topic_id: Uuid,
         label: &str,
     ) -> crate::model::SourceObservation {
         storage
             .record_observation(NewSourceObservation {
-                space_id,
+                topic_id,
                 origin: ObservationOrigin {
                     url: Some(format!("https://example.test/{label}")),
                     local_path: None,
@@ -192,13 +192,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn effective_curation_is_the_newest_assertion_per_observation() {
-        let (storage, space_id) = storage_with_space().await;
-        let subject = observation(&storage, space_id, "subject").await;
-        let target = observation(&storage, space_id, "target").await;
+        let (storage, topic_id) = storage_with_topic().await;
+        let subject = observation(&storage, topic_id, "subject").await;
+        let target = observation(&storage, topic_id, "target").await;
 
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::Stale,
                 target_observation_id: None,
@@ -207,7 +207,7 @@ mod tests {
             .unwrap();
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(target.id),
@@ -215,7 +215,7 @@ mod tests {
             .await
             .unwrap();
 
-        let effective = storage.effective_curation_by_space(space_id).await.unwrap();
+        let effective = storage.effective_curation_by_topic(topic_id).await.unwrap();
 
         // Only the asserted observation appears, and only its newest
         // judgement: the earlier stale assertion is history, not state.
@@ -227,9 +227,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn accepts_all_assertion_kinds() {
-        let (storage, space_id) = storage_with_space().await;
-        let subject = observation(&storage, space_id, "subject").await;
-        let target = observation(&storage, space_id, "target").await;
+        let (storage, topic_id) = storage_with_topic().await;
+        let subject = observation(&storage, topic_id, "subject").await;
+        let target = observation(&storage, topic_id, "target").await;
 
         for kind in [
             CurationAssertionKind::DuplicateOf,
@@ -237,7 +237,7 @@ mod tests {
         ] {
             storage
                 .add_curation_assertion(NewCurationAssertion {
-                    space_id,
+                    topic_id,
                     observation_id: subject.id,
                     kind,
                     target_observation_id: Some(target.id),
@@ -247,7 +247,7 @@ mod tests {
         }
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::Stale,
                 target_observation_id: None,
@@ -257,33 +257,33 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn validates_relationship_targets_and_space_membership() {
-        let (storage, space_id) = storage_with_space().await;
-        let subject = observation(&storage, space_id, "subject").await;
-        let other_space = storage
-            .create(NewSpace {
+    async fn validates_relationship_targets_and_topic_membership() {
+        let (storage, topic_id) = storage_with_topic().await;
+        let subject = observation(&storage, topic_id, "subject").await;
+        let other_topic = storage
+            .create(NewTopic {
                 name: "other".into(),
                 slug: "other".into(),
             })
             .await
             .unwrap();
-        let foreign = observation(&storage, other_space.id, "foreign").await;
+        let foreign = observation(&storage, other_topic.id, "foreign").await;
 
         for invalid in [
             NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::DuplicateOf,
                 target_observation_id: None,
             },
             NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::Stale,
                 target_observation_id: Some(subject.id),
             },
             NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(foreign.id),
@@ -298,9 +298,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn superseded_observation_is_hidden_but_evidence_remains_unchanged() {
-        let (storage, space_id) = storage_with_space().await;
-        let subject = observation(&storage, space_id, "subject").await;
-        let replacement = observation(&storage, space_id, "replacement").await;
+        let (storage, topic_id) = storage_with_topic().await;
+        let subject = observation(&storage, topic_id, "subject").await;
+        let replacement = observation(&storage, topic_id, "replacement").await;
         let derivation = storage
             .add_extraction(
                 subject.id,
@@ -312,7 +312,7 @@ mod tests {
 
         assert_eq!(
             storage
-                .search_extractions(space_id, "uniquely superseded", 10)
+                .search_extractions(topic_id, "uniquely superseded", 10)
                 .await
                 .unwrap()
                 .len(),
@@ -320,7 +320,7 @@ mod tests {
         );
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(replacement.id),
@@ -330,7 +330,7 @@ mod tests {
 
         assert!(
             storage
-                .search_extractions(space_id, "uniquely superseded", 10)
+                .search_extractions(topic_id, "uniquely superseded", 10)
                 .await
                 .unwrap()
                 .is_empty()
@@ -364,11 +364,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn assertion_rows_reject_update_and_delete() {
-        let (storage, space_id) = storage_with_space().await;
-        let subject = observation(&storage, space_id, "subject").await;
+        let (storage, topic_id) = storage_with_topic().await;
+        let subject = observation(&storage, topic_id, "subject").await;
         let assertion = storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id,
+                topic_id,
                 observation_id: subject.id,
                 kind: CurationAssertionKind::Stale,
                 target_observation_id: None,

@@ -29,7 +29,7 @@ use swage_storage::{
     model::AppendMessage,
     store::{
         AgentMemoryStore, ApprovalStore, DeliveryStore, MessageStore, ScheduleStore, SessionStore,
-        SpaceStore, Storage, ThreadStore, TurnStore,
+        Storage, ThreadStore, TopicStore, TurnStore,
     },
 };
 
@@ -68,7 +68,7 @@ impl LlmProvider for MockProvider {
 fn test_state(storage: Arc<SqliteStorage>) -> AppState {
     AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -117,10 +117,10 @@ async fn post_json(router: &Router, uri: &str, body: Value) -> (StatusCode, Valu
 }
 
 async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".into(),
             metadata: Some(json!({"label": "Ops session"})),
             active_workspace_attachment_id: None,
@@ -136,7 +136,7 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     )
     .await
     .unwrap();
-    (space.id, session.id, thread.id)
+    (topic.id, session.id, thread.id)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -183,7 +183,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state.clone());
-    let (_space_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_topic_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {
@@ -314,7 +314,7 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (space_id, session_id, thread_id) = seed_session(&storage).await;
+    let (topic_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {
@@ -329,7 +329,7 @@ async fn operator_memory_surfaces_expose_provenance_and_searchability() {
     let memory = storage
         .create_agent_memory(NewAgentMemoryRecord {
             id: Uuid::new_v4(),
-            space_id,
+            topic_id,
             session_id,
             turn_id: turn.id,
             agent_id: "gateway".into(),
@@ -374,7 +374,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state.clone());
-    let (_space_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_topic_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {
@@ -535,7 +535,7 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = test_state(Arc::clone(&storage));
     let router = build_router(state);
-    let (_space_id, session_id, thread_id) = seed_session(&storage).await;
+    let (_topic_id, session_id, thread_id) = seed_session(&storage).await;
 
     let turn = storage
         .create_turn(NewTurn {

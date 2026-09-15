@@ -28,7 +28,7 @@ check_file() {
       printf 'broken link: %s -> %s\n' "$file" "$link"
       broken=1
     fi
-  done < <(awk '/^[[:space:]]*```/{fence=!fence; next} !fence' "$file" \
+  done < <(awk '/^[[:topic:]]*```/{fence=!fence; next} !fence' "$file" \
              | grep -oE '\]\([^)]+\)' \
              | sed -E 's/^\]\(//; s/\)$//')
 }

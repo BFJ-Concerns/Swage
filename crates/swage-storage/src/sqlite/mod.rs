@@ -24,10 +24,10 @@ pub mod secret;
 pub mod session;
 pub mod session_variable;
 pub mod skill_activation;
-pub mod space;
 pub mod task_definition;
 pub mod thread;
 pub mod tool_call;
+pub mod topic;
 pub mod turn;
 pub mod workflow;
 pub mod workspace_attachment;
@@ -114,13 +114,13 @@ mod tests {
     async fn in_memory_opens_and_migrates() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
-        // Schema should be present — query the spaces table.
+        // Schema should be present — query the topics table.
         storage
             .with_conn(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM spaces", [], |r| r.get::<_, i64>(0))
+                conn.query_row("SELECT COUNT(*) FROM topics", [], |r| r.get::<_, i64>(0))
             })
             .await
-            .expect("spaces table should exist after migration");
+            .expect("topics table should exist after migration");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -143,13 +143,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn default_space_seeded() {
+    async fn default_topic_seeded() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
         let count: i64 = storage
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT COUNT(*) FROM spaces WHERE name = 'default'",
+                    "SELECT COUNT(*) FROM topics WHERE name = 'default'",
                     [],
                     |r| r.get(0),
                 )
@@ -157,7 +157,7 @@ mod tests {
             .await
             .expect("query should succeed");
 
-        assert_eq!(count, 1, "exactly one default space should be seeded");
+        assert_eq!(count, 1, "exactly one default topic should be seeded");
     }
 
     #[tokio::test(flavor = "multi_thread")]

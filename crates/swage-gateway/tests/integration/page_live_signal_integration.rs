@@ -27,7 +27,7 @@ use swage_gateway::tool_executor::GatewayToolContext;
 use swage_gateway::websocket::ServerEvent;
 use swage_storage::NewSession;
 use swage_storage::SqliteStorage;
-use swage_storage::store::{SessionStore, SpaceStore, Storage};
+use swage_storage::store::{SessionStore, Storage, TopicStore};
 use swage_tool::context::MockToolContext;
 
 struct StubProvider;
@@ -87,7 +87,7 @@ async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface()
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -128,10 +128,10 @@ async fn a_page_update_inside_the_upgrade_handshake_window_reaches_the_surface()
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "assistant".into(),
             metadata: None,
             active_workspace_attachment_id: None,
@@ -141,7 +141,7 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
 
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

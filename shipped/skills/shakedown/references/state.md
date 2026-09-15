@@ -25,7 +25,7 @@ campaign open.
   wave's shape genuinely departs from the skill's carried `driver-wave`
   and `judgement-wave` (the default dispatch machinery, which needs no
   copy here): kept beside the record so a resume finds the campaign's
-  own machinery (run inline from the file, or saved to the space),
+  own machinery (run inline from the file, or saved to the topic),
   reading its staffing from the campaign record's table.
 - `build/qa/coverage.md` — the durable coverage ledger, kept across
   campaigns (references/campaign.md, *Carried Coverage*): per map

@@ -150,7 +150,7 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   built-in orientation: every session already knows what it is running on,
   where it is, and what tools it has.
 - `skills/<name>/` — global skills, one directory per skill with frontmatter.
-- `spaces/<space>/` — each space's world: its own `instructions/`,
+- `topics/<topic>/` — each topic's world: its own `instructions/`,
   `skills/`, `agents/<agent>/` (per-agent `instructions/` and `skills/`),
   memory, and knowledge-base bodies. The agent directory name
   `__workflow_ephemeral__` is reserved for bare workflow workers and is excluded
@@ -159,7 +159,7 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   knowledge base, workflow runs. The one local record everything is
   reconstructable from.
 
-The configuration cascade is Global → Space → Agent: the more specific
+The configuration cascade is Global → Topic → Agent: the more specific
 level extends or shadows the more general one. `AGENTS.md` extends the
 cascade (global then workspace) rather than participating in the shadowing
 — both levels are always additive.
@@ -233,7 +233,7 @@ gateway; point it at a non-default port with
 The [`docs/`](docs/) pages cover the parts of the system a newcomer meets
 first:
 
-- [First session](docs/first-session.md) — opening a space, attaching a
+- [First session](docs/first-session.md) — opening a topic, attaching a
   repository as a workspace, and trusting it so its guidance reaches agents.
 - [Workflow engine](docs/workflow-engine.md) — how a workflow script runs,
   how a run survives a restart, how its token budget is spent (including

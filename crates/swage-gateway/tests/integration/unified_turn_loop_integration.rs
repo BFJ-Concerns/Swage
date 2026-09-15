@@ -42,7 +42,7 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::model::NewWorkspaceAttachment;
 use swage_storage::store::WorkspaceAttachmentStore;
-use swage_storage::{SqliteStorage, store::SpaceStore};
+use swage_storage::{SqliteStorage, store::TopicStore};
 
 // ---------------------------------------------------------------------------
 // Mock provider — streams a fixed sequence of chunks
@@ -172,7 +172,7 @@ async fn start_test_server_with_config(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
@@ -625,10 +625,10 @@ async fn multi_round_tool_dispatch_through_unified_path() {
     );
 }
 
-/// A space with no trusted workspace attachment inherits global permissions.
+/// A topic with no trusted workspace attachment inherits global permissions.
 ///
-/// Proves: missing space-level workspace grants are absence of local config,
-/// not an implicit deny override. Explicit global or space denies still deny.
+/// Proves: missing topic-level workspace grants are absence of local config,
+/// not an implicit deny override. Explicit global or topic denies still deny.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_workspace_grants_inherit_global_permissions() {
     let provider = MockProvider::new(vec![
@@ -684,7 +684,7 @@ async fn missing_workspace_grants_inherit_global_permissions() {
     );
 }
 
-/// A space with a trusted read-grant workspace still allows file_read.
+/// A topic with a trusted read-grant workspace still allows file_read.
 ///
 /// Proves: trusted attachments remain compatible with the inherited global
 /// allow-all policy; they are not required to unlock tool visibility.
@@ -717,11 +717,11 @@ async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
     let (router, addr, storage) =
         start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
 
-    // Space-level grant must be in place before the turn dispatches.
-    let default_space = storage.get_or_create_default().await.unwrap();
+    // Topic-level grant must be in place before the turn dispatches.
+    let default_topic = storage.get_or_create_default().await.unwrap();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: default_space.id,
+            topic_id: default_topic.id,
             label: "trusted-read".into(),
             path: "/tmp".into(),
             permissions: vec!["read".into()],
@@ -752,6 +752,6 @@ async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
         .unwrap_or_else(|| panic!("expected tool_end; events: {events:?}"));
     assert_eq!(
         tool_end["status"], "success",
-        "file_read should succeed when space has trusted read grant; events: {events:?}"
+        "file_read should succeed when topic has trusted read grant; events: {events:?}"
     );
 }

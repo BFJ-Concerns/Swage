@@ -1,5 +1,5 @@
 //! Knowledge-base browse mirror — a generated markdown projection of a
-//! space's knowledge base for the human operator to read on disk.
+//! topic's knowledge base for the human operator to read on disk.
 //!
 //! Authority lives in the database; the mirror is a disposable projection,
 //! never the store. Deleting it is always safe, and regenerating from the
@@ -8,8 +8,8 @@
 //! the pattern's declared property — a projection whose bytes drift between
 //! regenerations has smuggled state from outside the database.
 //!
-//! The mirror lives under the space data root at
-//! `spaces/<slug>/.swage/knowledge/mirror/`, beside the body files, as an
+//! The mirror lives under the topic data root at
+//! `topics/<slug>/.swage/knowledge/mirror/`, beside the body files, as an
 //! `index.md` plus one page per observation. Regeneration wipes the
 //! directory and rewrites it whole; a crash mid-write leaves a partial
 //! mirror, and the next regeneration replaces it — disposability is the
@@ -36,42 +36,42 @@ const GENERATED_NOTE: &str = "<!-- Generated from the knowledge base. \
 Authority lives in the database — do not edit; deleting this directory is \
 always safe, and regenerating produces it identically. -->";
 
-/// `POST /api/spaces/{id}/knowledge-mirror` — regenerate the space's browse
+/// `POST /api/topics/{id}/knowledge-mirror` — regenerate the topic's browse
 /// mirror from the database.
 pub async fn regenerate(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<KnowledgeMirrorRegenerateResponse>, ApiError> {
-    let space = state
-        .space_store
-        .get(space_id)
+    let topic = state
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(GatewayError::from)?
-        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-    let response = regenerate_for_space(
+        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+    let response = regenerate_for_topic(
         state.storage.as_ref(),
         &state.config_root,
-        space_id,
-        &space.slug,
+        topic_id,
+        &topic.slug,
     )
     .await?;
     Ok(Json(response))
 }
 
-/// Rebuild the mirror directory whole from the space's rows.
-pub async fn regenerate_for_space(
+/// Rebuild the mirror directory whole from the topic's rows.
+pub async fn regenerate_for_topic(
     storage: &dyn Storage,
     config_root: &std::path::Path,
-    space_id: Uuid,
-    space_slug: &str,
+    topic_id: Uuid,
+    topic_slug: &str,
 ) -> Result<KnowledgeMirrorRegenerateResponse, GatewayError> {
-    let mut observations = storage.list_observations_by_space(space_id).await?;
+    let mut observations = storage.list_observations_by_topic(topic_id).await?;
     // The store orders by retrieved_at alone, which leaves ties to the
     // engine; byte-identical regeneration needs a total order.
     observations.sort_by(|a, b| b.retrieved_at.cmp(&a.retrieved_at).then(a.id.cmp(&b.id)));
 
     let curation: BTreeMap<Uuid, CurationAssertion> = storage
-        .effective_curation_by_space(space_id)
+        .effective_curation_by_topic(topic_id)
         .await?
         .into_iter()
         .map(|assertion| (assertion.observation_id, assertion))
@@ -88,8 +88,8 @@ pub async fn regenerate_for_space(
         });
     }
 
-    let files = render_mirror(space_slug, &pages);
-    let root = mirror_root(config_root, space_slug);
+    let files = render_mirror(topic_slug, &pages);
+    let root = mirror_root(config_root, topic_slug);
     let files_written = write_mirror(&root, &files).await?;
 
     Ok(KnowledgeMirrorRegenerateResponse {
@@ -105,10 +105,10 @@ struct ObservationPage {
     latest: Option<ExtractionDerivation>,
 }
 
-fn mirror_root(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
+fn mirror_root(config_root: &std::path::Path, topic_slug: &str) -> PathBuf {
     config_root
-        .join("spaces")
-        .join(space_slug)
+        .join("topics")
+        .join(topic_slug)
         .join(".swage")
         .join("knowledge")
         .join("mirror")
@@ -116,11 +116,11 @@ fn mirror_root(config_root: &std::path::Path, space_slug: &str) -> PathBuf {
 
 /// Render the whole mirror as relative path → content. Pure: everything in
 /// the output comes from the rows, so equal input renders equal bytes.
-fn render_mirror(space_slug: &str, pages: &[ObservationPage]) -> BTreeMap<String, String> {
+fn render_mirror(topic_slug: &str, pages: &[ObservationPage]) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
 
     let mut index = String::new();
-    let _ = writeln!(index, "# Knowledge base — {space_slug}");
+    let _ = writeln!(index, "# Knowledge base — {topic_slug}");
     let _ = writeln!(index);
     let _ = writeln!(index, "{GENERATED_NOTE}");
     let _ = writeln!(index);
@@ -264,8 +264,8 @@ mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
     use swage_storage::{
-        CurationAssertionStore, NewCurationAssertion, NewSourceObservation, NewSpace,
-        ObservationOrigin, ObservationStore, SpaceStore, SqliteStorage,
+        CurationAssertionStore, NewCurationAssertion, NewSourceObservation, NewTopic,
+        ObservationOrigin, ObservationStore, SqliteStorage, TopicStore,
     };
 
     use crate::test_support::SwageHomeGuard;
@@ -286,8 +286,8 @@ mod tests {
 
     async fn seeded_storage() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "research".into(),
                 slug: "research".into(),
             })
@@ -296,7 +296,7 @@ mod tests {
 
         let current = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/kettles-2026".into()),
                     local_path: None,
@@ -320,7 +320,7 @@ mod tests {
 
         let outdated = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/kettles-2019".into()),
                     local_path: None,
@@ -335,7 +335,7 @@ mod tests {
             .unwrap();
         storage
             .add_curation_assertion(NewCurationAssertion {
-                space_id: space.id,
+                topic_id: topic.id,
                 observation_id: outdated.id,
                 kind: CurationAssertionKind::SupersededBy,
                 target_observation_id: Some(current.id),
@@ -343,7 +343,7 @@ mod tests {
             .await
             .unwrap();
 
-        (storage, space.id)
+        (storage, topic.id)
     }
 
     /// Read every file under the mirror back as relative path → bytes.
@@ -375,9 +375,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn deleted_mirror_regenerates_byte_identically() {
         let config_root = pin_root();
-        let (storage, space_id) = seeded_storage().await;
+        let (storage, topic_id) = seeded_storage().await;
 
-        let first = regenerate_for_space(&storage, config_root.path(), space_id, "research")
+        let first = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
             .await
             .unwrap();
         let root = PathBuf::from(&first.mirror_root);
@@ -386,7 +386,7 @@ mod tests {
 
         std::fs::remove_dir_all(&root).expect("the mirror is disposable");
 
-        let second = regenerate_for_space(&storage, config_root.path(), space_id, "research")
+        let second = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
             .await
             .unwrap();
         assert_eq!(second.mirror_root, first.mirror_root);
@@ -400,9 +400,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn regeneration_replaces_the_directory_whole() {
         let config_root = pin_root();
-        let (storage, space_id) = seeded_storage().await;
+        let (storage, topic_id) = seeded_storage().await;
 
-        let report = regenerate_for_space(&storage, config_root.path(), space_id, "research")
+        let report = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
             .await
             .unwrap();
         let root = PathBuf::from(&report.mirror_root);
@@ -411,7 +411,7 @@ mod tests {
         // from an observation since absorbed elsewhere.
         std::fs::write(root.join("stray.md"), "not from the database").unwrap();
 
-        regenerate_for_space(&storage, config_root.path(), space_id, "research")
+        regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
             .await
             .unwrap();
         assert!(
@@ -423,9 +423,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn mirror_names_curation_state_without_hiding_material() {
         let config_root = pin_root();
-        let (storage, space_id) = seeded_storage().await;
+        let (storage, topic_id) = seeded_storage().await;
 
-        let report = regenerate_for_space(&storage, config_root.path(), space_id, "research")
+        let report = regenerate_for_topic(&storage, config_root.path(), topic_id, "research")
             .await
             .unwrap();
         let root = PathBuf::from(&report.mirror_root);
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_space_renders_an_index_saying_so() {
+    fn empty_topic_renders_an_index_saying_so() {
         let files = render_mirror("research", &[]);
         assert_eq!(files.len(), 1);
         assert!(files["index.md"].contains("No observations have been captured yet."));

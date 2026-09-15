@@ -36,7 +36,7 @@ fn script_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowScriptRecord>
     let grant: Option<String> = row.get(4)?;
     Ok(WorkflowScriptRecord {
         id: uuid(row.get(0)?)?,
-        space_id: uuid(row.get(1)?)?,
+        topic_id: uuid(row.get(1)?)?,
         name: row.get(2)?,
         description: row.get(3)?,
         delivery_grant: grant
@@ -75,7 +75,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     let completed_at: Option<String> = row.get(20)?;
     Ok(WorkflowRunRecord {
         id: uuid(row.get(0)?)?,
-        space_id: uuid(row.get(1)?)?,
+        topic_id: uuid(row.get(1)?)?,
         parent_run_id: parent_run_id.map(uuid).transpose()?,
         parent_seq: row.get::<_, Option<i64>>(3)?.map(|value| value as u64),
         script_version_id: script_version_id.map(uuid).transpose()?,
@@ -179,9 +179,9 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
     })
 }
 
-const SCRIPT_COLUMNS: &str = "id, space_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at";
+const SCRIPT_COLUMNS: &str = "id, topic_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at";
 const VERSION_COLUMNS: &str = "id, script_id, version, source, created_at";
-const RUN_COLUMNS: &str = "id, space_id, parent_run_id, parent_seq, script_version_id, \
+const RUN_COLUMNS: &str = "id, topic_id, parent_run_id, parent_seq, script_version_id, \
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
@@ -347,7 +347,7 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         let created = self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            tx.execute("INSERT INTO workflow_scripts (id, space_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)", params![id.to_string(), script.space_id.to_string(), script.name, script.description, grant, script.captured_sources_grant, script.authoring_session_id.map(|id| id.to_string()), now.to_rfc3339()])?;
+            tx.execute("INSERT INTO workflow_scripts (id, topic_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)", params![id.to_string(), script.topic_id.to_string(), script.name, script.description, grant, script.captured_sources_grant, script.authoring_session_id.map(|id| id.to_string()), now.to_rfc3339()])?;
             tx.execute("INSERT INTO workflow_script_versions (id, script_id, version, source, created_at) VALUES (?1, ?2, 1, ?3, ?4)", params![version_id.to_string(), id.to_string(), script.source, now.to_rfc3339()])?;
             tx.commit()?;
             Ok((id, version_id))
@@ -434,13 +434,13 @@ impl WorkflowStore for SqliteStorage {
 
     async fn list_workflow_scripts(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkflowScriptRecord>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE space_id = ?1 ORDER BY name"
+                "SELECT {SCRIPT_COLUMNS} FROM workflow_scripts WHERE topic_id = ?1 ORDER BY name"
             ))?;
-            stmt.query_map([space_id.to_string()], script_row)?
+            stmt.query_map([topic_id.to_string()], script_row)?
                 .collect()
         })
         .await
@@ -471,7 +471,7 @@ impl WorkflowStore for SqliteStorage {
             .map(|tools| serde_json::to_string(&tools))
             .transpose()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, space_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, task, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'running', ?15, ?16, ?17, ?18, ?19, ?20)", params![id.to_string(), run.space_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.task, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, topic_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, task, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'running', ?15, ?16, ?17, ?18, ?19, ?20)", params![id.to_string(), run.topic_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.task, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339()])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {
@@ -505,9 +505,9 @@ impl WorkflowStore for SqliteStorage {
 
     async fn list_workflow_runs(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
-        self.with_conn(move |conn| { let mut stmt = conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE space_id = ?1 ORDER BY created_at DESC"))?; stmt.query_map([space_id.to_string()], run_row)?.collect() }).await
+        self.with_conn(move |conn| { let mut stmt = conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE topic_id = ?1 ORDER BY created_at DESC"))?; stmt.query_map([topic_id.to_string()], run_row)?.collect() }).await
     }
     async fn try_transition_workflow_run_state(
         &self,
@@ -905,13 +905,13 @@ impl WorkflowStore for SqliteStorage {
 
     async fn list_open_workflow_run_holds(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {} FROM workflow_run_holds h \
                  JOIN workflow_runs r ON r.id = h.run_id \
-                 WHERE r.space_id = ?1 AND h.state = 'open' \
+                 WHERE r.topic_id = ?1 AND h.state = 'open' \
                  ORDER BY h.raised_at ASC",
                 RUN_HOLD_COLUMNS
                     .split(", ")
@@ -919,7 +919,7 @@ impl WorkflowStore for SqliteStorage {
                     .collect::<Vec<_>>()
                     .join(", ")
             ))?;
-            stmt.query_map([space_id.to_string()], run_hold_row)?
+            stmt.query_map([topic_id.to_string()], run_hold_row)?
                 .collect()
         })
         .await
@@ -1273,27 +1273,27 @@ impl WorkflowStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NewSpace, SpaceStore};
+    use crate::{NewTopic, TopicStore};
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn list_parked_workflow_runs_returns_only_parked_runs_across_spaces() {
+    async fn list_parked_workflow_runs_returns_only_parked_runs_across_topics() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let first_space = storage
-            .create(NewSpace {
-                name: "first workflow space".into(),
-                slug: "first-workflow-space".parse().expect("slug"),
+        let first_topic = storage
+            .create(NewTopic {
+                name: "first workflow topic".into(),
+                slug: "first-workflow-topic".parse().expect("slug"),
             })
             .await
-            .expect("first space");
-        let second_space = storage
-            .create(NewSpace {
-                name: "second workflow space".into(),
-                slug: "second-workflow-space".parse().expect("slug"),
+            .expect("first topic");
+        let second_topic = storage
+            .create(NewTopic {
+                name: "second workflow topic".into(),
+                slug: "second-workflow-topic".parse().expect("slug"),
             })
             .await
-            .expect("second space");
-        let new_run = |space_id| NewWorkflowRun {
-            space_id,
+            .expect("second topic");
+        let new_run = |topic_id| NewWorkflowRun {
+            topic_id,
             parent_run_id: None,
             parent_seq: None,
             script_version_id: None,
@@ -1314,7 +1314,7 @@ mod tests {
         };
 
         let parked_first = storage
-            .create_workflow_run(new_run(first_space.id))
+            .create_workflow_run(new_run(first_topic.id))
             .await
             .expect("first parked run");
         storage
@@ -1322,11 +1322,11 @@ mod tests {
             .await
             .expect("park first run");
         let running = storage
-            .create_workflow_run(new_run(first_space.id))
+            .create_workflow_run(new_run(first_topic.id))
             .await
             .expect("running run");
         let parked_second = storage
-            .create_workflow_run(new_run(second_space.id))
+            .create_workflow_run(new_run(second_topic.id))
             .await
             .expect("second parked run");
         storage
@@ -1341,7 +1341,7 @@ mod tests {
         assert_eq!(
             parked.iter().map(|run| run.id).collect::<Vec<_>>(),
             vec![parked_second.id, parked_first.id],
-            "the lister includes parked runs from every space in wake order"
+            "the lister includes parked runs from every topic in wake order"
         );
         assert!(
             parked.iter().all(|run| run.state == "parked"),
@@ -1356,16 +1356,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_is_keyed_to_its_raise_and_stops_being_parkable_once_answered() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "hold-store".into(),
                 slug: "hold-store".parse().expect("slug"),
             })
             .await
-            .expect("space");
+            .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -1487,7 +1487,7 @@ mod tests {
         assert_eq!(answered.state, "answered");
         assert!(
             storage
-                .list_open_workflow_run_holds(space.id)
+                .list_open_workflow_run_holds(topic.id)
                 .await
                 .expect("open holds")
                 .is_empty(),
@@ -1498,16 +1498,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn answering_a_parked_run_s_hold_makes_it_due_in_the_same_write() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "hold-wake".into(),
                 slug: "hold-wake".parse().expect("slug"),
             })
             .await
-            .expect("space");
+            .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -1593,16 +1593,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answer_arriving_after_the_run_went_terminal_loses() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "hold-cancel".into(),
                 slug: "hold-cancel".parse().expect("slug"),
             })
             .await
-            .expect("space");
+            .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -1686,16 +1686,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn script_versions_append_and_runs_survive_reopen_shape() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "workflow-test".into(),
                 slug: "workflow-test".parse().expect("slug"),
             })
             .await
-            .expect("space");
+            .expect("topic");
         let (script, first) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "publish".into(),
                 description: "reviewed delivery".into(),
                 source: "return 1".into(),
@@ -1713,7 +1713,7 @@ mod tests {
         assert_eq!(second.version, 2);
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: Some(second.id),
@@ -1741,7 +1741,7 @@ mod tests {
         let inline_id = Uuid::new_v4();
         let inline = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -1852,16 +1852,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn run_events_assign_dense_seqs_and_deliver_idempotently() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "events-test".into(),
                 slug: "events-test".parse().expect("slug"),
             })
             .await
-            .expect("space");
+            .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -2032,10 +2032,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_attempt_is_appended_beside_the_first_not_over_it() {
         let storage = SqliteStorage::in_memory().expect("storage");
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,

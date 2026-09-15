@@ -1,16 +1,16 @@
 mod agent_definition;
 mod conversation;
 mod session_variable;
-mod space;
 mod task_definition;
+mod topic;
 mod workflow_script;
 mod workspace_attachment;
 
 pub use agent_definition::*;
 pub use conversation::*;
 pub use session_variable::*;
-pub use space::*;
 pub use task_definition::*;
+pub use topic::*;
 pub use workflow_script::*;
 pub use workspace_attachment::*;
 
@@ -22,9 +22,9 @@ use serde_json::Value as JsonValue;
 #[cfg(test)]
 use swage_core::{GatewayError, Role, StorageError};
 #[cfg(test)]
-use swage_storage::model::{NewAgentDefinition, NewSession, NewSpace, SpaceSlug};
+use swage_storage::model::{NewAgentDefinition, NewSession, NewTopic, TopicSlug};
 #[cfg(test)]
-use swage_storage::store::{AgentDefinitionStore, SessionStore, SpaceStore, Storage};
+use swage_storage::store::{AgentDefinitionStore, SessionStore, Storage, TopicStore};
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -45,7 +45,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         ConversationService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
         )
     }
 
@@ -60,25 +60,25 @@ mod tests {
 
     async fn make_workspace_service() -> (WorkspaceAttachmentService, Arc<SqliteStorage>, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space should exist");
+            .expect("default topic should exist");
         let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
         let service = WorkspaceAttachmentService::from_state(state);
-        (service, storage, space.id)
+        (service, storage, topic.id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_persists_canonical_path() {
-        let (service, _storage, space_id) = make_workspace_service().await;
+        let (service, _storage, topic_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         std::fs::create_dir(&workspace).expect("workspace dir");
@@ -86,7 +86,7 @@ mod tests {
 
         let response = service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: non_canonical.to_string_lossy().into_owned(),
                     label: None,
@@ -110,14 +110,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn workspace_attachment_mutations_record_audit_events() {
-        let (service, storage, space_id) = make_workspace_service().await;
+        let (service, storage, topic_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("audited");
         std::fs::create_dir(&workspace).expect("workspace dir");
 
         let attached = service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -131,14 +131,14 @@ mod tests {
             .expect("workspace should attach");
         service
             .set_trust(
-                space_id,
+                topic_id,
                 attached.id,
                 UpdateWorkspaceTrustRequest { is_trusted: true },
             )
             .await
             .expect("workspace trust should update");
         service
-            .detach_workspace(space_id, attached.id)
+            .detach_workspace(topic_id, attached.id)
             .await
             .expect("workspace should detach");
 
@@ -181,14 +181,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_workspaces_persists_missing_folder_state() {
-        let (service, _storage, space_id) = make_workspace_service().await;
+        let (service, _storage, topic_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         std::fs::create_dir(&workspace).expect("workspace dir");
 
         let attached = service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -205,7 +205,7 @@ mod tests {
         std::fs::remove_dir(&workspace).expect("workspace dir should be removable");
 
         let list = service
-            .list_workspaces(space_id)
+            .list_workspaces(topic_id)
             .await
             .expect("workspaces should list");
         assert_eq!(list.workspaces.len(), 1);
@@ -221,15 +221,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn attach_workspace_can_become_space_default() {
-        let (service, _storage, space_id) = make_workspace_service().await;
+    async fn attach_workspace_can_become_topic_default() {
+        let (service, _storage, topic_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("default");
         std::fs::create_dir(&workspace).expect("workspace dir");
 
         let response = service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -254,11 +254,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_can_become_session_active_workspace() {
-        let (service, _storage, space_id) = make_workspace_service().await;
+        let (service, _storage, topic_id) = make_workspace_service().await;
         let session = service
             .storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "gateway".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -271,7 +271,7 @@ mod tests {
 
         let response = service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -296,7 +296,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_workspace_rejects_duplicate_canonical_path() {
-        let (service, _storage, space_id) = make_workspace_service().await;
+        let (service, _storage, topic_id) = make_workspace_service().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("actual");
         let symlink = temp.path().join("alias");
@@ -305,7 +305,7 @@ mod tests {
 
         service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: workspace.to_string_lossy().into_owned(),
                     label: None,
@@ -320,7 +320,7 @@ mod tests {
 
         let error = service
             .attach_workspace(
-                space_id,
+                topic_id,
                 CreateWorkspaceAttachmentRequest {
                     path: symlink.to_string_lossy().into_owned(),
                     label: None,
@@ -354,7 +354,7 @@ mod tests {
 
         // Non-nil UUID expected.
         assert_ne!(resp.id, Uuid::nil());
-        assert_ne!(resp.space_id, Uuid::nil());
+        assert_ne!(resp.topic_id, Uuid::nil());
     }
 
     #[tokio::test]
@@ -364,8 +364,8 @@ mod tests {
         let a = svc.create_conversation().await.unwrap();
         let b = svc.create_conversation().await.unwrap();
 
-        // Both conversations should belong to the same default space.
-        assert_eq!(a.space_id, b.space_id);
+        // Both conversations should belong to the same default topic.
+        assert_eq!(a.topic_id, b.topic_id);
         // But have distinct session IDs.
         assert_ne!(a.id, b.id);
     }
@@ -380,15 +380,15 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite should initialise"));
         let service = ConversationService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
         );
         (service, storage)
     }
 
-    fn definition(id: &str, space_id: Option<Uuid>) -> NewAgentDefinition {
+    fn definition(id: &str, topic_id: Option<Uuid>) -> NewAgentDefinition {
         NewAgentDefinition {
             id: id.to_string(),
-            space_id,
+            topic_id,
             display_name: id.to_string(),
             description: String::new(),
             instructions: String::new(),
@@ -466,10 +466,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn conversation_space_effort_uses_retained_config_root() {
+    async fn conversation_topic_effort_uses_retained_config_root() {
         let retained_root = tempfile::tempdir().expect("retained config root");
-        let space_dir = retained_root.path().join("spaces/default");
-        std::fs::create_dir_all(&space_dir).expect("create space config directory");
+        let topic_dir = retained_root.path().join("topics/default");
+        std::fs::create_dir_all(&topic_dir).expect("create topic config directory");
         std::fs::write(
             retained_root.path().join("config.toml"),
             r#"
@@ -490,15 +490,15 @@ default_effort = "low"
         )
         .expect("write global config");
         std::fs::write(
-            space_dir.join("config.toml"),
+            topic_dir.join("config.toml"),
             r#"
 [models.entries.model-a]
 provider_id = "test"
-model_id = "space-model"
+model_id = "topic-model"
 default_effort = "high"
 "#,
         )
-        .expect("write space config");
+        .expect("write topic config");
 
         let (svc, storage) = make_definition_service();
         let response = svc
@@ -666,7 +666,7 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_conversation_rejects_a_workflow_role_name() {
+    async fn fresh_topic_conversation_rejects_a_workflow_role_name() {
         let (svc, storage) = make_definition_service();
 
         // A shipped workflow's roles are bare dispatches inside its script,
@@ -708,17 +708,17 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn create_space_session_accepts_a_definition_scoped_to_that_space() {
+    async fn create_topic_session_accepts_a_definition_scoped_to_that_topic() {
         let (svc, storage) = make_definition_service();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         storage
-            .upsert_agent_definition(definition("triage", Some(space.id)))
+            .upsert_agent_definition(definition("triage", Some(topic.id)))
             .await
             .unwrap();
 
         let resp = svc
-            .create_session_in_space_from_request(
-                space.id,
+            .create_session_in_topic_from_request(
+                topic.id,
                 CreateConversationRequest {
                     selected_model_id: None,
                     agent_id: Some("triage".to_string()),
@@ -733,16 +733,16 @@ default_effort = "high"
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn create_space_session_rejects_a_definition_scoped_to_another_space() {
+    async fn create_topic_session_rejects_a_definition_scoped_to_another_topic() {
         let (svc, storage) = make_definition_service();
-        let space = storage.get_or_create_default().await.unwrap();
-        // Scoped to a space that is not the target: invisible to the
+        let topic = storage.get_or_create_default().await.unwrap();
+        // Scoped to a topic that is not the target: invisible to the
         // selector, so validation must reject it rather than fall through
         // to the default agent.
         let other = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Other".to_string(),
-                slug: SpaceSlug::new("other").unwrap(),
+                slug: TopicSlug::new("other").unwrap(),
             })
             .await
             .unwrap();
@@ -752,8 +752,8 @@ default_effort = "high"
             .unwrap();
 
         let error = svc
-            .create_session_in_space_from_request(
-                space.id,
+            .create_session_in_topic_from_request(
+                topic.id,
                 CreateConversationRequest {
                     selected_model_id: None,
                     agent_id: Some("triage".to_string()),
@@ -761,17 +761,17 @@ default_effort = "high"
                 },
             )
             .await
-            .expect_err("a definition invisible to the space should be rejected");
+            .expect_err("a definition invisible to the topic should be rejected");
 
         assert!(matches!(error, GatewayError::ValidationError(_)));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn create_space_session_reports_a_missing_space_before_the_selector() {
+    async fn create_topic_session_reports_a_missing_topic_before_the_selector() {
         let (svc, _storage) = make_definition_service();
 
         let error = svc
-            .create_session_in_space_from_request(
+            .create_session_in_topic_from_request(
                 Uuid::new_v4(),
                 CreateConversationRequest {
                     selected_model_id: None,
@@ -780,9 +780,9 @@ default_effort = "high"
                 },
             )
             .await
-            .expect_err("a missing space should be reported");
+            .expect_err("a missing topic should be reported");
 
-        assert!(matches!(error, GatewayError::SpaceNotFound { .. }));
+        assert!(matches!(error, GatewayError::TopicNotFound { .. }));
     }
 
     // -----------------------------------------------------------------------

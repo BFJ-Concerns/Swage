@@ -323,8 +323,8 @@ impl ChannelQueueStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NewSession, NewSpace, NewThread};
-    use crate::store::{ChannelQueueStore, SessionStore, SpaceStore, ThreadStore, TurnStore};
+    use crate::model::{NewSession, NewThread, NewTopic};
+    use crate::store::{ChannelQueueStore, SessionStore, ThreadStore, TopicStore, TurnStore};
 
     fn inbound(external_id: &str, content: &str) -> NewChannelInboundMessage {
         NewChannelInboundMessage {
@@ -338,11 +338,11 @@ mod tests {
     }
 
     async fn thread(storage: &SqliteStorage) -> (Uuid, String) {
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             storage,
-            NewSpace {
-                name: "queue space".into(),
-                slug: "queue-space".into(),
+            NewTopic {
+                name: "queue topic".into(),
+                slug: "queue-topic".into(),
             },
         )
         .await
@@ -350,7 +350,7 @@ mod tests {
         let agent_id = "gateway".to_string();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: agent_id.clone(),
                 metadata: None,
                 active_workspace_attachment_id: None,

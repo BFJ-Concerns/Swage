@@ -2,15 +2,15 @@
 // this module remains a compatibility barrel while the non-wire UI state below
 // stays authored locally.
 
-import type { SpaceResponse } from "./protocol/SpaceResponse";
+import type { TopicResponse } from "./protocol/TopicResponse";
 import type { WorkspaceAttachmentResponse } from "./protocol/WorkspaceAttachmentResponse";
 
-import type { CreateSpaceRequest as WireCreateSpaceRequest } from "./protocol/CreateSpaceRequest";
-import type { UpdateSpaceRequest as WireUpdateSpaceRequest } from "./protocol/UpdateSpaceRequest";
+import type { CreateTopicRequest as WireCreateTopicRequest } from "./protocol/CreateTopicRequest";
+import type { UpdateTopicRequest as WireUpdateTopicRequest } from "./protocol/UpdateTopicRequest";
 import type { CreateWorkspaceAttachmentRequest as WireCreateWorkspaceAttachmentRequest } from "./protocol/CreateWorkspaceAttachmentRequest";
 
-export type CreateSpaceRequest = Omit<WireCreateSpaceRequest, "description"> & { description?: string };
-export type UpdateSpaceRequest = WireUpdateSpaceRequest;
+export type CreateTopicRequest = Omit<WireCreateTopicRequest, "description"> & { description?: string };
+export type UpdateTopicRequest = WireUpdateTopicRequest;
 export type CreateWorkspaceAttachmentRequest = Omit<
   WireCreateWorkspaceAttachmentRequest,
   "set_as_default" | "permissions" | "is_trusted"
@@ -21,7 +21,7 @@ export type CreateWorkspaceAttachmentRequest = Omit<
 };
 export type { UpdateWorkspaceTrustRequest } from "./protocol/UpdateWorkspaceTrustRequest";
 
-export type Space = SpaceResponse & {
+export type Topic = TopicResponse & {
   /** Client-side recency marker until the gateway persists last_opened_at. */
   last_opened_at?: string | null;
 };
@@ -141,7 +141,7 @@ export type MessageView = Omit<WireMessageView, "role" | "tool_calls" | "thread_
 // Materials and attachments
 // -------------------------------------------------------------------------
 
-export type MaterialScopeKind = "session" | "space";
+export type MaterialScopeKind = "session" | "topic";
 export type { MaterialResponse as MaterialRecord } from "./protocol/MaterialResponse";
 export type { AttachmentResponse as AttachmentRecord } from "./protocol/AttachmentResponse";
 export type { BackgroundJobResponse as BackgroundJobRecord } from "./protocol/BackgroundJobResponse";
@@ -149,15 +149,15 @@ export type { QueuedAttachmentResponse as AttachmentQueuedResponse } from "./pro
 
 import type { CreateAttachmentRequest as WireCreateAttachmentRequest } from "./protocol/CreateAttachmentRequest";
 import type { CreateMaterialRequest as WireCreateMaterialRequest } from "./protocol/CreateMaterialRequest";
-export type CreateAttachmentRequest = Omit<WireCreateAttachmentRequest, "scope_kind" | "session_id" | "space_id"> & {
+export type CreateAttachmentRequest = Omit<WireCreateAttachmentRequest, "scope_kind" | "session_id" | "topic_id"> & {
   scope_kind: MaterialScopeKind;
   session_id?: string;
-  space_id?: string;
+  topic_id?: string;
 };
-export type CreateMaterialRequest = Omit<WireCreateMaterialRequest, "scope_kind" | "session_id" | "space_id" | "mime_type"> & {
+export type CreateMaterialRequest = Omit<WireCreateMaterialRequest, "scope_kind" | "session_id" | "topic_id" | "mime_type"> & {
   scope_kind: MaterialScopeKind;
   session_id?: string;
-  space_id?: string;
+  topic_id?: string;
   mime_type?: string;
 };
 

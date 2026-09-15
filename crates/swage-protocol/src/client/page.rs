@@ -1,4 +1,4 @@
-//! Pages — agent-run tabs on a space, assembled from module instances —
+//! Pages — agent-run tabs on a topic, assembled from module instances —
 //! and the requests that create and mutate them.
 
 use chrono::{DateTime, Utc};
@@ -10,7 +10,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct CreatePageRequest {
     pub title: String,
-    /// Seed the new page from a template of the same space. Absent creates a
+    /// Seed the new page from a template of the same topic. Absent creates a
     /// blank page. The seeded modules are the page's own from birth; the
     /// template is recorded as the fork's origin, never projected into it.
     #[serde(default)]
@@ -18,7 +18,7 @@ pub struct CreatePageRequest {
     pub template_id: Option<Uuid>,
 }
 
-/// Create a reusable page shape for a space, with its module rows in the
+/// Create a reusable page shape for a topic, with its module rows in the
 /// order they will seed.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct CreatePageTemplateRequest {
@@ -40,7 +40,7 @@ pub struct PageTemplateModuleInput {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct PageTemplateResponse {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -140,7 +140,7 @@ pub struct PageModuleView {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct PageResponse {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -2,10 +2,10 @@
   import ResolvedSkillsPanel from "./ResolvedSkillsPanel.svelte";
 
   interface Props {
-    spaceId: string | null;
+    topicId: string | null;
   }
 
-  let { spaceId }: Props = $props();
+  let { topicId }: Props = $props();
 </script>
 
-<ResolvedSkillsPanel {spaceId} presentation="commands" />
+<ResolvedSkillsPanel {topicId} presentation="commands" />

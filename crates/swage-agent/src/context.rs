@@ -14,7 +14,7 @@ pub struct TurnExecutionContext {
     pub session_id: Uuid,
     pub thread_id: Uuid,
     pub turn_id: Uuid,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
 }
 
 /// Context for tool execution within an agent turn.
@@ -159,9 +159,9 @@ mod tests {
 
     #[test]
     fn trait_working_directory() {
-        let ctx = AgentToolContext::new("a", "s", "/space/root");
+        let ctx = AgentToolContext::new("a", "s", "/topic/root");
         let tc: &dyn ToolContext = &ctx;
-        assert_eq!(tc.working_directory(), Path::new("/space/root"));
+        assert_eq!(tc.working_directory(), Path::new("/topic/root"));
     }
 
     #[test]

@@ -3,16 +3,16 @@ import type { EffectiveAgentDefinitionListResponse } from "../protocol/Effective
 import { ApiError } from "./error";
 
 export async function listEffectiveAgentDefinitions(
-  spaceId: string,
+  topicId: string,
 ): Promise<EffectiveAgentDefinitionResponse[]> {
-  const response = await fetch(`/api/spaces/${spaceId}/agent-definitions`, {
+  const response = await fetch(`/api/topics/${topicId}/agent-definitions`, {
     method: "GET",
   });
   if (!response.ok) {
     throw await ApiError.fromResponse(
       response,
       "GET",
-      `/api/spaces/${spaceId}/agent-definitions`,
+      `/api/topics/${topicId}/agent-definitions`,
     );
   }
   const body = (await response.json()) as EffectiveAgentDefinitionListResponse;

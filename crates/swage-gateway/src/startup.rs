@@ -187,10 +187,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 8: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
-    let space_store: Arc<dyn swage_storage::store::SpaceStore> = raw_storage;
+    let topic_store: Arc<dyn swage_storage::store::TopicStore> = raw_storage;
     let mut state = crate::state::AppState::new_with_config_root(
         storage,
-        space_store,
+        topic_store,
         provider,
         config.clone(),
         tool_dispatcher,
@@ -624,7 +624,7 @@ fn init_logging(config: &swage_config::ResolvedConfig) {
 /// Open the persistent SQLite storage backend.
 ///
 /// Returns `Arc<SqliteStorage>` rather than an erased trait object so the caller
-/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn SpaceStore>`
+/// can type-erase it into both `Arc<dyn Storage>` and `Arc<dyn TopicStore>`
 /// from the same underlying connection pool.
 fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
     Arc::new(
@@ -723,7 +723,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(RunEventPostTool),
         Arc::new(WorkflowHoldTool),
         Arc::new(SessionVariableTool),
-        // Knowledge-base tools: the space's gathered external evidence.
+        // Knowledge-base tools: the topic's gathered external evidence.
         // Host-only; read, capture authoring, and curation authoring are
         // separately grantable.
         Arc::new(KnowledgeSearchTool),
@@ -1086,7 +1086,7 @@ mod tests {
     use swage_storage::{
         SqliteStorage,
         model::{NewWorkflowJournalIntent, NewWorkflowRun},
-        store::{AuditStore, SpaceStore, Storage, WorkflowStore},
+        store::{AuditStore, Storage, TopicStore, WorkflowStore},
     };
     use tokio::net::TcpListener;
     use tracing_subscriber::{Registry, layer::SubscriberExt};
@@ -1135,9 +1135,9 @@ mod tests {
         );
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let new_run = |source_hash: &str| NewWorkflowRun {
-            space_id: space.id,
+            topic_id: topic.id,
             parent_run_id: None,
             parent_seq: None,
             script_version_id: None,
@@ -1210,7 +1210,7 @@ mod tests {
             .expect("complete run with worker result");
         let state = crate::state::AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

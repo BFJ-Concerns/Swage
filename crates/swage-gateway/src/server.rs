@@ -71,7 +71,7 @@ async fn activity_recording_middleware(
 /// # Routes
 ///
 /// The router handles the following endpoints (in priority order):
-/// - `POST /api/spaces` / `GET /api/spaces` - space management
+/// - `POST /api/topics` / `GET /api/topics` - topic management
 /// - conversation, thread, turn, approval, and agent-message APIs
 /// - `GET /api/conversations/{id}/ws` - WebSocket upgrade for live turn events
 /// - `GET /api/work-surface/ws` - listen-only WebSocket for work-surface signals
@@ -79,35 +79,35 @@ async fn activity_recording_middleware(
 /// - `*` - embedded frontend SPA (with fallback)
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        // Space CRUD
+        // Topic CRUD
         .route(
-            "/api/spaces",
-            post(handlers::create_space).get(handlers::list_spaces),
+            "/api/topics",
+            post(handlers::create_topic).get(handlers::list_topics),
         )
         .route(
-            "/api/spaces/{id}",
-            get(handlers::get_space)
-                .put(handlers::update_space)
-                .delete(handlers::delete_space),
+            "/api/topics/{id}",
+            get(handlers::get_topic)
+                .put(handlers::update_topic)
+                .delete(handlers::delete_topic),
         )
         .route(
-            "/api/spaces/{id}/workspaces",
-            get(handlers::list_space_workspaces).post(handlers::attach_space_workspace),
+            "/api/topics/{id}/workspaces",
+            get(handlers::list_topic_workspaces).post(handlers::attach_topic_workspace),
         )
         .route(
-            "/api/spaces/{space_id}/workspaces/{workspace_id}",
-            axum::routing::delete(handlers::detach_space_workspace),
+            "/api/topics/{topic_id}/workspaces/{workspace_id}",
+            axum::routing::delete(handlers::detach_topic_workspace),
         )
         .route(
-            "/api/spaces/{space_id}/workspaces/{workspace_id}/trust",
-            put(handlers::update_space_workspace_trust),
+            "/api/topics/{topic_id}/workspaces/{workspace_id}/trust",
+            put(handlers::update_topic_workspace_trust),
         )
         .route(
-            "/api/spaces/{id}/knowledge-mirror",
+            "/api/topics/{id}/knowledge-mirror",
             post(knowledge_mirror::regenerate),
         )
         .route(
-            "/api/spaces/{id}/workflow-scripts",
+            "/api/topics/{id}/workflow-scripts",
             get(workflow::list_scripts).post(workflow::create_script),
         )
         .route(
@@ -119,7 +119,7 @@ pub fn build_router(state: AppState) -> Router {
             post(workflow::start_saved_run),
         )
         .route(
-            "/api/spaces/{id}/workflow-runs",
+            "/api/topics/{id}/workflow-runs",
             get(workflow::list_runs).post(workflow::start_inline_run),
         )
         .route("/api/workflow-runs/{id}", get(workflow::get_run))
@@ -154,21 +154,21 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sessions/{id}/materials",
             get(handlers::list_session_materials),
         )
-        // Space-scoped session routes. These supplement /api/conversations
-        // and allow the frontend to fetch/create sessions per space.
+        // Topic-scoped session routes. These supplement /api/conversations
+        // and allow the frontend to fetch/create sessions per topic.
         .route(
-            "/api/spaces/{space_id}/sessions",
-            get(handlers::list_space_sessions).post(handlers::create_space_session),
+            "/api/topics/{topic_id}/sessions",
+            get(handlers::list_topic_sessions).post(handlers::create_topic_session),
         )
         .route(
-            "/api/spaces/{id}/attachments",
-            get(handlers::list_space_attachments),
+            "/api/topics/{id}/attachments",
+            get(handlers::list_topic_attachments),
         )
         .route(
-            "/api/spaces/{id}/materials",
-            get(handlers::list_space_materials),
+            "/api/topics/{id}/materials",
+            get(handlers::list_topic_materials),
         )
-        // Skills listing — resolved hierarchy for a space/agent combination.
+        // Skills listing — resolved hierarchy for a topic/agent combination.
         .route("/api/skills", get(handlers::list_skills))
         .route("/api/capabilities", get(handlers::workflow_capabilities))
         // External communication channel gateway.
@@ -217,15 +217,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/overview", get(handlers::operator_overview))
         .route("/api/operator/history", get(handlers::operator_history))
         .route(
-            "/api/spaces/{space_id}/agent-definitions",
+            "/api/topics/{topic_id}/agent-definitions",
             get(handlers::list_effective_agent_definitions),
         )
         .route(
-            "/api/spaces/{space_id}/pages",
+            "/api/topics/{topic_id}/pages",
             get(page::list_pages_handler).post(page::create_page_handler),
         )
         .route(
-            "/api/spaces/{space_id}/page-templates",
+            "/api/topics/{topic_id}/page-templates",
             get(page::list_page_templates_handler).post(page::create_page_template_handler),
         )
         .route(
@@ -410,7 +410,7 @@ mod tests {
     use tower::ServiceExt;
 
     use swage_protocol::client::routes::{Method, routes};
-    use swage_storage::store::{SpaceStore, Storage};
+    use swage_storage::store::{Storage, TopicStore};
 
     use super::build_router;
     use crate::{
@@ -427,7 +427,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

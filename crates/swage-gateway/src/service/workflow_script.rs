@@ -1,6 +1,6 @@
 //! Workflow-script mutations: validate, apply through the store, record.
 //!
-//! Saved workflows are configuration — a named, versioned thing the space
+//! Saved workflows are configuration — a named, versioned thing the topic
 //! keeps and later runs — so every save and update lands here rather than on
 //! the store directly, and every one of them leaves a `configuration_change`
 //! record naming the surface and the session behind it (see
@@ -42,7 +42,7 @@ pub struct WorkflowScriptChange {
 
 /// A script as a caller asks for it to be saved.
 pub struct WorkflowScriptDraft {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
     pub description: String,
     pub source: String,
@@ -66,7 +66,7 @@ pub struct WorkflowScriptEdit {
     pub authoring_session_id: Option<Uuid>,
 }
 
-/// Create a new saved workflow script in a space, recorded.
+/// Create a new saved workflow script in a topic, recorded.
 pub async fn create_workflow_script(
     state: &AppState,
     draft: WorkflowScriptDraft,
@@ -74,22 +74,22 @@ pub async fn create_workflow_script(
     session_id: Option<Uuid>,
 ) -> Result<WorkflowScriptChange, GatewayError> {
     let draft = validate_draft(draft)?;
-    if find_by_name(state, draft.space_id, &draft.name)
+    if find_by_name(state, draft.topic_id, &draft.name)
         .await?
         .is_some()
     {
-        return Err(GatewayError::SpaceConflict(format!(
-            "a workflow script named '{}' already exists in this space",
+        return Err(GatewayError::TopicConflict(format!(
+            "a workflow script named '{}' already exists in this topic",
             draft.name
         )));
     }
 
     let name = draft.name.clone();
-    let space_id = draft.space_id;
+    let topic_id = draft.topic_id;
     let (record, version) = state
         .storage
         .create_workflow_script(NewWorkflowScript {
-            space_id,
+            topic_id,
             name: draft.name,
             description: draft.description,
             source: draft.source,
@@ -99,7 +99,7 @@ pub async fn create_workflow_script(
         })
         .await
         .map_err(GatewayError::from)?;
-    let summary = format!("created workflow script '{name}' in space {space_id}");
+    let summary = format!("created workflow script '{name}' in topic {topic_id}");
 
     record_config_change(
         state,
@@ -140,7 +140,7 @@ pub async fn update_workflow_script(
         .await
         .map_err(GatewayError::from)?
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no workflow script {id} exists in this space"))
+            GatewayError::ValidationError(format!("no workflow script {id} exists in this topic"))
         })?;
     if edit.delivery_grant.is_some() && edit.authoring_session_id.is_some() {
         return Err(agent_authored_grant_refusal());
@@ -235,11 +235,11 @@ pub async fn update_workflow_script(
     })
 }
 
-/// Save a script by name: a new script where the space has none by that name,
-/// a new version of the space's own script where it does.
+/// Save a script by name: a new script where the topic has none by that name,
+/// a new version of the topic's own script where it does.
 ///
 /// A shipped or skill-carried workflow of the same name is left untouched —
-/// the space's script shadows it from then on, which is the same direction an
+/// the topic's script shadows it from then on, which is the same direction an
 /// operator's own copy takes.
 pub async fn save_workflow_script(
     state: &AppState,
@@ -248,7 +248,7 @@ pub async fn save_workflow_script(
     session_id: Option<Uuid>,
 ) -> Result<WorkflowScriptChange, GatewayError> {
     let draft = validate_draft(draft)?;
-    match find_by_name(state, draft.space_id, &draft.name).await? {
+    match find_by_name(state, draft.topic_id, &draft.name).await? {
         Some(existing) => {
             update_workflow_script(
                 state,
@@ -325,12 +325,12 @@ fn agent_authored_grant_refusal() -> GatewayError {
 
 async fn find_by_name(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     name: &str,
 ) -> Result<Option<WorkflowScriptRecord>, GatewayError> {
     Ok(state
         .storage
-        .list_workflow_scripts(space_id)
+        .list_workflow_scripts(topic_id)
         .await
         .map_err(GatewayError::from)?
         .into_iter()
@@ -352,7 +352,7 @@ async fn head_version(state: &AppState, id: Uuid) -> Result<u32, GatewayError> {
 fn snapshot(record: &WorkflowScriptRecord, head_version: u32) -> serde_json::Value {
     serde_json::json!({
         "id": record.id,
-        "space_id": record.space_id,
+        "topic_id": record.topic_id,
         "name": record.name,
         "description": record.description,
         "head_version": head_version,
@@ -369,13 +369,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use swage_storage::{NewSession, SpaceStore, SqliteStorage, Storage};
+    use swage_storage::{NewSession, SqliteStorage, Storage, TopicStore};
 
     const SOURCE: &str = "return 1;";
 
-    fn draft(space_id: Uuid, name: &str) -> WorkflowScriptDraft {
+    fn draft(topic_id: Uuid, name: &str) -> WorkflowScriptDraft {
         WorkflowScriptDraft {
-            space_id,
+            topic_id,
             name: name.into(),
             description: "A saved workflow.".into(),
             source: SOURCE.into(),
@@ -389,7 +389,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -399,11 +399,11 @@ mod tests {
 
     /// A real session row: the audit trail's session reference is a foreign key,
     /// so a save naming a session only records against one that exists.
-    async fn session(state: &AppState, space_id: Uuid) -> Uuid {
+    async fn session(state: &AppState, topic_id: Uuid) -> Uuid {
         state
             .storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "current-agent".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -416,8 +416,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn refuses_a_delivery_grant_on_an_agent_authored_save() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let mut draft = draft(space.id, "escalate");
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let mut draft = draft(topic.id, "escalate");
         draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         draft.authoring_session_id = Some(Uuid::new_v4());
 
@@ -432,7 +432,7 @@ mod tests {
         assert!(
             state
                 .storage
-                .list_workflow_scripts(space.id)
+                .list_workflow_scripts(topic.id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -443,9 +443,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_authored_script_resolves_no_delivery_grant() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let session = session(&state, space.id).await;
-        let mut draft = draft(space.id, "authored");
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let session = session(&state, topic.id).await;
+        let mut draft = draft(topic.id, "authored");
         draft.authoring_session_id = Some(session);
         let change = save_workflow_script(&state, draft, "workflow_save", Some(session))
             .await
@@ -480,8 +480,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_operator_script_keeps_its_delivery_grant() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let mut draft = draft(space.id, "operator-authored");
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let mut draft = draft(topic.id, "operator-authored");
         draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         let change = save_workflow_script(&state, draft, "operator_http", None)
             .await
@@ -498,14 +498,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_second_save_appends_a_version_rather_than_a_row() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let first = save_workflow_script(&state, draft(space.id, "sweep"), "workflow_save", None)
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let first = save_workflow_script(&state, draft(topic.id, "sweep"), "workflow_save", None)
             .await
             .unwrap();
         assert!(first.created);
         assert_eq!(first.head_version, 1);
 
-        let mut second = draft(space.id, "sweep");
+        let mut second = draft(topic.id, "sweep");
         second.source = "return 2;".into();
         let second = save_workflow_script(&state, second, "workflow_save", None)
             .await
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(
             state
                 .storage
-                .list_workflow_scripts(space.id)
+                .list_workflow_scripts(topic.id)
                 .await
                 .unwrap()
                 .len(),
@@ -537,8 +537,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_meta_header_names_the_saved_script() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let mut draft = draft(space.id, "ignored");
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let mut draft = draft(topic.id, "ignored");
         draft.source =
             "export const meta = { name: \"declared\", description: \"From the header.\" };\n\nreturn 1;"
                 .into();
@@ -558,9 +558,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_update_uses_the_source_header_description_over_the_request_field() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
         let change =
-            save_workflow_script(&state, draft(space.id, "described"), "operator_http", None)
+            save_workflow_script(&state, draft(topic.id, "described"), "operator_http", None)
                 .await
                 .unwrap();
 
@@ -593,9 +593,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn rejects_a_name_that_is_not_a_workflow_name() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
         let error =
-            save_workflow_script(&state, draft(space.id, "not a name"), "workflow_save", None)
+            save_workflow_script(&state, draft(topic.id, "not a name"), "workflow_save", None)
                 .await
                 .expect_err("a spaced name must be refused");
         assert!(matches!(error, GatewayError::ValidationError(_)));
@@ -604,9 +604,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_save_records_a_configuration_change_naming_the_session() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let session = session(&state, space.id).await;
-        let mut draft = draft(space.id, "recorded");
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let session = session(&state, topic.id).await;
+        let mut draft = draft(topic.id, "recorded");
         draft.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         let change = save_workflow_script(&state, draft, "workflow_save", Some(session))
             .await
@@ -636,10 +636,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saving_over_an_operator_script_makes_it_the_conversation_s_own() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let session = session(&state, space.id).await;
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let session = session(&state, topic.id).await;
         let operator =
-            save_workflow_script(&state, draft(space.id, "sweep"), "operator_http", None)
+            save_workflow_script(&state, draft(topic.id, "sweep"), "operator_http", None)
                 .await
                 .unwrap();
         assert_eq!(
@@ -653,7 +653,7 @@ mod tests {
             None
         );
 
-        let mut agent = draft(space.id, "sweep");
+        let mut agent = draft(topic.id, "sweep");
         agent.source = "return 2;".into();
         agent.authoring_session_id = Some(session);
         let saved = save_workflow_script(&state, agent, "workflow_save", Some(session))
@@ -713,15 +713,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_conversation_cannot_save_over_a_delivering_script() {
         let state = state();
-        let space = state.space_store.get_or_create_default().await.unwrap();
-        let session = session(&state, space.id).await;
-        let mut operator = draft(space.id, "delivering");
+        let topic = state.topic_store.get_or_create_default().await.unwrap();
+        let session = session(&state, topic.id).await;
+        let mut operator = draft(topic.id, "delivering");
         operator.delivery_grant = Some(serde_json::json!({"targets": ["webhook"]}));
         let operator = save_workflow_script(&state, operator, "operator_http", None)
             .await
             .unwrap();
 
-        let mut agent = draft(space.id, "delivering");
+        let mut agent = draft(topic.id, "delivering");
         agent.source = "return 2;".into();
         agent.authoring_session_id = Some(session);
         let error = save_workflow_script(&state, agent, "workflow_save", Some(session))

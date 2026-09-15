@@ -195,7 +195,7 @@ governed system without being copied out of the CLI's own store.
 
 ## Pages
 
-Pages are work surfaces inside a space, assembled from ordered module
+Pages are work surfaces inside a topic, assembled from ordered module
 instances. An agent or workflow can write to a page's modules, and users
 can annotate individual modules with notes.
 
@@ -228,7 +228,7 @@ disconnected.
 
 A run's output can be routed to one or more destinations. The four target
 kinds are: an external channel (Telegram, dev DM or thread), the gateway's
-local store (as a log record), a page in the run's own space, and a
+local store (as a log record), a page in the run's own topic, and a
 webhook URL. Setting `store_local_output` on the routing request adds a
 local-storage target alongside any explicit targets.
 
@@ -324,7 +324,7 @@ The crate is organised into four surfaces, each emitting its own schema
 document:
 
 - **Client** — conversations, streaming, approvals, schedules, knowledge,
-  voice, workflows, channels, delivery, spaces, settings, materials, recovery,
+  voice, workflows, channels, delivery, topics, settings, materials, recovery,
   context reports, and provider sign-in.
 - **Hosting** — presence, operator overview, agent definitions, approvals,
   and configuration. The contract between the gateway and its hosting
@@ -347,7 +347,7 @@ reaches it).
 The client surface is gaining a route manifest — a single table that names
 each covered HTTP route once, with its method, path template, request and
 response schema names. The manifest does not yet cover the full client
-surface: the space CRUD routes are the first entries, and routes not yet in
+surface: the topic CRUD routes are the first entries, and routes not yet in
 the manifest are registered directly on the router without appearing in the
 projections below. Two projections are generated from the manifest:
 
@@ -454,12 +454,12 @@ two sandbox-eligible tools.
 
 **Workflow** — `workflow_run` (start a workflow), `workflow_list` (list saved
 scripts), `workflow_save` (save a script), `workflow_run_status` (list the
-space's runs that have not ended with the events each is waiting on, or read
+topic's runs that have not ended with the events each is waiting on, or read
 one run in any state), and `workflow_run_account` (read a run's terminal
 account — see
 [Workflow engine — Terminal account](workflow-engine.md#terminal-account)).
 `workflow_run_status` and `workflow_run_account` are scoped to the caller's
-session space: a run in another space reads as absent rather than forbidden.
+session topic: a run in another topic reads as absent rather than forbidden.
 
 **Pages and delivery** — `page_read`, `page_write`, and `run_event_post`.
 

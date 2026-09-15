@@ -5,13 +5,13 @@ use uuid::Uuid;
 use swage_core::GatewayError;
 use swage_storage::{
     model::{NewWorkspaceAttachment, WorkspaceAttachment},
-    store::{SpaceStore, Storage},
+    store::{Storage, TopicStore},
 };
 
 use crate::config_change::{ConfigChange, record_config_change};
 use crate::state::AppState;
 
-pub use swage_protocol::client::space::{
+pub use swage_protocol::client::topic::{
     CreateWorkspaceAttachmentRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
     WorkspaceAttachmentResponse,
 };
@@ -20,14 +20,14 @@ fn default_workspace_permissions() -> Vec<String> {
     vec!["read".to_string()]
 }
 
-/// Derives a URL-safe slug from a space name.
+/// Derives a URL-safe slug from a topic name.
 ///
 /// - Lowercases the name
-/// - Replaces spaces with hyphens
+/// - Replaces topics with hyphens
 /// - Strips any character that is neither ASCII alphanumeric nor a hyphen
 pub struct WorkspaceAttachmentService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) space_store: Arc<dyn SpaceStore>,
+    pub(crate) topic_store: Arc<dyn TopicStore>,
     audit_state: AppState,
 }
 
@@ -37,19 +37,19 @@ impl WorkspaceAttachmentService {
     pub fn from_state(state: AppState) -> Self {
         Self {
             storage: Arc::clone(&state.storage),
-            space_store: Arc::clone(&state.space_store),
+            topic_store: Arc::clone(&state.topic_store),
             audit_state: state,
         }
     }
 
     pub async fn list_workspaces(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<WorkspaceAttachmentListResponse, GatewayError> {
-        self.ensure_space_exists(space_id).await?;
+        self.ensure_topic_exists(topic_id).await?;
         let workspaces = self
             .storage
-            .list_workspace_attachments_by_space(space_id)
+            .list_workspace_attachments_by_topic(topic_id)
             .await?;
         let mut refreshed = Vec::with_capacity(workspaces.len());
         for workspace in workspaces {
@@ -62,10 +62,10 @@ impl WorkspaceAttachmentService {
 
     pub async fn attach_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         req: CreateWorkspaceAttachmentRequest,
     ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
-        self.ensure_space_exists(space_id).await?;
+        self.ensure_topic_exists(topic_id).await?;
         let path = req.path.trim();
         if path.is_empty() {
             return Err(GatewayError::ValidationError(
@@ -103,7 +103,7 @@ impl WorkspaceAttachmentService {
         let workspace = self
             .storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                space_id,
+                topic_id,
                 label,
                 path: canonical_path,
                 permissions,
@@ -112,11 +112,11 @@ impl WorkspaceAttachmentService {
             .await?;
         if req.set_as_default {
             self.storage
-                .set_space_default_workspace(space_id, Some(workspace.id))
+                .set_topic_default_workspace(topic_id, Some(workspace.id))
                 .await?;
         }
         if let Some(session_id) = req.active_session_id {
-            self.ensure_session_belongs_to_space(space_id, session_id)
+            self.ensure_session_belongs_to_topic(topic_id, session_id)
                 .await?;
             self.storage
                 .set_session_active_workspace(session_id, Some(workspace.id))
@@ -140,12 +140,12 @@ impl WorkspaceAttachmentService {
 
     pub async fn set_trust(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Uuid,
         req: UpdateWorkspaceTrustRequest,
     ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
         let prior = self.workspace_snapshot(workspace_id).await?;
-        self.ensure_workspace_belongs_to_space(space_id, workspace_id)
+        self.ensure_workspace_belongs_to_topic(topic_id, workspace_id)
             .await?;
         let workspace = self
             .storage
@@ -168,11 +168,11 @@ impl WorkspaceAttachmentService {
 
     pub async fn detach_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), GatewayError> {
         let prior = self.workspace_snapshot(workspace_id).await?;
-        self.ensure_workspace_belongs_to_space(space_id, workspace_id)
+        self.ensure_workspace_belongs_to_topic(topic_id, workspace_id)
             .await?;
         self.storage
             .delete_workspace_attachment(workspace_id)
@@ -228,17 +228,17 @@ impl WorkspaceAttachmentService {
         .await
     }
 
-    async fn ensure_space_exists(&self, space_id: Uuid) -> Result<(), GatewayError> {
-        self.space_store
-            .get(space_id)
+    async fn ensure_topic_exists(&self, topic_id: Uuid) -> Result<(), GatewayError> {
+        self.topic_store
+            .get(topic_id)
             .await?
             .map(|_| ())
-            .ok_or(GatewayError::SpaceNotFound { id: space_id })
+            .ok_or(GatewayError::TopicNotFound { id: topic_id })
     }
 
-    async fn ensure_workspace_belongs_to_space(
+    async fn ensure_workspace_belongs_to_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), GatewayError> {
         let workspace = self
@@ -250,17 +250,17 @@ impl WorkspaceAttachmentService {
                     "workspace attachment {workspace_id} not found"
                 ))
             })?;
-        if workspace.space_id != space_id {
+        if workspace.topic_id != topic_id {
             return Err(GatewayError::ValidationError(format!(
-                "workspace attachment {workspace_id} does not belong to space {space_id}"
+                "workspace attachment {workspace_id} does not belong to topic {topic_id}"
             )));
         }
         Ok(())
     }
 
-    async fn ensure_session_belongs_to_space(
+    async fn ensure_session_belongs_to_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         session_id: Uuid,
     ) -> Result<(), GatewayError> {
         let session = self
@@ -268,9 +268,9 @@ impl WorkspaceAttachmentService {
             .get_session(session_id)
             .await?
             .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
-        if session.space_id != space_id {
+        if session.topic_id != topic_id {
             return Err(GatewayError::ValidationError(format!(
-                "session {session_id} does not belong to space {space_id}"
+                "session {session_id} does not belong to topic {topic_id}"
             )));
         }
         Ok(())
@@ -303,7 +303,7 @@ fn workspace_snapshot(workspace: &WorkspaceAttachment) -> Result<serde_json::Val
 fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentResponse {
     WorkspaceAttachmentResponse {
         id: workspace.id,
-        space_id: workspace.space_id,
+        topic_id: workspace.topic_id,
         label: workspace.label,
         path: workspace.path,
         canonical_path: workspace.canonical_path,

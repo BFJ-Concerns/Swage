@@ -14,7 +14,7 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
 #[cfg(test)]
 tokio::task_local! {
-    static SPACE_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
+    static TOPIC_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
 }
 
 /// Build the context assembly elements for a turn.
@@ -26,7 +26,7 @@ tokio::task_local! {
 ///   operator-guidance rules (the standard agent-guidance files, resolved by
 ///   `operator_guidance_rules` from the config root and trusted workspaces)
 /// - `SkillsElement`  — from the active skill set
-/// - `MemoryElement`  — only for a named assembly, from pre-loaded space
+/// - `MemoryElement`  — only for a named assembly, from pre-loaded topic
 ///   memory content (may be empty)
 /// - `HistoryElement` — from the thread's message history
 ///
@@ -114,8 +114,8 @@ pub(crate) fn build_assembly_elements(
             .into_iter()
             .map(|resolved| Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>),
     );
-    if let Some((content, space_name)) = memory {
-        elements.push(Box::new(MemoryElement::new(content, space_name)));
+    if let Some((content, topic_name)) = memory {
+        elements.push(Box::new(MemoryElement::new(content, topic_name)));
     }
     elements.push(Box::new(HistoryElement::new(history)));
     elements
@@ -146,10 +146,10 @@ pub(crate) fn is_default_context_assembly(assembly_name: &str) -> bool {
 }
 
 /// Build the session-environment half of orientation from what the turn
-/// already resolved: the space row, the sandbox workspace root, and the
+/// already resolved: the topic row, the sandbox workspace root, and the
 /// session's channel origin when it speaks through one.
 pub(crate) fn build_session_environment(
-    space: &swage_storage::Space,
+    topic: &swage_storage::Topic,
     working_directory: Option<String>,
     session: &swage_storage::Session,
 ) -> SessionEnvironment {
@@ -176,12 +176,12 @@ pub(crate) fn build_session_environment(
         });
 
     SessionEnvironment {
-        space_name: if space.is_default {
+        topic_name: if topic.is_default {
             String::new()
         } else {
-            space.name.clone()
+            topic.name.clone()
         },
-        space_description: space.description.clone(),
+        topic_description: topic.description.clone(),
         working_directory,
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the
@@ -195,14 +195,14 @@ pub(crate) fn build_session_environment(
 /// orientation element, distinct from the active set whose instructions the
 /// skills element carries.
 pub(crate) fn available_skills_for_agent(
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: &str,
     swage_root: Option<&Path>,
 ) -> Vec<AvailableSkill> {
     let Some(root) = swage_root else {
         return vec![];
     };
-    crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id))
+    crate::skill::discover_available_for_scope(root, topic_slug, Some(agent_id))
         .into_iter()
         .map(|skill| AvailableSkill {
             name: skill.name,
@@ -233,7 +233,7 @@ fn active_skill_from_definition(
 /// the interactive skill catalogue. Unlike declarative configuration, an
 /// unavailable dispatch request is an admission failure.
 pub(crate) fn resolve_requested_skills_for_agent(
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: &str,
     swage_root: Option<&Path>,
     requested_skills: &[String],
@@ -247,7 +247,7 @@ pub(crate) fn resolve_requested_skills_for_agent(
             requested_skills[0]
         ));
     };
-    let available = crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id));
+    let available = crate::skill::discover_available_for_scope(root, topic_slug, Some(agent_id));
     requested_skills
         .iter()
         .enumerate()
@@ -261,42 +261,42 @@ pub(crate) fn resolve_requested_skills_for_agent(
         .collect()
 }
 
-/// Construct the shared global → space → optional-agent config hierarchy.
+/// Construct the shared global → topic → optional-agent config hierarchy.
 ///
 /// The workflow-ephemeral agent is a dispatch-only identity, not an
-/// operator-configurable agent. Its hierarchy stops at the space level so no
+/// operator-configurable agent. Its hierarchy stops at the topic level so no
 /// filesystem content can join its assembled context.
 pub(crate) fn configuration_hierarchy(
     root: &Path,
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: Option<&str>,
 ) -> Vec<(HierarchyLevel, PathBuf)> {
-    swage_config::configuration_hierarchy(root, space_slug, agent_id)
+    swage_config::configuration_hierarchy(root, topic_slug, agent_id)
 }
 
-/// Load space memory content by reading all `.md` files from the space's
-/// memory directory (`{swage_root}/spaces/{space_slug}/memory/`).
+/// Load topic memory content by reading all `.md` files from the topic's
+/// memory directory (`{swage_root}/topics/{topic_slug}/memory/`).
 ///
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> String {
+pub(crate) async fn load_topic_memory(swage_root: &Path, topic_slug: &str) -> String {
     #[cfg(test)]
-    SPACE_MEMORY_LOAD_COUNT
+    TOPIC_MEMORY_LOAD_COUNT
         .try_with(|count| count.set(count.get() + 1))
         .ok();
 
-    let memory_dir = swage_root.join("spaces").join(space_slug).join("memory");
+    let memory_dir = swage_root.join("topics").join(topic_slug).join("memory");
 
     let mut entries = match tokio::fs::read_dir(&memory_dir).await {
         Ok(rd) => rd,
-        // Missing directory is the common case for new spaces.
+        // Missing directory is the common case for new topics.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return String::new(),
         Err(error) => {
             tracing::warn!(
                 path = %memory_dir.display(),
                 %error,
-                "failed to read space memory directory"
+                "failed to read topic memory directory"
             );
             return String::new();
         }
@@ -317,7 +317,7 @@ pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> St
                 tracing::warn!(
                     path = %memory_dir.display(),
                     %error,
-                    "failed to enumerate space memory directory"
+                    "failed to enumerate topic memory directory"
                 );
                 return String::new();
             }
@@ -334,7 +334,7 @@ pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> St
                 }
             }
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "failed to read space memory file");
+                tracing::warn!(path = %path.display(), %error, "failed to read topic memory file");
             }
         }
     }
@@ -343,14 +343,14 @@ pub(crate) async fn load_space_memory(swage_root: &Path, space_slug: &str) -> St
 }
 
 #[cfg(test)]
-pub(crate) async fn observe_space_memory_loads<F>(future: F) -> (F::Output, usize)
+pub(crate) async fn observe_topic_memory_loads<F>(future: F) -> (F::Output, usize)
 where
     F: std::future::Future,
 {
-    SPACE_MEMORY_LOAD_COUNT
+    TOPIC_MEMORY_LOAD_COUNT
         .scope(std::cell::Cell::new(0), async move {
             let output = future.await;
-            let count = SPACE_MEMORY_LOAD_COUNT.with(std::cell::Cell::get);
+            let count = TOPIC_MEMORY_LOAD_COUNT.with(std::cell::Cell::get);
             (output, count)
         })
         .await
@@ -363,7 +363,7 @@ pub(crate) fn resolve_swage_root(state: &AppState) -> &Path {
 pub(crate) async fn load_active_skills_for_agent(
     state: &AppState,
     session_id: Uuid,
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: &str,
     swage_root: Option<&Path>,
     include_user_activated: bool,
@@ -372,13 +372,13 @@ pub(crate) async fn load_active_skills_for_agent(
 ) -> Result<Vec<ActiveSkill>, String> {
     let Some(root) = swage_root else {
         return resolve_requested_skills_for_agent(
-            space_slug,
+            topic_slug,
             agent_id,
             swage_root,
             requested_skills,
         );
     };
-    let available = crate::skill::discover_available_for_scope(root, space_slug, Some(agent_id));
+    let available = crate::skill::discover_available_for_scope(root, topic_slug, Some(agent_id));
 
     // Agent-level skills are automatic for the current agent context. Store
     // them idempotently so the normal activation ordering and filtering path is
@@ -437,7 +437,7 @@ pub(crate) async fn load_active_skills_for_agent(
     }
 
     for requested in
-        resolve_requested_skills_for_agent(space_slug, agent_id, Some(root), requested_skills)?
+        resolve_requested_skills_for_agent(topic_slug, agent_id, Some(root), requested_skills)?
     {
         if !active.iter().any(|skill| skill.name == requested.name) {
             active.push(ActiveSkill {
@@ -479,7 +479,7 @@ mod shipped_skill_tests {
     #[test]
     fn requested_dispatch_skills_use_the_interactive_discovery_hierarchy() {
         let root = tempfile::tempdir().expect("temporary root");
-        let skill_dir = root.path().join("spaces/default/skills/dispatch-proof");
+        let skill_dir = root.path().join("topics/default/skills/dispatch-proof");
         std::fs::create_dir_all(&skill_dir).expect("create skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -512,9 +512,9 @@ mod shipped_skill_tests {
     #[test]
     fn workflow_ephemeral_agent_directory_is_excluded_from_hierarchy_catalogue_and_named_lookups() {
         let root = tempfile::tempdir().expect("temporary root");
-        let space = root.path().join("spaces/dispatch");
-        let reserved_agent = space.join("agents").join(RESERVED_WORKFLOW_AGENT_ID);
-        let ordinary_agent = space.join("agents/reviewer");
+        let topic = root.path().join("topics/dispatch");
+        let reserved_agent = topic.join("agents").join(RESERVED_WORKFLOW_AGENT_ID);
+        let ordinary_agent = topic.join("agents/reviewer");
 
         for agent in [&reserved_agent, &ordinary_agent] {
             std::fs::create_dir_all(agent.join("skills/injected-skill"))

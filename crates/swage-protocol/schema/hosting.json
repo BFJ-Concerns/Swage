@@ -84,15 +84,15 @@
         "agent_id": {
           "type": "string"
         },
-        "space_id": {
+        "summary": {
+          "type": "string"
+        },
+        "topic_id": {
           "type": [
             "string",
             "null"
           ],
           "format": "uuid"
-        },
-        "summary": {
-          "type": "string"
         }
       },
       "required": [
@@ -140,14 +140,14 @@
             "type": "string"
           }
         },
-        "space_id": {
+        "tool_permissions": true,
+        "topic_id": {
           "type": [
             "string",
             "null"
           ],
           "format": "uuid"
         },
-        "tool_permissions": true,
         "updated_at": {
           "type": "string",
           "format": "date-time"
@@ -167,7 +167,7 @@
       "description": "Scope filter for durable agent-definition reads and deletes.",
       "type": "object",
       "properties": {
-        "space_id": {
+        "topic_id": {
           "type": [
             "string",
             "null"
@@ -285,7 +285,7 @@
           "type": "string",
           "format": "uuid"
         },
-        "space_id": {
+        "topic_id": {
           "type": "string",
           "format": "uuid"
         },
@@ -297,7 +297,7 @@
       "required": [
         "turn_id",
         "session_id",
-        "space_id",
+        "topic_id",
         "recorded_at",
         "assembly_name"
       ]
@@ -469,14 +469,14 @@
             "type": "string"
           }
         },
-        "space_id": {
+        "tool_permissions": true,
+        "topic_id": {
           "type": [
             "string",
             "null"
           ],
           "format": "uuid"
-        },
-        "tool_permissions": true
+        }
       },
       "required": [
         "id",
@@ -737,7 +737,7 @@
       ]
     },
     "EffectiveAgentDefinitionResponse": {
-      "description": "An agent definition available when creating a session in one space.",
+      "description": "An agent definition available when creating a session in one topic.",
       "type": "object",
       "properties": {
         "description": {
@@ -797,7 +797,7 @@
       "enum": [
         "built_in",
         "global",
-        "space"
+        "topic"
       ]
     },
     "ExternalChannelIntegration": {
@@ -830,7 +830,7 @@
       ]
     },
     "KnowledgeMirrorRegenerateResponse": {
-      "description": "Result of regenerating a space's knowledge-base browse mirror — a\ndisposable markdown projection of the database-authoritative store.",
+      "description": "Result of regenerating a topic's knowledge-base browse mirror — a\ndisposable markdown projection of the database-authoritative store.",
       "type": "object",
       "properties": {
         "files_written": {
@@ -1045,18 +1045,18 @@
             "null"
           ]
         },
-        "space_id": {
+        "topic_id": {
           "type": "string",
           "format": "uuid"
         },
-        "space_name": {
+        "topic_name": {
           "type": "string"
         }
       },
       "required": [
         "id",
-        "space_id",
-        "space_name",
+        "topic_id",
+        "topic_name",
         "created_at",
         "last_activity",
         "has_interrupted_turn",
@@ -1314,7 +1314,7 @@
       ]
     },
     "SessionPolicy": {
-      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `space_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `topic_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
       "oneOf": [
         {
           "type": "object",
@@ -1326,14 +1326,14 @@
               "type": "string",
               "const": "fresh"
             },
-            "space_id": {
+            "topic_id": {
               "type": "string",
               "format": "uuid"
             }
           },
           "required": [
             "policy",
-            "space_id",
+            "topic_id",
             "agent_id"
           ]
         },
@@ -1391,14 +1391,14 @@
             "type": "string"
           }
         },
-        "space_id": {
+        "tool_permissions": true,
+        "topic_id": {
           "type": [
             "string",
             "null"
           ],
           "format": "uuid"
-        },
-        "tool_permissions": true
+        }
       },
       "required": [
         "display_name",

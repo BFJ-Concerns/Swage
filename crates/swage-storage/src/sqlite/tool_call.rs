@@ -259,12 +259,12 @@ impl ToolCallStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewSession, NewSpace, NewThread, NewTurn, TurnState};
-    use crate::store::{SessionStore, SpaceStore, ThreadStore, ToolCallStore, TurnStore};
+    use crate::model::{NewSession, NewThread, NewTopic, NewTurn, TurnState};
+    use crate::store::{SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore};
 
     use super::*;
 
-    /// Set up an in-memory DB with a space, session, thread, and turn.
+    /// Set up an in-memory DB with a topic, session, thread, and turn.
     ///
     /// Inserts the thread via raw SQL because create_thread (task 6ay8) is not
     /// yet implemented. Task 1byf will update this once the trait lands.
@@ -273,9 +273,9 @@ mod tests {
         use rusqlite::params as sql_params;
 
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             &storage,
-            NewSpace {
+            NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             },
@@ -284,7 +284,7 @@ mod tests {
         .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

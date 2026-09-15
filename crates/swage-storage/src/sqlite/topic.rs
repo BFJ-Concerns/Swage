@@ -5,15 +5,15 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewSpace, Space, SpaceSlug};
+use crate::model::{NewTopic, Topic, TopicSlug};
 use crate::sqlite::SqliteStorage;
-use crate::store::SpaceStore;
+use crate::store::TopicStore;
 
 // ---------------------------------------------------------------------------
 // Row mapping
 // ---------------------------------------------------------------------------
 
-fn row_to_space(row: &rusqlite::Row<'_>) -> rusqlite::Result<Space> {
+fn row_to_topic(row: &rusqlite::Row<'_>) -> rusqlite::Result<Topic> {
     let id: String = row.get(0)?;
     // Column order:
     // id(0), name(1), description(2), is_default(3), slug(4), created_at(5), updated_at(6)
@@ -21,7 +21,7 @@ fn row_to_space(row: &rusqlite::Row<'_>) -> rusqlite::Result<Space> {
     let updated: String = row.get(6)?;
     let slug: String = row.get(4)?;
 
-    Ok(Space {
+    Ok(Topic {
         id: parse_uuid(&id)?,
         name: row.get(1)?,
         description: row.get(2)?,
@@ -46,36 +46,36 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
-fn parse_slug(s: &str) -> rusqlite::Result<SpaceSlug> {
-    SpaceSlug::new(s).map_err(|e| {
+fn parse_slug(s: &str) -> rusqlite::Result<TopicSlug> {
+    TopicSlug::new(s).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, e.into())
     })
 }
 
 // ---------------------------------------------------------------------------
-// SpaceStore
+// TopicStore
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-impl SpaceStore for SqliteStorage {
-    async fn create(&self, space: NewSpace) -> Result<Space, StorageError> {
+impl TopicStore for SqliteStorage {
+    async fn create(&self, topic: NewTopic) -> Result<Topic, StorageError> {
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO spaces (id, name, description, is_default, slug, created_at, updated_at)
+                "INSERT INTO topics (id, name, description, is_default, slug, created_at, updated_at)
                  VALUES (?1, ?2, '', 0, ?3, ?4, ?4)",
-                params![id.to_string(), &space.name, space.slug.as_str(), &now_str],
+                params![id.to_string(), &topic.name, topic.slug.as_str(), &now_str],
             )?;
 
-            Ok(Space {
+            Ok(Topic {
                 id,
-                name: space.name,
+                name: topic.name,
                 description: String::new(),
                 is_default: false,
-                slug: space.slug,
+                slug: topic.slug,
                 created_at: now,
                 updated_at: now,
             })
@@ -83,49 +83,49 @@ impl SpaceStore for SqliteStorage {
         .await
     }
 
-    async fn get(&self, id: Uuid) -> Result<Option<Space>, StorageError> {
+    async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM spaces WHERE id = ?1",
+                 FROM topics WHERE id = ?1",
                 params![id.to_string()],
-                row_to_space,
+                row_to_topic,
             )
             .optional()
         })
         .await
     }
 
-    async fn get_by_name(&self, name: &str) -> Result<Option<Space>, StorageError> {
+    async fn get_by_name(&self, name: &str) -> Result<Option<Topic>, StorageError> {
         // Capture as owned String to satisfy 'static bound on with_conn closure.
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM spaces WHERE name = ?1",
+                 FROM topics WHERE name = ?1",
                 params![&name],
-                row_to_space,
+                row_to_topic,
             )
             .optional()
         })
         .await
     }
 
-    async fn get_or_create_default(&self) -> Result<Space, StorageError> {
-        if let Some(space) = self
+    async fn get_or_create_default(&self) -> Result<Topic, StorageError> {
+        if let Some(topic) = self
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT id, name, description, is_default, slug, created_at, updated_at
-                     FROM spaces
+                     FROM topics
                      WHERE is_default = 1",
                     [],
-                    row_to_space,
+                    row_to_topic,
                 )
                 .optional()
             })
             .await?
         {
-            return Ok(space);
+            return Ok(topic);
         }
 
         self.with_conn(|conn| {
@@ -134,12 +134,12 @@ impl SpaceStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO spaces (id, name, description, is_default, slug, created_at, updated_at)
+                "INSERT INTO topics (id, name, description, is_default, slug, created_at, updated_at)
                  VALUES (?1, 'default', '', 1, 'default', ?2, ?2)",
                 params![id.to_string(), &now_str],
             )?;
 
-            Ok(Space {
+            Ok(Topic {
                 id,
                 name: "default".into(),
                 description: String::new(),
@@ -152,26 +152,26 @@ impl SpaceStore for SqliteStorage {
         .await
     }
 
-    async fn list_all(&self) -> Result<Vec<Space>, StorageError> {
+    async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM spaces ORDER BY created_at ASC",
+                 FROM topics ORDER BY created_at ASC",
             )?;
-            let rows = stmt.query_map([], row_to_space)?;
+            let rows = stmt.query_map([], row_to_topic)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .await
     }
 
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Space>, StorageError> {
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Topic>, StorageError> {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM spaces WHERE slug = ?1",
+                 FROM topics WHERE slug = ?1",
                 params![&slug],
-                row_to_space,
+                row_to_topic,
             )
             .optional()
         })
@@ -183,12 +183,12 @@ impl SpaceStore for SqliteStorage {
         id: Uuid,
         name: Option<String>,
         description: Option<String>,
-        slug: Option<SpaceSlug>,
-    ) -> Result<Space, StorageError> {
-        // Pre-flight: verify the space exists.
+        slug: Option<TopicSlug>,
+    ) -> Result<Topic, StorageError> {
+        // Pre-flight: verify the topic exists.
         if self.get(id).await?.is_none() {
             return Err(StorageError::NotFound {
-                entity: "Space".into(),
+                entity: "Topic".into(),
                 id: id.to_string(),
             });
         }
@@ -200,7 +200,7 @@ impl SpaceStore for SqliteStorage {
             // COALESCE preserves the existing value when the parameter is NULL,
             // so None fields stay unchanged while Some fields are overwritten.
             conn.execute(
-                "UPDATE spaces
+                "UPDATE topics
                  SET name           = COALESCE(?2, name),
                      description    = COALESCE(?3, description),
                      slug           = COALESCE(?4, slug),
@@ -210,28 +210,28 @@ impl SpaceStore for SqliteStorage {
                     id_str,
                     name,
                     description,
-                    slug.as_ref().map(SpaceSlug::as_str),
+                    slug.as_ref().map(TopicSlug::as_str),
                     now
                 ],
             )?;
 
             conn.query_row(
                 "SELECT id, name, description, is_default, slug, created_at, updated_at
-                 FROM spaces WHERE id = ?1",
+                 FROM topics WHERE id = ?1",
                 params![id_str],
-                row_to_space,
+                row_to_topic,
             )
         })
         .await
     }
 
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError> {
-        // Pre-flight: fetch the space to check existence and guard the default.
+        // Pre-flight: fetch the topic to check existence and guard the default.
         match self.get(id).await? {
             None => return Ok(false),
             Some(ref p) if p.is_default => {
                 return Err(StorageError::ConstraintViolation(
-                    "cannot delete the default space".into(),
+                    "cannot delete the default topic".into(),
                 ));
             }
             Some(_) => {}
@@ -240,7 +240,7 @@ impl SpaceStore for SqliteStorage {
         // Sessions cascade via the FK ON DELETE CASCADE defined in the schema.
         self.with_conn(move |conn| {
             let affected =
-                conn.execute("DELETE FROM spaces WHERE id = ?1", params![id.to_string()])?;
+                conn.execute("DELETE FROM topics WHERE id = ?1", params![id.to_string()])?;
             Ok(affected > 0)
         })
         .await
@@ -253,16 +253,16 @@ mod tests {
     use crate::sqlite::SqliteStorage;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn create_and_get_space() {
+    async fn create_and_get_topic() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let new = NewSpace {
-            name: "my-space".into(),
-            slug: "my-space".into(),
+        let new = NewTopic {
+            name: "my-topic".into(),
+            slug: "my-topic".into(),
         };
         let created = storage.create(new).await.unwrap();
 
-        assert_eq!(created.name, "my-space");
-        assert_eq!(created.slug, "my-space");
+        assert_eq!(created.name, "my-topic");
+        assert_eq!(created.slug, "my-topic");
 
         let fetched = storage
             .get(created.id)
@@ -270,14 +270,14 @@ mod tests {
             .unwrap()
             .expect("should exist");
         assert_eq!(fetched.id, created.id);
-        assert_eq!(fetched.name, "my-space");
-        assert_eq!(fetched.slug, "my-space");
+        assert_eq!(fetched.name, "my-topic");
+        assert_eq!(fetched.slug, "my-topic");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_by_name_returns_none_for_unknown() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let result = storage.get_by_name("no-such-space").await.unwrap();
+        let result = storage.get_by_name("no-such-topic").await.unwrap();
         assert!(result.is_none());
     }
 
@@ -285,7 +285,7 @@ mod tests {
     async fn get_by_name_finds_existing() {
         let storage = SqliteStorage::in_memory().unwrap();
         storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "find-me".into(),
                 slug: "find-me".into(),
             })
@@ -301,44 +301,44 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let p1 = storage.get_or_create_default().await.unwrap();
         let p2 = storage.get_or_create_default().await.unwrap();
-        // Same space returned both times — not duplicated.
+        // Same topic returned both times — not duplicated.
         assert_eq!(p1.id, p2.id);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn slug_is_stored_and_retrieved() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let new = NewSpace {
-            name: "slugged-space".into(),
-            slug: "slugged-space".into(),
+        let new = NewTopic {
+            name: "slugged-topic".into(),
+            slug: "slugged-topic".into(),
         };
         let created = storage.create(new).await.unwrap();
-        assert_eq!(created.slug, "slugged-space");
+        assert_eq!(created.slug, "slugged-topic");
 
         let fetched = storage
             .get(created.id)
             .await
             .unwrap()
             .expect("should exist");
-        assert_eq!(fetched.slug, "slugged-space");
+        assert_eq!(fetched.slug, "slugged-topic");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn get_or_create_default_returns_default_slug() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
-        assert!(space.is_default);
-        assert_eq!(space.slug, "default");
+        let topic = storage.get_or_create_default().await.unwrap();
+        assert!(topic.is_default);
+        assert_eq!(topic.slug, "default");
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn renamed_default_space_remains_structurally_default() {
+    async fn renamed_default_topic_remains_structurally_default() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let default_space = storage.get_or_create_default().await.unwrap();
+        let default_topic = storage.get_or_create_default().await.unwrap();
 
         let renamed = storage
             .update(
-                default_space.id,
+                default_topic.id,
                 Some("Operations".into()),
                 None,
                 Some("operations".into()),
@@ -350,12 +350,12 @@ mod tests {
         assert_eq!(renamed.name, "Operations");
 
         let fetched_default = storage.get_or_create_default().await.unwrap();
-        assert_eq!(fetched_default.id, default_space.id);
+        assert_eq!(fetched_default.id, default_topic.id);
 
-        let delete_error = storage.delete(default_space.id).await.unwrap_err();
+        let delete_error = storage.delete(default_topic.id).await.unwrap_err();
         assert!(
             matches!(delete_error, StorageError::ConstraintViolation(_)),
-            "renamed default space should still be protected"
+            "renamed default topic should still be protected"
         );
     }
 
@@ -366,16 +366,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn list_all_returns_spaces_ordered_by_created_at() {
         let storage = SqliteStorage::in_memory().unwrap();
-        // The seeded default space already exists; add two more.
+        // The seeded default topic already exists; add two more.
         storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "alpha".into(),
                 slug: "alpha".into(),
             })
             .await
             .unwrap();
         storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "beta".into(),
                 slug: "beta".into(),
             })
@@ -384,16 +384,16 @@ mod tests {
 
         let all = storage.list_all().await.unwrap();
 
-        // At least 3 spaces (default + alpha + beta).
+        // At least 3 topics (default + alpha + beta).
         assert!(
             all.len() >= 3,
-            "expected at least 3 spaces, got {}",
+            "expected at least 3 topics, got {}",
             all.len()
         );
 
         // Must be ordered by created_at ASC.
         let is_sorted = all.windows(2).all(|w| w[0].created_at <= w[1].created_at);
-        assert!(is_sorted, "spaces should be ordered by created_at ASC");
+        assert!(is_sorted, "topics should be ordered by created_at ASC");
     }
 
     // ---------------------------------------------------------------------------
@@ -401,10 +401,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn get_by_slug_returns_matching_space() {
+    async fn get_by_slug_returns_matching_topic() {
         let storage = SqliteStorage::in_memory().unwrap();
         storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Slug Test".into(),
                 slug: "slug-test".into(),
             })
@@ -412,7 +412,7 @@ mod tests {
             .unwrap();
 
         let found = storage.get_by_slug("slug-test").await.unwrap();
-        assert!(found.is_some(), "get_by_slug should find the space");
+        assert!(found.is_some(), "get_by_slug should find the topic");
         assert_eq!(found.unwrap().slug, "slug-test");
     }
 
@@ -431,7 +431,7 @@ mod tests {
     async fn update_changes_provided_fields() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Old Name".into(),
                 slug: "old-name".into(),
             })
@@ -456,7 +456,7 @@ mod tests {
     async fn update_changes_description() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Documented".into(),
                 slug: "documented".into(),
             })
@@ -464,20 +464,20 @@ mod tests {
             .unwrap();
 
         let updated = storage
-            .update(created.id, None, Some("Operations space".into()), None)
+            .update(created.id, None, Some("Operations topic".into()), None)
             .await
             .unwrap();
 
-        assert_eq!(updated.description, "Operations space");
-        let fetched = storage.get(created.id).await.unwrap().expect("space");
-        assert_eq!(fetched.description, "Operations space");
+        assert_eq!(updated.description, "Operations topic");
+        let fetched = storage.get(created.id).await.unwrap().expect("topic");
+        assert_eq!(fetched.description, "Operations topic");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn update_partial_leaves_unspecified_fields_unchanged() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Stable".into(),
                 slug: "stable".into(),
             })
@@ -508,10 +508,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn delete_removes_space_and_returns_true() {
+    async fn delete_removes_topic_and_returns_true() {
         let storage = SqliteStorage::in_memory().unwrap();
         let created = storage
-            .create(NewSpace {
+            .create(NewTopic {
                 name: "Gone".into(),
                 slug: "gone".into(),
             })
@@ -519,12 +519,12 @@ mod tests {
             .unwrap();
 
         let deleted = storage.delete(created.id).await.unwrap();
-        assert!(deleted, "delete should return true for an existing space");
+        assert!(deleted, "delete should return true for an existing topic");
 
         let fetched = storage.get(created.id).await.unwrap();
         assert!(
             fetched.is_none(),
-            "space should no longer exist after delete"
+            "topic should no longer exist after delete"
         );
     }
 
@@ -537,14 +537,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn delete_refuses_default_space() {
+    async fn delete_refuses_default_topic() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let default_space = storage.get_or_create_default().await.unwrap();
+        let default_topic = storage.get_or_create_default().await.unwrap();
 
-        let result = storage.delete(default_space.id).await;
+        let result = storage.delete(default_topic.id).await;
         assert!(
             result.is_err(),
-            "deleting the default space should return an error"
+            "deleting the default topic should return an error"
         );
     }
 }

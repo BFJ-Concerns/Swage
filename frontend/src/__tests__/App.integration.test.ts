@@ -20,7 +20,7 @@ import * as conversationsApi from "../lib/api/conversations";
 import * as materialsApi from "../lib/api/materials";
 import * as operatorApi from "../lib/api/operator";
 import * as settingsApi from "../lib/api/settings";
-import * as spacesApi from "../lib/api/spaces";
+import * as topicsApi from "../lib/api/topics";
 import type { EffectiveAgentDefinitionResponse } from "../lib/protocol/EffectiveAgentDefinitionResponse";
 import type {
   ClientEvent,
@@ -29,7 +29,7 @@ import type {
   ConversationResponse,
   ConversationSummary,
   OperatorOverview,
-  Space,
+  Topic,
   ServerEvent,
   WorkspaceAttachment,
   SettingsResponse,
@@ -98,15 +98,15 @@ const websocketHarness = vi.hoisted(() => {
   };
 });
 
-vi.mock("../lib/api/spaces", () => ({
-  listSpaces: vi.fn(),
-  createSpace: vi.fn(),
-  updateSpace: vi.fn(),
-  deleteSpace: vi.fn(),
-  listSpaceWorkspaces: vi.fn(),
-  attachSpaceWorkspace: vi.fn(),
-  detachSpaceWorkspace: vi.fn(),
-  listSpaceSessions: vi.fn(),
+vi.mock("../lib/api/topics", () => ({
+  listTopics: vi.fn(),
+  createTopic: vi.fn(),
+  updateTopic: vi.fn(),
+  deleteTopic: vi.fn(),
+  listTopicWorkspaces: vi.fn(),
+  attachTopicWorkspace: vi.fn(),
+  detachTopicWorkspace: vi.fn(),
+  listTopicSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/conversations", () => ({
@@ -121,7 +121,7 @@ vi.mock("../lib/api/agent-definitions", () => ({
 }));
 
 vi.mock("../lib/api/materials", () => ({
-  listSpaceMaterials: vi.fn(),
+  listTopicMaterials: vi.fn(),
   listSessionMaterials: vi.fn(),
   createMaterial: vi.fn(),
 }));
@@ -146,7 +146,7 @@ vi.mock("../lib/api/websocket", () => ({
   createWebSocketClient: websocketHarness.factory,
 }));
 
-function makeSpace(overrides: Partial<Space> = {}): Space {
+function makeTopic(overrides: Partial<Topic> = {}): Topic {
   return {
     id: "proj-default",
     name: "default",
@@ -163,7 +163,7 @@ function makeWorkspaceAttachment(
 ): WorkspaceAttachment {
   return {
     id: "workspace-1",
-    space_id: "proj-default",
+    topic_id: "proj-default",
     label: "Codebase",
     path: "/missing/codebase",
     canonical_path: "/missing/codebase",
@@ -194,7 +194,7 @@ function makeConversationDetail(
 ): ConversationDetail {
   return {
     id: "conv-1",
-    space_id: "proj-default",
+    topic_id: "proj-default",
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
     messages: [],
@@ -268,8 +268,8 @@ function makeOperatorOverview(
     sessions: [
       {
         id: "conv-ops",
-        space_id: "proj-default",
-        space_name: "default",
+        topic_id: "proj-default",
+        topic_name: "default",
         created_at: "2026-04-07T12:00:00Z",
         last_activity: "2026-04-07T12:04:00Z",
         message_preview: "Operator view",
@@ -352,22 +352,22 @@ function setPath(path: string): void {
 }
 
 /**
- * Open a space from the picker. Swage lands on the space picker on entry, so
- * tests that need a space open must go through it. Clicking a card's Open
- * button triggers `openSpace` in SpacePicker.
+ * Open a topic from the picker. Swage lands on the topic picker on entry, so
+ * tests that need a topic open must go through it. Clicking a card's Open
+ * button triggers `openTopic` in TopicPicker.
  */
-async function openSpaceFromPicker(name: string): Promise<void> {
+async function openTopicFromPicker(name: string): Promise<void> {
   const card = Array.from(
-    document.querySelectorAll<HTMLElement>(".space-card"),
+    document.querySelectorAll<HTMLElement>(".topic-card"),
   ).find((el) => el.textContent?.includes(name));
 
   if (!card) {
-    throw new Error(`Space card with name "${name}" not found in picker`);
+    throw new Error(`Topic card with name "${name}" not found in picker`);
   }
 
   const openBtn = card.querySelector<HTMLButtonElement>(".open-btn");
   if (!openBtn) {
-    throw new Error(`Open button missing on space card "${name}"`);
+    throw new Error(`Open button missing on topic card "${name}"`);
   }
 
   flushSync(() => openBtn.click());
@@ -383,18 +383,18 @@ describe("App", () => {
     setPath("/");
     delete window.swageDesktop;
     localStorage.clear();
-    vi.mocked(materialsApi.listSpaceMaterials).mockResolvedValue([]);
+    vi.mocked(materialsApi.listTopicMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
     vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
     vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
       new Error("settings are not configured in this test"),
     );
-    // SpacePicker fetches workspace/session detail on card selection — return
+    // TopicPicker fetches workspace/session detail on card selection — return
     // empty arrays by default so the picker renders without errors. Individual
     // tests can override these mocks if they exercise the detail panel.
-    vi.mocked(spacesApi.listSpaceWorkspaces).mockResolvedValue([]);
-    vi.mocked(spacesApi.listSpaceSessions).mockResolvedValue([]);
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValue([]);
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -412,10 +412,10 @@ describe("App", () => {
     localStorage.clear();
   });
 
-  it("opens the persisted space and loads its conversations on reload", async () => {
-    const restoredSpace = makeSpace({ id: "proj-restored", name: "Restored" });
-    localStorage.setItem("swage:active-space", restoredSpace.id);
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace(), restoredSpace]);
+  it("opens the persisted topic and loads its conversations on reload", async () => {
+    const restoredTopic = makeTopic({ id: "proj-restored", name: "Restored" });
+    localStorage.setItem("swage:active-topic", restoredTopic.id);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic(), restoredTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-restored", message_preview: "Restored work" }),
     ]);
@@ -428,11 +428,11 @@ describe("App", () => {
   });
 
   it("connects exactly once when popstate selects a different conversation", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const first = makeConversationSummary({ id: "conv-first" });
     const second = makeConversationSummary({ id: "conv-second" });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       first,
       second,
@@ -464,13 +464,13 @@ describe("App", () => {
   });
 
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
       id: "conv-linked",
       message_preview: "Deep-linked conversation",
     });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-other", message_preview: "Other" }),
       linkedConversation,
@@ -494,8 +494,8 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    expect(spacesApi.listSpaces).toHaveBeenCalledTimes(1);
-    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultSpace.id);
+    expect(topicsApi.listTopics).toHaveBeenCalledTimes(1);
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultTopic.id);
     expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
@@ -518,9 +518,9 @@ describe("App", () => {
   });
 
   it("keeps the gateway available when startup agent inventory loading fails", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({ id: "conv-linked" });
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linkedConversation]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValue(
       makeConversationDetail({ id: linkedConversation.id }),
@@ -533,13 +533,13 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await settleUi();
 
-    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(defaultSpace.id);
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(defaultTopic.id);
     expect(document.querySelector(".conversation-list")).not.toBeNull();
     expect(document.querySelector(".error-screen")).toBeNull();
   });
 
   it("falls back to the root with a notice for a stale deep link", async () => {
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.getConversation).mockRejectedValueOnce(
       new Error("HTTP 404 from GET /api/conversations/stale-id"),
@@ -555,7 +555,7 @@ describe("App", () => {
       "Conversation not found",
     );
     expect(websocketHarness.clientFor("stale-id")).toBeUndefined();
-    await openSpaceFromPicker("default");
+    await openTopicFromPicker("default");
     expect(
       document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
     ).not.toBeNull();
@@ -580,11 +580,11 @@ describe("App", () => {
     const deletedConversation = makeConversationSummary({ id: "deleted-id" });
     const replacementConversation: ConversationResponse = {
       id: "replacement-id",
-      space_id: "proj-default",
+      topic_id: "proj-default",
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       deletedConversation,
     ]);
@@ -683,7 +683,7 @@ describe("App", () => {
       },
     );
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     component = mount(App, { target: document.body });
     await settleUi();
     addEventListenerSpy.mockRestore();
@@ -720,7 +720,7 @@ describe("App", () => {
       },
     );
     const activeConversation = makeConversationSummary({ id: "active-id" });
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       activeConversation,
     ]);
@@ -778,13 +778,13 @@ describe("App", () => {
         addEventListener(type, listener, options);
       },
     );
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
       id: "conv-settings-back",
       message_preview: "Settings return journey",
     });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       linkedConversation,
     ]);
@@ -841,13 +841,13 @@ describe("App", () => {
   });
 
   it("connects exactly once when a conversation is picked from the sidebar", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const selected = makeConversationSummary({
       id: "conv-picked",
       message_preview: "Pick me",
     });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([selected]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: selected.id }),
@@ -855,7 +855,7 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    await openSpaceFromPicker(defaultSpace.name);
+    await openTopicFromPicker(defaultTopic.name);
 
     const selectButton = document.querySelector<HTMLButtonElement>(
       ".conversation-select-btn",
@@ -882,29 +882,29 @@ describe("App", () => {
       },
     };
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // The app lands on the space picker — open the default space so the
+    // The app lands on the topic picker — open the default topic so the
     // shell navigation and its runtime context render.
-    await openSpaceFromPicker("default");
+    await openTopicFromPicker("default");
 
     const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
   it("creates and navigates when the sidebar starts a conversation", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-new",
-      space_id: defaultSpace.id,
+      topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
     vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(makeSettings({
@@ -921,8 +921,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the space so ConversationList (and its "New" button) renders.
-    await openSpaceFromPicker(defaultSpace.name);
+    // Open the topic so ConversationList (and its "New" button) renders.
+    await openTopicFromPicker(defaultTopic.name);
 
     const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
     expect(newButton).not.toBeNull();
@@ -931,7 +931,7 @@ describe("App", () => {
     await settleUi();
 
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
-      defaultSpace.id,
+      defaultTopic.id,
       undefined,
       undefined,
       undefined,
@@ -943,25 +943,25 @@ describe("App", () => {
   });
 
   it("uses the active creation picker for both New controls", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const existing = makeConversationSummary({ id: "conv-existing" });
     const createdFromChannel: ConversationResponse = {
       id: "conv-channel-new",
-      space_id: defaultSpace.id,
+      topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
     const createdFromSidebar: ConversationResponse = {
       id: "conv-sidebar-new",
-      space_id: defaultSpace.id,
+      topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:04:00Z",
       last_activity: "2026-04-07T12:04:00Z",
     };
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([existing]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValue(
-      makeConversationDetail({ id: existing.id, space_id: defaultSpace.id }),
+      makeConversationDetail({ id: existing.id, topic_id: defaultTopic.id }),
     );
     vi.mocked(conversationsApi.createConversation)
       .mockResolvedValueOnce(createdFromChannel)
@@ -987,7 +987,7 @@ describe("App", () => {
 
     expect(conversationsApi.createConversation).toHaveBeenCalledTimes(1);
     expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
-      defaultSpace.id,
+      defaultTopic.id,
       undefined,
       "picker-witness",
       undefined,
@@ -1000,7 +1000,7 @@ describe("App", () => {
 
     expect(conversationsApi.createConversation).toHaveBeenCalledTimes(2);
     expect(conversationsApi.createConversation).toHaveBeenLastCalledWith(
-      defaultSpace.id,
+      defaultTopic.id,
       undefined,
       "picker-witness",
       undefined,
@@ -1010,21 +1010,21 @@ describe("App", () => {
   });
 
   it("connects exactly once when the composer auto-creates a conversation", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-auto",
-      space_id: defaultSpace.id,
+      topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
 
     component = mount(App, { target: document.body });
     await settleUi();
-    await openSpaceFromPicker(defaultSpace.name);
+    await openTopicFromPicker(defaultTopic.name);
 
     const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
     expect(textarea).not.toBeNull();
@@ -1043,15 +1043,15 @@ describe("App", () => {
   });
 
   it("creates the conversation under the agent chosen in the composer", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-agent",
-      space_id: defaultSpace.id,
+      topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
     vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([
@@ -1065,7 +1065,7 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    await openSpaceFromPicker(defaultSpace.name);
+    await openTopicFromPicker(defaultTopic.name);
 
     const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
     expect(picker).not.toBeNull();
@@ -1088,10 +1088,10 @@ describe("App", () => {
     flushSync(() => sendButton!.click());
     await settleUi();
 
-    // One send from an empty space yields a conversation governed by the
+    // One send from an empty topic yields a conversation governed by the
     // definition the picker was left on.
     expect(conversationsApi.createConversation).toHaveBeenCalledWith(
-      defaultSpace.id,
+      defaultTopic.id,
       null,
       "reviewer",
       null,
@@ -1100,10 +1100,10 @@ describe("App", () => {
   });
 
   it("retains the selected conversation subscription while visiting Operator", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const linked = makeConversationSummary({ id: "conv-surface" });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: linked.id }),
@@ -1135,10 +1135,10 @@ describe("App", () => {
   });
 
   it("connects exactly once when manual retry is requested", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     const linked = makeConversationSummary({ id: "conv-retry" });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: linked.id }),
@@ -1161,9 +1161,9 @@ describe("App", () => {
   });
 
   it("sends a message and finalises a streamed reply through the full app stack", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({
         id: "conv-stream",
@@ -1218,9 +1218,9 @@ describe("App", () => {
   });
 
   it("keeps a live stream on its conversation when another conversation is selected", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-a", message_preview: "Conversation A" }),
       makeConversationSummary({ id: "conv-b", message_preview: "Conversation B" }),
@@ -1323,9 +1323,9 @@ describe("App", () => {
   });
 
   it("returns to a still-streaming conversation after clearing the route without replacing its client", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-a" }),
       makeConversationSummary({ id: "conv-b" }),
@@ -1371,13 +1371,13 @@ describe("App", () => {
   });
 
   it("reconciles an off-screen reconnect with its owner without changing B", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     let resolveRecovery!: (conversation: ConversationDetail) => void;
     const recovery = new Promise<ConversationDetail>((resolve) => {
       resolveRecovery = resolve;
     });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-a" }),
       makeConversationSummary({ id: "conv-b" }),
@@ -1436,9 +1436,9 @@ describe("App", () => {
   });
 
   it("keeps the live conversation subscription while Operator opens", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-a" }),
     ]);
@@ -1475,13 +1475,13 @@ describe("App", () => {
   });
 
   it("keeps a newer stream live when reconnect refresh completes late", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
     let resolveReconnectRefresh!: (conversation: ConversationDetail) => void;
     const reconnectRefresh = new Promise<ConversationDetail>((resolve) => {
       resolveReconnectRefresh = resolve;
     });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-reconnect" }),
     ]);
@@ -1570,7 +1570,7 @@ describe("App", () => {
     vi.mocked(settingsApi.saveSettings)
       .mockResolvedValueOnce(saved)
       .mockResolvedValueOnce(configured);
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([makeSpace()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-settings-model" }),
     ]);
@@ -1656,16 +1656,16 @@ describe("App", () => {
   });
 
   it("switches to the operator surface and renders the overview", async () => {
-    const defaultSpace = makeSpace();
+    const defaultTopic = makeTopic();
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
     );
     component = mount(App, { target: document.body });
     await settleUi();
-    await openSpaceFromPicker(defaultSpace.name);
+    await openTopicFromPicker(defaultTopic.name);
 
     const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
     const operatorButton = Array.from(
@@ -1687,33 +1687,33 @@ describe("App", () => {
     expect(document.body.textContent).toContain("Local device");
   });
 
-  it("shows missing space workspaces and relinks them before opening", async () => {
-    const defaultSpace = makeSpace({ name: "Space" });
+  it("shows missing topic workspaces and relinks them before opening", async () => {
+    const defaultTopic = makeTopic({ name: "Topic" });
     const missingWorkspace = makeWorkspaceAttachment({ is_missing: true });
     const relinkedWorkspace = makeWorkspaceAttachment({
-      path: "/srv/space",
-      canonical_path: "/srv/space",
+      path: "/srv/topic",
+      canonical_path: "/srv/topic",
       is_missing: false,
     });
 
-    vi.mocked(spacesApi.listSpaces).mockResolvedValueOnce([defaultSpace]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(spacesApi.listSpaceWorkspaces)
+    vi.mocked(topicsApi.listTopicWorkspaces)
       .mockResolvedValueOnce([missingWorkspace])
       .mockResolvedValueOnce([relinkedWorkspace]);
-    vi.mocked(spacesApi.detachSpaceWorkspace).mockResolvedValueOnce(undefined);
-    vi.mocked(spacesApi.attachSpaceWorkspace).mockResolvedValueOnce(relinkedWorkspace);
+    vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValueOnce(undefined);
+    vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(relinkedWorkspace);
 
     component = mount(App, { target: document.body });
     await settleUi();
 
     const card = Array.from(
-      document.querySelectorAll<HTMLElement>(".space-card"),
-    ).find((el) => el.textContent?.includes(defaultSpace.name));
+      document.querySelectorAll<HTMLElement>(".topic-card"),
+    ).find((el) => el.textContent?.includes(defaultTopic.name));
     expect(card).toBeDefined();
-    // Preview/selection is triggered by the space-name button, not the card
+    // Preview/selection is triggered by the topic-name button, not the card
     // container (UI audit f-2 — card is no longer a single interactive widget).
-    const nameBtn = card!.querySelector<HTMLButtonElement>(".space-name-btn");
+    const nameBtn = card!.querySelector<HTMLButtonElement>(".topic-name-btn");
     expect(nameBtn).toBeDefined();
     flushSync(() => nameBtn!.click());
     await waitForText("Missing folder");
@@ -1723,7 +1723,7 @@ describe("App", () => {
     );
     expect(relinkInput).toBeDefined();
     flushSync(() => {
-      relinkInput!.value = "/srv/space";
+      relinkInput!.value = "/srv/topic";
       relinkInput!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
@@ -1734,12 +1734,12 @@ describe("App", () => {
     flushSync(() => relinkButton!.click());
     await waitForText("Workspace relinked.");
 
-    expect(spacesApi.detachSpaceWorkspace).toHaveBeenCalledWith(
-      defaultSpace.id,
+    expect(topicsApi.detachTopicWorkspace).toHaveBeenCalledWith(
+      defaultTopic.id,
       missingWorkspace.id,
     );
-    expect(spacesApi.attachSpaceWorkspace).toHaveBeenCalledWith(defaultSpace.id, {
-      path: "/srv/space",
+    expect(topicsApi.attachTopicWorkspace).toHaveBeenCalledWith(defaultTopic.id, {
+      path: "/srv/topic",
       label: "Codebase",
       permissions: ["read", "write"],
       is_trusted: true,

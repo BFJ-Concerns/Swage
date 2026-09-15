@@ -33,31 +33,31 @@ pub(crate) struct ResolvedWorkerDirectory {
     pub(crate) authority_context_id: Uuid,
 }
 
-/// Inspect the space's workspace attachments and derive which permission
+/// Inspect the topic's workspace attachments and derive which permission
 /// grants are in force. Storage failures degrade to "no grants" so that a
 /// transient lookup error never silently widens the policy.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn summarise_trusted_workspace_permissions(
     storage: &Arc<dyn swage_storage::store::Storage>,
-    space_id: Uuid,
+    topic_id: Uuid,
 ) -> WorkspacePermissionSummary {
-    load_trusted_workspace_policy(storage, space_id, None)
+    load_trusted_workspace_policy(storage, topic_id, None)
         .await
         .permissions
 }
 
 pub(crate) async fn load_trusted_workspace_policy(
     storage: &Arc<dyn swage_storage::store::Storage>,
-    space_id: Uuid,
+    topic_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
 ) -> TrustedWorkspacePolicy {
-    let attachments = match storage.list_workspace_attachments_by_space(space_id).await {
+    let attachments = match storage.list_workspace_attachments_by_topic(topic_id).await {
         Ok(list) => list,
         Err(error) => {
             tracing::warn!(
-                space_id = %space_id,
+                topic_id = %topic_id,
                 %error,
-                "failed to load workspace attachments; treating space as having no granted permissions"
+                "failed to load workspace attachments; treating topic as having no granted permissions"
             );
             return TrustedWorkspacePolicy::default();
         }
@@ -122,7 +122,7 @@ pub(crate) async fn load_trusted_workspace_policy(
 /// scratch root, or approved location grants.
 pub(crate) async fn resolve_authorised_worker_directory(
     state: &crate::state::AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     context_id: Uuid,
     session_id: Option<Uuid>,
     active_workspace_attachment_id: Option<Uuid>,
@@ -140,13 +140,13 @@ pub(crate) async fn resolve_authorised_worker_directory(
     }
 
     let policy =
-        load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
+        load_trusted_workspace_policy(&state.storage, topic_id, active_workspace_attachment_id)
             .await;
     let workspace_root = policy
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(&state.config_root, space_id, context_id));
+        .unwrap_or_else(|| managed_scratch_workspace(&state.config_root, topic_id, context_id));
     let approval_grants = state
         .session_approval_grants
         .lock()
@@ -158,7 +158,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
     };
 
     // A placed worker's exact directory is its complete filesystem authority.
-    // Do not let a nested dispatch fall back to the wider space policy.
+    // Do not let a nested dispatch fall back to the wider topic policy.
     if let Some(placement) = inherited_placement {
         if within(&placement.path) {
             return Ok(ResolvedWorkerDirectory {
@@ -200,7 +200,7 @@ pub(crate) async fn resolve_authorised_worker_directory(
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
         .filter(|grant| grant.session_id.is_none() || grant.session_id == session_id)
-        .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
+        .filter(|grant| grant.topic_id.is_none() || grant.topic_id == Some(topic_id))
         .filter(|grant| within(Path::new(&grant.name)))
         .collect::<Vec<_>>();
     if !matching_approval_grants.is_empty() {
@@ -273,7 +273,7 @@ pub(crate) async fn reauthorise_session_worker_placement(
         })?;
     let authorised = resolve_authorised_worker_directory(
         state,
-        session.space_id,
+        session.topic_id,
         authority_context_id,
         Some(session.id),
         session.active_workspace_attachment_id,
@@ -320,7 +320,7 @@ pub(crate) async fn reauthorise_worker_placement_for_turn(
 pub(super) fn build_permission_config(
     config: &swage_config::ResolvedConfig,
     startup_config: &swage_config::ResolvedConfig,
-    space_id: Option<Uuid>,
+    topic_id: Option<Uuid>,
     session_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
 ) -> PermissionConfig {
@@ -352,20 +352,20 @@ pub(super) fn build_permission_config(
             .filter(|entry| {
                 !session_approval_grants.contains(&crate::state::ApprovalGrantKey {
                     session_id,
-                    space_id: None,
+                    topic_id: None,
                     kind: swage_storage::model::ApprovalKind::Tool,
                     name: entry.tool_name.clone(),
                     access: None,
                 }) && !session_approval_grants.contains(&crate::state::ApprovalGrantKey {
                     session_id: None,
-                    space_id: None,
+                    topic_id: None,
                     kind: swage_storage::model::ApprovalKind::Tool,
                     name: entry.tool_name.clone(),
                     access: None,
-                }) && !space_id.is_some_and(|space_id| {
+                }) && !topic_id.is_some_and(|topic_id| {
                     session_approval_grants.contains(&crate::state::ApprovalGrantKey {
                         session_id: None,
-                        space_id: Some(space_id),
+                        topic_id: Some(topic_id),
                         kind: swage_storage::model::ApprovalKind::Tool,
                         name: entry.tool_name.clone(),
                         access: None,

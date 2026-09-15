@@ -108,7 +108,7 @@ async fn start_test_server(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let mut state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

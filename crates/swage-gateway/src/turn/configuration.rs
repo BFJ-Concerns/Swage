@@ -206,15 +206,15 @@ pub(crate) async fn dispatch_bound_task_definition_ids_for_turn(
 
 pub(crate) async fn apply_dispatch_bounds(
     state: &AppState,
-    space_slug: &str,
-    space_id: Uuid,
+    topic_slug: &str,
+    topic_id: Uuid,
     mut config: swage_config::ResolvedConfig,
     bound_agent_ids: &[String],
     subject: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     for bound_agent_id in bound_agent_ids {
         let bound =
-            super::load_session_config(state, space_slug, bound_agent_id).map_err(|error| {
+            super::load_session_config(state, topic_slug, bound_agent_id).map_err(|error| {
                 GatewayError::ConfigError(format!(
                     "failed to load dispatch bound {bound_agent_id:?} for {subject}: {error}"
                 ))
@@ -222,7 +222,7 @@ pub(crate) async fn apply_dispatch_bounds(
         let bound = match crate::service::resolve_effective_agent_definition(
             state.storage.as_ref(),
             bound_agent_id,
-            space_id,
+            topic_id,
         )
         .await
         {
@@ -306,20 +306,20 @@ pub(crate) fn build_agent_config_with_workspace(
     agent_config
 }
 
-pub(crate) async fn build_agent_config_for_space_workspace(
+pub(crate) async fn build_agent_config_for_topic_workspace(
     state: &AppState,
     agent_id: String,
     config: &swage_config::ResolvedConfig,
     output_schema_override: Option<serde_json::Value>,
-    space_id: Uuid,
+    topic_id: Uuid,
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
 ) -> AgentConfig {
     let workspace_policy =
-        load_trusted_workspace_policy(&state.storage, space_id, active_workspace_attachment_id)
+        load_trusted_workspace_policy(&state.storage, topic_id, active_workspace_attachment_id)
             .await;
     let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&state.config_root, &workspace_policy, space_id, session_id);
+        agent_workspace_from_policy(&state.config_root, &workspace_policy, topic_id, session_id);
     build_agent_config_with_workspace(
         agent_id,
         config,
@@ -331,13 +331,13 @@ pub(crate) async fn build_agent_config_for_space_workspace(
 
 pub(super) fn managed_scratch_workspace(
     config_root: &Path,
-    space_id: Uuid,
+    topic_id: Uuid,
     session_id: Uuid,
 ) -> PathBuf {
     config_root
         .join("scratch")
-        .join("spaces")
-        .join(space_id.to_string())
+        .join("topics")
+        .join(topic_id.to_string())
         .join("sessions")
         .join(session_id.to_string())
 }
@@ -345,14 +345,14 @@ pub(super) fn managed_scratch_workspace(
 pub(super) fn agent_workspace_from_policy(
     config_root: &Path,
     policy: &TrustedWorkspacePolicy,
-    space_id: Uuid,
+    topic_id: Uuid,
     session_id: Uuid,
 ) -> (PathBuf, Vec<PathBuf>) {
     let workspace_root = policy
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(config_root, space_id, session_id));
+        .unwrap_or_else(|| managed_scratch_workspace(config_root, topic_id, session_id));
     if let Err(error) = std::fs::create_dir_all(&workspace_root) {
         tracing::warn!(
             path = %workspace_root.display(),
@@ -373,7 +373,7 @@ pub(super) fn agent_workspace_from_policy(
 pub(super) fn append_approved_location_paths(
     allowed_paths: &mut Vec<PathBuf>,
     grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
-    space_id: Uuid,
+    topic_id: Uuid,
     session_id: Uuid,
     session_metadata: Option<&serde_json::Value>,
 ) {
@@ -384,7 +384,7 @@ pub(super) fn append_approved_location_paths(
         .iter()
         .filter(|grant| grant.kind == swage_storage::model::ApprovalKind::Location)
         .filter(|grant| grant.session_id.is_none() || grant.session_id == Some(session_id))
-        .filter(|grant| grant.space_id.is_none() || grant.space_id == Some(space_id))
+        .filter(|grant| grant.topic_id.is_none() || grant.topic_id == Some(topic_id))
     {
         let path = PathBuf::from(&grant.name);
         if !allowed_paths.contains(&path) {
@@ -412,13 +412,13 @@ pub(crate) fn worker_placement_metadata_present(
 
 pub(crate) fn load_session_config(
     state: &AppState,
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     load_session_config_from_root(
         &state.config_root,
         state.active_config(),
-        space_slug,
+        topic_slug,
         agent_id,
     )
 }
@@ -426,23 +426,23 @@ pub(crate) fn load_session_config(
 pub(crate) fn load_session_config_from_root(
     root: &Path,
     active_config: swage_config::ResolvedConfig,
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    let space_dir = root.join("spaces").join(space_slug);
-    let space_config_exists = space_dir.join("config.toml").exists();
+    let topic_dir = root.join("topics").join(topic_slug);
+    let topic_config_exists = topic_dir.join("config.toml").exists();
     let agent_config_exists = agent_id != RESERVED_WORKFLOW_AGENT_ID
-        && space_dir
+        && topic_dir
             .join("agents")
             .join(agent_id)
             .join("config.toml")
             .exists();
 
-    if !space_config_exists && !agent_config_exists {
+    if !topic_config_exists && !agent_config_exists {
         return Ok(active_config);
     }
 
-    swage_config::load_resolved_config_from(root, space_slug, agent_id)
+    swage_config::load_resolved_config_from(root, topic_slug, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
@@ -876,18 +876,18 @@ mod tests {
     #[test]
     fn reserved_workflow_agent_config_does_not_replace_runtime_configuration() {
         let root = tempfile::tempdir().expect("temporary root");
-        let space_config = root.path().join("spaces/dispatch/config.toml");
+        let topic_config = root.path().join("topics/dispatch/config.toml");
         let global_instructions = root.path().join("instructions/01-runtime.md");
         let reserved_config = root
             .path()
-            .join("spaces/dispatch/agents")
+            .join("topics/dispatch/agents")
             .join(RESERVED_WORKFLOW_AGENT_ID)
             .join("config.toml");
         let ordinary_config = root
             .path()
-            .join("spaces/dispatch/agents/reviewer/config.toml");
-        std::fs::create_dir_all(space_config.parent().expect("space directory"))
-            .expect("create space directory");
+            .join("topics/dispatch/agents/reviewer/config.toml");
+        std::fs::create_dir_all(topic_config.parent().expect("topic directory"))
+            .expect("create topic directory");
         std::fs::create_dir_all(
             global_instructions
                 .parent()
@@ -896,8 +896,8 @@ mod tests {
         .expect("create instructions directory");
         std::fs::write(&global_instructions, "RUNTIME_ONLY_MARKER\n")
             .expect("write runtime instructions");
-        std::fs::write(&space_config, "[communication]\nmessage_ttl_secs = 73\n")
-            .expect("write space overlay");
+        std::fs::write(&topic_config, "[communication]\nmessage_ttl_secs = 73\n")
+            .expect("write topic overlay");
         for config in [&reserved_config, &ordinary_config] {
             std::fs::create_dir_all(config.parent().expect("config directory"))
                 .expect("create agent directory");
@@ -926,7 +926,7 @@ mod tests {
         );
         assert_eq!(
             reserved.communication.message_ttl_secs, 73,
-            "the reserved workflow worker must retain its space configuration overlay"
+            "the reserved workflow worker must retain its topic configuration overlay"
         );
         assert_eq!(
             ordinary.server.port, 4100,
@@ -968,7 +968,7 @@ mod tests {
     ) -> swage_storage::NewAgentDefinition {
         swage_storage::NewAgentDefinition {
             id: "researcher".into(),
-            space_id: None,
+            topic_id: None,
             display_name: "Researcher".into(),
             description: String::new(),
             instructions: instructions.into(),

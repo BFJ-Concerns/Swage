@@ -6,12 +6,12 @@ use super::{
     WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
     add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
     apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
-    build_agent_config_for_space_workspace, build_approval_registrar, build_assembly_elements,
+    build_agent_config_for_topic_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
     execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
-    load_session_config, load_space_memory, load_trusted_workspace_policy, mpsc,
+    load_session_config, load_topic_memory, load_trusted_workspace_policy, mpsc,
     operator_guidance_rules, resolve_authorised_worker_directory,
     resolve_requested_skills_for_agent, resolve_swage_root, select_context_assembly,
     shutdown_sandbox_guard,
@@ -145,7 +145,7 @@ async fn record_named_child(
 
 pub(super) async fn reauthorise_named_child_placement(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     sender_turn_id: Uuid,
     sender_session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
@@ -176,7 +176,7 @@ pub(super) async fn reauthorise_named_child_placement(
         })?;
     let authority = resolve_authorised_worker_directory(
         state,
-        space_id,
+        topic_id,
         sender_turn_id,
         Some(sender_session_id),
         active_workspace_attachment_id,
@@ -203,7 +203,7 @@ pub(crate) fn delegate_worktree_owner(sender_turn_id: Uuid, delegate_call_id: &s
 
 struct GatewayDelegatedContextAssembler {
     state: AppState,
-    space: swage_storage::Space,
+    topic: swage_storage::Topic,
     config: swage_config::ResolvedConfig,
     agent_id: String,
     working_directory: String,
@@ -215,7 +215,7 @@ struct GatewayDelegatedContextAssembler {
 
 pub(crate) fn delegated_context_assembler(
     state: AppState,
-    space: swage_storage::Space,
+    topic: swage_storage::Topic,
     config: swage_config::ResolvedConfig,
     agent_id: String,
     working_directory: String,
@@ -226,7 +226,7 @@ pub(crate) fn delegated_context_assembler(
     let swage_root = resolve_swage_root(&state).to_path_buf();
     Arc::new(GatewayDelegatedContextAssembler {
         state,
-        space,
+        topic,
         config,
         agent_id,
         working_directory,
@@ -248,7 +248,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         let active_skills = load_active_skills_for_agent(
             &self.state,
             session.id,
-            &self.space.slug,
+            &self.topic.slug,
             &self.agent_id,
             Some(&self.swage_root),
             false,
@@ -268,7 +268,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let assembly_name = context_choices.assembly_name;
         let memory_content = load_memory_for_assembly(&assembly_name, || async {
-            load_space_memory(&self.swage_root, &self.space.slug).await
+            load_topic_memory(&self.swage_root, &self.topic.slug).await
         })
         .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self
@@ -282,27 +282,27 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             .collect();
         session_variables.extend(self.composition.variables.clone().unwrap_or_default());
         let environment =
-            build_session_environment(&self.space, Some(self.working_directory.clone()), session);
+            build_session_environment(&self.topic, Some(self.working_directory.clone()), session);
         let available_skills =
-            available_skills_for_agent(&self.space.slug, &self.agent_id, Some(&self.swage_root));
+            available_skills_for_agent(&self.topic.slug, &self.agent_id, Some(&self.swage_root));
         // Delegated children read the same operator-guidance sources as
         // foreground turns: the trust policy is re-derived here because the
         // assembler holds only the working directory, not the policy.
         let workspace_policy = load_trusted_workspace_policy(
             &self.state.storage,
-            self.space.id,
+            self.topic.id,
             session.active_workspace_attachment_id,
         )
         .await;
         let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
         let hierarchy =
-            configuration_hierarchy(&self.swage_root, &self.space.slug, Some(&self.agent_id));
+            configuration_hierarchy(&self.swage_root, &self.topic.slug, Some(&self.agent_id));
         let elements = build_assembly_elements(
             &self.config.instructions,
             operator_guidance,
             active_skills,
             delegated_history,
-            memory_content.map(|content| (content, self.space.name.clone())),
+            memory_content.map(|content| (content, self.topic.name.clone())),
             environment,
             available_skills,
             self.config.default_model_id(),
@@ -317,7 +317,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &elements,
             &tokeniser,
             Some(&self.swage_root),
-            &self.space.slug,
+            &self.topic.slug,
             &self.agent_id,
             &session_variables,
         );
@@ -502,12 +502,12 @@ impl DelegationHandler for GatewayDelegationHandler {
         delegate_call_id: &str,
         sender_agent_id: &str,
         sender_turn_id: Uuid,
-        space_id: Uuid,
+        topic_id: Uuid,
         cancel_token: CancellationToken,
         completion_mode: DelegateCompletionMode,
     ) -> Result<DelegationOutcome, AgentError> {
-        let space = self.state.space_store.get(space_id).await?.ok_or_else(|| {
-            AgentError::InvalidConfig(format!("delegation space {space_id} no longer exists"))
+        let topic = self.state.topic_store.get(topic_id).await?.ok_or_else(|| {
+            AgentError::InvalidConfig(format!("delegation topic {topic_id} no longer exists"))
         })?;
         let sender_filesystem_authority =
             self.filesystem_authority_for_turn(sender_turn_id).await?;
@@ -570,16 +570,16 @@ impl DelegationHandler for GatewayDelegationHandler {
         };
 
         let target_resolved =
-            load_session_config(&self.state, &space.slug, target_agent_id).map_err(|error| {
+            load_session_config(&self.state, &topic.slug, target_agent_id).map_err(|error| {
                 AgentError::InvalidConfig(format!(
-                    "failed to load config for delegated agent '{target_agent_id}' in space '{}': {error}",
-                    space.slug
+                    "failed to load config for delegated agent '{target_agent_id}' in topic '{}': {error}",
+                    topic.slug
                 ))
             })?;
         let target_resolved = match crate::service::resolve_effective_agent_definition(
             self.state.storage.as_ref(),
             target_agent_id,
-            space_id,
+            topic_id,
         )
         .await
         {
@@ -625,7 +625,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             None => target_resolved,
         };
         resolve_requested_skills_for_agent(
-            &space.slug,
+            &topic.slug,
             target_agent_id,
             Some(resolve_swage_root(&self.state)),
             skills.as_deref().unwrap_or_default(),
@@ -661,8 +661,8 @@ impl DelegationHandler for GatewayDelegationHandler {
             })?;
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
-            &space.slug,
-            space_id,
+            &topic.slug,
+            topic_id,
             target_resolved.clone(),
             &bound_agent_ids,
             &format!("delegated agent {target_agent_id:?}"),
@@ -685,12 +685,12 @@ impl DelegationHandler for GatewayDelegationHandler {
             session_metadata = existing.metadata.clone();
         }
         let existing_child = existing_named_child.map(|child| child.continuation);
-        let mut target_agent_config = build_agent_config_for_space_workspace(
+        let mut target_agent_config = build_agent_config_for_topic_workspace(
             &self.state,
             target_agent_id.to_string(),
             &target_resolved,
             None,
-            space_id,
+            topic_id,
             sender_turn_id,
             active_workspace_attachment_id,
         )
@@ -699,7 +699,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let placement = if existing_child.is_some() {
             reauthorise_named_child_placement(
                 &self.state,
-                space_id,
+                topic_id,
                 sender_turn_id,
                 sender_session_id,
                 active_workspace_attachment_id,
@@ -713,7 +713,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     Some(cwd) => Some(
                         resolve_authorised_worker_directory(
                             &self.state,
-                            space_id,
+                            topic_id,
                             sender_turn_id,
                             Some(sender_session_id),
                             active_workspace_attachment_id,
@@ -734,7 +734,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     })?;
                     let repo = resolve_authorised_worker_directory(
                         &self.state,
-                        space_id,
+                        topic_id,
                         sender_turn_id,
                         Some(sender_session_id),
                         active_workspace_attachment_id,
@@ -789,7 +789,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 config: &effective_target_resolved,
                 agent_config: &target_agent_config,
                 session_metadata: Some(&session_metadata),
-                space_id: Some(space_id),
+                topic_id: Some(topic_id),
                 active_workspace_attachment_id,
                 ws_tx: silent_ws_tx.clone(),
                 session_id: None,
@@ -818,7 +818,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_delegations: self.active_delegations.clone(),
             context_assembler: delegated_context_assembler(
                 self.state.clone(),
-                space.clone(),
+                topic.clone(),
                 target_resolved.clone(),
                 target_agent_id.to_string(),
                 target_agent_config.working_directory.display().to_string(),
@@ -879,7 +879,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .execute_delegation(
                         &delegate_msg,
                         Some(sender_turn_id),
-                        space_id,
+                        topic_id,
                         target_agent_config,
                         target_context_transfer_config,
                         Some(target_dispatcher),
@@ -969,7 +969,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         .execute_delegation(
                             &delegate_msg,
                             Some(sender_turn_id),
-                            space_id,
+                            topic_id,
                             target_agent_config,
                             target_context_transfer_config,
                             Some(target_dispatcher),
@@ -1107,7 +1107,7 @@ impl GatewayDelegationHandler {
                     })?;
                 let authority = resolve_authorised_worker_directory(
                     &self.state,
-                    session.space_id,
+                    session.topic_id,
                     authority_context_id,
                     Some(session.id),
                     session.active_workspace_attachment_id,

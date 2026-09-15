@@ -1,4 +1,4 @@
-// HTTP API client for pages — agent-run tabs on a space.
+// HTTP API client for pages — agent-run tabs on a topic.
 //
 // Wraps the gateway's page endpoints with typed request/response handling.
 // All functions throw on HTTP errors so callers can handle failures uniformly.
@@ -19,8 +19,8 @@ export function setBaseUrl(url: string): void {
   generated.setClientBaseUrl(url);
 }
 
-export async function listPages(spaceId: string): Promise<PageListResponse> {
-  return generated.listPages(spaceId);
+export async function listPages(topicId: string): Promise<PageListResponse> {
+  return generated.listPages(topicId);
 }
 
 export async function getPage(pageId: string): Promise<PageResponse> {
@@ -30,24 +30,24 @@ export async function getPage(pageId: string): Promise<PageResponse> {
 // A template seeds the new page's modules and is recorded as its origin;
 // omitting it creates a blank page.
 export async function createPage(
-  spaceId: string,
+  topicId: string,
   title: string,
   templateId?: string,
 ): Promise<PageResponse> {
-  return generated.createPage(spaceId, { title, template_id: templateId });
+  return generated.createPage(topicId, { title, template_id: templateId });
 }
 
 export async function listPageTemplates(
-  spaceId: string,
+  topicId: string,
 ): Promise<PageTemplateListResponse> {
-  return generated.listPageTemplates(spaceId);
+  return generated.listPageTemplates(topicId);
 }
 
 export async function createPageTemplate(
-  spaceId: string,
+  topicId: string,
   body: CreatePageTemplateRequest,
 ): Promise<PageTemplateResponse> {
-  return generated.createPageTemplate(spaceId, body);
+  return generated.createPageTemplate(topicId, body);
 }
 
 export async function writePageModule(

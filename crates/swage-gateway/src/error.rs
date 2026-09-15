@@ -68,7 +68,7 @@ impl ApiError {
 
     /// 409 Conflict.
     pub fn conflict(message: String) -> Self {
-        GatewayError::SpaceConflict(message).into()
+        GatewayError::TopicConflict(message).into()
     }
 
     /// 422 Validation Error.
@@ -141,11 +141,11 @@ impl IntoResponse for ApiError {
 /// internal-error catch-all that hides it from clients.
 pub fn error_code(error: &GatewayError) -> ErrorCode {
     match error {
-        GatewayError::ConversationNotFound { .. } | GatewayError::SpaceNotFound { .. } => {
+        GatewayError::ConversationNotFound { .. } | GatewayError::TopicNotFound { .. } => {
             ErrorCode::NotFound
         }
         GatewayError::TurnInProgress { .. } => ErrorCode::TurnInProgress,
-        GatewayError::SpaceConflict(_) => ErrorCode::Conflict,
+        GatewayError::TopicConflict(_) => ErrorCode::Conflict,
         GatewayError::ValidationError(_) => ErrorCode::ValidationError,
         GatewayError::Provider(_) => ErrorCode::ProviderError,
         GatewayError::SignInUnsupported(_) => ErrorCode::SignInUnsupported,

@@ -244,19 +244,19 @@ mod tests {
     use swage_core::Role;
     use uuid::Uuid;
 
-    use crate::model::{NewMessage, NewSession, NewSpace};
-    use crate::store::{MessageStore, SessionStore, SpaceStore};
+    use crate::model::{NewMessage, NewSession, NewTopic};
+    use crate::store::{MessageStore, SessionStore, TopicStore};
 
     use super::*;
 
-    // Create a space → session → thread chain.
+    // Create a topic → session → thread chain.
     //
     // Threads are inserted via raw SQL because the ThreadStore SQLite
     // implementation lives in a separate task and may not be wired yet.
     async fn make_thread() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             })
@@ -264,7 +264,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -535,8 +535,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_by_thread_is_scoped_to_thread() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             })
@@ -544,7 +544,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "a".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

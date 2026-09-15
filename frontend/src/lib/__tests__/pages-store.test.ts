@@ -36,8 +36,8 @@ function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void; recon
 
 const PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const MODULE_ID = "22222222-2222-4222-8222-222222222222";
-const SPACE_ID = "33333333-3333-4333-8333-333333333333";
-const OTHER_SPACE_ID = "66666666-6666-4666-8666-666666666666";
+const TOPIC_ID = "33333333-3333-4333-8333-333333333333";
+const OTHER_TOPIC_ID = "66666666-6666-4666-8666-666666666666";
 const ANNOTATION_ID = "44444444-4444-4444-8444-444444444444";
 
 function jsonResponse(body: unknown): Response {
@@ -62,7 +62,7 @@ function annotationBody(body: string, author: string) {
 function pageBody(source: string, annotations: unknown[] = []) {
   return {
     id: PAGE_ID,
-    space_id: SPACE_ID,
+    topic_id: TOPIC_ID,
     title: "Planning",
     created_at: "2026-08-28T00:00:00Z",
     updated_at: "2026-08-28T00:00:00Z",
@@ -115,7 +115,7 @@ describe("pages store", () => {
     vi.restoreAllMocks();
   });
 
-  it("loads the space's pages and opens one", async () => {
+  it("loads the topic's pages and opens one", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
@@ -124,38 +124,38 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createPagesStore({ channelFactory: fakeChannel });
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
     expect(store.pages).toHaveLength(1);
     expect(store.pages[0].title).toBe("Planning");
 
     await store.openPage(PAGE_ID);
     expect(store.activePage?.modules[0].source).toBe("# Hello");
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/spaces/${SPACE_ID}/pages`,
+      `/api/topics/${TOPIC_ID}/pages`,
       expect.anything(),
     );
   });
 
-  it("keeps the current space's pages and templates when a previous template load finishes late", async () => {
+  it("keeps the current topic's pages and templates when a previous template load finishes late", async () => {
     let resolvePreviousTemplates: (response: Response) => void;
     let previousTemplateRequests = 0;
     const previousTemplates = new Promise<Response>((resolve) => {
       resolvePreviousTemplates = resolve;
     });
     const fetchMock = vi.fn((url: string) => {
-      if (url === `/api/spaces/${SPACE_ID}/pages`) {
+      if (url === `/api/topics/${TOPIC_ID}/pages`) {
         return Promise.resolve(jsonResponse(listBody));
       }
-      if (url === `/api/spaces/${SPACE_ID}/page-templates`) {
+      if (url === `/api/topics/${TOPIC_ID}/page-templates`) {
         previousTemplateRequests += 1;
         return previousTemplateRequests === 1
           ? Promise.resolve(jsonResponse(templateListBody))
           : previousTemplates;
       }
-      if (url === `/api/spaces/${OTHER_SPACE_ID}/pages`) {
+      if (url === `/api/topics/${OTHER_TOPIC_ID}/pages`) {
         return Promise.resolve(jsonResponse(otherListBody));
       }
-      if (url === `/api/spaces/${OTHER_SPACE_ID}/page-templates`) {
+      if (url === `/api/topics/${OTHER_TOPIC_ID}/page-templates`) {
         return Promise.resolve(jsonResponse(otherTemplateListBody));
       }
       throw new Error(`unexpected request: ${url}`);
@@ -163,17 +163,17 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createPagesStore({ channelFactory: fakeChannel });
-    await store.loadPages(SPACE_ID);
-    const previousLoad = store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
+    const previousLoad = store.loadPages(TOPIC_ID);
     await vi.waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        `/api/spaces/${SPACE_ID}/page-templates`,
+        `/api/topics/${TOPIC_ID}/page-templates`,
         expect.anything(),
       );
     });
 
-    const currentLoad = store.loadPages(OTHER_SPACE_ID);
-    // A visible previous-space picker is cleared before B's response settles.
+    const currentLoad = store.loadPages(OTHER_TOPIC_ID);
+    // A visible previous-topic picker is cleared before B's response settles.
     expect(store.templates).toEqual([]);
     await currentLoad;
     expect(store.pages.map((page) => page.title)).toEqual(["Other planning"]);
@@ -202,7 +202,7 @@ describe("pages store", () => {
 
     const channel = fakeChannel();
     const store = createPagesStore({ channelFactory: () => channel });
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
     await store.openPage(PAGE_ID);
     expect(store.activePage?.modules[0].source).toBe("before");
 
@@ -227,7 +227,7 @@ describe("pages store", () => {
 
     const channel = fakeChannel();
     const store = createPagesStore({ channelFactory: () => channel });
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
     await store.openPage(PAGE_ID);
 
     channel.reconnect();
@@ -256,7 +256,7 @@ describe("pages store", () => {
 
     const channel = fakeChannel();
     const store = createPagesStore({ channelFactory: () => channel });
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
     await store.openPage(PAGE_ID);
     expect(store.activePage?.modules[0].annotations).toEqual([]);
 
@@ -296,7 +296,7 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createPagesStore({ channelFactory: fakeChannel });
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
     await store.openPage(PAGE_ID);
 
     await store.annotate(PAGE_ID, MODULE_ID, "mine, on this module");
@@ -324,11 +324,11 @@ describe("pages store", () => {
       page_id: PAGE_ID,
       module_id: MODULE_ID,
     });
-    // No space loaded, nothing open: the signal is inert.
+    // No topic loaded, nothing open: the signal is inert.
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.activePage).toBeNull();
   });
-  it("offers the space's templates and forks a page from the chosen one", async () => {
+  it("offers the topic's templates and forks a page from the chosen one", async () => {
     const forked = {
       ...pageBody("## Yesterday"),
       forked_from_template_id: TEMPLATE_ID,
@@ -344,14 +344,14 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createPagesStore();
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
     expect(store.templates.map((template) => template.name)).toEqual([
       "Standup",
     ]);
 
-    await store.createPage(SPACE_ID, "Monday standup", TEMPLATE_ID);
+    await store.createPage(TOPIC_ID, "Monday standup", TEMPLATE_ID);
     const createCall = fetchMock.mock.calls[2];
-    expect(createCall[0]).toBe(`/api/spaces/${SPACE_ID}/pages`);
+    expect(createCall[0]).toBe(`/api/topics/${TOPIC_ID}/pages`);
     expect(requestBody(createCall)).toEqual({
       title: "Monday standup",
       template_id: TEMPLATE_ID,
@@ -370,7 +370,7 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createPagesStore();
-    await store.loadPages(SPACE_ID);
+    await store.loadPages(TOPIC_ID);
 
     expect(store.templateName(TEMPLATE_ID)).toBe("Standup");
     // A template deleted since the fork resolves to nothing, so the surface
@@ -388,8 +388,8 @@ describe("pages store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createPagesStore();
-    await store.loadPages(SPACE_ID);
-    await store.createPage(SPACE_ID, "Scratch");
+    await store.loadPages(TOPIC_ID);
+    await store.createPage(TOPIC_ID, "Scratch");
     expect(requestBody(fetchMock.mock.calls[2]).template_id).toBeUndefined();
   });
 });

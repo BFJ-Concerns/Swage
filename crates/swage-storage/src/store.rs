@@ -13,15 +13,15 @@ use crate::model::{
     NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
     NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewPage, NewPageAnnotation,
     NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput, NewSchedule,
-    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSpace, NewTaskDefinition,
-    NewThread, NewToolCall, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
-    NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment,
-    OrientationCard, OrientationCardLifecycle, Page, PageAnnotation, PageModule, PageTemplate,
-    PageTemplateModule, PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SessionVariable, SourceCapture, SourceObservation,
-    Space, SpaceSlug, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Turn,
-    TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
-    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewTaskDefinition,
+    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
+    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
+    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, Page, PageAnnotation,
+    PageModule, PageTemplate, PageTemplateModule, PendingChannelOrigin, ProviderRoundRecord,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionVariable,
+    SourceCapture, SourceObservation, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
@@ -31,30 +31,30 @@ use crate::model::{
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-pub trait SpaceStore: Send + Sync {
-    async fn create(&self, space: NewSpace) -> Result<Space, StorageError>;
-    async fn get(&self, id: Uuid) -> Result<Option<Space>, StorageError>;
-    async fn get_by_name(&self, name: &str) -> Result<Option<Space>, StorageError>;
-    /// Get the default space, creating it if it does not exist.
-    async fn get_or_create_default(&self) -> Result<Space, StorageError>;
-    /// Return all spaces ordered by created_at ascending.
-    async fn list_all(&self) -> Result<Vec<Space>, StorageError>;
-    /// Look up a space by its slug.
-    async fn get_by_slug(&self, slug: &str) -> Result<Option<Space>, StorageError>;
-    /// Partially update a space. Only `Some` fields are changed.
+pub trait TopicStore: Send + Sync {
+    async fn create(&self, topic: NewTopic) -> Result<Topic, StorageError>;
+    async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError>;
+    async fn get_by_name(&self, name: &str) -> Result<Option<Topic>, StorageError>;
+    /// Get the default topic, creating it if it does not exist.
+    async fn get_or_create_default(&self) -> Result<Topic, StorageError>;
+    /// Return all topics ordered by created_at ascending.
+    async fn list_all(&self) -> Result<Vec<Topic>, StorageError>;
+    /// Look up a topic by its slug.
+    async fn get_by_slug(&self, slug: &str) -> Result<Option<Topic>, StorageError>;
+    /// Partially update a topic. Only `Some` fields are changed.
     ///
-    /// Returns the updated space, or `StorageError::NotFound` if `id` is unknown.
+    /// Returns the updated topic, or `StorageError::NotFound` if `id` is unknown.
     async fn update(
         &self,
         id: Uuid,
         name: Option<String>,
         description: Option<String>,
-        slug: Option<SpaceSlug>,
-    ) -> Result<Space, StorageError>;
-    /// Delete a space and cascade its sessions.
+        slug: Option<TopicSlug>,
+    ) -> Result<Topic, StorageError>;
+    /// Delete a topic and cascade its sessions.
     ///
-    /// Returns `true` if the space existed and was removed, `false` if not found.
-    /// Returns `StorageError::ConstraintViolation` if called on the default space.
+    /// Returns `true` if the topic existed and was removed, `false` if not found.
+    /// Returns `StorageError::ConstraintViolation` if called on the default topic.
     async fn delete(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
@@ -70,9 +70,9 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
         id: Uuid,
     ) -> Result<Option<WorkspaceAttachment>, StorageError>;
 
-    async fn list_workspace_attachments_by_space(
+    async fn list_workspace_attachments_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkspaceAttachment>, StorageError>;
 
     async fn set_workspace_trust(
@@ -87,9 +87,9 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
         is_missing: bool,
     ) -> Result<WorkspaceAttachment, StorageError>;
 
-    async fn set_space_default_workspace(
+    async fn set_topic_default_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Option<Uuid>,
     ) -> Result<(), StorageError>;
 
@@ -100,8 +100,8 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
 pub trait SessionStore: Send + Sync {
     async fn create_session(&self, session: NewSession) -> Result<Session, StorageError>;
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError>;
-    /// List sessions in the space ordered by updated_at DESC.
-    async fn list_by_space(&self, space_id: Uuid) -> Result<Vec<Session>, StorageError>;
+    /// List sessions in the topic ordered by updated_at DESC.
+    async fn list_by_topic(&self, topic_id: Uuid) -> Result<Vec<Session>, StorageError>;
     /// List sessions belonging to an agent, ordered by updated_at DESC.
     async fn list_sessions_by_agent_id(&self, agent_id: &str)
     -> Result<Vec<Session>, StorageError>;
@@ -194,7 +194,7 @@ pub trait AgentMemoryStore: Send + Sync {
     async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError>;
     async fn list_agent_memories(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         agent_id: Option<&str>,
         session_id: Option<Uuid>,
         query: Option<&str>,
@@ -214,24 +214,24 @@ pub trait AgentDefinitionStore: Send + Sync {
         definition: NewAgentDefinition,
     ) -> Result<AgentDefinition, StorageError>;
 
-    /// Resolve the definition a session starting as `agent_id` in `space_id`
-    /// should use: the space-scoped definition when one exists, else the
+    /// Resolve the definition a session starting as `agent_id` in `topic_id`
+    /// should use: the topic-scoped definition when one exists, else the
     /// global one, else none (the agent runs on resolved config alone).
     async fn resolve_agent_definition(
         &self,
         agent_id: &str,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Option<AgentDefinition>, StorageError>;
 
     async fn list_agent_definitions(
         &self,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
     ) -> Result<Vec<AgentDefinition>, StorageError>;
 
     async fn delete_agent_definition(
         &self,
         agent_id: &str,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
     ) -> Result<bool, StorageError>;
 }
 
@@ -265,7 +265,7 @@ pub trait SessionVariableStore: Send + Sync {
     ) -> Result<bool, StorageError>;
 }
 
-/// Store for a space's knowledge base: immutable source observations and
+/// Store for a topic's knowledge base: immutable source observations and
 /// their versioned text extractions, searched by full text.
 ///
 /// Immutability is this store's contract, not a caller convention: nothing
@@ -274,7 +274,7 @@ pub trait SessionVariableStore: Send + Sync {
 /// — later state is always a new row.
 #[async_trait]
 pub trait ObservationStore: Send + Sync {
-    /// Record a capture. Identical bodies within a space deduplicate: the
+    /// Record a capture. Identical bodies within a topic deduplicate: the
     /// existing observation is returned, so evidence identity never forks.
     async fn record_observation(
         &self,
@@ -283,15 +283,15 @@ pub trait ObservationStore: Send + Sync {
 
     async fn get_observation(&self, id: Uuid) -> Result<Option<SourceObservation>, StorageError>;
 
-    async fn list_observations_by_space(
+    async fn list_observations_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<SourceObservation>, StorageError>;
 
     /// Read capture acts belonging to the supplied workflow worker scopes.
     async fn list_source_captures_by_scopes(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         capture_scopes: Vec<String>,
     ) -> Result<Vec<SourceCapture>, StorageError>;
 
@@ -318,12 +318,12 @@ pub trait ObservationStore: Send + Sync {
         observation_id: Uuid,
     ) -> Result<Option<ExtractionDerivation>, StorageError>;
 
-    /// Full-text search across the space's newest derivation per
+    /// Full-text search across the topic's newest derivation per
     /// observation, best matches first. Each hit carries the derivation
     /// version and snippet offsets a citation pins to.
     async fn search_extractions(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         query: &str,
         limit: usize,
     ) -> Result<Vec<KnowledgeSearchHit>, StorageError>;
@@ -342,9 +342,9 @@ pub trait CurationAssertionStore: Send + Sync {
     /// Each observation's newest assertion — its effective curation state,
     /// by the same newest-assertion rule the search filter applies.
     /// Observations with no assertion are absent from the result.
-    async fn effective_curation_by_space(
+    async fn effective_curation_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<CurationAssertion>, StorageError>;
 }
 
@@ -370,13 +370,13 @@ pub trait OrientationCardStore: Send + Sync {
     ) -> Result<OrientationCard, StorageError>;
     async fn find_orientation_cards(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OrientationCard>, StorageError>;
     async fn supersede_orientation_card(
         &self,
-        expected_space_id: Uuid,
+        expected_topic_id: Uuid,
         card_id: Uuid,
         replacement_card_id: Uuid,
         actor: String,
@@ -384,7 +384,7 @@ pub trait OrientationCardStore: Send + Sync {
     ) -> Result<OrientationCardLifecycle, StorageError>;
     async fn retire_orientation_card(
         &self,
-        expected_space_id: Uuid,
+        expected_topic_id: Uuid,
         card_id: Uuid,
         actor: String,
         session_id: Option<Uuid>,
@@ -420,9 +420,9 @@ pub trait AttachmentStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError>;
-    async fn list_attachments_by_space(
+    async fn list_attachments_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError>;
     async fn update_attachment_ingestion(
         &self,
@@ -469,7 +469,7 @@ pub trait MaterialStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<Material>, StorageError>;
-    async fn list_materials_by_space(&self, space_id: Uuid) -> Result<Vec<Material>, StorageError>;
+    async fn list_materials_by_topic(&self, topic_id: Uuid) -> Result<Vec<Material>, StorageError>;
     async fn update_material_content(
         &self,
         id: Uuid,
@@ -483,7 +483,7 @@ pub trait MaterialStore: Send + Sync {
         id: Uuid,
         scope_kind: crate::model::AttachmentScopeKind,
         session_id: Option<Uuid>,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
         relative_path: &str,
     ) -> Result<Material, StorageError>;
 }
@@ -638,10 +638,10 @@ pub trait ContextSnapshotStore: Send + Sync {
     /// Fetch the raw report JSON for `turn_id`. Returns `None` if no snapshot
     /// was stored for that turn.
     async fn get_snapshot(&self, turn_id: Uuid) -> Result<Option<String>, StorageError>;
-    /// List recent context snapshots for a space, newest first.
-    async fn list_snapshots_by_space(
+    /// List recent context snapshots for a topic, newest first.
+    async fn list_snapshots_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError>;
 }
@@ -1037,7 +1037,7 @@ pub trait WorkflowStore: Send + Sync {
     ) -> Result<WorkflowScriptRecord, StorageError>;
     async fn list_workflow_scripts(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkflowScriptRecord>, StorageError>;
     async fn create_workflow_run(
         &self,
@@ -1053,7 +1053,7 @@ pub trait WorkflowStore: Send + Sync {
     ) -> Result<Option<WorkflowRunRecord>, StorageError>;
     async fn list_workflow_runs(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
     async fn update_workflow_run_state(
         &self,
@@ -1181,11 +1181,11 @@ pub trait WorkflowStore: Send + Sync {
         &self,
         run_id: Uuid,
     ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError>;
-    /// Every unanswered hold across a space's runs, oldest first — what an
+    /// Every unanswered hold across a topic's runs, oldest first — what an
     /// agent holding the answering tool may still decide.
     async fn list_open_workflow_run_holds(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkflowRunHoldRecord>, StorageError>;
     /// Close every unanswered hold once its run has completed without using
     /// it. Closed holds remain on the run record but are no longer decisions
@@ -1281,9 +1281,9 @@ pub trait WorkflowStore: Send + Sync {
 
 /// Combined storage interface implemented by `SqliteStorage`.
 ///
-/// `SpaceStore` is not included — it is independently available and consumers
-/// that need space operations import it separately.
-/// Pages: agent-run tabs on a space assembled from module instances. The
+/// `TopicStore` is not included — it is independently available and consumers
+/// that need topic operations import it separately.
+/// Pages: agent-run tabs on a topic assembled from module instances. The
 /// database is authoritative for page content; renderings derive from it.
 #[async_trait]
 pub trait ProviderRoundStore: Send + Sync {
@@ -1314,8 +1314,8 @@ pub trait ProviderRoundStore: Send + Sync {
 pub trait PageStore: Send + Sync {
     async fn create_page(&self, page: NewPage) -> Result<Page, StorageError>;
     async fn get_page(&self, id: Uuid) -> Result<Option<Page>, StorageError>;
-    /// All pages of a space, oldest first.
-    async fn list_pages_by_space(&self, space_id: Uuid) -> Result<Vec<Page>, StorageError>;
+    /// All pages of a topic, oldest first.
+    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Page>, StorageError>;
     async fn create_page_module(&self, module: NewPageModule) -> Result<PageModule, StorageError>;
     async fn get_page_module(&self, id: Uuid) -> Result<Option<PageModule>, StorageError>;
     /// A page's module instances in position order.
@@ -1335,10 +1335,10 @@ pub trait PageStore: Send + Sync {
         modules: Vec<NewPageTemplateModuleInput>,
     ) -> Result<PageTemplate, StorageError>;
     async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError>;
-    /// A space's templates, oldest first.
-    async fn list_page_templates_by_space(
+    /// A topic's templates, oldest first.
+    async fn list_page_templates_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<PageTemplate>, StorageError>;
     async fn create_page_template_module(
         &self,
@@ -1491,23 +1491,23 @@ mod tests {
     struct StubStorage;
 
     #[async_trait]
-    impl SpaceStore for StubStorage {
-        async fn create(&self, _: NewSpace) -> Result<Space, StorageError> {
+    impl TopicStore for StubStorage {
+        async fn create(&self, _: NewTopic) -> Result<Topic, StorageError> {
             unimplemented!()
         }
-        async fn get(&self, _: Uuid) -> Result<Option<Space>, StorageError> {
+        async fn get(&self, _: Uuid) -> Result<Option<Topic>, StorageError> {
             unimplemented!()
         }
-        async fn get_by_name(&self, _: &str) -> Result<Option<Space>, StorageError> {
+        async fn get_by_name(&self, _: &str) -> Result<Option<Topic>, StorageError> {
             unimplemented!()
         }
-        async fn get_or_create_default(&self) -> Result<Space, StorageError> {
+        async fn get_or_create_default(&self) -> Result<Topic, StorageError> {
             unimplemented!()
         }
-        async fn list_all(&self) -> Result<Vec<Space>, StorageError> {
+        async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
             unimplemented!()
         }
-        async fn get_by_slug(&self, _: &str) -> Result<Option<Space>, StorageError> {
+        async fn get_by_slug(&self, _: &str) -> Result<Option<Topic>, StorageError> {
             unimplemented!()
         }
         async fn update(
@@ -1515,8 +1515,8 @@ mod tests {
             _: Uuid,
             _: Option<String>,
             _: Option<String>,
-            _: Option<SpaceSlug>,
-        ) -> Result<Space, StorageError> {
+            _: Option<TopicSlug>,
+        ) -> Result<Topic, StorageError> {
             unimplemented!()
         }
         async fn delete(&self, _: Uuid) -> Result<bool, StorageError> {
@@ -1532,7 +1532,7 @@ mod tests {
         async fn get_session(&self, _: Uuid) -> Result<Option<Session>, StorageError> {
             unimplemented!()
         }
-        async fn list_by_space(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
+        async fn list_by_topic(&self, _: Uuid) -> Result<Vec<Session>, StorageError> {
             unimplemented!()
         }
         async fn list_sessions_by_agent_id(&self, _: &str) -> Result<Vec<Session>, StorageError> {
@@ -1831,7 +1831,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_observations_by_space(
+        async fn list_observations_by_topic(
             &self,
             _: Uuid,
         ) -> Result<Vec<SourceObservation>, StorageError> {
@@ -1889,7 +1889,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn effective_curation_by_space(
+        async fn effective_curation_by_topic(
             &self,
             _: Uuid,
         ) -> Result<Vec<CurationAssertion>, StorageError> {
@@ -1996,7 +1996,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_workspace_attachments_by_space(
+        async fn list_workspace_attachments_by_topic(
             &self,
             _: Uuid,
         ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
@@ -2019,7 +2019,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn set_space_default_workspace(
+        async fn set_topic_default_workspace(
             &self,
             _: Uuid,
             _: Option<Uuid>,
@@ -2053,7 +2053,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_attachments_by_space(
+        async fn list_attachments_by_topic(
             &self,
             _: Uuid,
         ) -> Result<Vec<Attachment>, StorageError> {
@@ -2139,7 +2139,7 @@ mod tests {
             unimplemented!()
         }
 
-        async fn list_materials_by_space(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
+        async fn list_materials_by_topic(&self, _: Uuid) -> Result<Vec<Material>, StorageError> {
             unimplemented!()
         }
 
@@ -2180,7 +2180,7 @@ mod tests {
         async fn get_page(&self, _: Uuid) -> Result<Option<Page>, StorageError> {
             unimplemented!()
         }
-        async fn list_pages_by_space(&self, _: Uuid) -> Result<Vec<Page>, StorageError> {
+        async fn list_pages_by_topic(&self, _: Uuid) -> Result<Vec<Page>, StorageError> {
             unimplemented!()
         }
         async fn create_page_module(&self, _: NewPageModule) -> Result<PageModule, StorageError> {
@@ -2211,7 +2211,7 @@ mod tests {
         async fn get_page_template(&self, _: Uuid) -> Result<Option<PageTemplate>, StorageError> {
             unimplemented!()
         }
-        async fn list_page_templates_by_space(
+        async fn list_page_templates_by_topic(
             &self,
             _: Uuid,
         ) -> Result<Vec<PageTemplate>, StorageError> {
@@ -2344,9 +2344,9 @@ mod tests {
         async fn get_snapshot(&self, _turn_id: Uuid) -> Result<Option<String>, StorageError> {
             unimplemented!()
         }
-        async fn list_snapshots_by_space(
+        async fn list_snapshots_by_topic(
             &self,
-            _space_id: Uuid,
+            _topic_id: Uuid,
             _limit: usize,
         ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
             unimplemented!()
@@ -3132,7 +3132,7 @@ mod tests {
             let id = Uuid::new_v4();
             std::mem::drop(t.create_agent_memory(NewAgentMemoryRecord {
                 id,
-                space_id: Uuid::new_v4(),
+                topic_id: Uuid::new_v4(),
                 session_id: Uuid::new_v4(),
                 turn_id: Uuid::new_v4(),
                 agent_id: "agent-a".into(),

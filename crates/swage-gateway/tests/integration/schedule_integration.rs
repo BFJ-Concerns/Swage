@@ -35,7 +35,7 @@ use swage_protocol::client::schedule::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewScheduleRun, NewSpace, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    NewScheduleRun, NewTopic, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
     SqliteStorage, TurnState,
 };
 
@@ -161,7 +161,7 @@ fn test_state_with_config(
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
     AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -889,16 +889,16 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
             MockProvider::text_round("second outcome"),
         ]),
     );
-    let viewing_space = state.space_store.get_or_create_default().await.unwrap();
-    let target_space = state
-        .space_store
-        .create(swage_storage::NewSpace {
+    let viewing_topic = state.topic_store.get_or_create_default().await.unwrap();
+    let target_topic = state
+        .topic_store
+        .create(swage_storage::NewTopic {
             name: "Scheduled work target".into(),
             slug: "scheduled-work-target".into(),
         })
         .await
         .unwrap();
-    assert_ne!(viewing_space.id, target_space.id);
+    assert_ne!(viewing_topic.id, target_topic.id);
 
     let created = schedule::create_schedule(
         &state,
@@ -908,7 +908,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
                 every: "every 1 hours".into(),
             },
             SessionPolicy::Fresh {
-                space_id: target_space.id,
+                topic_id: target_topic.id,
                 agent_id: "gateway".into(),
             },
         ),
@@ -964,8 +964,8 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
         .unwrap()
         .unwrap();
     assert_eq!(session.agent_id, "gateway");
-    assert_eq!(session.space_id, target_space.id);
-    assert_ne!(session.space_id, viewing_space.id);
+    assert_eq!(session.topic_id, target_topic.id);
+    assert_ne!(session.topic_id, viewing_topic.id);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1041,7 +1041,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
         provider,
         config_with_gate_model(),
     );
-    let space = state.space_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -1051,7 +1051,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1134,7 +1134,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
         provider,
         config_with_gate_model(),
     );
-    let space = state.space_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -1144,7 +1144,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1181,7 +1181,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
         provider,
         config_with_gate_model(),
     );
-    let space = state.space_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.get_or_create_default().await.unwrap();
 
     let created = schedule::create_schedule(
         &state,
@@ -1191,7 +1191,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1233,7 +1233,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
         &dir.path().join("gate-unknown.db"),
         MockProvider::new(vec![]),
     );
-    let space = state.space_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.get_or_create_default().await.unwrap();
 
     let result = schedule::create_schedule(
         &state,
@@ -1243,7 +1243,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
                 every: "every 1 hours".into(),
             },
             session: SessionPolicy::Fresh {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1442,10 +1442,10 @@ async fn completed_runs_deliver_to_a_page_through_the_page_substrate() {
     );
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
-    let space = state.space_store.get_or_create_default().await.unwrap();
+    let topic = state.topic_store.get_or_create_default().await.unwrap();
     let page = swage_gateway::page::create_page(
         &state,
-        space.id,
+        topic.id,
         CreatePageRequest {
             title: "Schedule output".into(),
             template_id: None,
@@ -1493,16 +1493,16 @@ async fn completed_runs_deliver_to_a_page_through_the_page_substrate() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn page_delivery_rejects_a_page_outside_the_schedules_space() {
+async fn page_delivery_rejects_a_page_outside_the_schedules_topic() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
-        &dir.path().join("cross-space-page.db"),
+        &dir.path().join("cross-topic-page.db"),
         MockProvider::new(vec![]),
     );
-    let default = state.space_store.get_or_create_default().await.unwrap();
+    let default = state.topic_store.get_or_create_default().await.unwrap();
     let other = state
-        .space_store
-        .create(NewSpace {
+        .topic_store
+        .create(NewTopic {
             name: "Elsewhere".into(),
             slug: "elsewhere".parse().unwrap(),
         })
@@ -1512,7 +1512,7 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_space() {
         &state,
         other.id,
         CreatePageRequest {
-            title: "Other space".into(),
+            title: "Other topic".into(),
             template_id: None,
         },
     )
@@ -1527,7 +1527,7 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_space() {
                 every: "every 5 seconds".into(),
             },
             session: SessionPolicy::Fresh {
-                space_id: default.id,
+                topic_id: default.id,
                 agent_id: "gateway".into(),
             },
             routing: Some(DeliveryRoutingRequest {
@@ -1541,8 +1541,8 @@ async fn page_delivery_rejects_a_page_outside_the_schedules_space() {
         ScheduleCreator::User,
     )
     .await
-    .expect_err("cross-space page delivery must be refused at schedule creation");
-    assert!(error.to_string().contains("schedule's space"));
+    .expect_err("cross-topic page delivery must be refused at schedule creation");
+    assert!(error.to_string().contains("schedule's topic"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

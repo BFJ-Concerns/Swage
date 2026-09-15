@@ -20,7 +20,7 @@
   import ProviderSettingsSurface from "./settings/ProviderSettingsSurface.svelte";
   import RecoverySettingsSurface from "./settings/RecoverySettingsSurface.svelte";
   import SkillsPanel from "./SkillsPanel.svelte";
-  import type { GenerationPresetConfig, SettingsResponse, Space } from "../types";
+  import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
 
   // Agents, providers, generation, automation, and recovery have working
   // backends. The remaining partial pages are identified below.
@@ -41,15 +41,15 @@
 
   interface Props {
     tab?: SettingsTabId;
-    spaceId?: string | null;
-    spaces?: Space[];
+    topicId?: string | null;
+    topics?: Topic[];
     onSettingsSaved?: () => void | Promise<void>;
   }
 
   let {
     tab = "providers",
-    spaceId = null,
-    spaces = [],
+    topicId = null,
+    topics = [],
     onSettingsSaved,
   }: Props = $props();
 
@@ -181,15 +181,15 @@
     },
     agents: {
       title: "Agent definitions",
-      sub: "The effective agent definitions available when starting a conversation in the selected space.",
+      sub: "The effective agent definitions available when starting a conversation in the selected topic.",
     },
     commands: {
       title: "Commands",
-      sub: "The slash commands available in the selected space.",
+      sub: "The slash commands available in the selected topic.",
     },
     skills: {
       title: "Skills",
-      sub: "The resolved skills available in the selected space.",
+      sub: "The resolved skills available in the selected topic.",
     },
     generation: {
       title: "Generation",
@@ -217,11 +217,11 @@
     },
     recovery: {
       title: "Recovery",
-      sub: "Operator-managed export bundles capturing spaces, conversations, and configuration for restore.",
+      sub: "Operator-managed export bundles capturing topics, conversations, and configuration for restore.",
     },
     display: {
       title: "Display",
-      sub: "How Swage looks. Settings here are platform-level — they apply across all spaces.",
+      sub: "How Swage looks. Settings here are platform-level — they apply across all topics.",
     },
     account: {
       title: "Account",
@@ -310,11 +310,11 @@
     {/if}
 
     {#if tab === "agents"}
-      <AgentDefinitionsPanel {spaceId} />
+      <AgentDefinitionsPanel {topicId} />
     {:else if tab === "commands"}
-      <CommandsPanel {spaceId} />
+      <CommandsPanel {topicId} />
     {:else if tab === "skills"}
-      <SkillsPanel {spaceId} />
+      <SkillsPanel {topicId} />
     {:else if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
@@ -364,9 +364,9 @@
 
         Bind to /api/voice/capabilities for read-only state, then add voice
         provider configuration (transcription engine, synthesis voice,
-        per-space overrides). The capabilities endpoint exists; the
+        per-topic overrides). The capabilities endpoint exists; the
         configuration endpoint does not.
-        Why: the SpaceOperations capability strip is the only place voice
+        Why: the TopicOperations capability strip is the only place voice
         surfaces today.
         How to apply: once a /api/voice/config endpoint exists, replace this
         shell with the real form.
@@ -449,8 +449,8 @@
     {:else if tab === "automation"}
       <AutomationSettingsSurface
         bind:settings
-        {spaceId}
-        {spaces}
+        {topicId}
+        {topics}
         sessionId={null}
         onValidation={(bundlesInvalid, approvalsInvalid, message) => {
           hasInvalidBundlesJson = bundlesInvalid;

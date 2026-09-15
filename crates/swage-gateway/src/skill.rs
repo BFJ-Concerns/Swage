@@ -45,13 +45,13 @@ pub fn parse_slash_command(input: &str) -> SlashCommandResult {
         None => return SlashCommandResult::NotACommand,
     };
 
-    // Split at the first space to separate the candidate name from any trailing text.
+    // Split at the first topic to separate the candidate name from any trailing text.
     let (candidate, tail) = match after_slash.find(' ') {
         Some(pos) => (&after_slash[..pos], &after_slash[pos + 1..]),
         None => (after_slash, ""),
     };
 
-    // Reject empty candidates (bare `/` or `/ spaces`).
+    // Reject empty candidates (bare `/` or `/ topics`).
     if candidate.is_empty() {
         return SlashCommandResult::NotACommand;
     }
@@ -173,86 +173,86 @@ pub(crate) fn validate_agent_scope_id(agent_id: &str) -> Result<(), swage_core::
     Ok(())
 }
 
-/// Whether an agent selector names a definition visible in the selected space.
+/// Whether an agent selector names a definition visible in the selected topic.
 pub(crate) async fn agent_scope_is_visible(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     agent_id: &str,
 ) -> Result<bool, swage_core::GatewayError> {
     validate_agent_scope_id(agent_id)?;
     Ok(crate::service::resolve_effective_agent_definition(
         state.storage.as_ref(),
         agent_id,
-        space_id,
+        topic_id,
     )
     .await?
     .is_some())
 }
 
-/// Discover the effective skills for one space and optional agent beneath an
+/// Discover the effective skills for one topic and optional agent beneath an
 /// already selected Swage root.
-pub(crate) async fn discover_available_for_space(
+pub(crate) async fn discover_available_for_topic(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     agent_id: Option<&str>,
     root: &Path,
 ) -> Result<Vec<SkillDefinition>, String> {
-    let space = state
-        .space_store
-        .get(space_id)
+    let topic = state
+        .topic_store
+        .get(topic_id)
         .await
-        .map_err(|error| format!("failed to load space {space_id}: {error}"))?
-        .ok_or_else(|| format!("space {space_id} was not found"))?;
+        .map_err(|error| format!("failed to load topic {topic_id}: {error}"))?
+        .ok_or_else(|| format!("topic {topic_id} was not found"))?;
     if let Some(agent) = agent_id
-        && !agent_scope_is_visible(state, space_id, agent)
+        && !agent_scope_is_visible(state, topic_id, agent)
             .await
             .map_err(|error| error.to_string())?
     {
         return Err(format!(
-            "no agent definition named '{agent}' is visible to space {space_id}"
+            "no agent definition named '{agent}' is visible to topic {topic_id}"
         ));
     }
-    Ok(discover_available_for_scope(root, &space.slug, agent_id))
+    Ok(discover_available_for_scope(root, &topic.slug, agent_id))
 }
 
-/// Discover the effective skills for a configured space and optional agent.
+/// Discover the effective skills for a configured topic and optional agent.
 ///
 /// The filesystem layout and reserved workflow-agent rule are shared by
 /// context assembly, the HTTP catalogue, and storage-backed discovery.
 pub(crate) fn discover_available_for_scope(
     root: &Path,
-    space_slug: &str,
+    topic_slug: &str,
     agent_id: Option<&str>,
 ) -> Vec<SkillDefinition> {
-    let hierarchy = crate::turn::configuration_hierarchy(root, space_slug, agent_id);
-    let space_dir = &hierarchy[1].1;
+    let hierarchy = crate::turn::configuration_hierarchy(root, topic_slug, agent_id);
+    let topic_dir = &hierarchy[1].1;
     let agent_dir = hierarchy
         .iter()
         .find(|(level, _)| *level == HierarchyLevel::Agent)
         .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
-    SkillManager::discover_available(root, space_dir, agent_dir).0
+    SkillManager::discover_available(root, topic_dir, agent_dir).0
 }
 
-pub(crate) async fn discover_available_for_space_from_config(
+pub(crate) async fn discover_available_for_topic_from_config(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     agent_id: Option<&str>,
 ) -> Result<Vec<SkillDefinition>, String> {
-    let root = skill_root_for_space(space_id).unwrap_or_else(|| state.config_root.clone());
-    discover_available_for_space(state, space_id, agent_id, &root).await
+    let root = skill_root_for_topic(topic_id).unwrap_or_else(|| state.config_root.clone());
+    discover_available_for_topic(state, topic_id, agent_id, &root).await
 }
 
 #[cfg(test)]
-fn skill_root_for_space(space_id: Uuid) -> Option<std::path::PathBuf> {
+fn skill_root_for_topic(topic_id: Uuid) -> Option<std::path::PathBuf> {
     TEST_SKILL_ROOTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(&space_id)
+        .get(&topic_id)
         .cloned()
 }
 
 #[cfg(not(test))]
-fn skill_root_for_space(_space_id: Uuid) -> Option<std::path::PathBuf> {
+fn skill_root_for_topic(_topic_id: Uuid) -> Option<std::path::PathBuf> {
     None
 }
 
@@ -298,13 +298,13 @@ impl Drop for TestSkillRootGuard {
 impl SkillManager {
     /// Discover skills available to a conversation.
     ///
-    /// Builds a three-level hierarchy from `root` (Global), `space_dir`
-    /// (Space), and optionally `agent_dir` (Agent), then delegates to
+    /// Builds a three-level hierarchy from `root` (Global), `topic_dir`
+    /// (Topic), and optionally `agent_dir` (Agent), then delegates to
     /// [`swage_config::skill::discover_skills`] for scanning and override
     /// resolution.
     pub fn discover_available(
         root: &Path,
-        space_dir: &Path,
+        topic_dir: &Path,
         agent_dir: Option<&Path>,
     ) -> (
         Vec<swage_config::skill::SkillDefinition>,
@@ -312,7 +312,7 @@ impl SkillManager {
     ) {
         let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, root),
-            (HierarchyLevel::Space, space_dir),
+            (HierarchyLevel::Topic, topic_dir),
         ];
         if let Some(agent) = agent_dir {
             levels.push((HierarchyLevel::Agent, agent));
@@ -498,7 +498,7 @@ mod tests {
     use swage_config::model::HierarchyLevel as CfgLevel;
     use swage_config::skill::SkillDefinition;
     use swage_context::tokeniser::TiktokenTokeniser;
-    use swage_storage::{NewSession, SessionStore, SpaceStore, SqliteStorage};
+    use swage_storage::{NewSession, SessionStore, SqliteStorage, TopicStore};
     use tempfile::TempDir;
 
     // ── Test helpers ─────────────────────────────────────────────────────────
@@ -506,13 +506,13 @@ mod tests {
     /// Create an in-memory storage instance with a session, returning `(storage, session_id)`.
     async fn make_storage_with_session() -> (SqliteStorage, uuid::Uuid) {
         let storage = SqliteStorage::in_memory().expect("in-memory storage");
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -553,7 +553,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn activate_new_skill_returns_activated_with_token_count() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("my-skill", CfgLevel::Space)];
+        let available = vec![make_skill("my-skill", CfgLevel::Topic)];
         let tok = TiktokenTokeniser::new("gpt-4o");
 
         let result = SkillManager::activate(session_id, "my-skill", &available, &storage, &tok)
@@ -580,7 +580,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn activate_already_active_skill_returns_already_active() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("my-skill", CfgLevel::Space)];
+        let available = vec![make_skill("my-skill", CfgLevel::Topic)];
         let tok = TiktokenTokeniser::new("gpt-4o");
 
         // First activation
@@ -650,7 +650,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn deactivate_user_skill_removes_from_storage() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("user-skill", CfgLevel::Space)];
+        let available = vec![make_skill("user-skill", CfgLevel::Topic)];
         let tok = TiktokenTokeniser::new("gpt-4o");
 
         // Activate first
@@ -676,7 +676,7 @@ mod tests {
         let available = vec![
             make_skill("agent-a", CfgLevel::Agent),
             make_skill("agent-b", CfgLevel::Agent),
-            make_skill("user-only", CfgLevel::Space),
+            make_skill("user-only", CfgLevel::Topic),
         ];
 
         SkillManager::auto_activate_agent_skills(session_id, &available, &storage)
@@ -696,7 +696,7 @@ mod tests {
         );
         assert!(
             !active_names.contains(&"user-only"),
-            "space skill should not be auto-activated"
+            "topic skill should not be auto-activated"
         );
     }
 
@@ -724,7 +724,7 @@ mod tests {
     async fn build_active_skills_agent_level_sorts_first() {
         let (storage, session_id) = make_storage_with_session().await;
         let available = vec![
-            make_skill("user-skill", CfgLevel::Space),
+            make_skill("user-skill", CfgLevel::Topic),
             make_skill("agent-skill", CfgLevel::Agent),
         ];
         let tok = TiktokenTokeniser::new("gpt-4o");
@@ -752,7 +752,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_active_skills_empty_when_none_active() {
         let (storage, session_id) = make_storage_with_session().await;
-        let available = vec![make_skill("dormant", CfgLevel::Space)];
+        let available = vec![make_skill("dormant", CfgLevel::Topic)];
 
         let infos = SkillManager::build_active_skills(session_id, &available, &storage)
             .await
@@ -767,20 +767,20 @@ mod tests {
     #[test]
     fn discover_available_finds_skills_across_levels() {
         let root_dir = TempDir::new().unwrap();
-        let space_dir = TempDir::new().unwrap();
+        let topic_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         write_skill_md(root_dir.path(), "global-skill", "Global.");
-        write_skill_md(space_dir.path(), "space-skill", "Space.");
+        write_skill_md(topic_dir.path(), "topic-skill", "Topic.");
         write_skill_md(agent_dir.path(), "agent-skill", "Agent.");
 
         let (skills, warnings) = SkillManager::discover_available(
             root_dir.path(),
-            space_dir.path(),
+            topic_dir.path(),
             Some(agent_dir.path()),
         );
 
-        for name in ["global-skill", "space-skill", "agent-skill"] {
+        for name in ["global-skill", "topic-skill", "agent-skill"] {
             assert!(skills.iter().any(|skill| skill.name == name));
         }
         assert_eq!(skills.iter().filter(|skill| skill.shipped).count(), 7);
@@ -791,12 +791,12 @@ mod tests {
     #[test]
     fn discover_available_without_agent_dir_omits_agent_level() {
         let root_dir = TempDir::new().unwrap();
-        let space_dir = TempDir::new().unwrap();
+        let topic_dir = TempDir::new().unwrap();
 
         write_skill_md(root_dir.path(), "global-skill", "Global.");
-        write_skill_md(space_dir.path(), "space-skill", "Space.");
+        write_skill_md(topic_dir.path(), "topic-skill", "Topic.");
 
-        let (skills, _) = SkillManager::discover_available(root_dir.path(), space_dir.path(), None);
+        let (skills, _) = SkillManager::discover_available(root_dir.path(), topic_dir.path(), None);
 
         assert_eq!(skills.len(), 9);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
@@ -804,19 +804,19 @@ mod tests {
 
     #[test]
     fn authored_skills_shadow_shipped_definitions_at_every_level() {
-        for level in [CfgLevel::Global, CfgLevel::Space, CfgLevel::Agent] {
+        for level in [CfgLevel::Global, CfgLevel::Topic, CfgLevel::Agent] {
             let root = TempDir::new().unwrap();
-            let space = TempDir::new().unwrap();
+            let topic = TempDir::new().unwrap();
             let agent = TempDir::new().unwrap();
             let authored_base = match level {
                 CfgLevel::Global => root.path(),
-                CfgLevel::Space => space.path(),
+                CfgLevel::Topic => topic.path(),
                 CfgLevel::Agent => agent.path(),
             };
             write_skill_md(authored_base, "commission", "Authored commission.");
 
             let (skills, warnings) =
-                SkillManager::discover_available(root.path(), space.path(), Some(agent.path()));
+                SkillManager::discover_available(root.path(), topic.path(), Some(agent.path()));
             assert!(warnings.is_empty());
             let matching = skills
                 .iter()
@@ -832,7 +832,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projected_mutation_cannot_change_shipped_activation_body() {
         let root = TempDir::new().unwrap();
-        let space = root.path().join("spaces/default");
+        let topic = root.path().join("topics/default");
         crate::shipped_skill_projection::regenerate(root.path())
             .await
             .expect("render projection");
@@ -840,7 +840,7 @@ mod tests {
             crate::shipped_skill_projection::skill_dir(root.path(), "commission").join("SKILL.md");
         std::fs::write(projected, "---\ndescription: tampered\n---\nTAMPERED BODY").unwrap();
 
-        let (available, warnings) = SkillManager::discover_available(root.path(), &space, None);
+        let (available, warnings) = SkillManager::discover_available(root.path(), &topic, None);
         assert!(warnings.is_empty());
         let commission = available
             .iter()
@@ -911,9 +911,9 @@ mod tests {
     }
 
     #[test]
-    fn slash_with_space_first_returns_not_a_command() {
-        // Empty candidate name (space immediately after slash).
-        let result = parse_slash_command("/ spaces");
+    fn slash_with_topic_first_returns_not_a_command() {
+        // Empty candidate name (topic immediately after slash).
+        let result = parse_slash_command("/ topics");
         assert!(matches!(result, SlashCommandResult::NotACommand));
     }
 

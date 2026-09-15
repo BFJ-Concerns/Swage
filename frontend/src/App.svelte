@@ -4,8 +4,8 @@
   Startup sequence:
     1. Create stores (synchronous, no IO).
     2. Wire cross-store events: connection → streaming, reconnect → refresh.
-    3. onMount: load spaces (restoring the last open space), load conversations
-       for the selected space, then initialise router (reads URL, selects any
+    3. onMount: load topics (restoring the last open topic), load conversations
+       for the selected topic, then initialise router (reads URL, selects any
        conversation referenced by the path).
     4. Render: loading splash → layout, or error screen if the gateway is unreachable.
 -->
@@ -25,7 +25,7 @@
     withConversationAutoCreate,
     type StreamingStore,
   } from "./lib/stores/streaming";
-  import { createSpaceStore } from "./lib/stores/spaces";
+  import { createTopicStore } from "./lib/stores/topics";
   import { createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -41,7 +41,7 @@
   // Store creation
   // ---------------------------------------------------------------------------
 
-  const spaceStore = createSpaceStore();
+  const topicStore = createTopicStore();
   const conversationStore = createConversationStore();
 
   // A reconnect reconciles the conversation that owns the socket, even while
@@ -105,13 +105,13 @@
     keepSurfaceForConversation();
     await conversationStore.selectConversation(id);
 
-    // A deep-linked conversation may belong to a space other than the one
-    // currently in scope (or none, on first load). Bring the space into
+    // A deep-linked conversation may belong to a topic other than the one
+    // currently in scope (or none, on first load). Bring the topic into
     // scope so the navigation and conversation list reflect it.
     const conv = conversationStore.activeConversation;
-    if (conv && spaceStore.currentSpace?.id !== conv.space_id) {
-      await spaceStore.selectSpace(conv.space_id);
-      await conversationStore.loadConversations(conv.space_id);
+    if (conv && topicStore.currentTopic?.id !== conv.topic_id) {
+      await topicStore.selectTopic(conv.topic_id);
+      await conversationStore.loadConversations(conv.topic_id);
     }
 
     connectionStore.connectTo(id);
@@ -127,7 +127,7 @@
     }
   }
 
-  // Creates a conversation in the current space, connects, and navigates to
+  // Creates a conversation in the current topic, connects, and navigates to
   // it. Returns the new conversation's id, or null when creation failed —
   // the auto-create composer path uses the id to decide whether its pending
   // turn can be dispatched.
@@ -138,9 +138,9 @@
   ): Promise<string | null> {
     try {
       keepSurfaceForConversation();
-      // Use the currently selected space — should always be set after startup.
-      const spaceId = spaceStore.currentSpace?.id ?? "";
-      await conversationStore.createConversation(spaceId, selectedModelId, agentId, effort);
+      // Use the currently selected topic — should always be set after startup.
+      const topicId = topicStore.currentTopic?.id ?? "";
+      await conversationStore.createConversation(topicId, selectedModelId, agentId, effort);
       const id = conversationStore.activeConversation?.id;
       if (id) {
         connectionStore.connectTo(id);
@@ -170,12 +170,12 @@
     get isLoading() {
       return conversationStore.isLoading;
     },
-    loadConversations: (spaceId) =>
-      conversationStore.loadConversations(spaceId),
+    loadConversations: (topicId) =>
+      conversationStore.loadConversations(topicId),
     selectConversation: selectAndNavigate,
-    // The proxy captures spaceId from spaceStore at call time so child
-    // components don't need to know about spaces.
-    createConversation: async (_spaceId, selectedModelId, agentId, effort) => {
+    // The proxy captures topicId from topicStore at call time so child
+    // components don't need to know about topics.
+    createConversation: async (_topicId, selectedModelId, agentId, effort) => {
       await createAndNavigate(selectedModelId, agentId, effort);
     },
     deleteConversation: (id) => conversationStore.deleteConversation(id),
@@ -190,9 +190,9 @@
 
   // The streaming store handed to the layout: identical to the base store,
   // except that sending with no conversation in scope creates one in the
-  // current space first (connect, then dispatch — the WebSocket client queues
+  // current topic first (connect, then dispatch — the WebSocket client queues
   // the frame during the handshake). The composer that renders in an empty
-  // space therefore just works instead of dropping the message.
+  // topic therefore just works instead of dropping the message.
   const composerStreamingStore = withConversationAutoCreate(streamingStore, {
     hasActiveConversation: () => conversationStore.activeConversation !== null,
     createConversation: createAndNavigate,
@@ -367,40 +367,40 @@
   // Startup
   // ---------------------------------------------------------------------------
 
-  // Called by SpaceSelector when the user switches spaces.
-  // Reloads the conversation list for the newly active space and clears
-  // any cross-space UI state (active conversation, WebSocket connection).
-  async function handleSpaceChange(): Promise<void> {
+  // Called by TopicSelector when the user switches topics.
+  // Reloads the conversation list for the newly active topic and clears
+  // any cross-topic UI state (active conversation, WebSocket connection).
+  async function handleTopicChange(): Promise<void> {
     try {
-      const spaceId = spaceStore.currentSpace?.id;
-      if (!spaceId) return;
+      const topicId = topicStore.currentTopic?.id;
+      if (!topicId) return;
 
-      // Drop the WebSocket — it was bound to the previous space's session.
+      // Drop the WebSocket — it was bound to the previous topic's session.
       connectionStore.disconnect();
-      // Drop the active conversation too: left in place, the old space's
+      // Drop the active conversation too: left in place, the old topic's
       // conversation would keep rendering and the composer would send into it.
       conversationStore.clearActiveConversation();
       // Reset the URL so the router doesn't try to restore a stale conversation.
       router.navigate("/");
-      // Load the new space's conversations.
-      await conversationStore.loadConversations(spaceId);
-      agentDefinitions = await listEffectiveAgentDefinitions(spaceId);
+      // Load the new topic's conversations.
+      await conversationStore.loadConversations(topicId);
+      agentDefinitions = await listEffectiveAgentDefinitions(topicId);
     } catch (err) {
-      console.error("Failed to switch space:", err);
+      console.error("Failed to switch topic:", err);
     }
   }
 
   onMount(async () => {
     try {
-      // 1. Load the space list and restore the last explicitly opened space.
-      await spaceStore.loadSpaces();
-      if (spaceStore.currentSpace) {
-        await conversationStore.loadConversations(spaceStore.currentSpace.id);
+      // 1. Load the topic list and restore the last explicitly opened topic.
+      await topicStore.loadTopics();
+      if (topicStore.currentTopic) {
+        await conversationStore.loadConversations(topicStore.currentTopic.id);
       }
 
-      // 2. Fetch global model settings. Space-scoped data (conversations,
-      //    scoped runtime state loads when a space is opened — either via the
-      //    picker or by a deep-linked conversation that selects its space.
+      // 2. Fetch global model settings. Topic-scoped data (conversations,
+      //    scoped runtime state loads when a topic is opened — either via the
+      //    picker or by a deep-linked conversation that selects its topic.
       try {
         await refreshModelCatalogue();
       } catch (error) {
@@ -408,11 +408,11 @@
       }
 
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
-      //    will bring its space into scope along the way.
+      //    will bring its topic into scope along the way.
       await router.init();
-      if (spaceStore.currentSpace) {
+      if (topicStore.currentTopic) {
         try {
-          agentDefinitions = await listEffectiveAgentDefinitions(spaceStore.currentSpace.id);
+          agentDefinitions = await listEffectiveAgentDefinitions(topicStore.currentTopic.id);
         } catch (error) {
           console.error("Failed to load agent definitions:", error);
         }
@@ -463,8 +463,8 @@
     conversationStore={routerAwareStore}
     {connectionStore}
     streamingStore={composerStreamingStore}
-    {spaceStore}
-    onSpaceChange={handleSpaceChange}
+    {topicStore}
+    onTopicChange={handleTopicChange}
     onRetry={handleRetry}
     {activeSurface}
     {pagesStore}

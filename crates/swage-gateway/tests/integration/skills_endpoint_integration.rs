@@ -11,8 +11,8 @@ use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::store::SpaceStore;
-use swage_storage::{SqliteStorage, model::NewSpace};
+use swage_storage::store::TopicStore;
+use swage_storage::{SqliteStorage, model::NewTopic};
 
 // ---------------------------------------------------------------------------
 // Stub provider — skills tests don't exercise LLM streaming
@@ -57,7 +57,7 @@ fn make_router(config_root: &std::path::Path) -> (Router, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -114,42 +114,42 @@ fn create_skill(base_dir: &std::path::Path, name: &str, description: &str, tools
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Unknown space_id returns 404.
+/// Unknown topic_id returns 404.
 ///
 /// No file-system setup needed — this tests only the storage lookup path.
 #[tokio::test(flavor = "multi_thread")]
-async fn unknown_space_returns_404() {
+async fn unknown_topic_returns_404() {
     let root = tempfile::TempDir::new().unwrap();
     let (router, _storage) = make_router(root.path());
     let unknown_id = uuid::Uuid::new_v4();
 
-    let (status, body) = get(&router, &format!("/api/skills?space_id={unknown_id}")).await;
+    let (status, body) = get(&router, &format!("/api/skills?topic_id={unknown_id}")).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_found");
 }
 
-/// Known space and a fresh config root expose only the compiled catalogue.
+/// Known topic and a fresh config root expose only the compiled catalogue.
 ///
 /// When application state retains a fresh directory, the handler has no
 /// authored skills to discover and should return the compiled catalogue.
 #[tokio::test(flavor = "multi_thread")]
-async fn known_space_fresh_config_root_returns_shipped_catalogue() {
+async fn known_topic_fresh_config_root_returns_shipped_catalogue() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("fresh-swage-root");
     std::fs::create_dir(&root).unwrap();
     let (router, storage) = make_router(&root);
 
-    // Create a space in storage — it exists but has no config directory.
-    let space = storage
-        .create(NewSpace {
+    // Create a topic in storage — it exists but has no config directory.
+    let topic = storage
+        .create(NewTopic {
             name: "no-config".into(),
             slug: "no-config".into(),
         })
         .await
         .unwrap();
 
-    let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?topic_id={}", topic.id)).await;
 
     assert_eq!(status, StatusCode::OK);
     let skills = body["skills"]
@@ -186,15 +186,15 @@ async fn global_skills_appear_in_listing() {
     // Global skill: {root}/skills/formatter/SKILL.md
     create_skill(root, "formatter", "Format code according to standards", &[]);
 
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "test-global".into(),
             slug: "test-global".into(),
         })
         .await
         .unwrap();
 
-    let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?topic_id={}", topic.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -210,31 +210,31 @@ async fn global_skills_appear_in_listing() {
     assert!(!formatter["always_active"].as_bool().unwrap());
 }
 
-/// Space-level skills appear with level="space".
+/// Topic-level skills appear with level="topic".
 #[tokio::test(flavor = "multi_thread")]
-async fn space_skills_appear_in_listing() {
+async fn topic_skills_appear_in_listing() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let (router, storage) = make_router(root);
 
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "my-proj".into(),
             slug: "my-proj".into(),
         })
         .await
         .unwrap();
 
-    // Space skill: {root}/spaces/my-proj/skills/reviewer/SKILL.md
-    let space_dir = root.join("spaces").join("my-proj");
+    // Topic skill: {root}/topics/my-proj/skills/reviewer/SKILL.md
+    let topic_dir = root.join("topics").join("my-proj");
     create_skill(
-        &space_dir,
+        &topic_dir,
         "reviewer",
         "Structured code review",
         &["read_file"],
     );
 
-    let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?topic_id={}", topic.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -242,7 +242,7 @@ async fn space_skills_appear_in_listing() {
         .iter()
         .find(|s| s["name"] == "reviewer")
         .expect("reviewer skill should appear");
-    assert_eq!(reviewer["level"], "space");
+    assert_eq!(reviewer["level"], "topic");
     assert!(!reviewer["always_active"].as_bool().unwrap());
     let tools = reviewer["tools"].as_array().unwrap();
     assert!(
@@ -258,17 +258,17 @@ async fn agent_skills_have_always_active_true() {
     let root = tmp.path();
     let (router, storage) = make_router(root);
 
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "agent-proj".into(),
             slug: "agent-proj".into(),
         })
         .await
         .unwrap();
 
-    // Agent skill: {root}/spaces/agent-proj/agents/gateway/skills/persona/SKILL.md
+    // Agent skill: {root}/topics/agent-proj/agents/gateway/skills/persona/SKILL.md
     let agent_dir = root
-        .join("spaces")
+        .join("topics")
         .join("agent-proj")
         .join("agents")
         .join("gateway");
@@ -276,7 +276,7 @@ async fn agent_skills_have_always_active_true() {
 
     let (status, body) = get(
         &router,
-        &format!("/api/skills?space_id={}&agent_id=gateway", space.id),
+        &format!("/api/skills?topic_id={}&agent_id=gateway", topic.id),
     )
     .await;
 
@@ -300,32 +300,32 @@ async fn reserved_workflow_agent_skills_are_not_listed() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let (router, storage) = make_router(root);
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "reserved-agent".into(),
             slug: "reserved-agent".into(),
         })
         .await
         .unwrap();
     let reserved_agent = root
-        .join("spaces/reserved-agent/agents")
+        .join("topics/reserved-agent/agents")
         .join(swage_config::RESERVED_WORKFLOW_AGENT_ID);
-    let ordinary_agent = root.join("spaces/reserved-agent/agents/reviewer");
+    let ordinary_agent = root.join("topics/reserved-agent/agents/reviewer");
     create_skill(&reserved_agent, "injected", "Must not be visible", &[]);
     create_skill(&ordinary_agent, "reviewer", "Must remain visible", &[]);
 
     let (reserved_status, reserved_body) = get(
         &router,
         &format!(
-            "/api/skills?space_id={}&agent_id={}",
-            space.id,
+            "/api/skills?topic_id={}&agent_id={}",
+            topic.id,
             swage_config::RESERVED_WORKFLOW_AGENT_ID
         ),
     )
     .await;
     let (ordinary_status, ordinary_body) = get(
         &router,
-        &format!("/api/skills?space_id={}&agent_id=reviewer", space.id),
+        &format!("/api/skills?topic_id={}&agent_id=reviewer", topic.id),
     )
     .await;
 
@@ -349,17 +349,17 @@ async fn reserved_workflow_agent_skills_are_not_listed() {
     );
 }
 
-/// Same-name skill at space level shadows global.
+/// Same-name skill at topic level shadows global.
 ///
-/// Only the space version should appear; the listing must not contain duplicates.
+/// Only the topic version should appear; the listing must not contain duplicates.
 #[tokio::test(flavor = "multi_thread")]
-async fn space_skill_shadows_global() {
+async fn topic_skill_shadows_global() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let (router, storage) = make_router(root);
 
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "override-proj".into(),
             slug: "override-proj".into(),
         })
@@ -369,16 +369,16 @@ async fn space_skill_shadows_global() {
     // Global skill named "code-review".
     create_skill(root, "code-review", "Global code review", &["read_file"]);
 
-    // Space skill with the same name — should shadow the global.
-    let space_dir = root.join("spaces").join("override-proj");
+    // Topic skill with the same name — should shadow the global.
+    let topic_dir = root.join("topics").join("override-proj");
     create_skill(
-        &space_dir,
+        &topic_dir,
         "code-review",
-        "Space code review",
+        "Topic code review",
         &["read_file", "search"],
     );
 
-    let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?topic_id={}", topic.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let skills = body["skills"].as_array().unwrap();
@@ -393,10 +393,10 @@ async fn space_skill_shadows_global() {
         "same-name skill should appear once after override"
     );
     assert_eq!(
-        code_reviews[0]["level"], "space",
-        "space should shadow global"
+        code_reviews[0]["level"], "topic",
+        "topic should shadow global"
     );
-    assert_eq!(code_reviews[0]["description"], "Space code review");
+    assert_eq!(code_reviews[0]["description"], "Topic code review");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -404,8 +404,8 @@ async fn authored_skill_shadows_same_named_shipped_entry() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let (router, storage) = make_router(root);
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "shadow-shipped".into(),
             slug: "shadow-shipped".into(),
         })
@@ -413,7 +413,7 @@ async fn authored_skill_shadows_same_named_shipped_entry() {
         .unwrap();
     create_skill(root, "commission", "Operator commission", &[]);
 
-    let (status, body) = get(&router, &format!("/api/skills?space_id={}", space.id)).await;
+    let (status, body) = get(&router, &format!("/api/skills?topic_id={}", topic.id)).await;
 
     assert_eq!(status, StatusCode::OK, "response: {body}");
     let matching = body["skills"]
@@ -428,15 +428,15 @@ async fn authored_skill_shadows_same_named_shipped_entry() {
     assert!(matching[0]["id"].is_null());
 }
 
-/// Sorting: agent skills appear first, then space, then global; within each level alphabetically.
+/// Sorting: agent skills appear first, then topic, then global; within each level alphabetically.
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_are_sorted_by_level_then_alphabetically() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     let (router, storage) = make_router(root);
 
-    let space = storage
-        .create(NewSpace {
+    let topic = storage
+        .create(NewTopic {
             name: "sorted-proj".into(),
             slug: "sorted-proj".into(),
         })
@@ -447,13 +447,13 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     create_skill(root, "zebra", "Global zebra skill", &[]);
     create_skill(root, "alpha", "Global alpha skill", &[]);
 
-    // Space skills.
-    let space_dir = root.join("spaces").join("sorted-proj");
-    create_skill(&space_dir, "middle", "Space middle skill", &[]);
+    // Topic skills.
+    let topic_dir = root.join("topics").join("sorted-proj");
+    create_skill(&topic_dir, "middle", "Topic middle skill", &[]);
 
     // Agent skills.
     let agent_dir = root
-        .join("spaces")
+        .join("topics")
         .join("sorted-proj")
         .join("agents")
         .join("gw");
@@ -461,7 +461,7 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
 
     let (status, body) = get(
         &router,
-        &format!("/api/skills?space_id={}&agent_id=gw", space.id),
+        &format!("/api/skills?topic_id={}&agent_id=gw", topic.id),
     )
     .await;
 
@@ -478,10 +478,10 @@ async fn skills_are_sorted_by_level_then_alphabetically() {
     assert_eq!(skills[0]["level"], "agent", "agent skill should sort first");
     assert_eq!(skills[0]["name"], "persona");
 
-    // Then space.
+    // Then topic.
     assert_eq!(
-        skills[1]["level"], "space",
-        "space skill should sort second"
+        skills[1]["level"], "topic",
+        "topic skill should sort second"
     );
     assert_eq!(skills[1]["name"], "middle");
 

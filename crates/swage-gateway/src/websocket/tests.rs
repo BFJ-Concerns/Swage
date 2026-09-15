@@ -566,11 +566,11 @@ fn make_empty_state() -> AppState {
     let storage = Arc::new(MockStorage::new());
     let storage_arc: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-    let space_store: Arc<dyn swage_storage::store::SpaceStore> =
-        storage as Arc<dyn swage_storage::store::SpaceStore>;
+    let topic_store: Arc<dyn swage_storage::store::TopicStore> =
+        storage as Arc<dyn swage_storage::store::TopicStore>;
     AppState::new(
         storage_arc,
-        space_store,
+        topic_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -585,21 +585,21 @@ async fn make_state_with_session() -> (AppState, Uuid) {
 }
 
 async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStorage>) {
-    use swage_storage::store::SpaceStore;
+    use swage_storage::store::TopicStore;
 
     let storage = Arc::new(MockStorage::new());
     let session_id = Uuid::new_v4();
 
-    let space = storage
+    let topic = storage
         .get_or_create_default()
         .await
-        .expect("create default space");
+        .expect("create default topic");
 
     storage.db.lock().await.sessions.insert(
         session_id,
         Session {
             id: session_id,
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "gateway".to_string(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -611,11 +611,11 @@ async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStora
 
     let storage_arc: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
-    let space_store: Arc<dyn swage_storage::store::SpaceStore> =
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>;
+    let topic_store: Arc<dyn swage_storage::store::TopicStore> =
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>;
     let state = AppState::new(
         storage_arc,
-        space_store,
+        topic_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),

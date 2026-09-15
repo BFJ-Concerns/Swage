@@ -5,9 +5,9 @@
   import PagesSurface from "./PagesSurface.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import WorkflowRunView from "./WorkflowRunView.svelte";
-  import SpacePicker from "./SpacePicker.svelte";
-  import SpaceSelector from "./SpaceSelector.svelte";
-  import SpaceSettingsPage from "./SpaceSettingsPage.svelte";
+  import TopicPicker from "./TopicPicker.svelte";
+  import TopicSelector from "./TopicSelector.svelte";
+  import TopicSettingsPage from "./TopicSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
   import { fetchWorkflowRun } from "../api/workflow-runs";
@@ -17,7 +17,7 @@
   import type { ThemeMode } from "../theme";
   import type { ConnectionStore } from "../stores/connection";
   import type { ConversationStore } from "../stores/conversations";
-  import type { SpaceStore } from "../stores/spaces";
+  import type { TopicStore } from "../stores/topics";
   import type { StreamingStore } from "../stores/streaming";
   import type { PagesStore } from "../stores/pages";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
@@ -29,8 +29,8 @@
     conversationStore: ConversationStore;
     connectionStore: ConnectionStore;
     streamingStore: StreamingStore;
-    spaceStore?: SpaceStore;
-    onSpaceChange?: () => void;
+    topicStore?: TopicStore;
+    onTopicChange?: () => void;
     onRetry: () => void;
     activeSurface: Surface;
     pagesStore?: PagesStore;
@@ -53,8 +53,8 @@
     conversationStore,
     connectionStore,
     streamingStore,
-    spaceStore,
-    onSpaceChange,
+    topicStore,
+    onTopicChange,
     onRetry,
     activeSurface,
     pagesStore,
@@ -73,17 +73,17 @@
     onNewConversation,
   }: Props = $props();
 
-  const currentSpace = $derived(spaceStore?.currentSpace ?? null);
+  const currentTopic = $derived(topicStore?.currentTopic ?? null);
   const activeConversation = $derived(conversationStore.activeConversation);
   let selectedAgentId = $state("");
-  let selectedAgentSpaceId = $state<string | null | undefined>(undefined);
+  let selectedAgentTopicId = $state<string | null | undefined>(undefined);
   $effect(() => {
-    const currentSpaceId = currentSpace?.id ?? null;
-    if (selectedAgentSpaceId === undefined) {
-      selectedAgentSpaceId = currentSpaceId;
-    } else if (currentSpaceId !== selectedAgentSpaceId) {
+    const currentTopicId = currentTopic?.id ?? null;
+    if (selectedAgentTopicId === undefined) {
+      selectedAgentTopicId = currentTopicId;
+    } else if (currentTopicId !== selectedAgentTopicId) {
       selectedAgentId = "";
-      selectedAgentSpaceId = currentSpaceId;
+      selectedAgentTopicId = currentTopicId;
     } else if (
       selectedAgentId &&
       !agentDefinitions.some((definition) => definition.id === selectedAgentId)
@@ -116,12 +116,12 @@
       });
   });
   const settingsTab = $derived(route?.settingsTab ?? null);
-  const settingsSpaceSlug = $derived(route?.settingsSpaceSlug ?? null);
-  const settingsSpaceTab = $derived(route?.settingsSpaceTab ?? null);
-  const settingsMode = $derived(settingsTab !== null || settingsSpaceSlug !== null);
-  const settingsSpace = $derived(
-    settingsSpaceSlug
-      ? (spaceStore?.spaces ?? []).find((space) => space.slug === settingsSpaceSlug) ?? null
+  const settingsTopicSlug = $derived(route?.settingsTopicSlug ?? null);
+  const settingsTopicTab = $derived(route?.settingsTopicTab ?? null);
+  const settingsMode = $derived(settingsTab !== null || settingsTopicSlug !== null);
+  const settingsTopic = $derived(
+    settingsTopicSlug
+      ? (topicStore?.topics ?? []).find((topic) => topic.slug === settingsTopicSlug) ?? null
       : null,
   );
 
@@ -136,15 +136,15 @@
     onSelectSurface(next);
   }
 
-  function openCurrentSpaceWorkspaces(): void {
-    if (!currentSpace) return;
-    onNavigate?.(`/settings/space/${encodeURIComponent(currentSpace.slug)}/workspaces`);
+  function openCurrentTopicWorkspaces(): void {
+    if (!currentTopic) return;
+    onNavigate?.(`/settings/topic/${encodeURIComponent(currentTopic.slug)}/workspaces`);
   }
 </script>
 
-{#if currentSpace}
+{#if currentTopic}
   <header class="topbar">
-    <SpaceSelector {spaceStore} {onSpaceChange} />
+    <TopicSelector {topicStore} {onTopicChange} />
     <nav aria-label="Surface">
       <button aria-pressed={!settingsMode && activeSurface === "conversation"} class:active={!settingsMode && activeSurface === "conversation"} onclick={() => selectSurface("conversation")}>Conversations</button>
       <button aria-pressed={!settingsMode && activeSurface === "pages"} class:active={!settingsMode && activeSurface === "pages"} onclick={() => selectSurface("pages")}>Pages</button>
@@ -182,21 +182,21 @@
         <button class:active={settingsTab === "commands"} onclick={() => onNavigate?.("/settings/commands")}>Commands</button>
         <button class:active={settingsTab === "skills"} onclick={() => onNavigate?.("/settings/skills")}>Skills</button>
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
-        {#if currentSpace}
-          <button class:active={settingsSpaceTab === "workspaces"} onclick={openCurrentSpaceWorkspaces}>Workspaces</button>
+        {#if currentTopic}
+          <button class:active={settingsTopicTab === "workspaces"} onclick={openCurrentTopicWorkspaces}>Workspaces</button>
         {/if}
       </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
-    {#if settingsSpace}
-      <SpaceSettingsPage space={settingsSpace} tab={settingsSpaceTab ?? undefined} />
+    {#if settingsTopic}
+      <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} spaceId={currentSpace?.id ?? null} spaces={spaceStore?.spaces ?? []} {onSettingsSaved} />
+      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} {onSettingsSaved} />
     {/if}
   </div>
-{:else if !currentSpace}
+{:else if !currentTopic}
   <button onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
-  <SpacePicker {spaceStore} {onSpaceChange} />
+  <TopicPicker {topicStore} {onTopicChange} />
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
 {:else if activeSurface === "pages"}
@@ -207,8 +207,8 @@
   -->
   <main class="pages-surface">
     <div class="work">
-      {#if pagesStore && currentSpace}
-        <PagesSurface store={pagesStore} spaceId={currentSpace.id} />
+      {#if pagesStore && currentTopic}
+        <PagesSurface store={pagesStore} topicId={currentTopic.id} />
       {/if}
     </div>
     <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />

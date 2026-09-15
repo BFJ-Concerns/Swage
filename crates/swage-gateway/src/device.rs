@@ -561,7 +561,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

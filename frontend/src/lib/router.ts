@@ -21,7 +21,7 @@ export type SettingsTab =
   | "display"
   | "account";
 
-export type SpaceSettingsTab = "overview" | "workspaces" | "sessions";
+export type TopicSettingsTab = "overview" | "workspaces" | "sessions";
 
 export interface Route {
   path: string;
@@ -30,8 +30,8 @@ export interface Route {
   // and terminal account can be read back on its own surface.
   workflowRunId: string | null;
   settingsTab: SettingsTab | null;
-  settingsSpaceSlug: string | null;
-  settingsSpaceTab: SpaceSettingsTab | null;
+  settingsTopicSlug: string | null;
+  settingsTopicTab: TopicSettingsTab | null;
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
@@ -79,8 +79,8 @@ export function parseRoute(pathname: string): Route {
       conversationId: match[1],
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     };
   }
@@ -91,22 +91,22 @@ export function parseRoute(pathname: string): Route {
       conversationId: null,
       workflowRunId: decodeURIComponent(workflowRunMatch[1]),
       settingsTab: null,
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     };
   }
-  const spaceSettingsMatch = pathname.match(
-    /^\/settings\/space\/([^/]+)(?:\/(overview|workspaces|sessions))?$/,
+  const topicSettingsMatch = pathname.match(
+    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions))?$/,
   );
-  if (spaceSettingsMatch) {
+  if (topicSettingsMatch) {
     return {
       path: pathname,
       conversationId: null,
       workflowRunId: null,
       settingsTab: null,
-      settingsSpaceSlug: decodeURIComponent(spaceSettingsMatch[1]),
-      settingsSpaceTab: (spaceSettingsMatch[2] as SpaceSettingsTab | undefined) ?? "overview",
+      settingsTopicSlug: decodeURIComponent(topicSettingsMatch[1]),
+      settingsTopicTab: (topicSettingsMatch[2] as TopicSettingsTab | undefined) ?? "overview",
       notFound: false,
     };
   }
@@ -119,8 +119,8 @@ export function parseRoute(pathname: string): Route {
       conversationId: null,
       workflowRunId: null,
       settingsTab: (settingsMatch[1] as SettingsTab | undefined) ?? "providers",
-      settingsSpaceSlug: null,
-      settingsSpaceTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
       notFound: false,
     };
   }
@@ -129,8 +129,8 @@ export function parseRoute(pathname: string): Route {
     conversationId: null,
     workflowRunId: null,
     settingsTab: null,
-    settingsSpaceSlug: null,
-    settingsSpaceTab: null,
+    settingsTopicSlug: null,
+    settingsTopicTab: null,
     notFound: false,
   };
 }
@@ -179,8 +179,8 @@ export function createRouter(options?: RouterOptions): Router {
             conversationId: null,
             workflowRunId: null,
             settingsTab: null,
-            settingsSpaceSlug: null,
-            settingsSpaceTab: null,
+            settingsTopicSlug: null,
+            settingsTopicTab: null,
             notFound: true,
           });
           window.history.replaceState(null, "", "/");

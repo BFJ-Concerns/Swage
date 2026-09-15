@@ -263,10 +263,10 @@ impl Default for ToolPermissionConfig {
             "session-authoring".to_string(),
             vec!["session_values".to_string()],
         );
-        // Knowledge-base access at registry grain: reading the space's
+        // Knowledge-base access at registry grain: reading the topic's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
-        // Pages at the same grain: reading the space's shared work
+        // Pages at the same grain: reading the topic's shared work
         // surfaces and writing on them are separate powers.
         bundles.insert("pages-read".to_string(), vec!["page_read".to_string()]);
         bundles.insert("pages-write".to_string(), vec!["page_write".to_string()]);
@@ -892,7 +892,7 @@ impl ResolvedConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HierarchyLevel {
     Global,
-    Space,
+    Topic,
     Agent,
 }
 
@@ -900,7 +900,7 @@ impl std::fmt::Display for HierarchyLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
             Self::Global => "Global",
-            Self::Space => "Space",
+            Self::Topic => "Topic",
             Self::Agent => "Agent",
         };
         write!(f, "{name}")

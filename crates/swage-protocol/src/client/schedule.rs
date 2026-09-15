@@ -29,7 +29,7 @@ pub enum ScheduleSpec {
 
 /// Which session each run executes in.
 ///
-/// - `fresh` — every run creates a new session in `space_id` for
+/// - `fresh` — every run creates a new session in `topic_id` for
 ///   `agent_id`, with a deliberately assembled opening context (the
 ///   schedule's message plus the previous run's outcome).
 /// - `continuation` — every run continues the named session, executing as
@@ -37,7 +37,7 @@ pub enum ScheduleSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
 pub enum SessionPolicy {
-    Fresh { space_id: Uuid, agent_id: String },
+    Fresh { topic_id: Uuid, agent_id: String },
     Continuation { session_id: Uuid },
 }
 

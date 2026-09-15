@@ -39,7 +39,7 @@ mentioning in the report.
 
 ## The Fact Inventory
 
-Working material, kept in the session's scratch space and never committed. One
+Working material, kept in the session's scratch topic and never committed. One
 row per substantive claim:
 
 ```

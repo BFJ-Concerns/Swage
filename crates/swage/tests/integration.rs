@@ -27,8 +27,8 @@ use swage::hook::{Hook, HookEvent, HookOutcome, HookRegistration, HookRegistry};
 use swage::provider::LlmProvider;
 use swage::safety::LeakDetector;
 use swage::storage::{
-    MessageStore, NewSession, NewThread, SessionStore, SpaceStore, SqliteStorage, ThreadState,
-    ThreadStore, TurnState, TurnStore,
+    MessageStore, NewSession, NewThread, SessionStore, SqliteStorage, ThreadState, ThreadStore,
+    TopicStore, TurnState, TurnStore,
 };
 use swage::tool::context::ToolContext;
 use swage::tool::dispatch::ToolDispatcher;
@@ -140,12 +140,12 @@ impl Hook for AppendAfterResponseHook {
 
 async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let space = SpaceStore::get_or_create_default(storage.as_ref())
+    let topic = TopicStore::get_or_create_default(storage.as_ref())
         .await
-        .expect("default space");
+        .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "agent-a".into(),
             metadata: None,
         })
@@ -160,11 +160,11 @@ async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
     )
     .await
     .expect("thread");
-    (storage, space.id, session.id, thread.id)
+    (storage, topic.id, session.id, thread.id)
 }
 
 fn turn_request(
-    space_id: Uuid,
+    topic_id: Uuid,
     session_id: Uuid,
     thread_id: Uuid,
     user_message: &str,
@@ -174,7 +174,7 @@ fn turn_request(
             session_id,
             thread_id,
             turn_id: Uuid::new_v4(),
-            space_id: Some(space_id),
+            topic_id: Some(topic_id),
         },
         user_message: user_message.to_string(),
         assembled_context: vec![ChatMessage::new(Role::User, user_message)],
@@ -194,7 +194,7 @@ fn collect_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent
 
 #[tokio::test(flavor = "multi_thread")]
 async fn facade_streaming_turn_persists_turn_and_messages() {
-    let (storage, space_id, session_id, thread_id) = setup().await;
+    let (storage, topic_id, session_id, thread_id) = setup().await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::Delta {
             content: "hello facade".into(),
@@ -217,7 +217,7 @@ async fn facade_streaming_turn_persists_turn_and_messages() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            turn_request(space_id, session_id, thread_id, "Hello facade"),
+            turn_request(topic_id, session_id, thread_id, "Hello facade"),
             event_tx,
         )
         .await
@@ -260,7 +260,7 @@ async fn facade_streaming_turn_persists_turn_and_messages() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn facade_streaming_turn_supports_hooks_redaction_and_schema_retry() {
-    let (storage, space_id, session_id, thread_id) = setup().await;
+    let (storage, topic_id, session_id, thread_id) = setup().await;
     let provider = Arc::new(StreamingProvider::new(vec![
         vec![
             StreamChunk::Delta {
@@ -314,7 +314,7 @@ async fn facade_streaming_turn_supports_hooks_redaction_and_schema_retry() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let outbound = agent
         .process_turn_streaming(
-            turn_request(space_id, session_id, thread_id, "Return checked JSON"),
+            turn_request(topic_id, session_id, thread_id, "Return checked JSON"),
             event_tx,
         )
         .await
@@ -343,7 +343,7 @@ async fn facade_streaming_turn_supports_hooks_redaction_and_schema_retry() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
-    let (storage, space_id, session_id, thread_id) = setup().await;
+    let (storage, topic_id, session_id, thread_id) = setup().await;
     let provider = Arc::new(StreamingProvider::new(vec![
         vec![
             StreamChunk::ToolUse {
@@ -377,7 +377,7 @@ async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let response = agent
         .process_turn_streaming(
-            turn_request(space_id, session_id, thread_id, "Use the echo tool"),
+            turn_request(topic_id, session_id, thread_id, "Use the echo tool"),
             event_tx,
         )
         .await
@@ -421,9 +421,9 @@ async fn facade_streaming_turn_emits_tool_and_turn_lifecycle_events() {
 #[tokio::test(flavor = "multi_thread")]
 async fn facade_storage_round_trips_session_metadata() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory sqlite"));
-    let space = SpaceStore::get_or_create_default(storage.as_ref())
+    let topic = TopicStore::get_or_create_default(storage.as_ref())
         .await
-        .expect("default space");
+        .expect("default topic");
     let metadata = json!({
         "owner": "host-app",
         "labels": ["embedder", "demo"]
@@ -431,7 +431,7 @@ async fn facade_storage_round_trips_session_metadata() {
 
     let session = storage
         .create_session(NewSession {
-            space_id: space.id,
+            topic_id: topic.id,
             agent_id: "agent-a".into(),
             metadata: Some(metadata.clone()),
         })

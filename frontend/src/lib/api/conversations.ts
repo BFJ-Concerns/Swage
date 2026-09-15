@@ -20,16 +20,16 @@ export function setBaseUrl(url: string): void {
 // API functions
 // ---------------------------------------------------------------------------
 
-/** Fetch all conversations belonging to the given space. */
+/** Fetch all conversations belonging to the given topic. */
 export async function listConversations(
-  spaceId: string,
+  topicId: string,
 ): Promise<ConversationSummary[]> {
-  return (await generated.listSpaceSessions(spaceId)).conversations;
+  return (await generated.listTopicSessions(topicId)).conversations;
 }
 
-/** Create a new conversation in the given space and return its metadata. */
+/** Create a new conversation in the given topic and return its metadata. */
 export async function createConversation(
-  spaceId: string,
+  topicId: string,
   selectedModelId?: string | null,
   agentId?: string | null,
   effort?: Effort | null,
@@ -39,8 +39,8 @@ export async function createConversation(
     ...(agentId ? { agent_id: agentId } : {}),
     ...(effort ? { effort } : {}),
   };
-  return generated.createSpaceSession(
-    spaceId,
+  return generated.createTopicSession(
+    topicId,
     Object.keys(body).length > 0 ? body : undefined,
   );
 }

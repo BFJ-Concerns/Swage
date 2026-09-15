@@ -34,9 +34,9 @@ fn typescript_bindings_are_regenerated() {
     client::error::ApiErrorBody::export_all(&cfg).expect("export api error body");
     client::websocket::ClientEvent::export_all(&cfg).expect("export client events");
     client::websocket::ServerEvent::export_all(&cfg).expect("export server events");
-    client::space::CreateSpaceRequest::export_all(&cfg).expect("export create space");
-    client::space::UpdateSpaceRequest::export_all(&cfg).expect("export update space");
-    client::space::SpaceListResponse::export_all(&cfg).expect("export spaces");
+    client::topic::CreateTopicRequest::export_all(&cfg).expect("export create topic");
+    client::topic::UpdateTopicRequest::export_all(&cfg).expect("export update topic");
+    client::topic::TopicListResponse::export_all(&cfg).expect("export topics");
     client::page::CreatePageRequest::export_all(&cfg).expect("export create page");
     client::page::WritePageModuleRequest::export_all(&cfg).expect("export write page module");
     client::page::PageResponse::export_all(&cfg).expect("export page");
@@ -50,9 +50,9 @@ fn typescript_bindings_are_regenerated() {
     client::page::CreatePageTemplateRequest::export_all(&cfg).expect("export create page template");
     client::page::PageTemplateResponse::export_all(&cfg).expect("export page template");
     client::page::PageTemplateListResponse::export_all(&cfg).expect("export page templates");
-    client::space::CreateWorkspaceAttachmentRequest::export_all(&cfg)
+    client::topic::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
-    client::space::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
+    client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
     client::conversation::ConversationResponse::export_all(&cfg)
         .expect("export conversation response");
@@ -79,7 +79,7 @@ fn typescript_bindings_are_regenerated() {
     client::material::PromoteMaterialRequest::export_all(&cfg).expect("export material promotion");
     client::material::MaterialListResponse::export_all(&cfg).expect("export materials");
     client::recovery::RecoveryExportListResponse::export_all(&cfg).expect("export recovery list");
-    client::space::UpdateWorkspaceTrustRequest::export_all(&cfg).expect("export workspace trust");
+    client::topic::UpdateWorkspaceTrustRequest::export_all(&cfg).expect("export workspace trust");
     client::conversation::CreateConversationBranchRequest::export_all(&cfg)
         .expect("export conversation branch request");
     client::voice::TranscribeAudioResponse::export_all(&cfg)
@@ -160,16 +160,16 @@ fn typescript_bindings_are_regenerated() {
     channel::DeliveryLogResponse::export_all(&cfg).expect("export delivery log");
     channel::ChannelStatusListResponse::export_all(&cfg).expect("export channel status");
 
-    // ts-rs preserves line-breaking spaces around documented enum fields.
+    // ts-rs preserves line-breaking topics around documented enum fields.
     // Normalise generated files so the committed projection also satisfies
     // the repository whitespace gate.
     trim_generated_typescript(&repo_root().join("frontend/src/lib/protocol"));
 
-    let create_space = std::fs::read_to_string(
-        repo_root().join("frontend/src/lib/protocol/CreateSpaceRequest.ts"),
+    let create_topic = std::fs::read_to_string(
+        repo_root().join("frontend/src/lib/protocol/CreateTopicRequest.ts"),
     )
-    .expect("read generated create-space binding");
-    assert!(create_space.contains("description?: string"));
+    .expect("read generated create-topic binding");
+    assert!(create_topic.contains("description?: string"));
 
     for type_name in ["ProviderSettings", "SaveProviderSettings"] {
         let binding = std::fs::read_to_string(
@@ -205,7 +205,7 @@ fn assert_defaulted_fields_reach_typescript_as_optional() {
     // be defaulted.
     assert!(
         fields.iter().any(
-            |field| field.type_name == "CreateSpaceRequest" && field.wire_name == "description"
+            |field| field.type_name == "CreateTopicRequest" && field.wire_name == "description"
         ),
         "the source sweep stopped finding defaulted fields",
     );

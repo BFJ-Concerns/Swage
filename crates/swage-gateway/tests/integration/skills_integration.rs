@@ -96,14 +96,14 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
     let (provider, requests) = fixed_response_provider_with_capture("Commission ready.");
     let (router, addr, storage) =
         start_test_server_with_config(provider, swage_config::ResolvedConfig::default()).await;
-    let space = swage_storage::store::SpaceStore::get_or_create_default(storage.as_ref())
+    let topic = swage_storage::store::TopicStore::get_or_create_default(storage.as_ref())
         .await
         .unwrap();
 
     let (status, catalogue) = http(
         &router,
         "GET",
-        &format!("/api/skills?space_id={}", space.id),
+        &format!("/api/skills?topic_id={}", topic.id),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -197,7 +197,7 @@ async fn start_test_server_with_config(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -289,7 +289,7 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 
 /// Proof scenario 1: Slash command → assembly report.
 ///
-/// Creates a space-level skill with distinctive instructions, invokes it
+/// Creates a topic-level skill with distinctive instructions, invokes it
 /// via `/skill-name` in a conversation, and verifies the assembly report
 /// includes the skill's content as a skills element with a token count
 /// and the skill's name in provenance.
@@ -299,18 +299,18 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 /// assembly wiring (gateway) + assembly report delivery (gateway).
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_command_activates_skill_and_appears_in_assembly_report() {
-    // Set up a temp directory with a space-level skill.
+    // Set up a temp directory with a topic-level skill.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
     // Create the Swage config hierarchy.
-    std::fs::create_dir_all(root.join("spaces/default/agents/gateway")).unwrap();
+    std::fs::create_dir_all(root.join("topics/default/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
-    // Create a distinctive space-level skill.
-    let space_dir = root.join("spaces/default");
+    // Create a distinctive topic-level skill.
+    let topic_dir = root.join("topics/default");
     create_skill(
-        &space_dir,
+        &topic_dir,
         "code-review",
         "Structured code review with checklist",
         "Review the code change systematically:\n\n1. Correctness\n2. Edge cases\n3. Clarity",
@@ -410,7 +410,7 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     let root = tmp.path();
 
     // Create the config hierarchy with an agent-level skill.
-    let agent_dir = root.join("spaces/default/agents/gateway");
+    let agent_dir = root.join("topics/default/agents/gateway");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
@@ -495,12 +495,12 @@ async fn activated_skill_persists_across_multiple_turns() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    std::fs::create_dir_all(root.join("spaces/default/agents/gateway")).unwrap();
+    std::fs::create_dir_all(root.join("topics/default/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
-    let space_dir = root.join("spaces/default");
+    let topic_dir = root.join("topics/default");
     create_skill(
-        &space_dir,
+        &topic_dir,
         "debug-helper",
         "Debugging assistance",
         "Help the user debug issues step by step.",
@@ -618,7 +618,7 @@ async fn deactivating_agent_level_skill_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let agent_dir = root.join("spaces/default/agents/gateway");
+    let agent_dir = root.join("topics/default/agents/gateway");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
@@ -671,8 +671,8 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let space_dir = root.join("spaces/default/agents/gateway");
-    std::fs::create_dir_all(&space_dir).unwrap();
+    let topic_dir = root.join("topics/default/agents/gateway");
+    std::fs::create_dir_all(&topic_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
     // Global skill.
@@ -685,15 +685,15 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         "Review code globally.",
     );
 
-    // Space skill with the same name — should shadow the global one.
-    let space_base = root.join("spaces/default");
+    // Topic skill with the same name — should shadow the global one.
+    let topic_base = root.join("topics/default");
     create_skill_with_tools(
-        &space_base,
+        &topic_base,
         "code-review",
-        "Space Code Review",
-        "Space-specific code review",
+        "Topic Code Review",
+        "Topic-specific code review",
         &["read_file", "search_files"],
-        "Review code for this space.",
+        "Review code for this topic.",
     );
 
     // A second global skill that should not be shadowed.
@@ -701,7 +701,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         root,
         "formatting",
         "Code formatting assistance",
-        "Format code according to space standards.",
+        "Format code according to topic standards.",
     );
 
     let _env_guard = SwageHomeGuard::set(root);
@@ -709,14 +709,14 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let (router, _addr, storage) =
         start_test_server_with_config(fixed_response_provider("ok"), config).await;
 
-    // Get the default space ID for the query parameter.
-    use swage_storage::store::SpaceStore;
-    let space = storage.get_or_create_default().await.unwrap();
+    // Get the default topic ID for the query parameter.
+    use swage_storage::store::TopicStore;
+    let topic = storage.get_or_create_default().await.unwrap();
 
     let (status, body) = http(
         &router,
         "GET",
-        &format!("/api/skills?space_id={}", space.id),
+        &format!("/api/skills?topic_id={}", topic.id),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -725,7 +725,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         .as_array()
         .expect("response should have skills array");
 
-    // code-review should appear once (space shadows global).
+    // code-review should appear once (topic shadows global).
     let code_reviews: Vec<&Value> = skills
         .iter()
         .filter(|s| s["name"] == "code-review")
@@ -736,10 +736,10 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         "same-name skill should appear once after override resolution"
     );
     assert_eq!(
-        code_reviews[0]["level"], "space",
-        "space-level skill should shadow global"
+        code_reviews[0]["level"], "topic",
+        "topic-level skill should shadow global"
     );
-    assert_eq!(code_reviews[0]["description"], "Space-specific code review",);
+    assert_eq!(code_reviews[0]["description"], "Topic-specific code review",);
 
     // Tool requirements should be present.
     let tools = code_reviews[0]["tools"]

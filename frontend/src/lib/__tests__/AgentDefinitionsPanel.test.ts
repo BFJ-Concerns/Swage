@@ -43,7 +43,7 @@ describe("AgentDefinitionsPanel", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise((_, reject) => {
       rejectRequest = reject;
     }));
-    component = mount(AgentDefinitionsPanel, { target: document.body, props: { spaceId: "space-1" } });
+    component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await tick();
 
     expect(document.body.textContent).toContain("Loading agent definitions");
@@ -54,7 +54,7 @@ describe("AgentDefinitionsPanel", () => {
   });
 
   it("lists effective definitions with source labels and opens complete details", async () => {
-    const spaceWinner = definition("shared", "space", {
+    const topicWinner = definition("shared", "topic", {
       display_name: "Primary researcher",
       instructions: "Use primary sources.",
       model_id: "research/model",
@@ -65,23 +65,23 @@ describe("AgentDefinitionsPanel", () => {
     });
     const definitions = [
       definition("gateway", "built_in", { display_name: "Standard assistant" }),
-      spaceWinner,
+      topicWinner,
       definition("global-only", "global", { display_name: "Shared helper" }),
     ];
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ definitions }), { status: 200 }),
     );
-    component = mount(AgentDefinitionsPanel, { target: document.body, props: { spaceId: "space-1" } });
+    component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("Standard assistant"));
 
     const sourceLabels = Array.from(document.querySelectorAll(".definition-list .source"), (label) => label.textContent);
-    expect(sourceLabels).toEqual(["Built-in default", "This space", "Global"]);
-    expect(document.body.textContent).toContain(spaceWinner.display_name);
+    expect(sourceLabels).toEqual(["Built-in default", "This topic", "Global"]);
+    expect(document.body.textContent).toContain(topicWinner.display_name);
 
-    const spaceResearcher = Array.from(document.querySelectorAll("button")).find(
+    const topicResearcher = Array.from(document.querySelectorAll("button")).find(
       (button) => button.textContent?.includes("Primary researcher"),
     );
-    flushSync(() => spaceResearcher?.click());
+    flushSync(() => topicResearcher?.click());
 
     const detail = document.querySelector('[aria-label="Primary researcher configuration"]');
     expect(detail?.textContent).toContain("Use primary sources.");
@@ -98,7 +98,7 @@ describe("AgentDefinitionsPanel", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
       definitions: [definition("minimal", "global", { display_name: "Minimal" })],
     }), { status: 200 }));
-    component = mount(AgentDefinitionsPanel, { target: document.body, props: { spaceId: "space-1" } });
+    component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("Minimal"));
 
     const detail = document.querySelector('[aria-label="Minimal configuration"]');
@@ -107,35 +107,35 @@ describe("AgentDefinitionsPanel", () => {
     expect(detail?.textContent?.match(/Not set/g)?.length).toBe(4);
   });
 
-  it("does not fetch configuration without a selected space", () => {
+  it("does not fetch configuration without a selected topic", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    component = mount(AgentDefinitionsPanel, { target: document.body, props: { spaceId: null } });
+    component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: null } });
 
-    expect(document.body.textContent).toContain("Select a space");
+    expect(document.body.textContent).toContain("Select a topic");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("requests and renders the inventory for a newly selected space", async () => {
+  it("requests and renders the inventory for a newly selected topic", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        definitions: [definition("first", "space", { display_name: "First space agent" })],
+        definitions: [definition("first", "topic", { display_name: "First topic agent" })],
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        definitions: [definition("second", "space", { display_name: "Second space agent" })],
+        definitions: [definition("second", "topic", { display_name: "Second topic agent" })],
       }), { status: 200 }));
     const panel = createClassComponent({
       component: AgentDefinitionsPanel,
       target: document.body,
-      props: { spaceId: "space-1" },
+      props: { topicId: "topic-1" },
     });
-    await vi.waitFor(() => expect(document.body.textContent).toContain("First space agent"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("First topic agent"));
 
-    panel.$set({ spaceId: "space-2" });
-    await vi.waitFor(() => expect(document.body.textContent).toContain("Second space agent"));
+    panel.$set({ topicId: "topic-2" });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Second topic agent"));
 
-    expect(fetchSpy).toHaveBeenNthCalledWith(1, "/api/spaces/space-1/agent-definitions", { method: "GET" });
-    expect(fetchSpy).toHaveBeenNthCalledWith(2, "/api/spaces/space-2/agent-definitions", { method: "GET" });
-    expect(document.body.textContent).not.toContain("First space agent");
+    expect(fetchSpy).toHaveBeenNthCalledWith(1, "/api/topics/topic-1/agent-definitions", { method: "GET" });
+    expect(fetchSpy).toHaveBeenNthCalledWith(2, "/api/topics/topic-2/agent-definitions", { method: "GET" });
+    expect(document.body.textContent).not.toContain("First topic agent");
     panel.$destroy();
   });
 });

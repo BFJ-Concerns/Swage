@@ -24,7 +24,7 @@ use swage_hook::HookRegistry;
 use swage_provider::{LlmProvider, UnsupportedVoiceProvider, VoiceProvider};
 use swage_storage::{
     model::{ApprovalKind, ApprovalRequest, NewAuditEvent},
-    store::{SpaceStore, Storage},
+    store::{Storage, TopicStore},
 };
 
 use crate::channel_gateway::{ChannelOrigin, DeliveryTarget, ExternalChannelIntegration};
@@ -45,10 +45,10 @@ pub struct AppState {
     pub config_root: PathBuf,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
-    /// Space storage backend. Separate from `storage` because `SpaceStore` is
-    /// not included in the `Storage` supertrait — consumers that need space
+    /// Topic storage backend. Separate from `storage` because `TopicStore` is
+    /// not included in the `Storage` supertrait — consumers that need topic
     /// operations import it independently.
-    pub space_store: Arc<dyn SpaceStore>,
+    pub topic_store: Arc<dyn TopicStore>,
     /// LLM provider for streaming message generation.
     pub provider: Arc<dyn LlmProvider>,
     /// Voice provider for speech-to-text and text-to-speech.
@@ -164,7 +164,7 @@ pub struct PairingCodeRecord {
 #[derive(Debug, Clone)]
 pub struct ChannelLinkCodeRecord {
     pub integration: ExternalChannelIntegration,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
     pub expires_at: DateTime<Utc>,
@@ -184,13 +184,13 @@ impl AppState {
             .map(|run| run.id)
             .collect::<HashSet<_>>();
 
-        let space_ids = self
-            .space_store
+        let topic_ids = self
+            .topic_store
             .list_all()
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
-            .map(|space| space.id)
+            .map(|topic| topic.id)
             .collect::<HashSet<_>>();
         replayable_owner_ids.extend(
             self.storage
@@ -198,15 +198,15 @@ impl AppState {
                 .await
                 .map_err(|error| error.to_string())?
                 .into_iter()
-                .filter(|run| space_ids.contains(&run.space_id))
+                .filter(|run| topic_ids.contains(&run.topic_id))
                 .map(|run| run.id),
         );
 
         let mut retained_paths = HashSet::new();
-        for space_id in space_ids {
+        for topic_id in topic_ids {
             let runs = self
                 .storage
-                .list_workflow_runs(space_id)
+                .list_workflow_runs(topic_id)
                 .await
                 .map_err(|error| error.to_string())?;
             for run in runs {
@@ -251,7 +251,7 @@ impl AppState {
 
     pub fn new(
         storage: Arc<dyn Storage>,
-        space_store: Arc<dyn SpaceStore>,
+        topic_store: Arc<dyn TopicStore>,
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
@@ -261,7 +261,7 @@ impl AppState {
             .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
         Self::new_with_config_root(
             storage,
-            space_store,
+            topic_store,
             provider,
             config,
             tool_dispatcher,
@@ -277,7 +277,7 @@ impl AppState {
     /// change between root discovery and retention.
     pub fn new_with_config_root(
         storage: Arc<dyn Storage>,
-        space_store: Arc<dyn SpaceStore>,
+        topic_store: Arc<dyn TopicStore>,
         provider: Arc<dyn LlmProvider>,
         config: ResolvedConfig,
         tool_dispatcher: ToolDispatcher,
@@ -317,7 +317,7 @@ impl AppState {
         Self {
             config_root,
             storage: storage.clone(),
-            space_store,
+            topic_store,
             provider: provider.clone(),
             voice_provider: Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
@@ -610,7 +610,7 @@ mod codex_runtime_audit_tests {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApprovalGrantKey {
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub kind: ApprovalKind,
     pub name: String,
     pub access: Option<String>,
@@ -626,7 +626,7 @@ impl ApprovalGrantKey {
 
         Some(Self {
             session_id,
-            space_id: None,
+            topic_id: None,
             kind: approval.kind.clone(),
             name,
             access: None,
@@ -637,13 +637,13 @@ impl ApprovalGrantKey {
 impl ApprovalGrantKey {
     pub fn location(
         session_id: Option<Uuid>,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
         path: impl Into<String>,
         access: impl Into<String>,
     ) -> Self {
         Self {
             session_id,
-            space_id,
+            topic_id,
             kind: ApprovalKind::Location,
             name: path.into(),
             access: Some(access.into()),
@@ -668,7 +668,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -726,7 +726,7 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

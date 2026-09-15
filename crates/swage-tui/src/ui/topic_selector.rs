@@ -1,8 +1,8 @@
-//! Space selector overlay — modal list of spaces fetched from the gateway.
+//! Topic selector overlay — modal list of topics fetched from the gateway.
 //!
 //! Renders as a centred popup over the conversation area with keyboard
-//! navigation for selecting a space. Selecting a space updates the active
-//! space context.
+//! navigation for selecting a topic. Selecting a topic updates the active
+//! topic context.
 
 use ratatui::{
     Frame,
@@ -12,18 +12,18 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::state::SpaceInfo;
+use crate::state::TopicInfo;
 
-/// State for the space selector modal overlay.
+/// State for the topic selector modal overlay.
 ///
 /// Navigation wraps around at both ends — selecting past the last item
 /// returns to the first, and selecting before the first goes to the last.
 #[derive(Debug, Default)]
-pub struct SpaceSelectorState {
-    pub spaces: Vec<SpaceInfo>,
-    /// Index of the currently highlighted space.
+pub struct TopicSelectorState {
+    pub topics: Vec<TopicInfo>,
+    /// Index of the currently highlighted topic.
     pub selected_index: usize,
-    /// True while the space list is being fetched from the gateway.
+    /// True while the topic list is being fetched from the gateway.
     pub is_loading: bool,
     /// Error message to display instead of the list when a fetch fails.
     pub error: Option<String>,
@@ -31,40 +31,40 @@ pub struct SpaceSelectorState {
     pub is_visible: bool,
 }
 
-impl SpaceSelectorState {
-    /// Create a new, hidden `SpaceSelectorState`.
+impl TopicSelectorState {
+    /// Create a new, hidden `TopicSelectorState`.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Move the selection one item down, wrapping to the first item after the last.
     pub fn select_next(&mut self) {
-        if self.spaces.is_empty() {
+        if self.topics.is_empty() {
             return;
         }
-        self.selected_index = (self.selected_index + 1) % self.spaces.len();
+        self.selected_index = (self.selected_index + 1) % self.topics.len();
     }
 
     /// Move the selection one item up, wrapping to the last item before the first.
     pub fn select_previous(&mut self) {
-        if self.spaces.is_empty() {
+        if self.topics.is_empty() {
             return;
         }
         self.selected_index = if self.selected_index == 0 {
-            self.spaces.len() - 1
+            self.topics.len() - 1
         } else {
             self.selected_index - 1
         };
     }
 
-    /// Return the currently selected `SpaceInfo`, or `None` if the list is empty.
-    pub fn confirm(&self) -> Option<SpaceInfo> {
-        self.spaces.get(self.selected_index).cloned()
+    /// Return the currently selected `TopicInfo`, or `None` if the list is empty.
+    pub fn confirm(&self) -> Option<TopicInfo> {
+        self.topics.get(self.selected_index).cloned()
     }
 
-    /// Replace the space list and reset the selection to the first item.
-    pub fn set_spaces(&mut self, spaces: Vec<SpaceInfo>) {
-        self.spaces = spaces;
+    /// Replace the topic list and reset the selection to the first item.
+    pub fn set_topics(&mut self, topics: Vec<TopicInfo>) {
+        self.topics = topics;
         self.selected_index = 0;
         self.is_loading = false;
         self.error = None;
@@ -95,14 +95,14 @@ impl SpaceSelectorState {
 
 // ---- Rendering -----------------------------------------------------------
 
-/// Render the space selector overlay centred within `area`.
+/// Render the topic selector overlay centred within `area`.
 ///
 /// If `state.is_visible` is false the function returns without rendering
 /// anything, so callers can always invoke it unconditionally.
 ///
 /// The popup clears the background beneath it (via `Clear`) before drawing,
 /// so underlying widgets do not bleed through.
-pub fn render_space_selector(frame: &mut Frame, area: Rect, state: &SpaceSelectorState) {
+pub fn render_topic_selector(frame: &mut Frame, area: Rect, state: &TopicSelectorState) {
     if !state.is_visible {
         return;
     }
@@ -114,7 +114,7 @@ pub fn render_space_selector(frame: &mut Frame, area: Rect, state: &SpaceSelecto
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Select Space ");
+        .title(" Select Topic ");
 
     let inner = block.inner(popup);
 
@@ -128,7 +128,7 @@ pub fn render_space_selector(frame: &mut Frame, area: Rect, state: &SpaceSelecto
 
     // ---- Content ----
     if state.is_loading {
-        let loading = Paragraph::new("Loading spaces...")
+        let loading = Paragraph::new("Loading topics...")
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(loading, content_area);
@@ -139,7 +139,7 @@ pub fn render_space_selector(frame: &mut Frame, area: Rect, state: &SpaceSelecto
         frame.render_widget(error_text, content_area);
     } else {
         let items: Vec<ListItem> = state
-            .spaces
+            .topics
             .iter()
             .map(|p| ListItem::new(p.name.as_str()))
             .collect();
@@ -149,7 +149,7 @@ pub fn render_space_selector(frame: &mut Frame, area: Rect, state: &SpaceSelecto
 
         // Feed our tracked index into ratatui's ListState for rendering.
         let mut list_state = ListState::default();
-        if !state.spaces.is_empty() {
+        if !state.topics.is_empty() {
             list_state.select(Some(state.selected_index));
         }
 
@@ -183,31 +183,31 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn make_space(name: &str) -> SpaceInfo {
-        SpaceInfo {
+    fn make_topic(name: &str) -> TopicInfo {
+        TopicInfo {
             id: Uuid::new_v4(),
             name: name.to_string(),
         }
     }
 
-    fn three_spaces() -> Vec<SpaceInfo> {
-        vec![make_space("Alpha"), make_space("Beta"), make_space("Gamma")]
+    fn three_topics() -> Vec<TopicInfo> {
+        vec![make_topic("Alpha"), make_topic("Beta"), make_topic("Gamma")]
     }
 
     // ---- select_next ----------------------------------------------------
 
     #[test]
     fn select_next_advances_index() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.select_next();
         assert_eq!(state.selected_index, 1);
     }
 
     #[test]
     fn select_next_wraps_from_last_to_first() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.selected_index = 2; // last item
         state.select_next();
         assert_eq!(state.selected_index, 0, "should wrap to first");
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn select_next_on_empty_list_is_noop() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.select_next();
         assert_eq!(state.selected_index, 0);
     }
@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn select_previous_decrements_index() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.selected_index = 2;
         state.select_previous();
         assert_eq!(state.selected_index, 1);
@@ -233,8 +233,8 @@ mod tests {
 
     #[test]
     fn select_previous_wraps_from_first_to_last() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.selected_index = 0; // first item
         state.select_previous();
         assert_eq!(state.selected_index, 2, "should wrap to last");
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn select_previous_on_empty_list_is_noop() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.select_previous();
         assert_eq!(state.selected_index, 0);
     }
@@ -250,9 +250,9 @@ mod tests {
     // ---- confirm --------------------------------------------------------
 
     #[test]
-    fn confirm_returns_selected_space() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+    fn confirm_returns_selected_topic() {
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.selected_index = 1;
         let confirmed = state.confirm().unwrap();
         assert_eq!(confirmed.name, "Beta");
@@ -260,36 +260,36 @@ mod tests {
 
     #[test]
     fn confirm_on_empty_list_returns_none() {
-        let state = SpaceSelectorState::new();
+        let state = TopicSelectorState::new();
         assert!(state.confirm().is_none());
     }
 
     #[test]
     fn confirm_does_not_mutate_state() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         let _ = state.confirm();
         assert_eq!(state.selected_index, 0, "confirm must not change selection");
     }
 
-    // ---- set_spaces ---------------------------------------------------
+    // ---- set_topics ---------------------------------------------------
 
     #[test]
     fn set_spaces_replaces_list_and_resets_selection() {
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.selected_index = 2;
-        state.set_spaces(vec![make_space("New")]);
-        assert_eq!(state.spaces.len(), 1);
+        state.set_topics(vec![make_topic("New")]);
+        assert_eq!(state.topics.len(), 1);
         assert_eq!(state.selected_index, 0, "selection should reset to 0");
     }
 
     #[test]
     fn set_spaces_clears_loading_and_error() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.is_loading = true;
         state.error = Some("previous error".to_string());
-        state.set_spaces(three_spaces());
+        state.set_topics(three_topics());
         assert!(!state.is_loading);
         assert!(state.error.is_none());
     }
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn set_error_stores_message_and_clears_loading() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.is_loading = true;
         state.set_error("fetch failed".to_string());
         assert_eq!(state.error.as_deref(), Some("fetch failed"));
@@ -309,14 +309,14 @@ mod tests {
 
     #[test]
     fn show_makes_overlay_visible() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.show();
         assert!(state.is_visible());
     }
 
     #[test]
     fn hide_makes_overlay_invisible() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.show();
         state.hide();
         assert!(!state.is_visible());
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn show_clears_previous_error() {
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.set_error("old error".to_string());
         state.show();
         assert!(state.error.is_none());
@@ -368,9 +368,9 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = SpaceSelectorState::new(); // is_visible = false
+        let state = TopicSelectorState::new(); // is_visible = false
         terminal
-            .draw(|frame| render_space_selector(frame, frame.area(), &state))
+            .draw(|frame| render_topic_selector(frame, frame.area(), &state))
             .unwrap();
         // Buffer should be entirely blank (no popup was rendered).
         let content: String = terminal
@@ -380,10 +380,10 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        let non_space: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+        let non_topic: String = content.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            non_space.is_empty(),
-            "hidden overlay must not render anything; got: {non_space:?}"
+            non_topic.is_empty(),
+            "hidden overlay must not render anything; got: {non_topic:?}"
         );
     }
 
@@ -392,11 +392,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.show();
         state.is_loading = true;
         terminal
-            .draw(|frame| render_space_selector(frame, frame.area(), &state))
+            .draw(|frame| render_topic_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -416,11 +416,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = SpaceSelectorState::new();
+        let mut state = TopicSelectorState::new();
         state.show();
         state.set_error("gateway unreachable".to_string());
         terminal
-            .draw(|frame| render_space_selector(frame, frame.area(), &state))
+            .draw(|frame| render_topic_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -436,15 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_space_list() {
+    fn render_shows_topic_list() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.show();
         terminal
-            .draw(|frame| render_space_selector(frame, frame.area(), &state))
+            .draw(|frame| render_topic_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -455,15 +455,15 @@ mod tests {
             .collect();
         assert!(
             content.contains("Alpha"),
-            "space list must show 'Alpha'; got: {content:?}"
+            "topic list must show 'Alpha'; got: {content:?}"
         );
         assert!(
             content.contains("Beta"),
-            "space list must show 'Beta'; got: {content:?}"
+            "topic list must show 'Beta'; got: {content:?}"
         );
         assert!(
             content.contains("Gamma"),
-            "space list must show 'Gamma'; got: {content:?}"
+            "topic list must show 'Gamma'; got: {content:?}"
         );
     }
 
@@ -472,11 +472,11 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.show();
         terminal
-            .draw(|frame| render_space_selector(frame, frame.area(), &state))
+            .draw(|frame| render_topic_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -492,15 +492,15 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_select_space_title() {
+    fn render_shows_select_topic_title() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = SpaceSelectorState::new();
-        state.set_spaces(three_spaces());
+        let mut state = TopicSelectorState::new();
+        state.set_topics(three_topics());
         state.show();
         terminal
-            .draw(|frame| render_space_selector(frame, frame.area(), &state))
+            .draw(|frame| render_topic_selector(frame, frame.area(), &state))
             .unwrap();
         let content: String = terminal
             .backend()
@@ -510,8 +510,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("Select Space"),
-            "popup must show 'Select Space' title; got: {content:?}"
+            content.contains("Select Topic"),
+            "popup must show 'Select Topic' title; got: {content:?}"
         );
     }
 }

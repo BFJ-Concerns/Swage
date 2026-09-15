@@ -16,7 +16,7 @@ use swage_storage::AgentMemoryRecord;
 
 use crate::state::AppState;
 
-const OPERATOR_HISTORY_SNAPSHOTS_PER_SPACE: usize = 100;
+const OPERATOR_HISTORY_SNAPSHOTS_PER_TOPIC: usize = 100;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct OperatorSearchQuery {
@@ -36,7 +36,7 @@ pub struct OperatorSearchResult {
     pub kind: String,
     pub id: String,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub title: String,
     pub excerpt: Option<String>,
     pub occurred_at: DateTime<Utc>,
@@ -79,7 +79,7 @@ pub struct OperatorUsageResponse {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AgentMemoryListQuery {
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub q: Option<String>,
@@ -142,10 +142,10 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
     variant_selections.sort_by_key(|entry| std::cmp::Reverse(entry.recorded_at));
 
     let mut assembly_reports = Vec::new();
-    for space in state.space_store.list_all().await? {
+    for topic in state.topic_store.list_all().await? {
         for snapshot in state
             .storage
-            .list_snapshots_by_space(space.id, OPERATOR_HISTORY_SNAPSHOTS_PER_SPACE)
+            .list_snapshots_by_topic(topic.id, OPERATOR_HISTORY_SNAPSHOTS_PER_TOPIC)
             .await?
         {
             let report: AssemblyReport =
@@ -158,7 +158,7 @@ pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryRespons
             assembly_reports.push(AssemblyHistoryEntry {
                 turn_id: snapshot.turn_id,
                 session_id: snapshot.session_id,
-                space_id: snapshot.space_id,
+                topic_id: snapshot.topic_id,
                 recorded_at: snapshot.created_at,
                 assembly_name: report.assembly_name,
             });
@@ -200,18 +200,18 @@ pub async fn operator_search(
     let session_filter = query.session_id;
     let limit = query.limit.unwrap_or(50);
 
-    let spaces = state.space_store.list_all().await?;
-    let space_names: HashMap<Uuid, String> = spaces
+    let topics = state.topic_store.list_all().await?;
+    let topic_names: HashMap<Uuid, String> = topics
         .iter()
-        .map(|space| (space.id, space.name.clone()))
+        .map(|topic| (topic.id, topic.name.clone()))
         .collect();
     let mut sessions = Vec::new();
-    for space in &spaces {
-        sessions.extend(state.storage.list_by_space(space.id).await?);
+    for topic in &topics {
+        sessions.extend(state.storage.list_by_topic(topic.id).await?);
     }
-    let session_spaces: HashMap<Uuid, Uuid> = sessions
+    let session_topics: HashMap<Uuid, Uuid> = sessions
         .iter()
-        .map(|session| (session.id, session.space_id))
+        .map(|session| (session.id, session.topic_id))
         .collect();
 
     let mut results = Vec::new();
@@ -221,8 +221,8 @@ pub async fn operator_search(
             if !matches_session(session_filter, session.id) {
                 continue;
             }
-            let title = space_names
-                .get(&session.space_id)
+            let title = topic_names
+                .get(&session.topic_id)
                 .map(|name| format!("session in {name}"))
                 .unwrap_or_else(|| "session".to_string());
             let excerpt = session.metadata.as_ref().map(|value| value.to_string());
@@ -235,7 +235,7 @@ pub async fn operator_search(
                     kind: "session".into(),
                     id: session.id.to_string(),
                     session_id: Some(session.id),
-                    space_id: Some(session.space_id),
+                    topic_id: Some(session.topic_id),
                     title,
                     excerpt,
                     occurred_at: session.updated_at,
@@ -264,7 +264,7 @@ pub async fn operator_search(
                             kind: "message".into(),
                             id: message.id.to_string(),
                             session_id: Some(session.id),
-                            space_id: Some(session.space_id),
+                            topic_id: Some(session.topic_id),
                             title: format!("{} message", message.role),
                             excerpt: Some(message.content),
                             occurred_at: message.created_at,
@@ -277,8 +277,8 @@ pub async fn operator_search(
 
     if matches_kind(kind_filter, "approval") {
         for approval in state.storage.list_approvals().await? {
-            let (session_id, space_id) =
-                session_and_space_for_turn(state, approval.turn_id).await?;
+            let (session_id, topic_id) =
+                session_and_topic_for_turn(state, approval.turn_id).await?;
             if !matches_optional_session(session_filter, session_id) {
                 continue;
             }
@@ -304,7 +304,7 @@ pub async fn operator_search(
                     kind: "approval".into(),
                     id: approval.id.to_string(),
                     session_id,
-                    space_id,
+                    topic_id,
                     title,
                     excerpt,
                     occurred_at: approval.decided_at.unwrap_or(approval.created_at),
@@ -346,8 +346,8 @@ pub async fn operator_search(
                         kind: "schedule_run".into(),
                         id: run.id.to_string(),
                         session_id: run_session,
-                        space_id: run_session
-                            .and_then(|session_id| session_spaces.get(&session_id).copied()),
+                        topic_id: run_session
+                            .and_then(|session_id| session_topics.get(&session_id).copied()),
                         title: schedule.message.clone(),
                         excerpt,
                         occurred_at: run
@@ -376,9 +376,9 @@ pub async fn operator_search(
                     kind: "delivery".into(),
                     id: delivery.id.to_string(),
                     session_id: delivery.session_id,
-                    space_id: delivery
+                    topic_id: delivery
                         .session_id
-                        .and_then(|session_id| session_spaces.get(&session_id).copied()),
+                        .and_then(|session_id| session_topics.get(&session_id).copied()),
                     title: "delivery record".into(),
                     excerpt,
                     occurred_at: delivery.delivered_at,
@@ -407,9 +407,9 @@ pub async fn operator_search(
                     kind: "audit_event".into(),
                     id: event.id,
                     session_id: event.session_id,
-                    space_id: event
+                    topic_id: event
                         .session_id
-                        .and_then(|id| session_spaces.get(&id).copied()),
+                        .and_then(|id| session_topics.get(&id).copied()),
                     title: event.summary,
                     excerpt: Some(event.metadata.to_string()),
                     occurred_at: event.created_at,
@@ -427,7 +427,7 @@ pub async fn operator_search(
                     state
                         .storage
                         .list_agent_memories(
-                            session.space_id,
+                            session.topic_id,
                             None,
                             Some(session.id),
                             search_query,
@@ -437,11 +437,11 @@ pub async fn operator_search(
                 );
             }
         } else {
-            for space in &spaces {
+            for topic in &topics {
                 memories.extend(
                     state
                         .storage
-                        .list_agent_memories(space.id, None, None, search_query, limit)
+                        .list_agent_memories(topic.id, None, None, search_query, limit)
                         .await?,
                 );
             }
@@ -462,7 +462,7 @@ pub async fn operator_search(
                     kind: "agent_memory".into(),
                     id: memory.id.to_string(),
                     session_id: Some(memory.session_id),
-                    space_id: Some(memory.space_id),
+                    topic_id: Some(memory.topic_id),
                     title: memory.title,
                     excerpt: Some(memory.source_summary),
                     occurred_at: memory.updated_at,
@@ -484,12 +484,12 @@ pub async fn list_agent_memories(
     let search = query.q.as_deref();
     let mut memories = Vec::new();
 
-    if let Some(space_id) = query.space_id {
+    if let Some(topic_id) = query.topic_id {
         memories.extend(
             state
                 .storage
                 .list_agent_memories(
-                    space_id,
+                    topic_id,
                     query.agent_id.as_deref(),
                     query.session_id,
                     search,
@@ -503,7 +503,7 @@ pub async fn list_agent_memories(
                 state
                     .storage
                     .list_agent_memories(
-                        session.space_id,
+                        session.topic_id,
                         query.agent_id.as_deref(),
                         Some(session_id),
                         search,
@@ -513,11 +513,11 @@ pub async fn list_agent_memories(
             );
         }
     } else {
-        for space in state.space_store.list_all().await? {
+        for topic in state.topic_store.list_all().await? {
             memories.extend(
                 state
                     .storage
-                    .list_agent_memories(space.id, query.agent_id.as_deref(), None, search, limit)
+                    .list_agent_memories(topic.id, query.agent_id.as_deref(), None, search, limit)
                     .await?,
             );
         }
@@ -664,7 +664,7 @@ async fn turn_usage(
     )))
 }
 
-async fn session_and_space_for_turn(
+async fn session_and_topic_for_turn(
     state: &AppState,
     turn_id: Uuid,
 ) -> Result<(Option<Uuid>, Option<Uuid>), GatewayError> {
@@ -675,12 +675,12 @@ async fn session_and_space_for_turn(
         return Ok((None, None));
     };
     let session_id = Some(thread.session_id);
-    let space_id = state
+    let topic_id = state
         .storage
         .get_session(thread.session_id)
         .await?
-        .map(|session| session.space_id);
-    Ok((session_id, space_id))
+        .map(|session| session.topic_id);
+    Ok((session_id, topic_id))
 }
 
 fn matches_kind(filter: Option<&str>, kind: &str) -> bool {

@@ -15,7 +15,7 @@ use crate::store::SessionStore;
 
 pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     let id: String = row.get(0)?;
-    let space_id: String = row.get(1)?;
+    let topic_id: String = row.get(1)?;
     let agent_id: String = row.get(2)?;
     let metadata_json: Option<String> = row.get(3)?;
     let selected_model_id: Option<String> = row.get(4)?;
@@ -25,7 +25,7 @@ pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
 
     Ok(Session {
         id: parse_uuid(&id)?,
-        space_id: parse_uuid(&space_id)?,
+        topic_id: parse_uuid(&topic_id)?,
         agent_id,
         metadata: parse_metadata(metadata_json.as_deref())?,
         selected_model_id,
@@ -92,11 +92,11 @@ impl SessionStore for SqliteStorage {
             let now_str = now.to_rfc3339();
 
             conn.execute(
-                "INSERT INTO sessions (id, space_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at)
+                "INSERT INTO sessions (id, topic_id, agent_id, metadata_json, active_workspace_attachment_id, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
                 params![
                     id.to_string(),
-                    session.space_id.to_string(),
+                    session.topic_id.to_string(),
                     &session.agent_id,
                     &metadata_json,
                     session
@@ -108,7 +108,7 @@ impl SessionStore for SqliteStorage {
 
             Ok(Session {
                 id,
-                space_id: session.space_id,
+                topic_id: session.topic_id,
                 agent_id: session.agent_id,
                 metadata: session.metadata,
                 selected_model_id: None,
@@ -123,7 +123,7 @@ impl SessionStore for SqliteStorage {
     async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, space_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 params![id.to_string()],
                 row_to_session,
@@ -133,14 +133,14 @@ impl SessionStore for SqliteStorage {
         .await
     }
 
-    async fn list_by_space(&self, space_id: Uuid) -> Result<Vec<Session>, StorageError> {
+    async fn list_by_topic(&self, topic_id: Uuid) -> Result<Vec<Session>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, space_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
-                 FROM sessions WHERE space_id = ?1
+                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
+                 FROM sessions WHERE topic_id = ?1
                  ORDER BY updated_at DESC",
             )?;
-            let rows = stmt.query_map(params![space_id.to_string()], row_to_session)?;
+            let rows = stmt.query_map(params![topic_id.to_string()], row_to_session)?;
             rows.collect()
         })
         .await
@@ -153,7 +153,7 @@ impl SessionStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, space_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions WHERE agent_id = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -291,7 +291,7 @@ impl SessionStore for SqliteStorage {
         let conversation = conversation.to_string();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, space_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
+                "SELECT id, topic_id, agent_id, metadata_json, selected_model_id, active_workspace_attachment_id, created_at, updated_at
                  FROM sessions
                  WHERE json_extract(metadata_json, '$.channel_origin.integration') = ?1
                    AND json_extract(metadata_json, '$.channel_origin.account') = ?2
@@ -309,29 +309,29 @@ impl SessionStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewSpace, NewWorkspaceAttachment};
-    use crate::store::{SpaceStore, WorkspaceAttachmentStore};
+    use crate::model::{NewTopic, NewWorkspaceAttachment};
+    use crate::store::{TopicStore, WorkspaceAttachmentStore};
 
     use super::*;
 
-    async fn make_storage_with_space() -> (SqliteStorage, Uuid) {
+    async fn make_storage_with_topic() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "test".into(),
                 slug: "test".into(),
             })
             .await
             .unwrap();
-        (storage, space.id)
+        (storage, topic.id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_session() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -339,7 +339,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(session.space_id, space_id);
+        assert_eq!(session.topic_id, topic_id);
 
         let fetched = storage.get_session(session.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, session.id);
@@ -347,11 +347,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_sessions_ordered_by_updated_at_desc() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
 
         let s1 = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -362,7 +362,7 @@ mod tests {
         storage.update_activity(s1.id).await.unwrap();
         let s2 = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -371,7 +371,7 @@ mod tests {
             .unwrap();
         storage.update_activity(s2.id).await.unwrap();
 
-        let sessions = storage.list_by_space(space_id).await.unwrap();
+        let sessions = storage.list_by_topic(topic_id).await.unwrap();
         assert_eq!(sessions.len(), 2);
         // Most-recently-updated appears first.
         assert!(sessions[0].updated_at >= sessions[1].updated_at);
@@ -379,10 +379,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_session_returns_true_then_false() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -396,10 +396,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_session_stores_agent_id() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "my-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -415,7 +415,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_session_round_trips_metadata() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
         let metadata = serde_json::json!({
             "host": "embedder",
             "labels": ["demo", "cli"]
@@ -423,7 +423,7 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "my-agent".to_string(),
                 metadata: Some(metadata.clone()),
                 active_workspace_attachment_id: None,
@@ -439,10 +439,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn session_active_workspace_round_trips_and_updates() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
         let workspace = storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                space_id,
+                topic_id,
                 label: "repo".to_string(),
                 path: "/tmp/swage-test-repo".to_string(),
                 permissions: vec!["read".to_string(), "write".to_string()],
@@ -452,7 +452,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "my-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: Some(workspace.id),
@@ -472,12 +472,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_by_agent_id_filters_and_orders() {
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
 
         // Create sessions for two different agents.
         let s1 = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "alpha".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -486,7 +486,7 @@ mod tests {
             .unwrap();
         let _s2 = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "beta".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -495,7 +495,7 @@ mod tests {
             .unwrap();
         let s3 = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "alpha".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -526,10 +526,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cascade_delete_removes_sessions() {
         // Deleting a session should also remove its turns via ON DELETE CASCADE.
-        let (storage, space_id) = make_storage_with_space().await;
+        let (storage, topic_id) = make_storage_with_topic().await;
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "test-agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

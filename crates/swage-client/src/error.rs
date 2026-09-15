@@ -154,14 +154,14 @@ mod tests {
     #[test]
     fn gateway_refusal_display_names_the_code_and_message() {
         let err = ClientError::Gateway {
-            address: "http://127.0.0.1:3000/api/spaces".to_string(),
+            address: "http://127.0.0.1:3000/api/topics".to_string(),
             code: ErrorCode::Conflict,
-            message: "space conflict: a space named 'ops' exists".to_string(),
+            message: "topic conflict: a topic named 'ops' exists".to_string(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("http://127.0.0.1:3000/api/spaces"), "{msg}");
+        assert!(msg.contains("http://127.0.0.1:3000/api/topics"), "{msg}");
         assert!(msg.contains("Conflict"), "{msg}");
-        assert!(msg.contains("a space named 'ops' exists"), "{msg}");
+        assert!(msg.contains("a topic named 'ops' exists"), "{msg}");
     }
 
     #[test]

@@ -1,30 +1,30 @@
-<!-- Space-scoped settings pane. Global provider/runtime settings stay in
-     SettingsPage; this component only reads space-owned data. -->
+<!-- Topic-scoped settings pane. Global provider/runtime settings stay in
+     SettingsPage; this component only reads topic-owned data. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
-    attachSpaceWorkspace,
-    detachSpaceWorkspace,
-    listSpaceSessions,
-    listSpaceWorkspaces,
-    updateSpaceWorkspaceTrust,
-  } from "../api/spaces";
-  import type { SpaceSettingsTab } from "../router";
-  import type { Space, ConversationSummary, WorkspaceAttachment } from "../types";
+    attachTopicWorkspace,
+    detachTopicWorkspace,
+    listTopicSessions,
+    listTopicWorkspaces,
+    updateTopicWorkspaceTrust,
+  } from "../api/topics";
+  import type { TopicSettingsTab } from "../router";
+  import type { Topic, ConversationSummary, WorkspaceAttachment } from "../types";
 
   interface Props {
-    space: Space | null;
-    tab?: SpaceSettingsTab;
+    topic: Topic | null;
+    tab?: TopicSettingsTab;
   }
 
-  let { space, tab = "overview" }: Props = $props();
+  let { topic, tab = "overview" }: Props = $props();
 
   let workspaces = $state<WorkspaceAttachment[]>([]);
-  // Attaching decides whether the new folder becomes the space's working
+  // Attaching decides whether the new folder becomes the topic's working
   // folder from this list, so the form waits for a real load rather than
   // reading an empty placeholder as "no attachments yet".
-  let workspacesLoaded = $state(false);
+  let worktopicsLoaded = $state(false);
   let sessions = $state<ConversationSummary[]>([]);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
@@ -34,32 +34,32 @@
   let workspaceIsTrusted = $state(false);
   let isMutating = $state(false);
 
-  onMount(loadSpaceSettings);
+  onMount(loadTopicSettings);
 
-  async function loadSpaceSettings(): Promise<void> {
-    if (!space) return;
+  async function loadTopicSettings(): Promise<void> {
+    if (!topic) return;
     isLoading = true;
     try {
       const [workspaceList, sessionList] = await Promise.all([
-        listSpaceWorkspaces(space.id),
-        listSpaceSessions(space.id),
+        listTopicWorkspaces(topic.id),
+        listTopicSessions(topic.id),
       ]);
       workspaces = workspaceList;
-      workspacesLoaded = true;
+      worktopicsLoaded = true;
       sessions = sessionList;
       error = null;
     } catch (err) {
-      error = err instanceof Error ? err.message : "Failed to load space settings.";
+      error = err instanceof Error ? err.message : "Failed to load topic settings.";
     } finally {
       isLoading = false;
     }
   }
 
   async function attachWorkspace(): Promise<void> {
-    if (!space || !workspacesLoaded || !workspacePath.trim()) return;
+    if (!topic || !worktopicsLoaded || !workspacePath.trim()) return;
     isMutating = true;
     try {
-      await attachSpaceWorkspace(space.id, {
+      await attachTopicWorkspace(topic.id, {
         path: workspacePath.trim(),
         label: workspaceLabel.trim() || undefined,
         permissions: workspaceCanWrite ? ["read", "write"] : ["read"],
@@ -70,7 +70,7 @@
       workspaceLabel = "";
       workspaceCanWrite = true;
       workspaceIsTrusted = false;
-      await loadSpaceSettings();
+      await loadTopicSettings();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to attach workspace.";
     } finally {
@@ -79,11 +79,11 @@
   }
 
   async function setWorkspaceTrust(workspace: WorkspaceAttachment, isTrusted: boolean): Promise<void> {
-    if (!space) return;
+    if (!topic) return;
     isMutating = true;
     try {
-      await updateSpaceWorkspaceTrust(space.id, workspace.id, { is_trusted: isTrusted });
-      await loadSpaceSettings();
+      await updateTopicWorkspaceTrust(topic.id, workspace.id, { is_trusted: isTrusted });
+      await loadTopicSettings();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to update workspace trust.";
     } finally {
@@ -92,11 +92,11 @@
   }
 
   async function detachWorkspace(workspace: WorkspaceAttachment): Promise<void> {
-    if (!space) return;
+    if (!topic) return;
     isMutating = true;
     try {
-      await detachSpaceWorkspace(space.id, workspace.id);
-      await loadSpaceSettings();
+      await detachTopicWorkspace(topic.id, workspace.id);
+      await loadTopicSettings();
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to detach workspace.";
     } finally {
@@ -105,25 +105,25 @@
   }
 </script>
 
-<div class="space-settings-pane" aria-label="Space settings">
-  {#if !space}
+<div class="topic-settings-pane" aria-label="Topic settings">
+  {#if !topic}
     <section class="shell-section">
-      <h1 class="title">Space not found</h1>
-      <p class="shell-empty">The requested space settings route does not match a known space.</p>
+      <h1 class="title">Topic not found</h1>
+      <p class="shell-empty">The requested topic settings route does not match a known topic.</p>
     </section>
   {:else}
     <div class="head">
       <div class="head-text">
-        <p class="eyebrow">Space settings</p>
-        <h1 class="title">{space.name}</h1>
-        <p class="sub">Space-scoped configuration and attached workspace state for {space.slug}.</p>
+        <p class="eyebrow">Topic settings</p>
+        <h1 class="title">{topic.name}</h1>
+        <p class="sub">Topic-scoped configuration and attached workspace state for {topic.slug}.</p>
       </div>
     </div>
 
     {#if error}
       <div class="notice error" role="alert">{error}</div>
     {:else if isLoading}
-      <div class="notice">Loading space settings…</div>
+      <div class="notice">Loading topic settings…</div>
     {/if}
 
     {#if tab === "overview"}
@@ -132,11 +132,11 @@
         <div class="shell-grid">
           <div class="shell-row">
             <span class="shell-label">Slug</span>
-            <span class="shell-value">{space.slug}</span>
+            <span class="shell-value">{topic.slug}</span>
           </div>
           <div class="shell-row">
-            <span class="shell-label">Default space</span>
-            <span class="shell-value">{space.is_default ? "Yes" : "No"}</span>
+            <span class="shell-label">Default topic</span>
+            <span class="shell-value">{topic.is_default ? "Yes" : "No"}</span>
           </div>
           <div class="shell-row">
             <span class="shell-label">Workspaces</span>
@@ -151,7 +151,7 @@
     {:else if tab === "workspaces"}
       <section class="shell-section">
         <h2 class="shell-section-title">Workspaces</h2>
-        <p class="workspace-note">Trusted workspace content can supply instructions to agents working in this space.</p>
+        <p class="workspace-note">Trusted workspace content can supply instructions to agents working in this topic.</p>
         <form class="workspace-form" onsubmit={(event) => { event.preventDefault(); void attachWorkspace(); }}>
           <label>
             Repository folder
@@ -162,7 +162,7 @@
             <input bind:value={workspaceLabel} placeholder="Repository name" disabled={isMutating} />
           </label>
           <WorkspaceAccessOptions bind:canWrite={workspaceCanWrite} bind:isTrusted={workspaceIsTrusted} disabled={isMutating} />
-          <button type="submit" disabled={isMutating || !workspacesLoaded || !workspacePath.trim()}>
+          <button type="submit" disabled={isMutating || !worktopicsLoaded || !workspacePath.trim()}>
             {isMutating ? "Saving…" : "Attach workspace"}
           </button>
         </form>
@@ -182,7 +182,7 @@
               </div>
             </article>
           {:else}
-            <p class="shell-empty">No workspace folders are attached to this space.</p>
+            <p class="shell-empty">No workspace folders are attached to this topic.</p>
           {/each}
         </div>
       </section>
@@ -197,7 +197,7 @@
               <span>{new Date(session.last_activity).toLocaleString()}</span>
             </article>
           {:else}
-            <p class="shell-empty">No sessions have been created in this space.</p>
+            <p class="shell-empty">No sessions have been created in this topic.</p>
           {/each}
         </div>
       </section>
@@ -206,7 +206,7 @@
 </div>
 
 <style>
-  .space-settings-pane {
+  .topic-settings-pane {
     min-height: 100%;
     padding: 28px 32px;
     background: var(--paper);

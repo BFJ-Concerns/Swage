@@ -13,11 +13,11 @@ const repoRoot = path.resolve(desktopRoot, "..");
 const frontendDist = path.resolve(repoRoot, "frontend", "dist");
 const desktopMain = path.resolve(desktopRoot, "src", "main.mjs");
 
-function createConversationState(id, spaceId) {
+function createConversationState(id, topicId) {
   const now = new Date().toISOString();
   return {
     id,
-    space_id: spaceId,
+    topic_id: topicId,
     created_at: now,
     last_activity: now,
     messages: [],
@@ -25,10 +25,10 @@ function createConversationState(id, spaceId) {
 }
 
 function createMockGateway() {
-  const space = {
-    id: "space-default",
+  const topic = {
+    id: "topic-default",
     name: "Default",
-    description: "Smoke-test space",
+    description: "Smoke-test topic",
     slug: "default",
     is_default: true,
     created_at: "2026-04-17T12:00:00Z",
@@ -96,12 +96,12 @@ function createMockGateway() {
       return;
     }
 
-    if (request.method === "GET" && pathname === "/api/spaces") {
-      writeJson(response, 200, { spaces: [space] });
+    if (request.method === "GET" && pathname === "/api/topics") {
+      writeJson(response, 200, { topics: [topic] });
       return;
     }
 
-    if (request.method === "GET" && pathname === `/api/spaces/${space.id}/materials`) {
+    if (request.method === "GET" && pathname === `/api/topics/${topic.id}/materials`) {
       writeJson(response, 200, { materials: [] });
       return;
     }
@@ -118,8 +118,8 @@ function createMockGateway() {
         },
         sessions: listConversationSummaries().map((conversation) => ({
           ...conversation,
-          space_id: space.id,
-          space_name: space.name,
+          topic_id: topic.id,
+          topic_name: topic.name,
           has_active_connection: false,
           has_running_turn: false,
         })),
@@ -145,7 +145,7 @@ function createMockGateway() {
     if (request.method === "GET" && pathname === "/api/recovery/export") {
       writeJson(response, 200, {
         version: 1,
-        spaces: [space],
+        topics: [topic],
         workspaces: [],
         sessions: [],
         secrets: [],
@@ -159,7 +159,7 @@ function createMockGateway() {
 
     if (
       request.method === "GET"
-      && pathname === `/api/spaces/${space.id}/sessions`
+      && pathname === `/api/topics/${topic.id}/sessions`
     ) {
       writeJson(response, 200, { conversations: listConversationSummaries() });
       return;
@@ -167,15 +167,15 @@ function createMockGateway() {
 
     if (
       request.method === "POST"
-      && pathname === `/api/spaces/${space.id}/sessions`
+      && pathname === `/api/topics/${topic.id}/sessions`
     ) {
       conversationCounter += 1;
       const id = `conv-${conversationCounter}`;
-      const conversation = createConversationState(id, space.id);
+      const conversation = createConversationState(id, topic.id);
       conversations.set(id, conversation);
       writeJson(response, 200, {
         id,
-        space_id: space.id,
+        topic_id: topic.id,
         created_at: conversation.created_at,
         last_activity: conversation.last_activity,
       });
@@ -329,11 +329,11 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
-  const defaultSpace = page.getByRole("article", { name: "Space Default" });
-  await defaultSpace
-    .getByRole("button", { name: "Preview space Default", exact: true })
+  const defaultTopic = page.getByRole("article", { name: "Topic Default" });
+  await defaultTopic
+    .getByRole("button", { name: "Preview topic Default", exact: true })
     .click();
-  await defaultSpace.getByRole("button", { name: "Open", exact: true }).click();
+  await defaultTopic.getByRole("button", { name: "Open", exact: true }).click();
   await page.getByRole("button", { name: /\+ new conversation/i }).click();
   await page
     .getByPlaceholder("Send a message — Shift+Enter for a new line")

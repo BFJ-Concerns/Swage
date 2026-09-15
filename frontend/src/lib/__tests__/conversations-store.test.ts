@@ -37,7 +37,7 @@ function makeSummary(id: string, last_activity = "2026-01-01T00:00:00Z") {
 function makeDetail(id: string) {
   return {
     id,
-    space_id: "default",
+    topic_id: "default",
     created_at: "2026-01-01T00:00:00Z",
     last_activity: "2026-01-01T00:00:00Z",
     messages: [] as import("../types").MessageView[],
@@ -193,7 +193,7 @@ describe("createConversation", () => {
     const store = createConversationStore();
     const resp = {
       id: "new-conv",
-      space_id: "default",
+      topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
     };
@@ -222,7 +222,7 @@ describe("createConversation", () => {
 
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
-      space_id: "default",
+      topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
     });
@@ -236,7 +236,7 @@ describe("createConversation", () => {
     const store = createConversationStore();
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
-      space_id: "default",
+      topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
     });
@@ -491,11 +491,11 @@ describe("refreshActiveConversation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// loadConversations — space-scoped
+// loadConversations — topic-scoped
 // ---------------------------------------------------------------------------
 
-describe("loadConversations (space-scoped)", () => {
-  it("passes the spaceId through to the API", async () => {
+describe("loadConversations (topic-scoped)", () => {
+  it("passes the topicId through to the API", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([]);
 
@@ -504,17 +504,17 @@ describe("loadConversations (space-scoped)", () => {
     expect(api.listConversations).toHaveBeenCalledWith("proj-1");
   });
 
-  it("replaces the conversation list when switching spaces", async () => {
+  it("replaces the conversation list when switching topics", async () => {
     const store = createConversationStore();
 
-    // Load space A — one conversation.
+    // Load topic A — one conversation.
     vi.mocked(api.listConversations).mockResolvedValueOnce([
       makeSummary("conv-a1", "2026-01-01T00:00:00Z"),
     ]);
     await store.loadConversations("proj-a");
     expect(store.conversations.map((c) => c.id)).toEqual(["conv-a1"]);
 
-    // Switch to space B — result should replace space A's list entirely.
+    // Switch to topic B — result should replace topic A's list entirely.
     vi.mocked(api.listConversations).mockResolvedValueOnce([
       makeSummary("conv-b1", "2026-01-02T00:00:00Z"),
     ]);
@@ -525,15 +525,15 @@ describe("loadConversations (space-scoped)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createConversation — space-scoped
+// createConversation — topic-scoped
 // ---------------------------------------------------------------------------
 
-describe("createConversation (space-scoped)", () => {
-  it("passes the spaceId through to the API", async () => {
+describe("createConversation (topic-scoped)", () => {
+  it("passes the topicId through to the API", async () => {
     const store = createConversationStore();
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
-      space_id: "proj-1",
+      topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
     });

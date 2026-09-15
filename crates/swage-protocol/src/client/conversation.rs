@@ -20,13 +20,13 @@ pub enum TurnState {
     Delegating,
 }
 
-/// Request body for the conversation and space-session creation endpoints.
+/// Request body for the conversation and topic-session creation endpoints.
 ///
 /// Every field is optional and the body itself may be omitted: an absent
 /// `agent_id` selects the default `"gateway"` agent, and an absent
 /// `selected_model_id` leaves the session's model unselected. A named
 /// `agent_id` must be `"gateway"` or an agent definition visible to the
-/// target space; the gateway rejects anything else with a validation error.
+/// target topic; the gateway rejects anything else with a validation error.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateConversationRequest {
@@ -44,7 +44,7 @@ pub struct CreateConversationRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct ConversationResponse {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,
@@ -67,7 +67,7 @@ pub struct ConversationSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct ConversationDetail {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,

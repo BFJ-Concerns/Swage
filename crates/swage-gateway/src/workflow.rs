@@ -105,7 +105,7 @@ fn worker_placement_directory(placement: &ResolvedWorkerPlacement) -> ResolvedWo
 #[derive(Clone)]
 struct EffectiveWorkflow {
     id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     name: String,
     description: String,
     head_version: u32,
@@ -140,7 +140,7 @@ impl EffectiveWorkflow {
     }
 
     fn from_carried(
-        space_id: Uuid,
+        topic_id: Uuid,
         skill: &SkillDefinition,
         name: String,
         source: String,
@@ -154,8 +154,8 @@ impl EffectiveWorkflow {
             )
         })?;
         Ok(Self {
-            id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, space_id, &identity),
-            space_id,
+            id: crate::synthetic_id::synthetic_id(CARRIED_WORKFLOW_ID_DOMAIN, topic_id, &identity),
+            topic_id,
             name,
             description: format!("Workflow carried by the {} skill.", skill.name),
             head_version: 1,
@@ -175,7 +175,7 @@ impl EffectiveWorkflow {
 
 async fn carried_workflows(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
     let mut workflows = Vec::new();
@@ -188,7 +188,7 @@ async fn carried_workflows(
                     .and_then(|(_, file)| file.strip_suffix(".js"))
                     .ok_or_else(|| format!("invalid shipped workflow path: {}", file.path))?;
                 match EffectiveWorkflow::from_carried(
-                    space_id,
+                    topic_id,
                     skill,
                     name.into(),
                     file.contents.into(),
@@ -198,7 +198,7 @@ async fn carried_workflows(
                     Err(error) => {
                         record_carried_workflow_exclusion(
                             state,
-                            space_id,
+                            topic_id,
                             &skill.name,
                             name,
                             &error,
@@ -251,10 +251,10 @@ async fn carried_workflows(
                     skill.name
                 )
             })?;
-            match EffectiveWorkflow::from_carried(space_id, skill, name.into(), source, false) {
+            match EffectiveWorkflow::from_carried(topic_id, skill, name.into(), source, false) {
                 Ok(workflow) => workflows.push(workflow),
                 Err(error) => {
-                    record_carried_workflow_exclusion(state, space_id, &skill.name, name, &error)
+                    record_carried_workflow_exclusion(state, topic_id, &skill.name, name, &error)
                         .await;
                 }
             }
@@ -265,7 +265,7 @@ async fn carried_workflows(
 
 async fn record_carried_workflow_exclusion(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     skill_name: &str,
     workflow_name: &str,
     error: &str,
@@ -281,7 +281,7 @@ async fn record_carried_workflow_exclusion(
             event_kind: "excluded".into(),
             summary: "Excluded carried workflow with invalid metadata".into(),
             metadata: serde_json::json!({
-                "space_id": space_id,
+                "topic_id": topic_id,
                 "skill": skill_name,
                 "workflow": workflow_name,
                 "error": error,
@@ -293,12 +293,12 @@ async fn record_carried_workflow_exclusion(
     }
 }
 
-async fn discover_skills_for_space(
+async fn discover_skills_for_topic(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     agent_id: Option<&str>,
 ) -> Result<Vec<SkillDefinition>, String> {
-    crate::skill::discover_available_for_space_from_config(state, space_id, agent_id).await
+    crate::skill::discover_available_for_topic_from_config(state, topic_id, agent_id).await
 }
 
 async fn authored_workflow(
@@ -318,7 +318,7 @@ async fn authored_workflow(
     let meta = swage_workflow::script_meta(&head.source)?;
     Ok(EffectiveWorkflow {
         id: record.id,
-        space_id: record.space_id,
+        topic_id: record.topic_id,
         name: record.name,
         description: record.description,
         head_version: head.version,
@@ -337,13 +337,13 @@ async fn authored_workflow(
 
 async fn resolve_workflow_by_name(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     name: &str,
     skills: &[SkillDefinition],
 ) -> Result<Option<EffectiveWorkflow>, String> {
     if let Some(record) = state
         .storage
-        .list_workflow_scripts(space_id)
+        .list_workflow_scripts(topic_id)
         .await
         .map_err(|error| error.to_string())?
         .into_iter()
@@ -351,7 +351,7 @@ async fn resolve_workflow_by_name(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    Ok(carried_workflows(state, space_id, skills)
+    Ok(carried_workflows(state, topic_id, skills)
         .await?
         .into_iter()
         .find(|workflow| workflow.name == name))
@@ -373,21 +373,21 @@ async fn resolve_workflow_by_id(
     {
         return authored_workflow(state, record).await.map(Some);
     }
-    for space in state
-        .space_store
+    for topic in state
+        .topic_store
         .list_all()
         .await
         .map_err(|error| error.to_string())?
     {
         if let Some(agent_id) = agent_id
-            && !crate::skill::agent_scope_is_visible(state, space.id, agent_id)
+            && !crate::skill::agent_scope_is_visible(state, topic.id, agent_id)
                 .await
                 .map_err(|error| error.to_string())?
         {
             continue;
         }
-        let skills = discover_skills_for_space(state, space.id, agent_id).await?;
-        if let Some(workflow) = list_effective_workflows(state, space.id, &skills)
+        let skills = discover_skills_for_topic(state, topic.id, agent_id).await?;
+        if let Some(workflow) = list_effective_workflows(state, topic.id, &skills)
             .await?
             .into_iter()
             .find(|workflow| workflow.id == id)
@@ -400,12 +400,12 @@ async fn resolve_workflow_by_id(
 
 async fn list_effective_workflows(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     skills: &[SkillDefinition],
 ) -> Result<Vec<EffectiveWorkflow>, String> {
     let records = state
         .storage
-        .list_workflow_scripts(space_id)
+        .list_workflow_scripts(topic_id)
         .await
         .map_err(|error| error.to_string())?;
     let authored_names: std::collections::HashSet<_> =
@@ -417,7 +417,7 @@ async fn list_effective_workflows(
     // Carried workflows arrive in skill precedence order (the discovery
     // sort), so the first carrier of a name wins and later ones are shadowed.
     let mut effective_names = authored_names;
-    for workflow in carried_workflows(state, space_id, skills).await? {
+    for workflow in carried_workflows(state, topic_id, skills).await? {
         if effective_names.insert(workflow.name.clone()) {
             workflows.push(workflow);
         }
@@ -1570,7 +1570,7 @@ impl WorkflowLauncher for GatewayWorkflowLauncher {
             .ok_or_else(|| format!("session {session_id} was not found"))?;
         let skills =
             crate::websocket::discover_available_for_session(&self.state, session_id).await?;
-        let script = resolve_workflow_by_name(&self.state, session.space_id, name, &skills)
+        let script = resolve_workflow_by_name(&self.state, session.topic_id, name, &skills)
             .await?
             .ok_or_else(|| format!("workflow script {name:?} was not found"))?;
         self.start_for_session(
@@ -1663,7 +1663,7 @@ impl GatewayWorkflowLauncher {
                 .map(store_worker_placement);
         let run = start_run(
             self.state.clone(),
-            session.space_id,
+            session.topic_id,
             script_version_id,
             inline_identity,
             source,
@@ -2304,22 +2304,22 @@ fn check_held_worker_turn(
 
 async fn resolve_held_worker_open(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     mut open: HeldWorkerOpen,
 ) -> Result<HeldWorkerOpen, String> {
     let agent_id = open.agent.as_deref().unwrap_or(BARE_WORKFLOW_AGENT_ID);
-    let space = state
-        .space_store
-        .get(space_id)
+    let topic = state
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("space {space_id} no longer exists"))?;
-    let mut config = crate::turn::load_session_config(state, &space.slug, agent_id)
+        .ok_or_else(|| format!("topic {topic_id} no longer exists"))?;
+    let mut config = crate::turn::load_session_config(state, &topic.slug, agent_id)
         .map_err(|error| error.to_string())?;
     if let Some(definition) = crate::service::resolve_effective_agent_definition(
         state.storage.as_ref(),
         agent_id,
-        space_id,
+        topic_id,
     )
     .await
     .map_err(|error| error.to_string())?
@@ -2756,7 +2756,7 @@ async fn latest_turn(
 async fn run_ephemeral_agent_call(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     dispatch_bound_task_definition_ids: &[String],
     journal_entry_id: Uuid,
@@ -2767,7 +2767,7 @@ async fn run_ephemeral_agent_call(
     run_ephemeral_agent_call_with_admission(
         state,
         run_id,
-        space_id,
+        topic_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
         journal_entry_id,
@@ -2783,7 +2783,7 @@ async fn run_ephemeral_agent_call(
 async fn run_ephemeral_agent_call_with_admission(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     dispatch_bound_task_definition_ids: &[String],
     journal_entry_id: Uuid,
@@ -2800,7 +2800,7 @@ async fn run_ephemeral_agent_call_with_admission(
         )
         .into());
     }
-    let call_config = resolve_agent_call_config(state, space_id, &request)
+    let call_config = resolve_agent_call_config(state, topic_id, &request)
         .await
         .map_err(|error| format!("AgentCallError: {error}"))?;
     let inherited_workflow_call_tools = state
@@ -2945,14 +2945,14 @@ async fn run_ephemeral_agent_call_with_admission(
                 );
             }
             if !persisted_skills.is_empty() {
-                let space = state
-                    .space_store
-                    .get(space_id)
+                let topic = state
+                    .topic_store
+                    .get(topic_id)
                     .await
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                    .ok_or_else(|| format!("AgentCallError: topic {topic_id} no longer exists"))?;
                 crate::turn::resolve_requested_skills_for_agent(
-                    &space.slug,
+                    &topic.slug,
                     &session.agent_id,
                     Some(crate::turn::resolve_swage_root(state)),
                     &persisted_skills,
@@ -3034,14 +3034,14 @@ async fn run_ephemeral_agent_call_with_admission(
                 metadata[crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY] = serde_json::json!(tools);
             }
             if let Some(skills) = request.skills.as_ref() {
-                let space = state
-                    .space_store
-                    .get(space_id)
+                let topic = state
+                    .topic_store
+                    .get(topic_id)
                     .await
                     .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("AgentCallError: space {space_id} no longer exists"))?;
+                    .ok_or_else(|| format!("AgentCallError: topic {topic_id} no longer exists"))?;
                 crate::turn::resolve_requested_skills_for_agent(
-                    &space.slug,
+                    &topic.slug,
                     &agent_id,
                     Some(crate::turn::resolve_swage_root(state)),
                     skills,
@@ -3052,7 +3052,7 @@ async fn run_ephemeral_agent_call_with_admission(
             let session = state
                 .storage
                 .create_session(NewSession {
-                    space_id,
+                    topic_id,
                     agent_id: agent_id.clone(),
                     metadata: Some(metadata),
                     active_workspace_attachment_id: None,
@@ -3305,7 +3305,7 @@ async fn run_ephemeral_agent_call_with_admission(
             structured.unwrap_or_else(|| Value::String(turn.assistant_response.unwrap_or_default()))
         }
     };
-    // The turn resolves its model after applying the agent, task, and space
+    // The turn resolves its model after applying the agent, task, and topic
     // overlays. Its persisted effective-model snapshot is therefore the
     // authoritative identity for this call; re-resolving from the gateway
     // configuration here would misattribute an overlay-served turn.
@@ -3754,7 +3754,7 @@ async fn record_terminal_account(
 fn run_host_commands(
     state: AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
     inherited_worker_placement: Option<ResolvedWorkerPlacement>,
@@ -3779,7 +3779,7 @@ fn run_host_commands(
     run_host_commands_with_budget(
         state,
         run_id,
-        space_id,
+        topic_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
         inherited_worker_placement,
@@ -3800,7 +3800,7 @@ fn run_host_commands(
 fn run_host_commands_with_budget(
     state: AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
     inherited_worker_placement: Option<ResolvedWorkerPlacement>,
@@ -3819,7 +3819,7 @@ fn run_host_commands_with_budget(
     Box::pin(run_host_commands_inner(
         state,
         run_id,
-        space_id,
+        topic_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
         inherited_worker_placement,
@@ -3840,7 +3840,7 @@ fn run_host_commands_with_budget(
 async fn provision_worker_command(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
     inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
@@ -3849,7 +3849,7 @@ async fn provision_worker_command(
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
     let inherited_worker_placement = match inherited_worker_placement {
         Some(placement) => {
-            Some(reauthorise_recorded_worker_placement(state, space_id, placement.clone()).await?)
+            Some(reauthorise_recorded_worker_placement(state, topic_id, placement.clone()).await?)
         }
         None => None,
     };
@@ -3880,7 +3880,7 @@ async fn provision_worker_command(
             })?;
             let placement = reauthorise_recorded_worker_placement(
                 state,
-                space_id,
+                topic_id,
                 ResolvedWorkerPlacement {
                     path,
                     can_write,
@@ -3915,7 +3915,7 @@ async fn provision_worker_command(
             complete_worker_placement(
                 state,
                 run_id,
-                space_id,
+                topic_id,
                 current_seq,
                 entry.id,
                 inherited_worker_placement.as_ref(),
@@ -3941,7 +3941,7 @@ async fn provision_worker_command(
                 complete_worker_placement(
                     state,
                     run_id,
-                    space_id,
+                    topic_id,
                     current_seq,
                     intent.id,
                     inherited_worker_placement.as_ref(),
@@ -3957,7 +3957,7 @@ async fn provision_worker_command(
 async fn resolve_worker_directory_command(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     replay: &[WorkflowJournalRecord],
     current_seq: u64,
     inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
@@ -3965,7 +3965,7 @@ async fn resolve_worker_directory_command(
 ) -> Result<Option<ResolvedWorkerPlacement>, String> {
     let inherited_worker_placement = match inherited_worker_placement {
         Some(placement) => {
-            Some(reauthorise_recorded_worker_placement(state, space_id, placement.clone()).await?)
+            Some(reauthorise_recorded_worker_placement(state, topic_id, placement.clone()).await?)
         }
         None => None,
     };
@@ -3993,7 +3993,7 @@ async fn resolve_worker_directory_command(
                     })
                 })
                 .ok_or_else(|| "completed worker directory resolution has no result".to_string())?;
-            reauthorise_recorded_worker_placement(state, space_id, placement)
+            reauthorise_recorded_worker_placement(state, topic_id, placement)
                 .await
                 .map(Some)
         } else if entry.status == "failed" {
@@ -4004,7 +4004,7 @@ async fn resolve_worker_directory_command(
         } else {
             complete_worker_directory_resolution(
                 state,
-                space_id,
+                topic_id,
                 run_id,
                 entry.id,
                 inherited_worker_placement.as_ref(),
@@ -4029,7 +4029,7 @@ async fn resolve_worker_directory_command(
             Ok(intent) => {
                 complete_worker_directory_resolution(
                     state,
-                    space_id,
+                    topic_id,
                     run_id,
                     intent.id,
                     inherited_worker_placement.as_ref(),
@@ -4045,7 +4045,7 @@ async fn resolve_worker_directory_command(
 async fn resolve_agent_placement_command(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     replay: &[WorkflowJournalRecord],
     seq: &AtomicU64,
     inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
@@ -4064,7 +4064,7 @@ async fn resolve_agent_placement_command(
             provision_worker_command(
                 state,
                 run_id,
-                space_id,
+                topic_id,
                 replay,
                 current_seq,
                 inherited_worker_placement,
@@ -4079,7 +4079,7 @@ async fn resolve_agent_placement_command(
                 resolve_worker_directory_command(
                     state,
                     run_id,
-                    space_id,
+                    topic_id,
                     replay,
                     current_seq,
                     inherited_worker_placement,
@@ -4108,7 +4108,7 @@ async fn resolve_agent_placement_command(
             }
             None => match inherited_worker_placement {
                 Some(placement) => {
-                    reauthorise_recorded_worker_placement(state, space_id, placement.clone())
+                    reauthorise_recorded_worker_placement(state, topic_id, placement.clone())
                         .await
                         .map(Some)
                 }
@@ -4136,10 +4136,10 @@ const FALLBACK_PROVIDER_ROUTE: &str = "default";
 /// settlement. A continued worker inherits its session's selected model.
 async fn resolve_agent_budget_route(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     request: &AgentCallRequest,
 ) -> Result<Option<String>, String> {
-    let config = resolve_agent_call_config(state, space_id, request).await?;
+    let config = resolve_agent_call_config(state, topic_id, request).await?;
     if let Some(route) = swage_config::resolve_provider_route(
         &config.models,
         &config.providers,
@@ -4177,7 +4177,7 @@ async fn resolve_agent_budget_route(
 
 async fn resolve_agent_call_config(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     request: &AgentCallRequest,
 ) -> Result<swage_config::ResolvedConfig, String> {
     let (agent_id, selected_model, task_id) = match request.session.as_ref() {
@@ -4205,18 +4205,18 @@ async fn resolve_agent_call_config(
             request.task.clone(),
         ),
     };
-    let space = state
-        .space_store
-        .get(space_id)
+    let topic = state
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("space {space_id} no longer exists"))?;
-    let mut config = crate::turn::load_session_config(state, &space.slug, &agent_id)
+        .ok_or_else(|| format!("topic {topic_id} no longer exists"))?;
+    let mut config = crate::turn::load_session_config(state, &topic.slug, &agent_id)
         .map_err(|error| error.to_string())?;
     match crate::service::resolve_effective_agent_definition(
         state.storage.as_ref(),
         &agent_id,
-        space_id,
+        topic_id,
     )
     .await
     {
@@ -4266,7 +4266,7 @@ fn declared_fallback_can_serve(
 async fn run_host_commands_inner(
     state: AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     dispatch_bound_agent_ids: Vec<String>,
     dispatch_bound_task_definition_ids: Vec<String>,
     inherited_worker_placement: Option<ResolvedWorkerPlacement>,
@@ -4445,7 +4445,7 @@ async fn run_host_commands_inner(
                 let resolved_working_directory = match resolve_agent_placement_command(
                     &state,
                     run_id,
-                    space_id,
+                    topic_id,
                     &replay,
                     &seq,
                     inherited_worker_placement.as_ref(),
@@ -4507,7 +4507,7 @@ async fn run_host_commands_inner(
                 let result = provision_worker_command(
                     &state,
                     run_id,
-                    space_id,
+                    topic_id,
                     &replay,
                     current_seq,
                     inherited_worker_placement.as_ref(),
@@ -4522,7 +4522,7 @@ async fn run_host_commands_inner(
                 let result = resolve_worker_directory_command(
                     &state,
                     run_id,
-                    space_id,
+                    topic_id,
                     &replay,
                     current_seq,
                     inherited_worker_placement.as_ref(),
@@ -4591,7 +4591,7 @@ async fn run_host_commands_inner(
                         .clone()
                         .unwrap_or_else(|| "recorded captured-sources failure".into())),
                     Some(entry) => {
-                        complete_captured_sources(&state, run_id, space_id, entry.id).await
+                        complete_captured_sources(&state, run_id, topic_id, entry.id).await
                     }
                     None => match state
                         .create_workflow_journal_intent(NewWorkflowJournalIntent {
@@ -4607,7 +4607,7 @@ async fn run_host_commands_inner(
                         .await
                     {
                         Ok(intent) => {
-                            complete_captured_sources(&state, run_id, space_id, intent.id).await
+                            complete_captured_sources(&state, run_id, topic_id, intent.id).await
                         }
                         Err(error) => Err(error.to_string()),
                     },
@@ -4648,7 +4648,7 @@ async fn run_host_commands_inner(
                     .and_then(Value::as_str)
                 {
                     Some(route) => Some(route.to_string()),
-                    None => match resolve_agent_budget_route(&state, space_id, &request).await {
+                    None => match resolve_agent_budget_route(&state, topic_id, &request).await {
                         Ok(route) => route,
                         Err(error) => {
                             seq.fetch_add(1, Ordering::SeqCst);
@@ -5124,7 +5124,7 @@ async fn run_host_commands_inner(
                                 Box::pin(complete_agent_entry(
                                     &state,
                                     run_id,
-                                    space_id,
+                                    topic_id,
                                     &dispatch_bound_agent_ids,
                                     &dispatch_bound_task_definition_ids,
                                     journal_entry_id,
@@ -5157,7 +5157,7 @@ async fn run_host_commands_inner(
                                     Box::pin(complete_agent_entry(
                                         &state,
                                         run_id,
-                                        space_id,
+                                        topic_id,
                                         &dispatch_bound_agent_ids,
                                         &dispatch_bound_task_definition_ids,
                                         journal_entry_id,
@@ -5315,7 +5315,7 @@ async fn run_host_commands_inner(
                     {
                         None
                     } else {
-                        match resolve_composed_workflow(&state, run_id, space_id, &request).await {
+                        match resolve_composed_workflow(&state, run_id, topic_id, &request).await {
                             Ok(script) => Some(script),
                             Err(error) => {
                                 let _ = reply.send(Err(error));
@@ -5357,7 +5357,7 @@ async fn run_host_commands_inner(
                             complete_workflow_call_entry(
                                 &state,
                                 run_id,
-                                space_id,
+                                topic_id,
                                 entry.id,
                                 current_seq,
                                 request,
@@ -5390,7 +5390,7 @@ async fn run_host_commands_inner(
                                             complete_workflow_call_entry(
                                                 &state,
                                                 run_id,
-                                                space_id,
+                                                topic_id,
                                                 intent.id,
                                                 current_seq,
                                                 request,
@@ -6049,7 +6049,7 @@ async fn run_host_commands_inner(
                             }
                         }
                     }
-                    _ => match resolve_held_worker_open(&state, space_id, open).await {
+                    _ => match resolve_held_worker_open(&state, topic_id, open).await {
                         Ok(open) => open,
                         Err(error) => {
                             let _ = reply.send(Err(format!("HeldWorkerError: {error}")));
@@ -6504,7 +6504,7 @@ async fn run_host_commands_inner(
                     } else if let Some(key) = entry.idempotency_key {
                         let capability = match capability_from_grant(
                             Some(state.clone()),
-                            space_id,
+                            topic_id,
                             Arc::clone(&state.storage),
                             delivery_grant.as_ref(),
                             payload.target.as_deref(),
@@ -6534,7 +6534,7 @@ async fn run_host_commands_inner(
                     let key = Uuid::new_v4();
                     let capability = match capability_from_grant(
                         Some(state.clone()),
-                        space_id,
+                        topic_id,
                         Arc::clone(&state.storage),
                         delivery_grant.as_ref(),
                         payload.target.as_deref(),
@@ -6591,12 +6591,12 @@ async fn run_host_commands_inner(
 
 async fn reauthorise_recorded_worker_placement(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     mut placement: ResolvedWorkerPlacement,
 ) -> Result<ResolvedWorkerPlacement, String> {
     let authority = resolve_authorised_worker_directory(
         state,
-        space_id,
+        topic_id,
         placement.authority_context_id,
         None,
         None,
@@ -6613,7 +6613,7 @@ async fn reauthorise_recorded_worker_placement(
 async fn complete_worker_placement(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     seq: u64,
     entry_id: Uuid,
     inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
@@ -6626,7 +6626,7 @@ async fn complete_worker_placement(
     let inherited_worker_placement = inherited_worker_placement.map(worker_placement_directory);
     let repo = match resolve_authorised_worker_directory(
         state,
-        space_id,
+        topic_id,
         run_id,
         None,
         None,
@@ -6676,7 +6676,7 @@ async fn complete_worker_placement(
 
 async fn complete_worker_directory_resolution(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     context_id: Uuid,
     entry_id: Uuid,
     inherited_worker_placement: Option<&ResolvedWorkerPlacement>,
@@ -6685,7 +6685,7 @@ async fn complete_worker_directory_resolution(
     let inherited_worker_placement = inherited_worker_placement.map(worker_placement_directory);
     match resolve_authorised_worker_directory(
         state,
-        space_id,
+        topic_id,
         context_id,
         None,
         None,
@@ -6721,7 +6721,7 @@ async fn complete_worker_directory_resolution(
 async fn complete_captured_sources(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     entry_id: Uuid,
 ) -> Result<Value, String> {
     let scopes = state
@@ -6735,7 +6735,7 @@ async fn complete_captured_sources(
         .collect();
     let sources = state
         .storage
-        .list_source_captures_by_scopes(space_id, scopes)
+        .list_source_captures_by_scopes(topic_id, scopes)
         .await
         .map_err(|error| error.to_string())?
         .into_iter()
@@ -6802,7 +6802,7 @@ async fn await_replay_release(rank: u64, next: &AtomicU64, notify: &Notify) {
 async fn complete_agent_entry(
     state: &AppState,
     run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     dispatch_bound_agent_ids: &[String],
     dispatch_bound_task_definition_ids: &[String],
     entry_id: Uuid,
@@ -6824,7 +6824,7 @@ async fn complete_agent_entry(
     match run_ephemeral_agent_call_with_admission(
         state,
         run_id,
-        space_id,
+        topic_id,
         dispatch_bound_agent_ids,
         dispatch_bound_task_definition_ids,
         entry_id,
@@ -7130,14 +7130,14 @@ pub(crate) async fn run_hold_projections(
 /// recorded and refused with feedback rather than reaching the script.
 /// Settle a hold with a verdict, attributed to whoever offered it.
 ///
-/// `caller_space` is the space the answerer is confined to; a hold on a run
-/// in any other space is not theirs to settle and reads as absent, exactly
+/// `caller_topic` is the topic the answerer is confined to; a hold on a run
+/// in any other topic is not theirs to settle and reads as absent, exactly
 /// as it does when they list. `None` is for surfaces that are not confined
-/// to one space at all.
+/// to one topic at all.
 pub(crate) async fn answer_run_hold(
     state: &AppState,
     request: AnswerWorkflowRunHoldRequest,
-    caller_space: Option<Uuid>,
+    caller_topic: Option<Uuid>,
     source: RunEventSource,
 ) -> Result<AnswerWorkflowRunHoldResponse, ApiError> {
     let hold = state
@@ -7152,7 +7152,7 @@ pub(crate) async fn answer_run_hold(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", hold.run_id))?;
-    if caller_space.is_some_and(|space_id| space_id != run.space_id) {
+    if caller_topic.is_some_and(|topic_id| topic_id != run.topic_id) {
         return Err(ApiError::not_found("workflow run hold", request.hold_id));
     }
     if matches!(run.state.as_str(), "completed" | "failed" | "cancelled") {
@@ -7599,7 +7599,7 @@ fn parse_run_gate_reply(content: &str) -> (bool, String) {
 async fn complete_workflow_call_entry(
     state: &AppState,
     parent_run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     entry_id: Uuid,
     parent_seq: u64,
     request: WorkflowCallRequest,
@@ -7670,7 +7670,7 @@ async fn complete_workflow_call_entry(
         None => {
             let script = match resolved_script {
                 Some(script) => script,
-                None => resolve_composed_workflow(state, parent_run_id, space_id, &request).await?,
+                None => resolve_composed_workflow(state, parent_run_id, topic_id, &request).await?,
             };
             let inline_identity = script.inline_identity();
             let parent_budget = parent
@@ -7680,7 +7680,7 @@ async fn complete_workflow_call_entry(
             let record = state
                 .storage
                 .create_workflow_run(NewWorkflowRun {
-                    space_id,
+                    topic_id,
                     parent_run_id: Some(parent_run_id),
                     parent_seq: Some(parent_seq),
                     script_version_id: script.script_version_id,
@@ -7854,7 +7854,7 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
 fn effective_script_wire(workflow: EffectiveWorkflow) -> WorkflowScript {
     WorkflowScript {
         id: workflow.id,
-        space_id: workflow.space_id,
+        topic_id: workflow.topic_id,
         name: workflow.name,
         description: workflow.description,
         head_version: workflow.head_version,
@@ -7923,7 +7923,7 @@ fn validate_agent_call(request: &AgentCallRequest) -> Result<(), String> {
 async fn resolve_composed_workflow(
     state: &AppState,
     parent_run_id: Uuid,
-    space_id: Uuid,
+    topic_id: Uuid,
     request: &WorkflowCallRequest,
 ) -> Result<EffectiveWorkflow, String> {
     let parent = state
@@ -7935,8 +7935,8 @@ async fn resolve_composed_workflow(
         .as_ref()
         .and_then(|run| run.dispatch_bound_agent_ids.last())
         .map(String::as_str);
-    let skills = discover_skills_for_space(state, space_id, agent_id).await?;
-    let script = resolve_workflow_by_name(state, space_id, &request.name, &skills)
+    let skills = discover_skills_for_topic(state, topic_id, agent_id).await?;
+    let script = resolve_workflow_by_name(state, topic_id, &request.name, &skills)
         .await?
         .ok_or_else(|| {
             format!(
@@ -7966,7 +7966,7 @@ fn budget_wire(value: &Value) -> WorkflowBudget {
 fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
     Ok(WorkflowRun {
         id: record.id,
-        space_id: record.space_id,
+        topic_id: record.topic_id,
         script_id: record.script_id,
         script_name: record.script_name,
         script_version: record.script_version,
@@ -8006,19 +8006,19 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
 
 pub async fn create_script(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     Json(request): Json<CreateWorkflowScriptRequest>,
 ) -> Result<Json<WorkflowScript>, ApiError> {
     state
-        .space_store
-        .get(space_id)
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("space", space_id))?;
+        .ok_or_else(|| ApiError::not_found("topic", topic_id))?;
     let change = crate::service::create_workflow_script(
         &state,
         crate::service::WorkflowScriptDraft {
-            space_id,
+            topic_id,
             name: request.name,
             description: request.description,
             source: request.source,
@@ -8036,18 +8036,18 @@ pub async fn create_script(
 
 pub async fn list_scripts(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<WorkflowScriptListResponse>, ApiError> {
     state
-        .space_store
-        .get(space_id)
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("space", space_id))?;
-    let skills = discover_skills_for_space(&state, space_id, None)
+        .ok_or_else(|| ApiError::not_found("topic", topic_id))?;
+    let skills = discover_skills_for_topic(&state, topic_id, None)
         .await
         .map_err(internal)?;
-    let scripts = list_effective_workflows(&state, space_id, &skills)
+    let scripts = list_effective_workflows(&state, topic_id, &skills)
         .await
         .map_err(internal)?
         .into_iter()
@@ -8067,7 +8067,7 @@ pub(crate) async fn list_scripts_for_session(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("session {session_id} was not found"))?;
     let skills = crate::websocket::discover_available_for_session(state, session_id).await?;
-    let scripts = list_effective_workflows(state, session.space_id, &skills)
+    let scripts = list_effective_workflows(state, session.topic_id, &skills)
         .await?
         .into_iter()
         .map(effective_script_wire)
@@ -8097,7 +8097,7 @@ pub async fn update_script(
         .ok_or_else(|| ApiError::not_found("workflow script", id))?;
     if workflow.immutable {
         return Err(ApiError::conflict(
-            "carried and built-in workflow scripts are immutable; create a same-named workflow in the space to customise it".into(),
+            "carried and built-in workflow scripts are immutable; create a same-named workflow in the topic to customise it".into(),
         ));
     }
     crate::service::update_workflow_script(
@@ -8130,7 +8130,7 @@ fn source_hash(source: &str) -> String {
 
 async fn start_run(
     state: AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     script_version_id: Option<Uuid>,
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
@@ -8157,7 +8157,7 @@ async fn start_run(
     let record = state
         .storage
         .create_workflow_run(NewWorkflowRun {
-            space_id,
+            topic_id,
             parent_run_id: None,
             parent_seq: None,
             script_version_id,
@@ -8332,7 +8332,7 @@ async fn launch_existing_run(
     delivery_grant: Option<Value>,
 ) -> Result<WorkflowRun, ApiError> {
     let captured_sources_grant = captured_sources_grant_for_run(&state, &record).await?;
-    let space_id = record.space_id;
+    let topic_id = record.topic_id;
     let started = run_wire(record.clone())?;
     let _ = state.broadcast.send(ServerEvent::WorkflowRunStarted {
         event: swage_protocol::client::workflow::WorkflowRunStartedEvent {
@@ -8348,7 +8348,7 @@ async fn launch_existing_run(
             entity_id: record.id.to_string(),
             event_kind: "started".into(),
             summary: "Workflow run started".into(),
-            metadata: serde_json::json!({"space_id":record.space_id}),
+            metadata: serde_json::json!({"topic_id":record.topic_id}),
         })
         .await
         .map_err(internal)?;
@@ -8414,7 +8414,7 @@ async fn launch_existing_run(
     let host_task = tokio::spawn(run_host_commands_with_budget(
         state.clone(),
         record.id,
-        space_id,
+        topic_id,
         record.dispatch_bound_agent_ids.clone(),
         record.dispatch_bound_task_definition_ids.clone(),
         record
@@ -8814,15 +8814,15 @@ const PAUSE_BEFORE_HOLD_PARK: &str = "hold-park";
 
 pub async fn start_inline_run(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     Json(request): Json<StartInlineWorkflowRunRequest>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
     state
-        .space_store
-        .get(space_id)
+        .topic_store
+        .get(topic_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("space", space_id))?;
+        .ok_or_else(|| ApiError::not_found("topic", topic_id))?;
     let task = swage_workflow::script_meta(&request.source)
         .map_err(|error| {
             ApiError::validation(format!("inline workflow has invalid metadata: {error}"))
@@ -8831,7 +8831,7 @@ pub async fn start_inline_run(
     Ok(Json(
         start_run(
             state,
-            space_id,
+            topic_id,
             None,
             None,
             request.source,
@@ -8864,7 +8864,7 @@ pub async fn start_saved_run(
     Ok(Json(
         start_run(
             state,
-            script.space_id,
+            script.topic_id,
             script.script_version_id,
             script.inline_identity(),
             script.source,
@@ -9097,12 +9097,12 @@ pub struct WorkflowRunListQuery {
 
 pub async fn list_runs(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     Query(query): Query<WorkflowRunListQuery>,
 ) -> Result<Json<WorkflowRunListResponse>, ApiError> {
     let runs = state
         .storage
-        .list_workflow_runs(space_id)
+        .list_workflow_runs(topic_id)
         .await
         .map_err(internal)?
         .into_iter()
@@ -9435,8 +9435,8 @@ mod tests {
     use swage_storage::{
         AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore,
         NewSourceObservation, NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin,
-        ObservationStore, OrientationCardStore, ProviderRoundStore, SessionStore, SpaceStore,
-        SqliteStorage, Storage, TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore,
+        ObservationStore, OrientationCardStore, ProviderRoundStore, SessionStore, SqliteStorage,
+        Storage, TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore, TopicStore,
         TurnState, TurnStore, WorkflowStore, WorkspaceAttachmentStore,
     };
     use swage_workflow::AgentSessionRef;
@@ -9447,10 +9447,10 @@ mod tests {
     /// A call's dispatch record attaches to its journal entry, so a fixture
     /// driving `run_ephemeral_agent_call` needs a real entry rather than a
     /// fresh UUID standing in for one.
-    async fn journalled_agent_call(storage: &SqliteStorage, space_id: Uuid) -> (Uuid, Uuid) {
+    async fn journalled_agent_call(storage: &SqliteStorage, topic_id: Uuid) -> (Uuid, Uuid) {
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id,
+                topic_id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -9511,11 +9511,11 @@ mod tests {
             .contents
     }
 
-    /// The carried workflow's per-space identity, as listing assigns it.
-    fn research_sweep_id(space_id: Uuid) -> Uuid {
+    /// The carried workflow's per-topic identity, as listing assigns it.
+    fn research_sweep_id(topic_id: Uuid) -> Uuid {
         crate::synthetic_id::synthetic_id(
             CARRIED_WORKFLOW_ID_DOMAIN,
-            space_id,
+            topic_id,
             "research/research-sweep",
         )
     }
@@ -9524,7 +9524,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -9535,12 +9535,12 @@ mod tests {
 
     async fn grant_workspace(
         storage: &SqliteStorage,
-        space_id: Uuid,
+        topic_id: Uuid,
         path: &std::path::Path,
     ) -> Uuid {
         storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                space_id,
+                topic_id,
                 label: "test workspace".into(),
                 path: path.to_string_lossy().into_owned(),
                 permissions: vec!["read".into(), "write".into()],
@@ -9551,11 +9551,11 @@ mod tests {
             .id
     }
 
-    async fn store_test_agent(storage: &SqliteStorage, space_id: Uuid, agent_id: &str) {
+    async fn store_test_agent(storage: &SqliteStorage, topic_id: Uuid, agent_id: &str) {
         storage
             .upsert_agent_definition(swage_storage::NewAgentDefinition {
                 id: agent_id.into(),
-                space_id: Some(space_id),
+                topic_id: Some(topic_id),
                 display_name: "Workflow test agent".into(),
                 description: String::new(),
                 instructions: String::new(),
@@ -9570,17 +9570,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn empty_space_lists_every_shipped_carried_workflow_and_nothing_else() {
+    async fn empty_topic_lists_every_shipped_carried_workflow_and_nothing_else() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
 
-        let Json(list) = list_scripts(State(state), Path(space.id))
+        let Json(list) = list_scripts(State(state), Path(topic.id))
             .await
             .expect("workflow list");
 
         // Nothing ships as a global built-in: every listed workflow on a
-        // fresh space names the shipped skill that carries it.
+        // fresh topic names the shipped skill that carries it.
         let carried = list
             .scripts
             .iter()
@@ -9597,15 +9597,15 @@ mod tests {
         assert!(
             list.scripts
                 .iter()
-                .all(|script| script.space_id == space.id)
+                .all(|script| script.topic_id == topic.id)
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn authored_workflow_shadows_the_same_named_shipped_workflow() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let router = crate::server::build_router(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -9621,8 +9621,8 @@ mod tests {
 
         let initial_list = client
             .get(format!(
-                "{base_url}/api/spaces/{}/workflow-scripts",
-                space.id
+                "{base_url}/api/topics/{}/workflow-scripts",
+                topic.id
             ))
             .send()
             .await
@@ -9643,8 +9643,8 @@ mod tests {
 
         let authored = client
             .post(format!(
-                "{base_url}/api/spaces/{}/workflow-scripts",
-                space.id
+                "{base_url}/api/topics/{}/workflow-scripts",
+                topic.id
             ))
             .json(&serde_json::json!({
                 "name": "research-sweep",
@@ -9760,10 +9760,10 @@ mod tests {
         .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::at(topic.id, root.path());
 
-        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+        let Json(list) = list_scripts(State(state.clone()), Path(topic.id))
             .await
             .expect("workflow list");
         let listed = list
@@ -9819,10 +9819,10 @@ mod tests {
         .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::at(space.id, root.path());
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::at(topic.id, root.path());
 
-        let Json(list) = list_scripts(State(state), Path(space.id))
+        let Json(list) = list_scripts(State(state), Path(topic.id))
             .await
             .expect("valid carried workflows remain listable");
         assert!(
@@ -9848,10 +9848,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saved_run_rejects_invalid_arguments_before_creating_a_run() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "constrained".into(),
                 description: String::new(),
                 source: r#"export const meta = { argumentSchema: {"type":"object","required":["task"],"properties":{"task":{"type":"string"}}} }; return {};"#.into(),
@@ -9878,7 +9878,7 @@ mod tests {
         );
         assert!(
             storage
-                .list_workflow_runs(space.id)
+                .list_workflow_runs(topic.id)
                 .await
                 .expect("runs")
                 .is_empty(),
@@ -9889,9 +9889,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn shipped_research_sweep_can_be_read_and_started_but_not_updated() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
-        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
+        let Json(list) = list_scripts(State(state.clone()), Path(topic.id))
             .await
             .expect("workflow list");
         let listed = list
@@ -9917,7 +9917,7 @@ mod tests {
         .await
         .expect_err("shipped update must fail");
         assert!(
-            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::TopicConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -9974,9 +9974,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn listed_shipped_carried_workflow_can_start_but_not_update() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
-        let Json(list) = list_scripts(State(state.clone()), Path(space.id))
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
+        let Json(list) = list_scripts(State(state.clone()), Path(topic.id))
             .await
             .expect("workflow list");
         let listed = list
@@ -9997,7 +9997,7 @@ mod tests {
         .await
         .expect_err("carried update must fail");
         assert!(
-            matches!(update_error.cause(), Some(swage_core::GatewayError::SpaceConflict(message)) if message.contains("immutable"))
+            matches!(update_error.cause(), Some(swage_core::GatewayError::TopicConflict(message)) if message.contains("immutable"))
         );
 
         let Json(started) = start_saved_run(
@@ -10048,10 +10048,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_tool_name_resolution_reaches_a_shipped_carried_workflow() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -10071,7 +10071,7 @@ mod tests {
             .await
             .expect("run query")
             .expect("run");
-        assert_eq!(run.script_id, Some(research_sweep_id(space.id)));
+        assert_eq!(run.script_id, Some(research_sweep_id(topic.id)));
         assert_eq!(run.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(run.script_version, Some(1));
         assert_eq!(run.carrying_skill.as_deref(), Some("research"));
@@ -10081,11 +10081,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_composition_resolves_a_shipped_carried_child() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "parent".into(),
                 description: String::new(),
                 source: "return await workflow('research-sweep', {});".into(),
@@ -10121,14 +10121,14 @@ mod tests {
                 .contains("was not found")
         );
         let child = storage
-            .list_workflow_runs(space.id)
+            .list_workflow_runs(topic.id)
             .await
             .expect("runs")
             .into_iter()
             .find(|run| run.parent_run_id == Some(started.id))
             .expect("shipped child run");
         assert_eq!(child.engine_version, "rquickjs-0.12.2");
-        assert_eq!(child.script_id, Some(research_sweep_id(space.id)));
+        assert_eq!(child.script_id, Some(research_sweep_id(topic.id)));
         assert_eq!(child.script_name.as_deref(), Some("research-sweep"));
         assert_eq!(child.script_version, Some(1));
         assert_eq!(child.carrying_skill.as_deref(), Some("research"));
@@ -10157,11 +10157,11 @@ mod tests {
             .expect("carried workflow");
 
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        store_test_agent(&storage, space.id, AGENT_ID).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        store_test_agent(&storage, topic.id, AGENT_ID).await;
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: AGENT_ID.into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -10173,7 +10173,7 @@ mod tests {
         let available = crate::websocket::discover_available_for_session(&state, session.id)
             .await
             .expect("skill discovery");
-        let listed = list_effective_workflows(&state, space.id, &available)
+        let listed = list_effective_workflows(&state, topic.id, &available)
             .await
             .expect("effective workflows");
         let carried = listed
@@ -10211,7 +10211,7 @@ mod tests {
 
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "proof".into(),
                 description: "Authored shadow".into(),
                 source: "return { source: 'authored' };".into(),
@@ -10244,11 +10244,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn composed_shipped_workflow_retains_embedded_source_and_skill_attribution() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "parent".into(),
                 description: String::new(),
                 source: "return await workflow('teardown-audit', {});".into(),
@@ -10271,7 +10271,7 @@ mod tests {
         .expect("start parent");
         wait_for_terminal(&state, started.id).await;
         let child = storage
-            .list_workflow_runs(space.id)
+            .list_workflow_runs(topic.id)
             .await
             .expect("runs")
             .into_iter()
@@ -10289,11 +10289,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn interrupted_carried_run_resumes_from_its_recorded_inline_source() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let recorded_source = "return { resumed: true };";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -10340,11 +10340,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_pre_change_agent_call_replays_before_schema_validation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"return await agent("reuse recorded result", { schema: { type: 7 } });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -10434,7 +10434,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -10468,9 +10468,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_run_reapplies_its_persisted_dispatch_bound_after_a_grant_change() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let lead_dir = swage_home.path().join("spaces/default/agents/lead");
+        let lead_dir = swage_home.path().join("topics/default/agents/lead");
         std::fs::create_dir_all(&lead_dir).expect("create lead definition");
         let lead_config = lead_dir.join("config.toml");
         std::fs::write(
@@ -10482,7 +10482,7 @@ mod tests {
             r#"return await agent("continue bounded work", {agent: "default", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -10521,7 +10521,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -10579,15 +10579,15 @@ mod tests {
             ],
         ];
         let (state, _) = crate::turn::tests::make_state_with_approval_gated_echo(rounds).await;
-        let space = state
-            .space_store
+        let topic = state
+            .topic_store
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let result = run_ephemeral_agent_call(
             &state,
             Uuid::new_v4(),
-            space.id,
+            topic.id,
             &[],
             &[],
             Uuid::new_v4(),
@@ -10646,7 +10646,7 @@ mod tests {
         let swage_home = tempfile::TempDir::new().expect("temp swage home");
         let skill_dir = swage_home
             .path()
-            .join("spaces/default/skills/workflow-specialist");
+            .join("topics/default/skills/workflow-specialist");
         std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -10656,10 +10656,10 @@ mod tests {
         let _guard = crate::test_support::SwageHomeGuard::set_to(swage_home.path());
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![
                 swage_core::StreamChunk::Delta {
                     content: "specialist result".into(),
@@ -10696,11 +10696,11 @@ mod tests {
             assembly: None,
         };
 
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let result = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -10730,11 +10730,11 @@ mod tests {
             "workflow child report should name the requested skill: {skills}"
         );
 
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let error = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -10759,13 +10759,13 @@ mod tests {
         );
     }
 
-    /// A shipped workflow's roles are bare dispatches: a fresh space holds no
+    /// A shipped workflow's roles are bare dispatches: a fresh topic holds no
     /// definition for them, and the role's whole grant rides the call's
     /// `tools` list, narrowed further by a later call the same way.
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_space_workflow_call_grants_a_role_through_its_call_scoped_tools() {
+    async fn fresh_topic_workflow_call_grants_a_role_through_its_call_scoped_tools() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("gathered"),
@@ -10775,7 +10775,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all([
@@ -10790,7 +10790,7 @@ mod tests {
             crate::service::resolve_effective_agent_definition(
                 storage.as_ref(),
                 "researcher",
-                space.id
+                topic.id
             )
             .await
             .unwrap()
@@ -10798,7 +10798,7 @@ mod tests {
             "a workflow role is not a definition"
         );
 
-        let (gather_run_id, journal_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (gather_run_id, journal_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
             worker: None,
             cwd: None,
@@ -10825,7 +10825,7 @@ mod tests {
         let result = run_ephemeral_agent_call(
             &state,
             gather_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             journal_entry_id,
@@ -10870,11 +10870,11 @@ mod tests {
             Some(journal_entry_id.to_string().as_str())
         );
 
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let scoped = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -10897,10 +10897,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn captured_sources_query_journals_the_run_scoped_store_read() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -10936,7 +10936,7 @@ mod tests {
             .expect("worker entry");
         let prior = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/prior".into()),
                     local_path: None,
@@ -10951,7 +10951,7 @@ mod tests {
             .expect("record prior source");
         let recorded = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/first".into()),
                     local_path: None,
@@ -10970,7 +10970,7 @@ mod tests {
         );
         let other_run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -11006,7 +11006,7 @@ mod tests {
             .expect("other worker entry");
         storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/other-run".into()),
                     local_path: None,
@@ -11032,7 +11032,7 @@ mod tests {
             })
             .await
             .expect("query intent");
-        let reading = complete_captured_sources(&state, run.id, space.id, query.id)
+        let reading = complete_captured_sources(&state, run.id, topic.id, query.id)
             .await
             .expect("complete query");
         assert_eq!(
@@ -11040,7 +11040,7 @@ mod tests {
             serde_json::json!({"sources": [{"url": "https://example.test/first", "observation_id": recorded.id}]})
         );
         let independent = storage
-            .list_source_captures_by_scopes(space.id, vec![worker.id.to_string()])
+            .list_source_captures_by_scopes(topic.id, vec![worker.id.to_string()])
             .await
             .expect("independent store read");
         assert_eq!(
@@ -11053,7 +11053,7 @@ mod tests {
 
         storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/later".into()),
                     local_path: None,
@@ -11074,7 +11074,7 @@ mod tests {
         let host = tokio::spawn(run_host_commands(
             state.clone(),
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -11108,11 +11108,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn launch_resolves_captured_sources_from_the_persisted_authority_root() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = "return typeof capturedSources;";
         let (script, version) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "saved-sweep".into(),
                 description: String::new(),
                 source: source.into(),
@@ -11129,7 +11129,7 @@ mod tests {
 
         let saved = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: Some(version.id),
@@ -11171,7 +11171,7 @@ mod tests {
 
         let (_, ungranted_version) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "saved-ungranted-sweep".into(),
                 description: String::new(),
                 source: source.into(),
@@ -11183,7 +11183,7 @@ mod tests {
             .expect("ungranted saved script");
         let ungranted = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: Some(ungranted_version.id),
@@ -11226,13 +11226,13 @@ mod tests {
 
         let carried = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
                 inline_workflow_id: Some(crate::synthetic_id::synthetic_id(
                     CARRIED_WORKFLOW_ID_DOMAIN,
-                    space.id,
+                    topic.id,
                     "skill/research-sweep",
                 )),
                 inline_workflow_name: Some("research-sweep".into()),
@@ -11273,11 +11273,11 @@ mod tests {
 
         let builtin = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
-                inline_workflow_id: Some(research_sweep_id(space.id)),
+                inline_workflow_id: Some(research_sweep_id(topic.id)),
                 inline_workflow_name: Some("research-sweep".into()),
                 inline_workflow_version: Some(1),
                 carrying_skill: Some("research".into()),
@@ -11305,10 +11305,10 @@ mod tests {
     async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
         let _swage_home = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let deduplicated = storage
             .record_observation(NewSourceObservation {
-                space_id: space.id,
+                topic_id: topic.id,
                 origin: ObservationOrigin {
                     url: Some("https://example.test/landed".into()),
                     local_path: None,
@@ -11345,7 +11345,7 @@ mod tests {
         ]);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(tools),
@@ -11354,7 +11354,7 @@ mod tests {
 
         let Json(started) = start_saved_run(
             State(state.clone()),
-            Path(research_sweep_id(space.id)),
+            Path(research_sweep_id(topic.id)),
             Json(StartWorkflowRunRequest {
                 args: serde_json::json!({
                     "topic": "contract evidence",
@@ -11396,7 +11396,7 @@ mod tests {
         assert!(output["findings"][0].get("quote").is_none());
 
         let observations = storage
-            .list_observations_by_space(space.id)
+            .list_observations_by_topic(topic.id)
             .await
             .expect("persisted observations");
         assert_eq!(observations.len(), 1);
@@ -11406,7 +11406,7 @@ mod tests {
             Some("https://example.test/landed")
         );
         let cards = storage
-            .find_orientation_cards(space.id, None, 10)
+            .find_orientation_cards(topic.id, None, 10)
             .await
             .expect("persisted orientation cards");
         assert_eq!(cards.len(), 1);
@@ -11477,10 +11477,10 @@ mod tests {
         .expect("write unrequested element");
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -11510,7 +11510,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -11520,7 +11520,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -11880,7 +11880,7 @@ mod tests {
 
     struct WorkingBudgetScaffold {
         storage: Arc<SqliteStorage>,
-        space_id: Uuid,
+        topic_id: Uuid,
         run_id: Uuid,
         state: AppState,
         pending_call_started: Arc<Notify>,
@@ -11889,10 +11889,10 @@ mod tests {
     impl WorkingBudgetScaffold {
         async fn new(pending_calls: usize) -> Self {
             let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-            let space = storage.get_or_create_default().await.expect("space");
+            let topic = storage.get_or_create_default().await.expect("topic");
             let run = storage
                 .create_workflow_run(NewWorkflowRun {
-                    space_id: space.id,
+                    topic_id: topic.id,
                     parent_run_id: None,
                     parent_seq: None,
                     script_version_id: None,
@@ -11916,7 +11916,7 @@ mod tests {
             let pending_call_started = Arc::new(Notify::new());
             let state = AppState::new(
                 Arc::clone(&storage) as Arc<dyn Storage>,
-                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::clone(&storage) as Arc<dyn TopicStore>,
                 Arc::new(PendingWorkingProvider {
                     calls: AtomicUsize::new(0),
                     pending_calls,
@@ -11928,7 +11928,7 @@ mod tests {
             );
             Self {
                 storage,
-                space_id: space.id,
+                topic_id: topic.id,
                 run_id: run.id,
                 state,
                 pending_call_started,
@@ -11950,7 +11950,7 @@ mod tests {
             let task = tokio::spawn(run_host_commands(
                 self.state,
                 self.run_id,
-                self.space_id,
+                self.topic_id,
                 vec![],
                 vec![],
                 None,
@@ -12355,7 +12355,7 @@ mod tests {
                 scripted_text_output(
                     r#"{"url":"https://example.test/failed","recorded":true,"observation_id":"00000000-0000-0000-0000-000000000001","note":"unreachable"}"#,
                 )
-            } else if text.contains("Organise them into the space's knowledge base.") {
+            } else if text.contains("Organise them into the topic's knowledge base.") {
                 match tool_result("orient-landed") {
                     Some(_) => scripted_text_output(
                         r#"{"orientation_cards":1,"assertions":0,"note":"Added an evidence signpost."}"#,
@@ -12567,10 +12567,10 @@ mod tests {
 
     async fn started_effect_entry() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -12607,7 +12607,7 @@ mod tests {
             .expect("started entry");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12751,12 +12751,12 @@ mod tests {
             .list_workflow_journal(run_id)
             .await
             .expect("journal");
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (tx, rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_host_commands(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -12884,10 +12884,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn completed_and_failed_journal_broadcasts_match_persisted_entries() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -12896,7 +12896,7 @@ mod tests {
         let mut events = state.broadcast.subscribe();
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "console.log('visible'); return null".into(),
                 args: Value::Null,
@@ -13059,10 +13059,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_refuses_a_concurrent_call_at_admission() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -13085,7 +13085,7 @@ mod tests {
             .expect("run");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::PendingProvider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -13095,7 +13095,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -13205,13 +13205,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let worker_directory = tempfile::tempdir().expect("worker directory");
-        grant_workspace(&storage, space.id, worker_directory.path()).await;
+        grant_workspace(&storage, topic.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
         let skill_dir = swage_home
             .path()
-            .join("spaces/default/skills/workflow-specialist");
+            .join("topics/default/skills/workflow-specialist");
         std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -13219,7 +13219,7 @@ mod tests {
         )
         .expect("write workflow skill");
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
-            let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
+            let agent_dir = swage_home.path().join("topics/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
                 agent_dir.join("config.toml"),
@@ -13229,7 +13229,7 @@ mod tests {
         }
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -13283,7 +13283,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -13295,7 +13295,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec!["lead".into()],
             vec![],
             None,
@@ -13387,7 +13387,7 @@ mod tests {
         // it had when the worker session was created.
         let lead_config = swage_home
             .path()
-            .join("spaces/default/agents/lead/config.toml");
+            .join("topics/default/agents/lead/config.toml");
         std::fs::write(
             lead_config,
             "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
@@ -13710,10 +13710,10 @@ mod tests {
         crate::test_support::SwageHomeGuard,
     ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
         for agent in ["lead", "worker"] {
-            let agent_dir = swage_home.path().join("spaces/default/agents").join(agent);
+            let agent_dir = swage_home.path().join("topics/default/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
                 agent_dir.join("config.toml"),
@@ -13723,7 +13723,7 @@ mod tests {
         }
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -13750,7 +13750,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             match delay {
                 Some(delay) => Arc::new(SlowScriptedProvider {
                     inner: Arc::clone(&provider),
@@ -13935,7 +13935,7 @@ mod tests {
             .expect("simulate process interruption");
         let replay_state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -14258,14 +14258,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn worker_staleness_uses_the_hot_applied_route_threshold() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let worker_dir = swage_home.path().join("spaces/default/agents/worker");
+        let worker_dir = swage_home.path().join("topics/default/agents/worker");
         std::fs::create_dir_all(&worker_dir).expect("create worker config directory");
         std::fs::write(worker_dir.join("config.toml"), "").expect("write worker config");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             held_worker_route_config(None),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -14273,7 +14273,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const worker = await session({agent: "worker"});
@@ -14375,9 +14375,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bare_worker_completes_with_dispatch_bounded_tools_and_an_agentless_journal() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let lead_dir = swage_home.path().join("spaces/default/agents/lead");
+        let lead_dir = swage_home.path().join("topics/default/agents/lead");
         std::fs::create_dir_all(&lead_dir).expect("create lead config directory");
         std::fs::write(
             lead_dir.join("config.toml"),
@@ -14387,7 +14387,7 @@ mod tests {
         let source = "return await agent('bounded work');";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -14416,7 +14416,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -14506,7 +14506,7 @@ mod tests {
     async fn identified_schema_exhaustion_returns_its_failure_envelope_and_replays_without_a_new_agent_call()
      {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("not JSON"),
@@ -14517,7 +14517,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             fallback_test_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -14530,7 +14530,7 @@ mod tests {
         });"#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -14653,12 +14653,12 @@ mod tests {
         std::fs::create_dir_all(&sibling).expect("create sibling directory");
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let workspace_id = grant_workspace(storage.as_ref(), space.id, &placed).await;
-        grant_workspace(storage.as_ref(), space.id, &sibling).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let workspace_id = grant_workspace(storage.as_ref(), topic.id, &placed).await;
+        grant_workspace(storage.as_ref(), topic.id, &sibling).await;
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "placed-launch".into(),
                 description: String::new(),
                 source: "return await agent('attempt sibling read', { maxAttempts: 1 });".into(),
@@ -14672,7 +14672,7 @@ mod tests {
         let placed = std::fs::canonicalize(&placed).expect("canonical placed directory");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: Some(serde_json::json!({
                     "worker_placement_cwd": placed.to_string_lossy(),
@@ -14687,7 +14687,7 @@ mod tests {
         let outputs = std::collections::VecDeque::from([scripted_text_output("work complete")]);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(ScriptedRecordingProvider {
                 outputs: std::sync::Mutex::new(outputs),
                 requests: std::sync::Mutex::new(vec![]),
@@ -14744,7 +14744,7 @@ mod tests {
             .expect("revoke workspace");
         let child_error = reauthorise_recorded_worker_placement(
             &state,
-            space.id,
+            topic.id,
             runtime_worker_placement(&inherited),
         )
         .await
@@ -14761,7 +14761,7 @@ mod tests {
     async fn workflow_launches_carry_task_bounds_and_fail_closed_when_the_task_disappears() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .upsert_task_definition(swage_storage::NewTaskDefinition {
                 id: "restricted".into(),
@@ -14778,7 +14778,7 @@ mod tests {
         let source = "return await agent('bounded workflow work');";
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "bounded-workflow".into(),
                 description: String::new(),
                 source: source.into(),
@@ -14790,7 +14790,7 @@ mod tests {
             .expect("store workflow");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: Some(serde_json::json!({"task_definition": "restricted"})),
                 active_workspace_attachment_id: None,
@@ -14816,7 +14816,7 @@ mod tests {
         };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -14899,10 +14899,10 @@ mod tests {
     async fn workflow_launches_preserve_call_scoped_tools_through_nested_runs() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "inner-bounded".into(),
                 description: String::new(),
                 source: "return await agent('nested bounded work');".into(),
@@ -14914,7 +14914,7 @@ mod tests {
             .expect("store inner workflow");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "outer-bounded".into(),
                 description: String::new(),
                 source: "return await workflow('inner-bounded', {});".into(),
@@ -14926,7 +14926,7 @@ mod tests {
             .expect("store outer workflow");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: Some(serde_json::json!({
                     crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY: ["workflow_run"]
@@ -14954,7 +14954,7 @@ mod tests {
         };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -14972,7 +14972,7 @@ mod tests {
         wait_for_terminal(&state, parent_id).await;
 
         let runs = storage
-            .list_workflow_runs(space.id)
+            .list_workflow_runs(topic.id)
             .await
             .expect("workflow runs");
         assert_eq!(runs.len(), 2);
@@ -14998,7 +14998,7 @@ mod tests {
     async fn workflow_dispatch_re_resolves_and_applies_named_tasks() {
         let _guard = crate::test_support::SwageHomeGuard::new();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .upsert_task_definition(swage_storage::NewTaskDefinition {
                 id: "review".into(),
@@ -15060,7 +15060,7 @@ mod tests {
         };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -15098,11 +15098,11 @@ mod tests {
             assembly: None,
         };
 
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let first = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -15169,11 +15169,11 @@ mod tests {
             })
             .await
             .expect("edit definition");
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let second = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -15204,11 +15204,11 @@ mod tests {
             task: Some("missing".into()),
             ..request()
         };
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let error = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -15268,13 +15268,13 @@ mod tests {
         );
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let repo_grant = grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let repo_grant = grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let newly_allowed = fixture.path().join("newly-allowed");
         std::fs::create_dir(&newly_allowed).expect("newly allowed fixture");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -15298,7 +15298,7 @@ mod tests {
         let make_state = || {
             AppState::new(
                 Arc::clone(&storage) as Arc<dyn Storage>,
-                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::clone(&storage) as Arc<dyn TopicStore>,
                 Arc::new(ScriptedRecordingProvider {
                     outputs: std::sync::Mutex::new(Default::default()),
                     requests: std::sync::Mutex::new(vec![]),
@@ -15315,7 +15315,7 @@ mod tests {
             let task = tokio::spawn(run_host_commands(
                 state,
                 run.id,
-                space.id,
+                topic.id,
                 vec![],
                 vec![],
                 None,
@@ -15395,7 +15395,7 @@ mod tests {
                 .await
                 .expect("revoke repository grant")
         );
-        grant_workspace(storage.as_ref(), space.id, &newly_allowed).await;
+        grant_workspace(storage.as_ref(), topic.id, &newly_allowed).await;
         let replay_state = make_state();
         let (replay_tx, replay_task) = run_loop(replay_state.clone(), replay.clone());
         let (reply, receive) = oneshot::channel();
@@ -15493,10 +15493,10 @@ mod tests {
         std::fs::create_dir(&attachment).unwrap();
         std::fs::write(attachment.join("readable.txt"), "readable proof").unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .create_workspace_attachment(NewWorkspaceAttachment {
-                space_id: space.id,
+                topic_id: topic.id,
                 label: "read-only placement".into(),
                 path: attachment.to_string_lossy().into_owned(),
                 permissions: vec!["read".into()],
@@ -15532,7 +15532,7 @@ mod tests {
         ]);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(ScriptedRecordingProvider {
                 outputs: std::sync::Mutex::new(outputs),
                 requests: std::sync::Mutex::new(vec![]),
@@ -15551,7 +15551,7 @@ mod tests {
         let cwd = serde_json::to_string(&attachment.to_string_lossy()).unwrap();
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: format!(
                     r#"return await agent("exercise read-only placement", {{ cwd: {cwd}, maxAttempts: 1 }});"#
@@ -15650,12 +15650,12 @@ mod tests {
         .trim()
         .to_string();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
-        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let topic = storage.get_or_create_default().await.unwrap();
+        grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let placement_tool = Arc::new(PlacementWriteTool::default());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(PlacementWritingProvider::default()),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -15676,7 +15676,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source,
                 args: Value::Null,
@@ -15839,7 +15839,7 @@ mod tests {
         );
         let Json(failed) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: failed_source,
                 args: Value::Null,
@@ -15895,7 +15895,7 @@ mod tests {
         );
         let Json(cancelled) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: cancelled_source,
                 args: Value::Null,
@@ -15987,8 +15987,8 @@ mod tests {
         std::fs::create_dir_all(&first_cwd).unwrap();
         std::fs::create_dir_all(&second_cwd).unwrap();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
-        grant_workspace(storage.as_ref(), space.id, &workspace).await;
+        let topic = storage.get_or_create_default().await.unwrap();
+        grant_workspace(storage.as_ref(), topic.id, &workspace).await;
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("first result"),
@@ -15998,7 +15998,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -16017,7 +16017,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.clone(),
                 args: Value::Null,
@@ -16079,13 +16079,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinvocation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"return await agent("slow work", {
             effort: "high", timeoutMs: 10000, maxAttempts: 1
         });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -16112,7 +16112,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -16196,13 +16196,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn parent_cancellation_wins_over_a_configured_agent_call_timeout() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"return await agent("cancelled work", {
             timeoutMs: 60000, maxAttempts: 1
         });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -16236,7 +16236,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -16298,7 +16298,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = format!(
             r#"
                 await agent("working segment", {{agent: "default"}});
@@ -16311,7 +16311,7 @@ mod tests {
         );
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -16348,7 +16348,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -16425,14 +16425,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn parked_cancellation_losing_to_a_wake_keeps_the_resumed_runs_account() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"
             await awaitEvent({ kinds: ["operator.continue"] });
             return await agent("finish after wake", { agent: "default", maxAttempts: 1 });
         "#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -16457,7 +16457,7 @@ mod tests {
         let provider_release = Arc::new(Notify::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(ReleasableProvider {
                 started: Arc::clone(&provider_started),
                 release: Arc::clone(&provider_release),
@@ -16558,13 +16558,13 @@ mod tests {
         }
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let placement_tool = Arc::new(PlacementWriteTool::default());
         let worktree_root = fixture.path().join("worker-worktrees");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(PlacementWritingProvider::default()),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -16583,7 +16583,7 @@ mod tests {
         );
         let Json(run) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source,
                 args: Value::Null,
@@ -16725,12 +16725,12 @@ mod tests {
         }
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let worktree_root = fixture.path().join("worker-worktrees");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(PlacementWritingProvider::default()),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![
@@ -16749,7 +16749,7 @@ mod tests {
         );
         let Json(run) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source,
                 args: Value::Null,
@@ -16842,10 +16842,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_continuation_token_the_run_does_not_own_is_refused() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -16866,11 +16866,11 @@ mod tests {
             })
             .await
             .expect("run");
-        // A real session in the same space, but created outside this run —
+        // A real session in the same topic, but created outside this run —
         // exactly what a token must not be able to reach.
         let foreign_session = storage
             .create_session(swage_storage::NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "interactive".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -16879,7 +16879,7 @@ mod tests {
             .expect("foreign session");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::PendingProvider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -16889,7 +16889,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -16962,12 +16962,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_continuation_cannot_change_its_task_definition() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
-        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let error = run_ephemeral_agent_call(
             &state,
             fixture_run_id,
-            space.id,
+            topic.id,
             &[],
             &[],
             fixture_entry_id,
@@ -17120,10 +17120,10 @@ mod tests {
         swage_storage::WorkflowRunRecord,
     ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -17146,7 +17146,7 @@ mod tests {
             .expect("run");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17212,10 +17212,10 @@ mod tests {
             ..Default::default()
         };
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -17238,7 +17238,7 @@ mod tests {
             .expect("run");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17431,7 +17431,7 @@ mod tests {
     async fn hold_answering_context(
         storage: &Arc<SqliteStorage>,
         state: &AppState,
-        space_id: Uuid,
+        topic_id: Uuid,
         agent_id: &str,
     ) -> (
         swage_storage::Session,
@@ -17441,7 +17441,7 @@ mod tests {
     ) {
         let session = storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: agent_id.into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -17465,21 +17465,21 @@ mod tests {
     "#;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_hold_is_invisible_and_unanswerable_from_another_space() {
+    async fn a_hold_is_invisible_and_unanswerable_from_another_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let elsewhere = swage_storage::SpaceStore::create(
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let elsewhere = swage_storage::TopicStore::create(
             storage.as_ref(),
-            swage_storage::model::NewSpace {
+            swage_storage::model::NewTopic {
                 name: "elsewhere".into(),
                 slug: "elsewhere".parse().expect("slug"),
             },
         )
         .await
-        .expect("a second space");
+        .expect("a second topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17487,7 +17487,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: HOLD_SCRIPT.into(),
                 args: Value::Null,
@@ -17517,7 +17517,7 @@ mod tests {
         .expect("list open holds");
         assert!(
             listed["holds"].as_array().expect("holds").is_empty(),
-            "a hold in another space is not the caller's to see"
+            "a hold in another topic is not the caller's to see"
         );
 
         let refused = crate::tool::Tool::execute(
@@ -17530,10 +17530,10 @@ mod tests {
             &context,
         )
         .await
-        .expect_err("a hold in another space is not the caller's to settle");
+        .expect_err("a hold in another topic is not the caller's to settle");
         assert!(
             refused.to_string().contains("workflow run hold"),
-            "the refusal names the hold as absent, not the space: {refused}"
+            "the refusal names the hold as absent, not the topic: {refused}"
         );
 
         let hold = storage
@@ -17554,10 +17554,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_held_run_parks_until_an_agent_answers_it_through_the_tool() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17565,7 +17565,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: HOLD_SCRIPT.into(),
                 args: Value::Null,
@@ -17579,7 +17579,7 @@ mod tests {
         wait_for_active_workflow_run_release(&state, started.id).await;
 
         let (session, turn_id, base, ws_tx) =
-            hold_answering_context(&storage, &state, space.id, "decider").await;
+            hold_answering_context(&storage, &state, topic.id, "decider").await;
         let context = crate::tool_executor::GatewayToolContext::new(
             &base,
             ws_tx,
@@ -17647,10 +17647,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn answering_either_concurrent_hold_advances_the_workflow() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17664,7 +17664,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -17731,7 +17731,7 @@ mod tests {
         );
         assert!(
             storage
-                .list_open_workflow_run_holds(space.id)
+                .list_open_workflow_run_holds(topic.id)
                 .await
                 .expect("list open holds")
                 .is_empty(),
@@ -17754,10 +17754,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn answering_the_first_concurrent_hold_advances_the_workflow() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17771,7 +17771,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -17838,10 +17838,10 @@ mod tests {
     async fn an_answer_outside_the_hold_s_set_is_refused_with_feedback_and_the_hold_keeps_waiting()
     {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17849,7 +17849,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: HOLD_SCRIPT.into(),
                 args: Value::Null,
@@ -17861,7 +17861,7 @@ mod tests {
         wait_for_run_state(&storage, started.id, "parked").await;
 
         let (session, turn_id, base, ws_tx) =
-            hold_answering_context(&storage, &state, space.id, "decider").await;
+            hold_answering_context(&storage, &state, topic.id, "decider").await;
         let context = crate::tool_executor::GatewayToolContext::new(
             &base,
             ws_tx,
@@ -17929,10 +17929,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -17940,7 +17940,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: HOLD_SCRIPT.into(),
                 args: Value::Null,
@@ -18019,10 +18019,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn run_detail_counts_what_is_still_waiting_what_was_decided_and_what_was_refused() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18037,7 +18037,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -18049,7 +18049,7 @@ mod tests {
         wait_for_run_state(&storage, started.id, "parked").await;
 
         let (_session, _turn_id, base, ws_tx) =
-            hold_answering_context(&storage, &state, space.id, "decider").await;
+            hold_answering_context(&storage, &state, topic.id, "decider").await;
         let context = crate::tool_executor::GatewayToolContext::new(
             &base,
             ws_tx,
@@ -18105,10 +18105,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_offering_fewer_than_two_verdicts_is_refused_at_raise() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18124,7 +18124,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -18169,10 +18169,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_a_run_waiting_on_a_hold_closes_the_unanswered_decision() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18180,7 +18180,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: HOLD_SCRIPT.into(),
                 args: Value::Null,
@@ -18209,7 +18209,7 @@ mod tests {
         assert_eq!(detail.hold_metrics.holds_open, 0);
         assert!(
             storage
-                .list_open_workflow_run_holds(space.id)
+                .list_open_workflow_run_holds(topic.id)
                 .await
                 .expect("list actionable holds")
                 .is_empty(),
@@ -18217,7 +18217,7 @@ mod tests {
         );
 
         let (_session, _turn_id, base, ws_tx) =
-            hold_answering_context(&storage, &state, space.id, "decider").await;
+            hold_answering_context(&storage, &state, topic.id, "decider").await;
         let context = crate::tool_executor::GatewayToolContext::new(
             &base,
             ws_tx,
@@ -18241,12 +18241,12 @@ mod tests {
     /// decision waiting in the answering queue.
     async fn parked_on_a_hold(
         state: &AppState,
-        space_id: Uuid,
+        topic_id: Uuid,
         storage: &Arc<SqliteStorage>,
     ) -> (WorkflowRun, Uuid) {
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: HOLD_SCRIPT.into(),
                 args: Value::Null,
@@ -18264,16 +18264,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answered_hold_reaches_its_script_after_a_crash_before_the_resume() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let (started, hold_id) = parked_on_a_hold(&state, space.id, &storage).await;
+        let (started, hold_id) = parked_on_a_hold(&state, topic.id, &storage).await;
 
         // The answerer dies with the verdict recorded and the relaunch it
         // would have issued never issued — the crash a wake pass must
@@ -18304,10 +18304,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18320,7 +18320,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -18406,16 +18406,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let (started, hold_id) = parked_on_a_hold(&state, space.id, &storage).await;
+        let (started, hold_id) = parked_on_a_hold(&state, topic.id, &storage).await;
 
         let pause = workflow_pause_test_hook::install(PAUSE_AFTER_HOLD_SETTLEMENT, hold_id);
         let answering = tokio::spawn({
@@ -18477,16 +18477,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancellation_that_loses_to_an_answer_leaves_the_resumed_run_alone() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        let (started, hold_id) = parked_on_a_hold(&state, space.id, &storage).await;
+        let (started, hold_id) = parked_on_a_hold(&state, topic.id, &storage).await;
 
         // The cancellation reads a parked run and is held there while the
         // answer settles the hold, relaunches the run, and lets it finish.
@@ -18547,10 +18547,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_failed_run_closes_a_decision_it_can_no_longer_receive() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18571,7 +18571,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -18596,7 +18596,7 @@ mod tests {
         assert_eq!(detail.hold_metrics.holds_open, 0);
         assert!(
             storage
-                .list_open_workflow_run_holds(space.id)
+                .list_open_workflow_run_holds(topic.id)
                 .await
                 .expect("list open holds")
                 .is_empty(),
@@ -18607,10 +18607,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn operator_event_wakes_awaiting_run_and_replay_returns_recorded_answer() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18636,7 +18636,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -18761,9 +18761,9 @@ mod tests {
                 include_str!("../../../shipped/skills/assembly/workflows/estate-unit.js"),
             ] {
                 let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-                let space = storage.get_or_create_default().await.expect("space");
+                let topic = storage.get_or_create_default().await.expect("topic");
                 let make_state = || AppState::new(
-                    Arc::clone(&storage) as Arc<dyn Storage>, Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                    Arc::clone(&storage) as Arc<dyn Storage>, Arc::clone(&storage) as Arc<dyn TopicStore>,
                     Arc::new(crate::turn::tests::MockProvider::new(vec![])),
                     swage_config::ResolvedConfig::default(), crate::tool::ToolDispatcher::allow_all(vec![]), None,
                 );
@@ -18777,7 +18777,7 @@ mod tests {
                     const second = await runHold("second", {{}}, ["accept"]);
                     return [first.nonce, second.nonce];
                 "#, &pipeline[start..end]);
-                let Json(started) = start_inline_run(State(state.clone()), Path(space.id), Json(StartInlineWorkflowRunRequest {
+                let Json(started) = start_inline_run(State(state.clone()), Path(topic.id), Json(StartInlineWorkflowRunRequest {
                     source, args: Value::Null, budget: None,
                 })).await.expect("start hold fixture");
                 wait_for_run_state(&storage, started.id, "parked").await;
@@ -18883,10 +18883,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18894,7 +18894,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     await awaitEvent({ kinds: ["control.start"] });
@@ -18969,10 +18969,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_recovers_event_claimed_before_await_journal_completion() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -18980,7 +18980,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const answer = await awaitEvent({ kinds: ["operator.decision"] });
@@ -19059,10 +19059,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn script_event_operations_reject_invalid_kinds_without_journalling_them() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -19070,7 +19070,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     let postError;
@@ -19148,20 +19148,20 @@ mod tests {
     fn spawn_event_loop(
         state: AppState,
         run_id: Uuid,
-        space_id: Uuid,
+        topic_id: Uuid,
         replay: Vec<WorkflowJournalRecord>,
     ) -> (
         mpsc::UnboundedSender<HostCommand>,
         tokio::task::JoinHandle<()>,
     ) {
-        let (tx, host) = queued_event_loop(state, run_id, space_id, replay);
+        let (tx, host) = queued_event_loop(state, run_id, topic_id, replay);
         (tx, tokio::spawn(host))
     }
 
     fn queued_event_loop(
         state: AppState,
         run_id: Uuid,
-        space_id: Uuid,
+        topic_id: Uuid,
         replay: Vec<WorkflowJournalRecord>,
     ) -> (
         mpsc::UnboundedSender<HostCommand>,
@@ -19171,7 +19171,7 @@ mod tests {
         let host = run_host_commands(
             state,
             run_id,
-            space_id,
+            topic_id,
             vec![],
             vec![],
             None,
@@ -19219,7 +19219,7 @@ mod tests {
             })
             .await
             .expect("install read-to-park race trigger");
-        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state, run.id, run.topic_id, vec![]);
 
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::AwaitEvent {
@@ -19290,7 +19290,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
-        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.topic_id, vec![]);
 
         let first = send_post_event(
             &tx,
@@ -19358,7 +19358,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (_storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
-        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state, run.id, run.topic_id, vec![]);
 
         send_post_event(
             &tx,
@@ -19387,7 +19387,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (storage, state, run) = event_gate_fixture(Arc::clone(&provider)).await;
-        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.topic_id, vec![]);
         send_post_event(
             &tx,
             "worker.escalation",
@@ -19410,7 +19410,7 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, replay);
+        let (tx, task) = spawn_event_loop(state, run.id, run.topic_id, replay);
         let replayed_post = send_post_event(
             &tx,
             "worker.escalation",
@@ -19455,7 +19455,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            run.space_id,
+            run.topic_id,
             vec![],
             vec![],
             None,
@@ -19552,7 +19552,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            run.space_id,
+            run.topic_id,
             vec![],
             vec![],
             None,
@@ -19696,7 +19696,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (storage, state, run) = event_gate_fixture(provider).await;
-        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.topic_id, vec![]);
 
         // Short of the park threshold, so this timer arms in process and is
         // still armed when the hold asks to park.
@@ -19749,7 +19749,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (storage, state, run) = event_gate_fixture(provider).await;
-        let (tx, host) = queued_event_loop(state.clone(), run.id, run.space_id, vec![]);
+        let (tx, host) = queued_event_loop(state.clone(), run.id, run.topic_id, vec![]);
 
         let (hold_reply, hold_receive) = oneshot::channel();
         tx.send(HostCommand::Hold {
@@ -19828,7 +19828,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run.id,
-            run.space_id,
+            run.topic_id,
             vec![],
             vec![],
             None,
@@ -19962,7 +19962,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands_with_budget(
             state.clone(),
             run.id,
-            run.space_id,
+            run.topic_id,
             vec![],
             vec![],
             None,
@@ -20076,7 +20076,7 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let (storage, state, run) = event_gate_fixture(provider).await;
-        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state, run.id, run.topic_id, vec![]);
 
         let (timer_reply, _timer_receive) = oneshot::channel();
         tx.send(HostCommand::Timer {
@@ -20128,7 +20128,7 @@ mod tests {
             release: Arc::clone(&release),
         });
         let (storage, state, run) = event_gate_fixture(provider).await;
-        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.space_id, vec![]);
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.topic_id, vec![]);
 
         send_post_event(
             &tx,
@@ -20384,7 +20384,7 @@ mod tests {
             .list_workflow_journal(run.id)
             .await
             .expect("journal");
-        let (tx, task) = spawn_event_loop(state, run.id, run.space_id, replay);
+        let (tx, task) = spawn_event_loop(state, run.id, run.topic_id, replay);
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Timer {
             ms: 80,
@@ -20423,9 +20423,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_wake_pass_resumes_interrupted_and_due_parked_runs() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let make_run = |source: &str| NewWorkflowRun {
-            space_id: space.id,
+            topic_id: topic.id,
             parent_run_id: None,
             parent_seq: None,
             script_version_id: None,
@@ -20470,7 +20470,7 @@ mod tests {
             .expect("park future");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::PendingProvider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -20510,7 +20510,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orphaned() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"
             const worker = agentStart("restate", { agent: "worker" });
             await worker.result;
@@ -20518,7 +20518,7 @@ mod tests {
         "#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -20541,7 +20541,7 @@ mod tests {
             .expect("run");
         let session = storage
             .create_session(swage_storage::NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "worker".into(),
                 metadata: Some(serde_json::json!({})),
                 active_workspace_attachment_id: None,
@@ -20698,7 +20698,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider.clone(),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -20720,10 +20720,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_recovery_keeps_turn_non_terminal_when_worker_thread_release_fails() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "worker".into(),
                 metadata: Some(serde_json::json!({})),
                 active_workspace_attachment_id: None,
@@ -20784,10 +20784,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn token_reservation_settlement_releases_estimate_and_retains_actual_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -20811,7 +20811,7 @@ mod tests {
         let pending_call_started = Arc::new(Notify::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(SettlementProvider {
                 calls: AtomicUsize::new(0),
                 pending_call_started: Arc::clone(&pending_call_started),
@@ -20825,7 +20825,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -21171,10 +21171,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replayed_started_calls_hold_token_reservations_until_settlement() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -21240,7 +21240,7 @@ mod tests {
             .expect("journal");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::PendingProvider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -21250,7 +21250,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -21315,10 +21315,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_latches_wind_down_only_after_a_started_working_call_settles() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -21416,7 +21416,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -21426,7 +21426,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -21536,10 +21536,10 @@ mod tests {
 
     async fn assert_replayed_wind_down_transition(completed_transition: bool) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -21664,7 +21664,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -21674,7 +21674,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -21792,10 +21792,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replayed_started_closing_call_keeps_its_reserved_partition() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -21929,7 +21929,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -21939,7 +21939,7 @@ mod tests {
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -22028,7 +22028,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_run_excludes_journalled_refusal_from_agent_call_count() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = "try { await agent('must not execute', {agent:'default'}); } catch (_) {} return await agent('does execute', {agent:'default'});";
         let budget = WorkflowBudget {
             max_agent_calls: Some(1),
@@ -22039,7 +22039,7 @@ mod tests {
         };
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -22110,7 +22110,7 @@ mod tests {
             .expect("interrupt run");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![
                 swage_core::StreamChunk::Delta {
                     content: "admitted".into(),
@@ -22150,10 +22150,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_returns_detached_and_completes_from_recorded_args() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22162,7 +22162,7 @@ mod tests {
 
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return args".into(),
                 args: serde_json::json!({ "value": 42 }),
@@ -22199,11 +22199,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_run_task_identity_is_persisted_and_filters_the_listing() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"export const meta = { task: "run-task-identity" }; return null;"#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "task identity".into(),
                 description: String::new(),
                 source: source.into(),
@@ -22226,7 +22226,7 @@ mod tests {
         .expect("start saved run");
         let Json(inline) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -22237,7 +22237,7 @@ mod tests {
         .expect("start inline run");
         let Json(without_task) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return null;".into(),
                 args: Value::Null,
@@ -22257,7 +22257,7 @@ mod tests {
 
         let Json(list) = list_runs(
             State(state),
-            Path(space.id),
+            Path(topic.id),
             Query(WorkflowRunListQuery {
                 task: Some("run-task-identity".into()),
             }),
@@ -22277,7 +22277,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn invalid_inline_agent_prompt_fails_after_journalling_valid_work() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output("valid task result"),
@@ -22286,7 +22286,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22295,7 +22295,7 @@ mod tests {
 
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"await agent("Valid authored task");
                 await agent({ task: "Invalid authored task" });"#
@@ -22346,7 +22346,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_run_without_reserve_keeps_hard_ceiling_behaviour() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["one", "two", "three"].map(scripted_text_output),
@@ -22355,7 +22355,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22369,7 +22369,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -22414,7 +22414,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn exhausted_schema_agent_call_completes_without_a_durable_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 (0..3)
@@ -22429,7 +22429,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22451,7 +22451,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -22527,7 +22527,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
                 swage_core::StreamChunk::Error {
@@ -22538,7 +22538,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22556,7 +22556,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -22675,10 +22675,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_failures_attribute_handover_to_the_terminal_call() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(StaggeredFailingProvider),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22700,7 +22700,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -22780,7 +22780,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn caught_agent_failure_does_not_blame_the_call_for_a_later_script_error() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![vec![
                 swage_core::StreamChunk::Done {
@@ -22791,7 +22791,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22814,7 +22814,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -22861,11 +22861,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_call_reconstruction_failure_still_leaves_a_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"await agent("known failing call", {agent: "default", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -22929,7 +22929,7 @@ mod tests {
             .expect("failed journal entry");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -22975,11 +22975,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn uncaught_recorded_agent_failure_replays_without_provider_work_and_keeps_attribution() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"await agent("known failing call", {agent: "default", label: "recorded failure", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -23048,7 +23048,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23085,11 +23085,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_handover_record_outside_the_contract_is_rejected_not_passed_through() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = "return 1;";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -23122,7 +23122,7 @@ mod tests {
             .expect("stored blob");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23145,7 +23145,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn budget_snapshot_funds_the_following_closing_segment_from_the_reserve() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["work one", "work two", "the real closing report"].map(scripted_text_output),
@@ -23154,7 +23154,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23178,7 +23178,7 @@ mod tests {
         "#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "snapshot-led closing segment".into(),
                 description: String::new(),
                 source: source.into(),
@@ -23255,10 +23255,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn run_detail_survives_malformed_results_and_preserves_workflow_output() {
         let (state, storage) = workflow_test_state();
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return { completed: true };".into(),
                 args: Value::Null,
@@ -23339,7 +23339,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["working one", "working two", "closing report"].map(scripted_text_output),
@@ -23348,7 +23348,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23362,7 +23362,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -23467,7 +23467,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn terminal_budget_audit_failure_preserves_the_engine_outcome() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .with_conn(|connection| {
                 connection.execute_batch(
@@ -23482,7 +23482,7 @@ mod tests {
             .expect("install terminal audit failure trigger");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23491,7 +23491,7 @@ mod tests {
         let mut events = state.broadcast.subscribe();
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return { settled: true };".into(),
                 args: Value::Null,
@@ -23534,7 +23534,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn attempt_five_snapshot_enters_wind_down_through_the_consumer_expression() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output_with_usage("working segment", 12_000, 164),
@@ -23545,7 +23545,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23572,7 +23572,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -23612,7 +23612,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_led_closing_calls_remain_bounded_by_the_closing_partition() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output("work one"),
@@ -23624,7 +23624,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23643,7 +23643,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -23685,7 +23685,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_snapshot_led_closing_call_keeps_its_attributed_handover() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output("work one"),
@@ -23698,7 +23698,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23716,7 +23716,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -23757,7 +23757,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saved_run_winds_down_into_reserve_and_replays_the_boundary() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 [
@@ -23774,7 +23774,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23801,7 +23801,7 @@ mod tests {
         "#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "budget wind-down".into(),
                 description: String::new(),
                 source: source.into(),
@@ -23900,7 +23900,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_refusal_transition_only_latches_wind_down_through_a_later_snapshot() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["work"].map(scripted_text_output),
@@ -23909,7 +23909,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -23927,7 +23927,7 @@ mod tests {
         "#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "failed wind-down journal".into(),
                 description: String::new(),
                 source: source.into(),
@@ -23994,7 +23994,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_refusal_transition_completion_does_not_latch_on_replay() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(
                 ["work"].map(scripted_text_output),
@@ -24003,7 +24003,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24018,7 +24018,7 @@ mod tests {
         "#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "failed wind-down completion".into(),
                 description: String::new(),
                 source: source.into(),
@@ -24174,7 +24174,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_transition_completion_retries_before_latching_on_resume() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from(vec![
                 scripted_text_output_with_usage("working segment", 1, 2),
@@ -24184,7 +24184,7 @@ mod tests {
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24201,7 +24201,7 @@ mod tests {
         "#;
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "snapshot completion retry".into(),
                 description: String::new(),
                 source: source.into(),
@@ -24345,10 +24345,10 @@ mod tests {
         });
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24356,7 +24356,7 @@ mod tests {
         );
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "deliver-once".into(),
                 description: String::new(),
                 source: "return await deliver({ content: args.content })".into(),
@@ -24395,10 +24395,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn saved_run_projects_script_version_and_parallel_failure_log() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24406,7 +24406,7 @@ mod tests {
         );
         let (script, version) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "trace-contract".into(),
                 description: String::new(),
                 source: "await parallel([()=>{throw new Error('branch failed')}]); return {spent:budget.spent(),remaining:budget.remaining()};".into(),
@@ -24457,11 +24457,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn composed_run_executes_the_child_and_journals_its_output() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24469,7 +24469,7 @@ mod tests {
         );
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "child".into(),
                 description: String::new(),
                 source: "return { doubled: args.value * 2 };".into(),
@@ -24481,7 +24481,7 @@ mod tests {
             .expect("child script");
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "parent".into(),
                 description: String::new(),
                 source: "const child = await workflow(\"child\", { value: 21 }); return child;"
@@ -24573,11 +24573,11 @@ mod tests {
             ),
         ] {
             let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-            let space = storage.get_or_create_default().await.expect("space");
-            let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+            let topic = storage.get_or_create_default().await.expect("topic");
+            let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
             let state = AppState::new(
                 Arc::clone(&storage) as Arc<dyn Storage>,
-                Arc::clone(&storage) as Arc<dyn SpaceStore>,
+                Arc::clone(&storage) as Arc<dyn TopicStore>,
                 Arc::new(crate::turn::tests::MockProvider::new(vec![])),
                 swage_config::ResolvedConfig::default(),
                 crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24585,7 +24585,7 @@ mod tests {
             );
             let (script, _) = storage
                 .create_workflow_script(NewWorkflowScript {
-                    space_id: space.id,
+                    topic_id: topic.id,
                     name: format!("pre-spawn {forbidden_kind}"),
                     description: String::new(),
                     source: source.into(),
@@ -24634,11 +24634,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_caught_missing_workflow_keeps_positional_replay_dense() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24646,7 +24646,7 @@ mod tests {
         );
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "child".into(),
                 description: String::new(),
                 source: "return { doubled: args.value * 2 };".into(),
@@ -24658,7 +24658,7 @@ mod tests {
             .expect("child script");
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "parent".into(),
                 description: String::new(),
                 source: r#"try {
@@ -24794,11 +24794,11 @@ mod tests {
         );
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        grant_workspace(storage.as_ref(), space.id, &repo).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        grant_workspace(storage.as_ref(), topic.id, &repo).await;
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24808,7 +24808,7 @@ mod tests {
         let cwd = serde_json::to_string(&repo.to_string_lossy()).expect("serialise cwd");
         let (script, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "invalid placed schema".into(),
                 description: String::new(),
                 source: format!(
@@ -24863,11 +24863,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_child_run_cannot_compose_further() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let _skill_root = crate::skill::TestSkillRootGuard::empty(space.id);
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24875,7 +24875,7 @@ mod tests {
         );
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "grandchild".into(),
                 description: String::new(),
                 source: "return 1;".into(),
@@ -24887,7 +24887,7 @@ mod tests {
             .expect("grandchild script");
         storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "child".into(),
                 description: String::new(),
                 // In a child run `workflow` must be absent entirely.
@@ -24900,7 +24900,7 @@ mod tests {
             .expect("child script");
         let (parent, _) = storage
             .create_workflow_script(NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "parent".into(),
                 description: String::new(),
                 source: "return await workflow(\"child\");".into(),
@@ -24933,10 +24933,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn timer_won_wait_is_journalled_and_replays_the_same_winner() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -24944,7 +24944,7 @@ mod tests {
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "const wake = await wait({ timerMs: 10 }); return wake.wake;".into(),
                 args: Value::Null,
@@ -25007,7 +25007,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn route_budgets_isolate_admission_and_journal_their_balances() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output_with_usage("fallback", 1, 0),
@@ -25071,7 +25071,7 @@ mod tests {
         };
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -25104,7 +25104,7 @@ mod tests {
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -25191,30 +25191,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn route_admission_uses_the_space_model_catalogue() {
+    async fn route_admission_uses_the_topic_model_catalogue() {
         let config_root = tempfile::tempdir().expect("config root");
-        let space_config_dir = config_root.path().join("spaces/default");
-        std::fs::create_dir_all(&space_config_dir).expect("space config directory");
+        let topic_config_dir = config_root.path().join("topics/default");
+        std::fs::create_dir_all(&topic_config_dir).expect("topic config directory");
         std::fs::write(
-            space_config_dir.join("config.toml"),
+            topic_config_dir.join("config.toml"),
             r#"
 [models]
-default = "space-model"
+default = "topic-model"
 
-[models.entries.space-model]
-provider_id = "space-route"
-model_id = "space-wire"
+[models.entries.topic-model]
+provider_id = "topic-route"
+model_id = "topic-wire"
 
 [providers]
-default = "space-route"
+default = "topic-route"
 
-[providers.entries.space-route]
+[providers.entries.topic-route]
 protocol = "openai"
 "#,
         )
-        .expect("space config");
+        .expect("topic config");
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 scripted_text_output_with_usage("must not run", 1, 0),
@@ -25223,7 +25223,7 @@ protocol = "openai"
         });
         let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             route_test_config("global-model", "global-route"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -25233,26 +25233,26 @@ protocol = "openai"
         let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
             "per_route": {
                 "global-route": {"max_total_tokens": 5},
-                "space-route": {"max_total_tokens": 0}
+                "topic-route": {"max_total_tokens": 0}
             }
         }))
         .expect("route budget");
         assert_eq!(
             resolve_agent_budget_route(
                 &state,
-                space.id,
-                &route_test_request("space default", None)
+                topic.id,
+                &route_test_request("topic default", None)
             )
             .await
             .expect("resolve scoped route"),
-            Some("space-route".into())
+            Some("topic-route".into())
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
-                    try { await agent("space default", { agent: "default" }); }
+                    try { await agent("topic default", { agent: "default" }); }
                     catch (error) { return error.name; }
                 "#
                 .into(),
@@ -25275,17 +25275,17 @@ protocol = "openai"
         );
         assert!(
             provider.requests.lock().expect("requests").is_empty(),
-            "the exhausted space route must refuse before provider work"
+            "the exhausted topic route must refuse before provider work"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_route_keeps_its_recorded_closing_limit() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -25462,7 +25462,7 @@ protocol = "openai"
         let config = route_test_config("alpha", "alpha-route");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -25472,7 +25472,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -25534,8 +25534,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_route_restores_credit_for_work_settled_after_wind_down() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let late_request = route_test_request("late working call", Some("alpha"));
         let mut late_json = serde_json::to_value(&late_request).expect("late request");
         late_json["provider_route"] = Value::String("alpha-route".into());
@@ -25639,8 +25639,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_completes_a_started_route_wind_down_once() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let working = route_test_request("working", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &working, "alpha-route", Some(4)).await;
         let transition = route_test_request("wind down", Some("alpha"));
@@ -25676,7 +25676,7 @@ protocol = "openai"
         let accounting = terminal_budget_accounting_from_journal(&replay, &budget);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(FixedUsageProvider),
             route_test_config("alpha", "alpha-route"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -25686,7 +25686,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -25748,10 +25748,10 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn resumed_unconfigured_route_spend_uses_the_fallback_ledger() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -25854,7 +25854,7 @@ protocol = "openai"
         let config = route_test_config("unconfigured", "unconfigured-route");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -25864,7 +25864,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run.id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -25967,10 +25967,10 @@ protocol = "openai"
         }
     }
 
-    async fn empty_journal_run(storage: &SqliteStorage, space_id: Uuid) -> Uuid {
+    async fn empty_journal_run(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_workflow_run(NewWorkflowRun {
-                space_id,
+                topic_id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -26049,8 +26049,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn recovery_does_not_readmit_a_started_route_call_after_later_spend() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let started_request = route_test_request("interrupted earlier call", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &started_request, "alpha-route", None).await;
         let completed_request = route_test_request("later completed call", Some("alpha"));
@@ -26083,7 +26083,7 @@ protocol = "openai"
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             route_test_config("alpha", "alpha-route"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -26093,7 +26093,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -26172,8 +26172,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_resumed_call_spends_the_route_that_serves_after_a_config_change() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let resumed_request = route_test_request("interrupted call", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &resumed_request, "alpha-route", None).await;
         let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
@@ -26191,7 +26191,7 @@ protocol = "openai"
         // The model has moved to another provider since the run was interrupted.
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(FixedUsageProvider),
             route_test_config("alpha", "beta-route"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -26201,7 +26201,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -26250,8 +26250,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_resumed_fallback_call_spends_the_route_that_served_it() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let mut resumed_request = route_test_request("interrupted call", Some("pinned"));
         resumed_request.fallback_model = Some("fallback".into());
         journal_routed_agent_call(&storage, run_id, 0, &resumed_request, "primary-route", None)
@@ -26280,7 +26280,7 @@ protocol = "openai"
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             fallback_test_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -26290,7 +26290,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -26346,8 +26346,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_configured_default_route_keeps_its_own_spend_across_replay() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let recorded = route_test_request("recorded spend", Some("plain"));
         journal_routed_agent_call(&storage, run_id, 0, &recorded, "default", Some(5)).await;
         let budget: WorkflowBudget = serde_json::from_value(serde_json::json!({
@@ -26369,7 +26369,7 @@ protocol = "openai"
         assert_eq!(accounting.default.spent, 0);
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             route_test_config("plain", "default"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -26379,7 +26379,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -26430,8 +26430,8 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn an_unknown_model_fails_as_its_own_error_on_a_spent_fallback_ledger() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let recorded = route_test_request("spend the fallback allowance", Some("alpha"));
         journal_routed_agent_call(&storage, run_id, 0, &recorded, "alpha-route", Some(1)).await;
         let budget = WorkflowBudget {
@@ -26451,7 +26451,7 @@ protocol = "openai"
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             route_test_config("alpha", "alpha-route"),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -26461,7 +26461,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands_with_budget(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -26592,13 +26592,13 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_working_route_call_settling_after_wind_down_keeps_the_closing_allowance() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = empty_journal_run(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = empty_journal_run(&storage, topic.id).await;
         let first_call_started = Arc::new(Notify::new());
         let release_first_call = Arc::new(Notify::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(HeldFirstCallProvider {
                 calls: AtomicUsize::new(0),
                 first_call_started: Arc::clone(&first_call_started),
@@ -26619,7 +26619,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands(
             state,
             run_id,
-            space.id,
+            topic.id,
             vec![],
             vec![],
             None,
@@ -26750,7 +26750,7 @@ protocol = "openai"
         Uuid,
     ) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let mut config = fallback_test_config();
         config.tools.permissions.allow = tools.iter().map(|tool| tool.name().to_string()).collect();
         let provider = Arc::new(ScriptedRecordingProvider {
@@ -26759,22 +26759,22 @@ protocol = "openai"
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(tools),
             None,
         );
-        (state, storage, provider, space.id)
+        (state, storage, provider, topic.id)
     }
 
-    async fn run_declared_fallback(state: &AppState, space_id: Uuid, model: &str) -> Uuid {
+    async fn run_declared_fallback(state: &AppState, topic_id: Uuid, model: &str) -> Uuid {
         let source = format!(
             r#"return await agent("answer", {{ agent: "default", model: {model:?}, fallbackModel: "fallback" }});"#
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source,
                 args: Value::Null,
@@ -26789,7 +26789,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn successful_agent_calls_journal_the_effective_catalogue_model() {
-        let (state, storage, provider, space_id) = fallback_test_state(vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![
             scripted_text_output("pinned answer"),
             scripted_text_output("default answer"),
             scripted_text_output("task answer"),
@@ -26832,7 +26832,7 @@ protocol = "openai"
 
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const pinned = await agent("pinned", { agent: "default", model: "pinned" });
@@ -26889,9 +26889,9 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_model_retries_only_before_output_and_records_the_served_model() {
-        let (state, storage, provider, space_id) =
+        let (state, storage, provider, topic_id) =
             fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
-        let run_id = run_declared_fallback(&state, space_id, "missing").await;
+        let run_id = run_declared_fallback(&state, topic_id, "missing").await;
         let run = storage
             .get_workflow_run(run_id)
             .await
@@ -26943,14 +26943,14 @@ protocol = "openai"
         );
         assert_eq!(requests[0].model.as_deref(), Some("fallback-wire"));
 
-        let (state, storage, provider, space_id) = fallback_test_state(vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
                 message: "pinned refused".into(),
             }],
             scripted_text_output("fallback answer"),
         ])
         .await;
-        let run_id = run_declared_fallback(&state, space_id, "pinned").await;
+        let run_id = run_declared_fallback(&state, topic_id, "pinned").await;
         let run = storage
             .get_workflow_run(run_id)
             .await
@@ -26992,7 +26992,7 @@ protocol = "openai"
             "the fallback must reuse the primary prompt rather than append it again"
         );
 
-        let (state, storage, provider, space_id) = fallback_test_state(vec![vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![vec![
             swage_core::StreamChunk::Delta {
                 content: "partial".into(),
             },
@@ -27001,7 +27001,7 @@ protocol = "openai"
             },
         ]])
         .await;
-        let run_id = run_declared_fallback(&state, space_id, "pinned").await;
+        let run_id = run_declared_fallback(&state, topic_id, "pinned").await;
         let run = storage
             .get_workflow_run(run_id)
             .await
@@ -27020,7 +27020,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_spends_only_its_provider_route() {
-        let (state, storage, _provider, space_id) = fallback_test_state(vec![
+        let (state, storage, _provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
                 message: "primary refused".into(),
             }],
@@ -27036,7 +27036,7 @@ protocol = "openai"
         .expect("route budget");
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"return await agent("answer", { agent: "default", model: "pinned", fallbackModel: "fallback" });"#.into(),
                 args: Value::Null,
@@ -27062,7 +27062,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_refuses_an_exhausted_provider_route_before_dispatch() {
-        let (state, storage, provider, space_id) = fallback_test_state(vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
                 message: "primary refused".into(),
             }],
@@ -27078,7 +27078,7 @@ protocol = "openai"
         .expect("route budget");
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     try {
@@ -27116,7 +27116,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_on_an_unconfigured_route_uses_the_fallback_ledger() {
-        let (state, storage, provider, space_id) = fallback_test_state(vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
                 message: "primary refused".into(),
             }],
@@ -27132,7 +27132,7 @@ protocol = "openai"
         .expect("route budget");
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     try {
@@ -27170,7 +27170,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_does_not_retry_a_call_rejected_before_dispatch() {
-        let (state, storage, provider, space_id) =
+        let (state, storage, provider, topic_id) =
             fallback_test_state(vec![scripted_text_output("fallback answer")]).await;
         let source = r#"return await agent("answer", {
             agent: "default", model: "pinned", fallbackModel: "fallback",
@@ -27178,7 +27178,7 @@ protocol = "openai"
         });"#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -27240,10 +27240,10 @@ protocol = "openai"
             &state,
             Uuid::new_v4(),
             state
-                .space_store
+                .topic_store
                 .get_or_create_default()
                 .await
-                .expect("space")
+                .expect("topic")
                 .id,
             &[],
             &[],
@@ -27286,7 +27286,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn declared_fallback_retries_a_pre_output_failure_with_tools_configured() {
-        let (state, storage, provider, space_id) = fallback_test_state_with_tools(
+        let (state, storage, provider, topic_id) = fallback_test_state_with_tools(
             vec![
                 vec![swage_core::StreamChunk::Error {
                     message: "pinned refused".into(),
@@ -27303,7 +27303,7 @@ protocol = "openai"
         });"#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -27338,7 +27338,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn held_worker_resolves_and_persists_the_fallback_model_for_continuation() {
-        let (state, storage, provider, space_id) = fallback_test_state(vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
                 message: "pinned refused".into(),
             }],
@@ -27358,7 +27358,7 @@ protocol = "openai"
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -27443,7 +27443,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn continuation_ignores_declared_fallback_and_keeps_its_creation_model() {
-        let (state, storage, provider, space_id) = fallback_test_state(vec![
+        let (state, storage, provider, topic_id) = fallback_test_state(vec![
             scripted_text_output("created by pinned"),
             vec![swage_core::StreamChunk::Error {
                 message: "pinned refused continuation".into(),
@@ -27460,7 +27460,7 @@ protocol = "openai"
         "#;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -27517,11 +27517,11 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn get_run_shows_worker_liveness_before_first_evidence_and_after_settlement() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (provider, parked, release) = ParkedFirstDeltaProvider::new();
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -27540,7 +27540,7 @@ protocol = "openai"
         let dispatch_window_opened_at = chrono::Utc::now();
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source:
                     "return await Promise.all([agent('parked worker'), agent('streaming worker')]);"
@@ -27668,11 +27668,11 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn get_run_keeps_liveness_across_live_to_durable_handoff() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (provider, parked, release) = ParkedFirstDeltaProvider::new();
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -27680,7 +27680,7 @@ protocol = "openai"
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return await agent('parked worker');".into(),
                 args: Value::Null,
@@ -27749,10 +27749,10 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_worker_persists_liveness_after_live_overlay_is_evicted() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(ScriptedRecordingProvider {
                 outputs: std::sync::Mutex::new(std::collections::VecDeque::from([vec![
                     swage_core::StreamChunk::Error {
@@ -27767,7 +27767,7 @@ protocol = "openai"
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return await agent('failing worker', { maxAttempts: 1 });".into(),
                 args: Value::Null,
@@ -27817,7 +27817,7 @@ protocol = "openai"
 
     #[tokio::test(flavor = "multi_thread")]
     async fn tool_start_is_worker_evidence_before_any_text() {
-        let (state, storage, _, space_id) = fallback_test_state_with_tools(
+        let (state, storage, _, topic_id) = fallback_test_state_with_tools(
             vec![
                 vec![
                     swage_core::StreamChunk::ToolUse {
@@ -27840,7 +27840,7 @@ protocol = "openai"
         .await;
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space_id),
+            Path(topic_id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"return await agent("tool-only worker", { tools: ["echo"], maxAttempts: 1 });"#
                     .into(),
@@ -27872,11 +27872,11 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_worker_persists_liveness_after_live_overlay_is_evicted() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let pending = Arc::new(Notify::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(PendingWithoutEvidenceProvider {
                 pending: Arc::clone(&pending),
             }),
@@ -27886,7 +27886,7 @@ protocol = "openai"
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return await agent('cancelled worker');".into(),
                 args: Value::Null,
@@ -28042,7 +28042,7 @@ protocol = "openai"
         });
         let state = AppState::new(
             Arc::clone(storage) as Arc<dyn Storage>,
-            Arc::clone(storage) as Arc<dyn SpaceStore>,
+            Arc::clone(storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -28054,12 +28054,12 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn returned_run_accounts_its_workers_and_offers_no_partial_results() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (state, _provider) =
             scripted_state(&storage, vec![scripted_text_output("survey reply")]);
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const survey = await agent("survey the ground", {agent: "default", label: "survey"});
@@ -28103,7 +28103,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_terminal_account_write_failure_prevents_terminal_visibility() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .with_conn(|connection| {
                 connection.execute_batch(
@@ -28118,7 +28118,7 @@ protocol = "openai"
         let (state, _provider) = scripted_state(&storage, vec![]);
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: "return { settled: true };".into(),
                 args: Value::Null,
@@ -28155,12 +28155,12 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_run_surfaces_its_completed_worker_as_a_partial_result() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (state, _provider) =
             scripted_state(&storage, vec![scripted_text_output("survey findings")]);
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     await agent("survey the ground", {agent: "default", label: "survey"});
@@ -28202,7 +28202,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn failed_run_accounts_for_the_worker_that_actually_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let failure = "the survey provider rejected the request";
         let (state, _provider) = scripted_state(
             &storage,
@@ -28212,7 +28212,7 @@ protocol = "openai"
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     await agent("survey the ground", {
@@ -28251,7 +28251,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_that_threw_under_wind_down_names_the_closing_boundary_as_its_ending() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (state, _provider) = scripted_state(
             &storage,
             vec![
@@ -28262,7 +28262,7 @@ protocol = "openai"
         );
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const burst = [0, 1, 2, 3].map((i) =>
@@ -28317,12 +28317,12 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_a_run_reads_its_in_flight_worker_as_cut_short_not_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (state, provider) =
             scripted_state(&storage, vec![scripted_text_output("finishing reply")]);
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: r#"
                     const first = agentStart("finish this", {agent: "default", label: "finishing", maxAttempts: 1});
@@ -28428,12 +28428,12 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_the_gateway_could_not_resume_accounts_for_itself_without_settling_anything() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         // A run with neither source nor script version cannot be relaunched:
         // it stands in for the run whose gateway died under it.
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -28530,13 +28530,13 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_detail_rejects_a_terminal_account_outside_the_contract() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let (state, _provider) = scripted_state(&storage, vec![]);
         // A run that has recorded no account of its own, so the blob under
         // test is the only one the projection can read.
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -28617,10 +28617,10 @@ protocol = "openai"
         provider: Arc<ScriptedRecordingProvider>,
     ) -> (Arc<SqliteStorage>, AppState, WorkflowRunRecord) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -28643,7 +28643,7 @@ protocol = "openai"
             .expect("run");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -28689,7 +28689,7 @@ protocol = "openai"
         let task = tokio::spawn(run_host_commands(
             state,
             run.id,
-            run.space_id,
+            run.topic_id,
             vec![],
             vec![],
             None,
@@ -28722,15 +28722,15 @@ protocol = "openai"
         receive.await.expect("agent reply")
     }
 
-    /// A placement the space actually authorises: the directory is attached
+    /// A placement the topic actually authorises: the directory is attached
     /// as a trusted workspace, so the worker's turn re-authorises it rather
     /// than failing closed on a path nothing grants.
     async fn granted_worker_placement(
         storage: &SqliteStorage,
-        space_id: Uuid,
+        topic_id: Uuid,
         directory: &std::path::Path,
     ) -> ResolvedWorkerPlacement {
-        let attachment_id = grant_workspace(storage, space_id, directory).await;
+        let attachment_id = grant_workspace(storage, topic_id, directory).await;
         let path = directory
             .canonicalize()
             .expect("canonical placement path")
@@ -28748,10 +28748,10 @@ protocol = "openai"
 
     /// A worker turn standing in for one attempt of a call: its own session,
     /// thread, and turn, so the provider rounds hang off a real row.
-    async fn worker_turn(storage: &SqliteStorage, space_id: Uuid, input: &str) -> Uuid {
+    async fn worker_turn(storage: &SqliteStorage, topic_id: Uuid, input: &str) -> Uuid {
         let session = storage
             .create_session(swage_storage::NewSession {
-                space_id,
+                topic_id,
                 agent_id: BARE_WORKFLOW_AGENT_ID.into(),
                 metadata: Some(serde_json::json!({})),
                 active_workspace_attachment_id: None,
@@ -28851,12 +28851,12 @@ protocol = "openai"
             })
             .await
             .expect("install dispatch-record failure trigger");
-        let (_, entry_id) = journalled_agent_call(&storage, run.space_id).await;
+        let (_, entry_id) = journalled_agent_call(&storage, run.topic_id).await;
 
         let error = run_ephemeral_agent_call(
             &state,
             run.id,
-            run.space_id,
+            run.topic_id,
             &[],
             &[],
             entry_id,
@@ -28893,7 +28893,7 @@ protocol = "openai"
         // resolved rather than against the absence of one.
         let placement_directory = tempfile::tempdir().expect("placement directory");
         let placement =
-            granted_worker_placement(&storage, run.space_id, placement_directory.path()).await;
+            granted_worker_placement(&storage, run.topic_id, placement_directory.path()).await;
         let (tx, task) = spawn_worker_call_host(state.clone(), &run);
         send_worker_call(
             &tx,
@@ -29046,7 +29046,7 @@ protocol = "openai"
 
         // The interrupted attempt: one round that came back with a tool call,
         // and a second still out when the gateway went away.
-        let interrupted = worker_turn(&storage, run.space_id, "interrupted attempt").await;
+        let interrupted = worker_turn(&storage, run.topic_id, "interrupted attempt").await;
         open_round(&storage, interrupted, 1).await;
         settle_round(
             &storage,
@@ -29067,7 +29067,7 @@ protocol = "openai"
         .expect("first attempt");
 
         // Replay re-dispatches the same entry under a fresh turn.
-        let resumed = worker_turn(&storage, run.space_id, "resumed attempt").await;
+        let resumed = worker_turn(&storage, run.topic_id, "resumed attempt").await;
         let interruption_not_before = chrono::Utc::now();
         record_agent_call_attempt(
             storage.as_ref(),
@@ -29184,7 +29184,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn unavailable_usage_closes_the_token_gate_and_marks_budget_readings_incomplete() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 vec![
@@ -29201,7 +29201,7 @@ protocol = "openai"
         });
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -29220,7 +29220,7 @@ protocol = "openai"
 
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -29287,7 +29287,7 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn unavailable_usage_closes_only_its_configured_route() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let provider = Arc::new(ScriptedRecordingProvider {
             outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
                 vec![
@@ -29314,7 +29314,7 @@ protocol = "openai"
         );
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -29359,7 +29359,7 @@ protocol = "openai"
         .expect("route budget");
         let Json(started) = start_inline_run(
             State(state.clone()),
-            Path(space.id),
+            Path(topic.id),
             Json(StartInlineWorkflowRunRequest {
                 source: source.into(),
                 args: Value::Null,
@@ -29537,11 +29537,11 @@ protocol = "openai"
     #[tokio::test(flavor = "multi_thread")]
     async fn a_worker_cancelled_mid_round_reads_cut_short_not_failed() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let source = r#"return await agent("work the run interrupts", {maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                space_id: space.id,
+                topic_id: topic.id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -29573,7 +29573,7 @@ protocol = "openai"
         let release = Arc::new(Notify::new());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(GatedRoundProvider {
                 round_opened: Arc::clone(&round_opened),
                 release: Arc::clone(&release),

@@ -13,7 +13,7 @@ pub struct RecoveryExportSummary {
     #[ts(type = "number")]
     pub size_bytes: usize,
     #[ts(type = "number")]
-    pub spaces: usize,
+    pub topics: usize,
     #[ts(type = "number")]
     pub workspaces: usize,
     #[ts(type = "number")]

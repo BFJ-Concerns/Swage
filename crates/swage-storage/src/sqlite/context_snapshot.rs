@@ -51,23 +51,23 @@ impl ContextSnapshotStore for SqliteStorage {
         .await
     }
 
-    async fn list_snapshots_by_space(
+    async fn list_snapshots_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         limit: usize,
     ) -> Result<Vec<ContextSnapshotRecord>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT cs.turn_id, th.session_id, s.space_id, cs.created_at, cs.report_json
+                "SELECT cs.turn_id, th.session_id, s.topic_id, cs.created_at, cs.report_json
                  FROM context_snapshots cs
                  INNER JOIN turns t ON t.id = cs.turn_id
                  INNER JOIN threads th ON th.id = t.thread_id
                  INNER JOIN sessions s ON s.id = th.session_id
-                 WHERE s.space_id = ?1
+                 WHERE s.topic_id = ?1
                  ORDER BY cs.created_at DESC
                  LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![space_id.to_string(), limit as i64], |row| {
+            let rows = stmt.query_map(params![topic_id.to_string(), limit as i64], |row| {
                 Ok(ContextSnapshotRecord {
                     turn_id: row.get::<_, String>(0)?.parse().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -83,7 +83,7 @@ impl ContextSnapshotStore for SqliteStorage {
                             Box::new(error),
                         )
                     })?,
-                    space_id: row.get::<_, String>(2)?.parse().map_err(|error| {
+                    topic_id: row.get::<_, String>(2)?.parse().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
                             rusqlite::types::Type::Text,
@@ -108,15 +108,15 @@ impl ContextSnapshotStore for SqliteStorage {
 mod tests {
     use uuid::Uuid;
 
-    use crate::model::{NewSession, NewSpace, NewTurn, TurnState};
+    use crate::model::{NewSession, NewTopic, NewTurn, TurnState};
     use crate::sqlite::SqliteStorage;
-    use crate::store::{ContextSnapshotStore, SessionStore, SpaceStore, TurnStore};
+    use crate::store::{ContextSnapshotStore, SessionStore, TopicStore, TurnStore};
 
-    /// Create a space → session → thread → turn chain, returning storage + turn_id.
+    /// Create a topic → session → thread → turn chain, returning storage + turn_id.
     async fn make_turn() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage
-            .create(NewSpace {
+        let topic = storage
+            .create(NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             })
@@ -124,7 +124,7 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent".to_string(),
                 metadata: None,
                 active_workspace_attachment_id: None,

@@ -1,4 +1,4 @@
-//! Status bar widget — persistent top row showing connection state, space
+//! Status bar widget — persistent top row showing connection state, topic
 //! name, model name, and token counts.
 //!
 //! Renders as a single-line ratatui widget with colour-coded connection state
@@ -17,21 +17,21 @@ use crate::gateway::ConnectionState;
 /// Render the status bar into `area` (expected to be exactly one row tall).
 ///
 /// Left section: colour-coded connection indicator ("●") followed by the
-/// space name. Right section: model name and token counts, right-aligned
+/// topic name. Right section: model name and token counts, right-aligned
 /// by padding between the two sections. The right section degrades
 /// gracefully when `area.width` is too small to fit it.
 pub fn render_status_bar(
     frame: &mut Frame,
     area: Rect,
     connection_state: ConnectionState,
-    space_name: &str,
+    topic_name: &str,
     model_name: Option<&str>,
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
 ) {
     let line = build_status_line(
         connection_state,
-        space_name,
+        topic_name,
         model_name,
         input_tokens,
         output_tokens,
@@ -46,7 +46,7 @@ pub fn render_status_bar(
 /// content and colours without a terminal backend.
 pub(crate) fn build_status_line(
     connection_state: ConnectionState,
-    space_name: &str,
+    topic_name: &str,
     model_name: Option<&str>,
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
@@ -59,10 +59,10 @@ pub(crate) fn build_status_line(
         ConnectionState::Reconnecting => Style::default().fg(Color::Yellow),
     };
 
-    // Left section is always shown: " ● space_name ".
-    // Display width: 1 (leading space) + 1 (●) + 1 (space) + name + 1 (space).
-    let left_suffix = format!(" {space_name} ");
-    let left_width = 2 + left_suffix.chars().count(); // " " + "●" + " space_name "
+    // Left section is always shown: " ● topic_name ".
+    // Display width: 1 (leading space) + 1 (●) + 1 (topic) + name + 1 (topic).
+    let left_suffix = format!(" {topic_name} ");
+    let left_width = 2 + left_suffix.chars().count(); // " " + "●" + " topic_name "
 
     // Build right-side candidates, most detailed first.
     // Graceful truncation: drop token counts, then model, always keep left.
@@ -169,14 +169,14 @@ mod tests {
         );
     }
 
-    // ---- Space name ---------------------------------------------------
+    // ---- Topic name ---------------------------------------------------
 
     #[test]
-    fn space_name_always_appears() {
-        let line = build_status_line(ConnectionState::Connected, "myspace", None, None, None, 80);
+    fn topic_name_always_appears() {
+        let line = build_status_line(ConnectionState::Connected, "mytopic", None, None, None, 80);
         assert!(
-            line_text(&line).contains("myspace"),
-            "space name must always be visible"
+            line_text(&line).contains("mytopic"),
+            "topic name must always be visible"
         );
     }
 
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn render_status_bar_shows_space_name_in_buffer() {
+    fn render_status_bar_shows_topic_name_in_buffer() {
         use ratatui::{Terminal, backend::TestBackend};
         let backend = TestBackend::new(80, 1);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -339,7 +339,7 @@ mod tests {
                     frame,
                     frame.area(),
                     ConnectionState::Connected,
-                    "testspace",
+                    "testtopic",
                     None,
                     None,
                     None,
@@ -354,8 +354,8 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(
-            content.contains("testspace"),
-            "rendered buffer should contain space name; got: {content:?}"
+            content.contains("testtopic"),
+            "rendered buffer should contain topic name; got: {content:?}"
         );
     }
 

@@ -202,7 +202,7 @@
                   {/if}
                 </div>
                 <div class="secondary-line">
-                  {session.space_name} ·
+                  {session.topic_name} ·
                   {session.message_preview ?? "No messages yet"}
                 </div>
               </div>

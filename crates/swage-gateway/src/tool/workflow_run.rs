@@ -31,7 +31,7 @@ impl Tool for WorkflowRunTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The available workflow's name in this space. Use this or source, but not both."
+                    "description": "The available workflow's name in this topic. Use this or source, but not both."
                 },
                 "source": {
                     "type": "string",
@@ -150,7 +150,7 @@ mod tests {
     use swage_core::{CompletionRequest, ToolError};
     use swage_provider::{LlmProvider, ProviderConfig, openai::OpenAiProvider};
     use swage_storage::{
-        NewSession, SessionStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
+        NewSession, SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
 
@@ -230,10 +230,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn inline_source_runs_with_session_bounds_without_delivery_and_is_inspectable() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "current-agent".into(),
                 metadata: Some(json!({
                     "dispatch_bound_agent_ids": ["ancestor-agent"],
@@ -245,7 +245,7 @@ mod tests {
             .expect("session");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -302,7 +302,7 @@ mod tests {
 
         let crate::error::Json(list) = crate::workflow::list_runs(
             axum::extract::State(state),
-            crate::error::Path(space.id),
+            crate::error::Path(topic.id),
             axum::extract::Query(crate::workflow::WorkflowRunListQuery::default()),
         )
         .await
@@ -319,10 +319,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unknown_named_workflow_error_lists_the_effective_catalogue() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
+        let topic = storage.get_or_create_default().await.expect("topic");
         storage
             .create_workflow_script(swage_storage::NewWorkflowScript {
-                space_id: space.id,
+                topic_id: topic.id,
                 name: "operator-report".into(),
                 description: "Produce an operator report.".into(),
                 source: "return {};".into(),
@@ -334,7 +334,7 @@ mod tests {
             .expect("saved workflow");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -343,7 +343,7 @@ mod tests {
             .expect("session");
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

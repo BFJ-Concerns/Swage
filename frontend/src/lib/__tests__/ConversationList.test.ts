@@ -150,7 +150,7 @@ describe("ConversationList", () => {
     const conv = makeConversation({ id: "active-one" });
     const activeDetail: ConversationDetail = {
       id: "active-one",
-      space_id: "proj-1",
+      topic_id: "proj-1",
       created_at: conv.created_at,
       last_activity: conv.last_activity,
       messages: [],
@@ -169,7 +169,7 @@ describe("ConversationList", () => {
     ];
     const activeDetail: ConversationDetail = {
       id: "a",
-      space_id: "proj-1",
+      topic_id: "proj-1",
       created_at: conversations[0].created_at,
       last_activity: conversations[0].last_activity,
       messages: [],

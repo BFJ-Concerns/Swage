@@ -1,4 +1,4 @@
-//! Pages — agent-run tabs on a space, assembled from module instances.
+//! Pages — agent-run tabs on a topic, assembled from module instances.
 //!
 //! The database is authoritative for page content; every mutation lands an
 //! audit event (the page's provenance trail) and broadcasts a live
@@ -33,7 +33,7 @@ const MODULE_KINDS: &[&str] = &["document"];
 
 pub async fn create_page(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     request: CreatePageRequest,
 ) -> Result<PageResponse, GatewayError> {
     let title = request.title.trim();
@@ -43,15 +43,15 @@ pub async fn create_page(
         ));
     }
     state
-        .space_store
-        .get(space_id)
+        .topic_store
+        .get(topic_id)
         .await?
-        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
 
     // A template seeds the page; everything is validated before anything
     // lands, so a rejected fork leaves no page behind.
     let template = match request.template_id {
-        Some(template_id) => Some(resolve_template(state, space_id, template_id).await?),
+        Some(template_id) => Some(resolve_template(state, topic_id, template_id).await?),
         None => None,
     };
 
@@ -61,7 +61,7 @@ pub async fn create_page(
                 .storage
                 .create_page_from_template(
                     NewPage {
-                        space_id,
+                        topic_id,
                         title: title.to_string(),
                     },
                     template.id,
@@ -72,7 +72,7 @@ pub async fn create_page(
             state
                 .storage
                 .create_page(NewPage {
-                    space_id,
+                    topic_id,
                     title: title.to_string(),
                 })
                 .await?
@@ -97,7 +97,7 @@ pub async fn create_page(
                 None => format!("page created: {title}"),
             },
             metadata: json!({
-                "space_id": page.space_id,
+                "topic_id": page.topic_id,
                 "title": title,
                 "forked_from": template_metadata,
             }),
@@ -111,7 +111,7 @@ pub async fn create_page(
     let modules = state.storage.list_page_modules(page.id).await?;
     Ok(PageResponse {
         id: page.id,
-        space_id: page.space_id,
+        topic_id: page.topic_id,
         title: page.title,
         created_at: page.created_at,
         updated_at: page.updated_at,
@@ -124,29 +124,29 @@ pub async fn create_page(
     })
 }
 
-/// A template usable from this space: it must exist and belong here.
-/// Templates are space-local — there is no sharing across spaces.
+/// A template usable from this topic: it must exist and belong here.
+/// Templates are topic-local — there is no sharing across topics.
 async fn resolve_template(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     template_id: Uuid,
 ) -> Result<swage_storage::PageTemplate, GatewayError> {
     state
         .storage
         .get_page_template(template_id)
         .await?
-        .filter(|template| template.space_id == space_id)
+        .filter(|template| template.topic_id == topic_id)
         .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no template {template_id} in space {space_id}"))
+            GatewayError::ValidationError(format!("no template {template_id} in topic {topic_id}"))
         })
 }
 
-/// Create a space's reusable page shape. A template is inert: it seeds
+/// Create a topic's reusable page shape. A template is inert: it seeds
 /// pages at their creation and is never projected into pages already
 /// forked from it.
 pub async fn create_page_template(
     state: &AppState,
-    space_id: Uuid,
+    topic_id: Uuid,
     request: CreatePageTemplateRequest,
 ) -> Result<PageTemplateResponse, GatewayError> {
     let name = request.name.trim();
@@ -156,10 +156,10 @@ pub async fn create_page_template(
         ));
     }
     state
-        .space_store
-        .get(space_id)
+        .topic_store
+        .get(topic_id)
         .await?
-        .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
     // Validate every module kind before the first write: a template that
     // seeds an unrenderable module is a page the user cannot see.
     for module in &request.modules {
@@ -176,7 +176,7 @@ pub async fn create_page_template(
         .storage
         .create_page_template_with_modules(
             NewPageTemplate {
-                space_id,
+                topic_id,
                 name: name.to_string(),
             },
             request
@@ -202,7 +202,7 @@ pub async fn create_page_template(
             event_kind: "page_template_created".into(),
             summary: format!("page template created: {name}"),
             metadata: json!({
-                "space_id": template.space_id,
+                "topic_id": template.topic_id,
                 "name": name,
                 "module_count": request.modules.len(),
                 "modules": request.modules.iter().enumerate().map(|(position, module)| json!({
@@ -234,7 +234,7 @@ pub async fn template_response(
         .await?;
     Ok(PageTemplateResponse {
         id: template.id,
-        space_id: template.space_id,
+        topic_id: template.topic_id,
         name: template.name,
         created_at: template.created_at,
         updated_at: template.updated_at,
@@ -625,7 +625,7 @@ pub async fn page_response(state: &AppState, page_id: Uuid) -> Result<PageRespon
     // where the location is rather than having to match ids by hand.
     Ok(PageResponse {
         id: page.id,
-        space_id: page.space_id,
+        topic_id: page.topic_id,
         title: page.title,
         created_at: page.created_at,
         updated_at: page.updated_at,
@@ -675,11 +675,11 @@ fn annotation_view(annotation: PageAnnotation) -> PageAnnotationView {
 
 pub async fn list_pages_handler(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<PageListResponse>, ApiError> {
     let pages = state
         .storage
-        .list_pages_by_space(space_id)
+        .list_pages_by_topic(topic_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(PageListResponse {
@@ -696,10 +696,10 @@ pub async fn list_pages_handler(
 
 pub async fn create_page_handler(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     Json(request): Json<CreatePageRequest>,
 ) -> Result<Json<PageResponse>, ApiError> {
-    Ok(Json(create_page(&state, space_id, request).await?))
+    Ok(Json(create_page(&state, topic_id, request).await?))
 }
 
 pub async fn get_page_handler(
@@ -749,11 +749,11 @@ pub async fn delete_page_annotation_handler(
 
 pub async fn list_page_templates_handler(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
 ) -> Result<Json<PageTemplateListResponse>, ApiError> {
     let templates = state
         .storage
-        .list_page_templates_by_space(space_id)
+        .list_page_templates_by_topic(topic_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(PageTemplateListResponse {
@@ -770,10 +770,10 @@ pub async fn list_page_templates_handler(
 
 pub async fn create_page_template_handler(
     State(state): State<AppState>,
-    Path(space_id): Path<Uuid>,
+    Path(topic_id): Path<Uuid>,
     Json(request): Json<CreatePageTemplateRequest>,
 ) -> Result<Json<PageTemplateResponse>, ApiError> {
-    Ok(Json(create_page_template(&state, space_id, request).await?))
+    Ok(Json(create_page_template(&state, topic_id, request).await?))
 }
 
 pub async fn get_page_template_handler(
@@ -788,7 +788,7 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::{
-        AuditStore, NewSpace, PageAnnotationStore, PageStore, SpaceStore, SqliteStorage, Storage,
+        AuditStore, NewTopic, PageAnnotationStore, PageStore, SqliteStorage, Storage, TopicStore,
     };
 
     use super::*;
@@ -796,7 +796,7 @@ mod tests {
     fn state(storage: Arc<SqliteStorage>) -> AppState {
         AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            storage as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -808,9 +808,9 @@ mod tests {
     /// second is what a cross-page anchor would wrongly reach.
     async fn seeded() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             storage.as_ref(),
-            NewSpace {
+            NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             },
@@ -820,7 +820,7 @@ mod tests {
         let state = state(Arc::clone(&storage));
         let page = create_page(
             &state,
-            space.id,
+            topic.id,
             CreatePageRequest {
                 title: "Planning".into(),
                 template_id: None,
@@ -842,7 +842,7 @@ mod tests {
         .unwrap();
         let other = create_page(
             &state,
-            space.id,
+            topic.id,
             CreatePageRequest {
                 title: "Elsewhere".into(),
                 template_id: None,

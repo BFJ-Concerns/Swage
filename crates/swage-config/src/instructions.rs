@@ -166,16 +166,16 @@ mod tests {
     #[test]
     fn assemble_includes_content_from_all_levels() {
         let global_dir = TempDir::new().unwrap();
-        let space_dir = TempDir::new().unwrap();
+        let topic_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         write_file(global_dir.path(), "base.md", "global content");
-        write_file(space_dir.path(), "context.md", "space content");
+        write_file(topic_dir.path(), "context.md", "topic content");
         write_file(agent_dir.path(), "persona.md", "agent content");
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Space, space_dir.path()),
+            (HierarchyLevel::Topic, topic_dir.path()),
             (HierarchyLevel::Agent, agent_dir.path()),
         ];
 
@@ -185,8 +185,8 @@ mod tests {
             "should include global content"
         );
         assert!(
-            result.contains("space content"),
-            "should include space content"
+            result.contains("topic content"),
+            "should include topic content"
         );
         assert!(
             result.contains("agent content"),
@@ -210,27 +210,27 @@ mod tests {
     }
 
     #[test]
-    fn assemble_orders_global_before_space_before_agent() {
+    fn assemble_orders_global_before_topic_before_agent() {
         let global_dir = TempDir::new().unwrap();
-        let space_dir = TempDir::new().unwrap();
+        let topic_dir = TempDir::new().unwrap();
         let agent_dir = TempDir::new().unwrap();
 
         write_file(global_dir.path(), "a.md", "GLOBAL");
-        write_file(space_dir.path(), "a.md", "SPACE");
+        write_file(topic_dir.path(), "a.md", "TOPIC");
         write_file(agent_dir.path(), "a.md", "AGENT");
 
         let levels: Vec<(HierarchyLevel, &Path)> = vec![
             (HierarchyLevel::Global, global_dir.path()),
-            (HierarchyLevel::Space, space_dir.path()),
+            (HierarchyLevel::Topic, topic_dir.path()),
             (HierarchyLevel::Agent, agent_dir.path()),
         ];
 
         let result = assemble_instructions(&levels).unwrap();
         let global_pos = result.find("GLOBAL").unwrap();
-        let space_pos = result.find("SPACE").unwrap();
+        let topic_pos = result.find("TOPIC").unwrap();
         let agent_pos = result.find("AGENT").unwrap();
-        assert!(global_pos < space_pos, "Global should come before Space");
-        assert!(space_pos < agent_pos, "Space should come before Agent");
+        assert!(global_pos < topic_pos, "Global should come before Topic");
+        assert!(topic_pos < agent_pos, "Topic should come before Agent");
     }
 
     #[test]

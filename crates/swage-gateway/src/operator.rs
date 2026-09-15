@@ -95,13 +95,13 @@ fn classify_gateway_health(
 async fn list_operator_sessions(
     state: &AppState,
 ) -> Result<Vec<OperatorSessionSummary>, GatewayError> {
-    let spaces = state.space_store.list_all().await?;
+    let topics = state.topic_store.list_all().await?;
     let active_connections = state.active_connections.lock().await.clone();
     let active_turns = state.active_turns.lock().await.clone();
     let mut sessions = Vec::new();
 
-    for space in spaces {
-        for session in state.storage.list_by_space(space.id).await? {
+    for topic in topics {
+        for session in state.storage.list_by_topic(topic.id).await? {
             let preview = state
                 .storage
                 .get_latest_for_session(session.id)
@@ -111,8 +111,8 @@ async fn list_operator_sessions(
 
             sessions.push(OperatorSessionSummary {
                 id: session.id,
-                space_id: session.space_id,
-                space_name: space.name.clone(),
+                topic_id: session.topic_id,
+                topic_name: topic.name.clone(),
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: preview,

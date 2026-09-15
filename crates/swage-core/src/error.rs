@@ -570,13 +570,13 @@ pub enum GatewayError {
     #[error("conversation {id} not found")]
     ConversationNotFound { id: Uuid },
 
-    /// Space does not exist (permanent).
-    #[error("space {id} not found")]
-    SpaceNotFound { id: Uuid },
+    /// Topic does not exist (permanent).
+    #[error("topic {id} not found")]
+    TopicNotFound { id: Uuid },
 
-    /// Space name or slug conflicts with an existing space (permanent).
-    #[error("space conflict: {0}")]
-    SpaceConflict(String),
+    /// Topic name or slug conflicts with an existing topic (permanent).
+    #[error("topic conflict: {0}")]
+    TopicConflict(String),
 
     /// Request body or parameters failed validation (permanent).
     #[error("validation error: {0}")]
@@ -607,8 +607,8 @@ impl GatewayError {
             | GatewayError::BindError(_)
             | GatewayError::ShutdownError(_)
             | GatewayError::ConversationNotFound { .. }
-            | GatewayError::SpaceNotFound { .. }
-            | GatewayError::SpaceConflict(_)
+            | GatewayError::TopicNotFound { .. }
+            | GatewayError::TopicConflict(_)
             | GatewayError::ValidationError(_)
             | GatewayError::SignInUnsupported(_)
             | GatewayError::SignInFailed(_)

@@ -628,7 +628,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             history_element(&[("Hello", "Hi!")]),
             skills_element(
-                "skills: code-review (space, ~35 tokens)",
+                "skills: code-review (topic, ~35 tokens)",
                 Some("Always review for correctness."),
             ),
             prompts_element("You are helpful."),
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn skills_element_report_preview_contains_skill_names() {
-        let source = "skills: code-review (space, ~35 tokens), persona (agent, ~22 tokens)";
+        let source = "skills: code-review (topic, ~35 tokens), persona (agent, ~22 tokens)";
         let elements: Vec<Box<dyn ContextElement>> = vec![
             history_element(&[("Hi", "Hello")]),
             skills_element(source, Some("Review code. Be a persona.")),
@@ -741,7 +741,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             prompts_element("Instructions."),
             skills_element(
-                "skills: my-skill (space, ~10 tokens)",
+                "skills: my-skill (topic, ~10 tokens)",
                 Some("Skill instructions."),
             ),
             memory_element(),

@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
-import SpaceOperations from "../components/SpaceOperations.svelte";
+import TopicOperations from "../components/TopicOperations.svelte";
 import * as materialsApi from "../api/materials";
 import * as workflowApi from "../api/workflows";
 
@@ -51,7 +51,7 @@ function clickButton(label: string): void {
   button.click();
 }
 
-describe("SpaceOperations", () => {
+describe("TopicOperations", () => {
   let component: MountedComponent | undefined;
   let changed: () => void;
 
@@ -67,7 +67,7 @@ describe("SpaceOperations", () => {
       id: "material-1",
       scope_kind: "session",
       session_id: "session-1",
-      space_id: null,
+      topic_id: null,
       source_kind: "manual",
       source_attachment_id: null,
       status: "active",
@@ -82,7 +82,7 @@ describe("SpaceOperations", () => {
     });
     vi.mocked(workflowApi.exportRecoveryBundle).mockResolvedValue({
       version: 1,
-      spaces: [{}],
+      topics: [{}],
       sessions: [{}, {}],
       schedules: [],
     });
@@ -91,7 +91,7 @@ describe("SpaceOperations", () => {
         id: "attachment-1",
         scope_kind: "session",
         session_id: "session-1",
-        space_id: null,
+        topic_id: null,
         kind: "text",
         status: "queued",
         filename: "notes.txt",
@@ -129,10 +129,10 @@ describe("SpaceOperations", () => {
   });
 
   it("saves a session material through the material API", async () => {
-    component = mount(SpaceOperations, {
+    component = mount(TopicOperations, {
       target: document.body,
       props: {
-        spaceId: "space-1",
+        topicId: "topic-1",
         sessionId: "session-1",
         onChanged: changed,
       },
@@ -141,7 +141,7 @@ describe("SpaceOperations", () => {
 
     setFieldValue(inputByPlaceholder("Deployment checklist"), "Runbook");
     setFieldValue(
-      textareaByPlaceholder("Capture a constraint, checklist, or space note."),
+      textareaByPlaceholder("Capture a constraint, checklist, or topic note."),
       "Ship it.",
     );
     clickButton("Save material");
@@ -158,10 +158,10 @@ describe("SpaceOperations", () => {
   });
 
   it("queues an attachment for the active conversation", async () => {
-    component = mount(SpaceOperations, {
+    component = mount(TopicOperations, {
       target: document.body,
       props: {
-        spaceId: "space-1",
+        topicId: "topic-1",
         sessionId: "session-1",
       },
     });
@@ -188,10 +188,10 @@ describe("SpaceOperations", () => {
   });
 
   it("no longer offers schedule creation — the automation panel owns it", async () => {
-    component = mount(SpaceOperations, {
+    component = mount(TopicOperations, {
       target: document.body,
       props: {
-        spaceId: "space-1",
+        topicId: "topic-1",
         sessionId: "session-1",
       },
     });
@@ -205,10 +205,10 @@ describe("SpaceOperations", () => {
   });
 
   it("surfaces recovery export counts", async () => {
-    component = mount(SpaceOperations, {
+    component = mount(TopicOperations, {
       target: document.body,
       props: {
-        spaceId: "space-1",
+        topicId: "topic-1",
         sessionId: "session-1",
       },
     });
@@ -218,7 +218,7 @@ describe("SpaceOperations", () => {
     await flushUi();
 
     expect(workflowApi.exportRecoveryBundle).toHaveBeenCalled();
-    expect(document.body.textContent).toContain("spaces: 1");
+    expect(document.body.textContent).toContain("topics: 1");
     expect(document.body.textContent).toContain("sessions: 2");
   });
 });

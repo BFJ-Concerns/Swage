@@ -3,4 +3,4 @@
 /**
  * Whole definition supplied when creating a durable agent.
  */
-export type CreateAgentDefinitionRequest = { id: string, space_id: string | null, display_name: string, description: string, instructions: string, model_id: string | null, tool_permissions: unknown, skills?: Array<string>, output_schema: unknown, output_max_retries: number | null, };
+export type CreateAgentDefinitionRequest = { id: string, topic_id: string | null, display_name: string, description: string, instructions: string, model_id: string | null, tool_permissions: unknown, skills?: Array<string>, output_schema: unknown, output_max_retries: number | null, };

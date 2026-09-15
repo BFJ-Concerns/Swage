@@ -1,9 +1,9 @@
-//! What the space's workflow runs are doing and waiting on, for the agent
+//! What the topic's workflow runs are doing and waiting on, for the agent
 //! steering them.
 //!
 //! A lead that wakes into a fresh session has no transcript to tell it which
 //! pipelines are parked on a decision. This tool answers that from the record:
-//! every run in the caller's space that has not ended, with the events it has
+//! every run in the caller's topic that has not ended, with the events it has
 //! posted that nobody has yet acted on — a pipeline's hold is such an event,
 //! carrying the hold's content and the verdicts it accepts.
 
@@ -57,9 +57,9 @@ async fn run_value(state: &AppState, run: &WorkflowRunRecord) -> Result<Value, S
     }))
 }
 
-/// The open runs of the caller's space, or one named run in any state.
+/// The open runs of the caller's topic, or one named run in any state.
 ///
-/// A run in another space reads as absent rather than forbidden: the caller
+/// A run in another topic reads as absent rather than forbidden: the caller
 /// has no way to know it exists, so naming it would be the disclosure.
 pub async fn status_for_session(
     state: &AppState,
@@ -80,13 +80,13 @@ pub async fn status_for_session(
                 .get_workflow_run(run_id)
                 .await
                 .map_err(|error| error.to_string())?
-                .filter(|record| record.space_id == session.space_id)
+                .filter(|record| record.topic_id == session.topic_id)
                 .ok_or_else(|| format!("workflow run {run_id} was not found"))?;
             vec![record]
         }
         None => state
             .storage
-            .list_workflow_runs(session.space_id)
+            .list_workflow_runs(session.topic_id)
             .await
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -110,7 +110,7 @@ impl Tool for WorkflowRunStatusTool {
     }
 
     fn description(&self) -> &str {
-        "See which workflow runs in this space are still going and what each is waiting on. \
+        "See which workflow runs in this topic are still going and what each is waiting on. \
          Without a run_id, lists every run that has not ended — running, parked, or \
          interrupted — with its undelivered events: a pipeline holding for a decision shows \
          the hold's content and the verdicts it accepts, and you answer it with \
@@ -125,7 +125,7 @@ impl Tool for WorkflowRunStatusTool {
             "properties": {
                 "run_id": {
                     "type": "string",
-                    "description": "Optional. Omit it (or leave it empty) to list every open run in the space. Give a run's UUID to read that one run in any state.",
+                    "description": "Optional. Omit it (or leave it empty) to list every open run in the topic. Give a run's UUID to read that one run in any state.",
                 },
             },
             "additionalProperties": false,
@@ -182,15 +182,15 @@ mod tests {
     use super::*;
     use crate::state::AppState;
     use swage_storage::{
-        NewSession, NewSpace, NewWorkflowRun, NewWorkflowRunEvent, SessionStore, SpaceStore,
-        SqliteStorage, Storage, WorkflowStore,
+        NewSession, NewTopic, NewWorkflowRun, NewWorkflowRunEvent, SessionStore, SqliteStorage,
+        Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
 
     fn state(storage: Arc<SqliteStorage>) -> AppState {
         AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            storage as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -208,10 +208,10 @@ mod tests {
         GatewayToolContext::new(&base, tx, storage as Arc<dyn Storage>).with_app_state(Some(state))
     }
 
-    async fn run_in(storage: &SqliteStorage, space_id: Uuid, name: &str) -> Uuid {
+    async fn run_in(storage: &SqliteStorage, topic_id: Uuid, name: &str) -> Uuid {
         storage
             .create_workflow_run(NewWorkflowRun {
-                space_id,
+                topic_id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -235,10 +235,10 @@ mod tests {
             .id
     }
 
-    async fn session_in(storage: &SqliteStorage, space_id: Uuid) -> Uuid {
+    async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -267,8 +267,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_sees_open_runs_with_the_decisions_they_await_and_not_ended_ones() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let holding = run_in(&storage, space.id, "build-verify").await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let holding = run_in(&storage, topic.id, "build-verify").await;
         post(
             &storage,
             holding,
@@ -276,12 +276,12 @@ mod tests {
             json!({"stage": "restate", "nonce": "restate-1", "options": ["accept", "correct", "kill"]}),
         )
         .await;
-        let ended = run_in(&storage, space.id, "docs-update").await;
+        let ended = run_in(&storage, topic.id, "docs-update").await;
         storage
             .update_workflow_run_state(ended, "completed", None, None, None)
             .await
             .expect("end the run");
-        let session = session_in(&storage, space.id).await;
+        let session = session_in(&storage, topic.id).await;
         let context = context_for(state(Arc::clone(&storage)), Arc::clone(&storage), session);
 
         let result = WorkflowRunStatusTool
@@ -316,18 +316,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_run_in_another_space_reads_as_absent() {
+    async fn a_run_in_another_topic_reads_as_absent() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let mine = storage.get_or_create_default().await.expect("space");
-        let theirs = SpaceStore::create(
+        let mine = storage.get_or_create_default().await.expect("topic");
+        let theirs = TopicStore::create(
             storage.as_ref(),
-            NewSpace {
+            NewTopic {
                 name: "theirs".into(),
-                slug: swage_storage::SpaceSlug::new("theirs").expect("slug"),
+                slug: swage_storage::TopicSlug::new("theirs").expect("slug"),
             },
         )
         .await
-        .expect("other space");
+        .expect("other topic");
         let foreign = run_in(&storage, theirs.id, "build-verify").await;
         post(&storage, foreign, "decision.needed", json!({"nonce": "x"})).await;
         let session = session_in(&storage, mine.id).await;

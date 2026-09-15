@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_returns_none() {
+    fn whitetopic_only_returns_none() {
         assert!(extract_json_values("   \n  ").is_empty());
     }
 
@@ -128,7 +128,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn fenced_block_with_only_whitespace_inside_returns_none() {
+    fn fenced_block_with_only_whitetopic_inside_returns_none() {
         let input = "```json\n   \n```";
         assert!(extract_json_values(input).is_empty());
     }

@@ -12,15 +12,15 @@
   import type { ScheduleCreator } from "../protocol/ScheduleCreator";
   import type { ScheduleSpec } from "../protocol/ScheduleSpec";
   import type { SessionPolicy } from "../protocol/SessionPolicy";
-  import type { Space } from "../types";
+  import type { Topic } from "../types";
 
   interface Props {
-    spaceId: string | null;
+    topicId: string | null;
     sessionId: string | null;
-    spaces?: Space[];
+    topics?: Topic[];
   }
 
-  let { spaceId, sessionId, spaces = [] }: Props = $props();
+  let { topicId, sessionId, topics = [] }: Props = $props();
 
   // Creation form.
   let scheduleMessage = $state("");
@@ -87,10 +87,10 @@
       }
       return { policy: "continuation", session_id: sessionId };
     }
-    if (!spaceId) throw new Error("Select a space before scheduling work.");
+    if (!topicId) throw new Error("Select a topic before scheduling work.");
     const agentId = scheduleAgentId.trim();
     if (!agentId) throw new Error("Fresh-session schedules need a target agent.");
-    return { policy: "fresh", space_id: spaceId, agent_id: agentId };
+    return { policy: "fresh", topic_id: topicId, agent_id: agentId };
   }
 
   async function createAutomationSchedule(): Promise<void> {
@@ -181,11 +181,11 @@
   }
 
   function describeSession(session: SessionPolicy): string {
-    const targetSpace = session.policy === "fresh"
-      ? spaces.find((space) => space.id === session.space_id)
+    const targetTopic = session.policy === "fresh"
+      ? topics.find((topic) => topic.id === session.topic_id)
       : null;
     return session.policy === "fresh"
-      ? `fresh · space ${targetSpace?.name ?? session.space_id} · agent ${session.agent_id}`
+      ? `fresh · topic ${targetTopic?.name ?? session.topic_id} · agent ${session.agent_id}`
       : `continues session ${session.session_id}`;
   }
 

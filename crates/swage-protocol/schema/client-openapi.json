@@ -197,15 +197,15 @@
               "null"
             ]
           },
-          "space_id": {
+          "status": {
+            "type": "string"
+          },
+          "topic_id": {
             "format": "uuid",
             "type": [
               "string",
               "null"
             ]
-          },
-          "status": {
-            "type": "string"
           },
           "updated_at": {
             "format": "date-time",
@@ -733,14 +733,14 @@
               "null"
             ]
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": "string"
           }
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "created_at",
           "last_activity",
           "messages"
@@ -781,14 +781,14 @@
               "null"
             ]
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": "string"
           }
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "created_at",
           "last_activity"
         ],
@@ -895,7 +895,7 @@
               "null"
             ]
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": [
               "string",
@@ -912,7 +912,7 @@
         "type": "object"
       },
       "CreateChannelLinkCodeRequest": {
-        "description": "Request a short-lived code that links a channel conversation to a space.",
+        "description": "Request a short-lived code that links a channel conversation to a topic.",
         "properties": {
           "agent_id": {
             "default": null,
@@ -935,7 +935,7 @@
           "integration": {
             "$ref": "#/components/schemas/ExternalChannelIntegration"
           },
-          "space_id": {
+          "topic_id": {
             "default": null,
             "format": "uuid",
             "type": [
@@ -968,7 +968,7 @@
       },
       "CreateConversationRequest": {
         "additionalProperties": false,
-        "description": "Request body for the conversation and space-session creation endpoints.\n\nEvery field is optional and the body itself may be omitted: an absent\n`agent_id` selects the default `\"gateway\"` agent, and an absent\n`selected_model_id` leaves the session's model unselected. A named\n`agent_id` must be `\"gateway\"` or an agent definition visible to the\ntarget space; the gateway rejects anything else with a validation error.",
+        "description": "Request body for the conversation and topic-session creation endpoints.\n\nEvery field is optional and the body itself may be omitted: an absent\n`agent_id` selects the default `\"gateway\"` agent, and an absent\n`selected_model_id` leaves the session's model unselected. A named\n`agent_id` must be `\"gateway\"` or an agent definition visible to the\ntarget topic; the gateway rejects anything else with a validation error.",
         "properties": {
           "agent_id": {
             "type": [
@@ -1019,15 +1019,15 @@
               "null"
             ]
           },
-          "space_id": {
+          "title": {
+            "type": "string"
+          },
+          "topic_id": {
             "format": "uuid",
             "type": [
               "string",
               "null"
             ]
-          },
-          "title": {
-            "type": "string"
           }
         },
         "required": [
@@ -1066,7 +1066,7 @@
         "properties": {
           "template_id": {
             "default": null,
-            "description": "Seed the new page from a template of the same space. Absent creates a\nblank page. The seeded modules are the page's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
+            "description": "Seed the new page from a template of the same topic. Absent creates a\nblank page. The seeded modules are the page's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
             "format": "uuid",
             "type": [
               "string",
@@ -1083,7 +1083,7 @@
         "type": "object"
       },
       "CreatePageTemplateRequest": {
-        "description": "Create a reusable page shape for a space, with its module rows in the\norder they will seed.",
+        "description": "Create a reusable page shape for a topic, with its module rows in the\norder they will seed.",
         "properties": {
           "modules": {
             "default": [],
@@ -1145,7 +1145,7 @@
         ],
         "type": "object"
       },
-      "CreateSpaceRequest": {
+      "CreateTopicRequest": {
         "properties": {
           "description": {
             "default": "",
@@ -1841,18 +1841,18 @@
           "source_kind": {
             "type": "string"
           },
-          "space_id": {
-            "format": "uuid",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "status": {
             "type": "string"
           },
           "title": {
             "type": "string"
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "updated_at": {
             "format": "date-time",
@@ -2293,11 +2293,11 @@
             },
             "type": "array"
           },
-          "space_id": {
-            "format": "uuid",
+          "title": {
             "type": "string"
           },
-          "title": {
+          "topic_id": {
+            "format": "uuid",
             "type": "string"
           },
           "updated_at": {
@@ -2307,7 +2307,7 @@
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "title",
           "created_at",
           "updated_at",
@@ -2413,7 +2413,7 @@
           "name": {
             "type": "string"
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": "string"
           },
@@ -2424,7 +2424,7 @@
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "name",
           "created_at",
           "updated_at",
@@ -2511,7 +2511,7 @@
               "null"
             ]
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": [
               "string",
@@ -2776,7 +2776,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "spaces": {
+          "topics": {
             "format": "uint",
             "minimum": 0,
             "type": "integer"
@@ -2791,7 +2791,7 @@
           "id",
           "created_at",
           "size_bytes",
-          "spaces",
+          "topics",
           "workspaces",
           "sessions",
           "secrets",
@@ -3500,7 +3500,7 @@
               "null"
             ]
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": [
               "string",
@@ -4291,7 +4291,7 @@
         ]
       },
       "SessionPolicy": {
-        "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `space_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+        "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `topic_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
         "oneOf": [
           {
             "properties": {
@@ -4302,14 +4302,14 @@
                 "const": "fresh",
                 "type": "string"
               },
-              "space_id": {
+              "topic_id": {
                 "format": "uuid",
                 "type": "string"
               }
             },
             "required": [
               "policy",
-              "space_id",
+              "topic_id",
               "agent_id"
             ],
             "type": "object"
@@ -4431,7 +4431,7 @@
             ]
           },
           "id": {
-            "description": "Stable synthetic identifier for a shipped skill in this space.",
+            "description": "Stable synthetic identifier for a shipped skill in this topic.",
             "format": "uuid",
             "type": [
               "string",
@@ -4439,7 +4439,7 @@
             ]
           },
           "level": {
-            "description": "Resolved hierarchy level: `agent`, `space`, or `global`.",
+            "description": "Resolved hierarchy level: `agent`, `topic`, or `global`.",
             "type": "string"
           },
           "name": {
@@ -4494,53 +4494,6 @@
             "type": "string"
           }
         ]
-      },
-      "SpaceListResponse": {
-        "properties": {
-          "spaces": {
-            "items": {
-              "$ref": "#/components/schemas/SpaceResponse"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "spaces"
-        ],
-        "type": "object"
-      },
-      "SpaceResponse": {
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "description": {
-            "type": "string"
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "is_default": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          },
-          "slug": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "description",
-          "is_default",
-          "slug",
-          "created_at"
-        ],
-        "type": "object"
       },
       "StartInlineWorkflowRunRequest": {
         "properties": {
@@ -4886,6 +4839,53 @@
         ],
         "type": "object"
       },
+      "TopicListResponse": {
+        "properties": {
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/TopicResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "topics"
+        ],
+        "type": "object"
+      },
+      "TopicResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "is_default",
+          "slug",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "TranscribeAudioRequest": {
         "properties": {
           "audio_bytes": {
@@ -5082,7 +5082,7 @@
         },
         "type": "object"
       },
-      "UpdateSpaceRequest": {
+      "UpdateTopicRequest": {
         "properties": {
           "description": {
             "type": [
@@ -6744,10 +6744,6 @@
             "description": "SHA-256 of the exact source executed by this run.",
             "type": "string"
           },
-          "space_id": {
-            "format": "uuid",
-            "type": "string"
-          },
           "state": {
             "$ref": "#/components/schemas/WorkflowRunState"
           },
@@ -6768,11 +6764,15 @@
               }
             ],
             "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going."
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": "string"
           }
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "source_hash",
           "state",
           "args",
@@ -7266,7 +7266,7 @@
             "$ref": "#/components/schemas/WorkflowArgumentContract"
           },
           "carrying_skill": {
-            "description": "The shipped or operator skill that carries this workflow, when it is\nnot an authored row of the space. A carried workflow is immutable in\nplace; a same-named authored row shadows it.",
+            "description": "The shipped or operator skill that carries this workflow, when it is\nnot an authored row of the topic. A carried workflow is immutable in\nplace; a same-named authored row shadows it.",
             "type": [
               "string",
               "null"
@@ -7298,7 +7298,7 @@
           "name": {
             "type": "string"
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": "string"
           },
@@ -7309,7 +7309,7 @@
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "name",
           "description",
           "head_version",
@@ -7677,14 +7677,14 @@
             },
             "type": "array"
           },
-          "space_id": {
+          "topic_id": {
             "format": "uuid",
             "type": "string"
           }
         },
         "required": [
           "id",
-          "space_id",
+          "topic_id",
           "label",
           "path",
           "canonical_path",
@@ -8288,16 +8288,16 @@
         "summary": "Read restart status."
       }
     },
-    "/api/spaces": {
+    "/api/topics": {
       "get": {
-        "operationId": "list_spaces",
+        "operationId": "list_topics",
         "parameters": [],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SpaceListResponse"
+                  "$ref": "#/components/schemas/TopicListResponse"
                 }
               }
             },
@@ -8307,16 +8307,16 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "List every space."
+        "summary": "List every topic."
       },
       "post": {
-        "operationId": "create_space",
+        "operationId": "create_topic",
         "parameters": [],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateSpaceRequest"
+                "$ref": "#/components/schemas/CreateTopicRequest"
               }
             }
           },
@@ -8327,7 +8327,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SpaceResponse"
+                  "$ref": "#/components/schemas/TopicResponse"
                 }
               }
             },
@@ -8337,12 +8337,12 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Create a space."
+        "summary": "Create a topic."
       }
     },
-    "/api/spaces/{id}": {
+    "/api/topics/{id}": {
       "delete": {
-        "operationId": "delete_space",
+        "operationId": "delete_topic",
         "parameters": [
           {
             "in": "path",
@@ -8362,10 +8362,10 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Delete a space."
+        "summary": "Delete a topic."
       },
       "get": {
-        "operationId": "get_space",
+        "operationId": "get_topic",
         "parameters": [
           {
             "in": "path",
@@ -8382,7 +8382,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SpaceResponse"
+                  "$ref": "#/components/schemas/TopicResponse"
                 }
               }
             },
@@ -8392,10 +8392,10 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Read one space."
+        "summary": "Read one topic."
       },
       "put": {
-        "operationId": "update_space",
+        "operationId": "update_topic",
         "parameters": [
           {
             "in": "path",
@@ -8411,7 +8411,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateSpaceRequest"
+                "$ref": "#/components/schemas/UpdateTopicRequest"
               }
             }
           },
@@ -8422,7 +8422,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SpaceResponse"
+                  "$ref": "#/components/schemas/TopicResponse"
                 }
               }
             },
@@ -8432,16 +8432,16 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Update a space's name or description."
+        "summary": "Update a topic's name or description."
       }
     },
-    "/api/spaces/{space_id}/page-templates": {
+    "/api/topics/{topic_id}/page-templates": {
       "get": {
         "operationId": "list_page_templates",
         "parameters": [
           {
             "in": "path",
-            "name": "space_id",
+            "name": "topic_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8464,14 +8464,14 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "List page templates in a space."
+        "summary": "List page templates in a topic."
       },
       "post": {
         "operationId": "create_page_template",
         "parameters": [
           {
             "in": "path",
-            "name": "space_id",
+            "name": "topic_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8504,16 +8504,16 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Create a page template in a space."
+        "summary": "Create a page template in a topic."
       }
     },
-    "/api/spaces/{space_id}/pages": {
+    "/api/topics/{topic_id}/pages": {
       "get": {
         "operationId": "list_pages",
         "parameters": [
           {
             "in": "path",
-            "name": "space_id",
+            "name": "topic_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8536,14 +8536,14 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "List pages in a space."
+        "summary": "List pages in a topic."
       },
       "post": {
         "operationId": "create_page",
         "parameters": [
           {
             "in": "path",
-            "name": "space_id",
+            "name": "topic_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8576,16 +8576,16 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Create a page in a space."
+        "summary": "Create a page in a topic."
       }
     },
-    "/api/spaces/{space_id}/sessions": {
+    "/api/topics/{topic_id}/sessions": {
       "get": {
-        "operationId": "list_space_sessions",
+        "operationId": "list_topic_sessions",
         "parameters": [
           {
             "in": "path",
-            "name": "space_id",
+            "name": "topic_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8608,14 +8608,14 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "List conversations in a space."
+        "summary": "List conversations in a topic."
       },
       "post": {
-        "operationId": "create_space_session",
+        "operationId": "create_topic_session",
         "parameters": [
           {
             "in": "path",
-            "name": "space_id",
+            "name": "topic_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8648,7 +8648,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Create a conversation in a space."
+        "summary": "Create a conversation in a topic."
       }
     },
     "/api/turns/{id}/context": {

@@ -478,7 +478,7 @@ path. The run resumes from artefacts alone.
 
 **The seat is a fresh segment, not a session.** A run left unattended is
 steered by a standing schedule (the `schedule` tool: session `fresh`,
-this space, an agent whose definition activates this skill, an interval
+this topic, an agent whose definition activates this skill, an interval
 of ten to twenty minutes, gated on a cheap model whose criteria name the
 events worth a wake — a pipeline holding for a decision, a run that
 ended, a worker that died, allowance state that changed). Each fire is a

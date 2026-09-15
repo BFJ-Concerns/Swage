@@ -1,6 +1,6 @@
 //! SQLite implementation of PageStore.
 //!
-//! Pages are agent-run tabs on a space, assembled from module instances.
+//! Pages are agent-run tabs on a topic, assembled from module instances.
 //! The database is authoritative for page content (the knowledge base's
 //! posture): file renderings are derived projections, never the source.
 
@@ -20,18 +20,18 @@ use crate::store::PageStore;
 
 /// Every page read selects the same column list, lineage included.
 const PAGE_COLUMNS: &str =
-    "id, space_id, title, created_at, updated_at, forked_from_template_id, forked_at";
+    "id, topic_id, title, created_at, updated_at, forked_from_template_id, forked_at";
 
 fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
     let id: String = row.get(0)?;
-    let space_id: String = row.get(1)?;
+    let topic_id: String = row.get(1)?;
     let created: String = row.get(3)?;
     let updated: String = row.get(4)?;
     let forked_from: Option<String> = row.get(5)?;
     let forked_at: Option<String> = row.get(6)?;
     Ok(Page {
         id: parse_uuid(&id)?,
-        space_id: parse_uuid(&space_id)?,
+        topic_id: parse_uuid(&topic_id)?,
         title: row.get(2)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
@@ -42,12 +42,12 @@ fn row_to_page(row: &rusqlite::Row<'_>) -> rusqlite::Result<Page> {
 
 fn row_to_template(row: &rusqlite::Row<'_>) -> rusqlite::Result<PageTemplate> {
     let id: String = row.get(0)?;
-    let space_id: String = row.get(1)?;
+    let topic_id: String = row.get(1)?;
     let created: String = row.get(3)?;
     let updated: String = row.get(4)?;
     Ok(PageTemplate {
         id: parse_uuid(&id)?,
-        space_id: parse_uuid(&space_id)?,
+        topic_id: parse_uuid(&topic_id)?,
         name: row.get(2)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
@@ -108,18 +108,18 @@ impl PageStore for SqliteStorage {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO pages (id, space_id, title, created_at, updated_at)
+                "INSERT INTO pages (id, topic_id, title, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     id.to_string(),
-                    page.space_id.to_string(),
+                    page.topic_id.to_string(),
                     &page.title,
                     &now_str
                 ],
             )?;
             Ok(Page {
                 id,
-                space_id: page.space_id,
+                topic_id: page.topic_id,
                 title: page.title,
                 created_at: now,
                 updated_at: now,
@@ -142,12 +142,12 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn list_pages_by_space(&self, space_id: Uuid) -> Result<Vec<Page>, StorageError> {
+    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Page>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {PAGE_COLUMNS} FROM pages WHERE space_id = ?1 ORDER BY created_at ASC"
+                "SELECT {PAGE_COLUMNS} FROM pages WHERE topic_id = ?1 ORDER BY created_at ASC"
             ))?;
-            let rows = stmt.query_map(params![space_id.to_string()], row_to_page)?;
+            let rows = stmt.query_map(params![topic_id.to_string()], row_to_page)?;
             rows.collect()
         })
         .await
@@ -239,18 +239,18 @@ impl PageStore for SqliteStorage {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO page_templates (id, space_id, name, created_at, updated_at)
+                "INSERT INTO page_templates (id, topic_id, name, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     id.to_string(),
-                    template.space_id.to_string(),
+                    template.topic_id.to_string(),
                     &template.name,
                     &now_str
                 ],
             )?;
             Ok(PageTemplate {
                 id,
-                space_id: template.space_id,
+                topic_id: template.topic_id,
                 name: template.name,
                 created_at: now,
                 updated_at: now,
@@ -270,11 +270,11 @@ impl PageStore for SqliteStorage {
             let now_str = now.to_rfc3339();
             let tx = conn.unchecked_transaction()?;
             tx.execute(
-                "INSERT INTO page_templates (id, space_id, name, created_at, updated_at)
+                "INSERT INTO page_templates (id, topic_id, name, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![
                     id.to_string(),
-                    template.space_id.to_string(),
+                    template.topic_id.to_string(),
                     &template.name,
                     &now_str,
                 ],
@@ -297,7 +297,7 @@ impl PageStore for SqliteStorage {
             tx.commit()?;
             Ok(PageTemplate {
                 id,
-                space_id: template.space_id,
+                topic_id: template.topic_id,
                 name: template.name,
                 created_at: now,
                 updated_at: now,
@@ -309,7 +309,7 @@ impl PageStore for SqliteStorage {
     async fn get_page_template(&self, id: Uuid) -> Result<Option<PageTemplate>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, space_id, name, created_at, updated_at
+                "SELECT id, topic_id, name, created_at, updated_at
                  FROM page_templates WHERE id = ?1",
                 params![id.to_string()],
                 row_to_template,
@@ -319,16 +319,16 @@ impl PageStore for SqliteStorage {
         .await
     }
 
-    async fn list_page_templates_by_space(
+    async fn list_page_templates_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<PageTemplate>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, space_id, name, created_at, updated_at
-                 FROM page_templates WHERE space_id = ?1 ORDER BY created_at ASC",
+                "SELECT id, topic_id, name, created_at, updated_at
+                 FROM page_templates WHERE topic_id = ?1 ORDER BY created_at ASC",
             )?;
-            let rows = stmt.query_map(params![space_id.to_string()], row_to_template)?;
+            let rows = stmt.query_map(params![topic_id.to_string()], row_to_template)?;
             rows.collect()
         })
         .await
@@ -402,12 +402,12 @@ impl PageStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO pages
-                     (id, space_id, title, created_at, updated_at,
+                     (id, topic_id, title, created_at, updated_at,
                       forked_from_template_id, forked_at)
                  VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4)",
                 params![
                     id.to_string(),
-                    page.space_id.to_string(),
+                    page.topic_id.to_string(),
                     &page.title,
                     &now_str,
                     template_id.to_string(),
@@ -443,7 +443,7 @@ impl PageStore for SqliteStorage {
             tx.commit()?;
             Ok(Page {
                 id,
-                space_id: page.space_id,
+                topic_id: page.topic_id,
                 title: page.title,
                 created_at: now,
                 updated_at: now,
@@ -459,32 +459,32 @@ impl PageStore for SqliteStorage {
 mod tests {
     use crate::model::{
         NewPage, NewPageModule, NewPageTemplate, NewPageTemplateModule, NewPageTemplateModuleInput,
-        NewSpace,
+        NewTopic,
     };
-    use crate::store::SpaceStore;
+    use crate::store::TopicStore;
 
     use super::*;
 
-    async fn make_space() -> (SqliteStorage, Uuid) {
+    async fn make_topic() -> (SqliteStorage, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             &storage,
-            NewSpace {
+            NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             },
         )
         .await
         .unwrap();
-        (storage, space.id)
+        (storage, topic.id)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn pages_and_modules_round_trip_in_position_order() {
-        let (storage, space_id) = make_space().await;
+        let (storage, topic_id) = make_topic().await;
         let page = storage
             .create_page(NewPage {
-                space_id,
+                topic_id,
                 title: "Planning".into(),
             })
             .await
@@ -516,17 +516,17 @@ mod tests {
             "modules list in position order"
         );
 
-        let listed = storage.list_pages_by_space(space_id).await.unwrap();
+        let listed = storage.list_pages_by_topic(topic_id).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].title, "Planning");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn writing_a_module_touches_its_page_updated_at() {
-        let (storage, space_id) = make_space().await;
+        let (storage, topic_id) = make_topic().await;
         let page = storage
             .create_page(NewPage {
-                space_id,
+                topic_id,
                 title: "Notes".into(),
             })
             .await
@@ -557,10 +557,10 @@ mod tests {
 
     /// A template with two module rows, out of insertion order so the seed
     /// path cannot pass by accident of insertion sequence.
-    async fn seeded_template(storage: &SqliteStorage, space_id: Uuid) -> Uuid {
+    async fn seeded_template(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         let template = storage
             .create_page_template(NewPageTemplate {
-                space_id,
+                topic_id,
                 name: "Standup".into(),
             })
             .await
@@ -588,8 +588,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn templates_and_their_modules_round_trip_in_position_order() {
-        let (storage, space_id) = make_space().await;
-        let template_id = seeded_template(&storage, space_id).await;
+        let (storage, topic_id) = make_topic().await;
+        let template_id = seeded_template(&storage, topic_id).await;
 
         let modules = storage
             .list_page_template_modules(template_id)
@@ -605,7 +605,7 @@ mod tests {
         );
 
         let listed = storage
-            .list_page_templates_by_space(space_id)
+            .list_page_templates_by_topic(topic_id)
             .await
             .unwrap();
         assert_eq!(listed.len(), 1);
@@ -614,7 +614,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn template_creation_rolls_back_when_a_later_module_insert_fails() {
-        let (storage, space_id) = make_space().await;
+        let (storage, topic_id) = make_topic().await;
         storage
             .with_conn(|conn| {
                 conn.execute_batch(
@@ -630,7 +630,7 @@ mod tests {
         let result = storage
             .create_page_template_with_modules(
                 NewPageTemplate {
-                    space_id,
+                    topic_id,
                     name: "Broken template".into(),
                 },
                 vec![
@@ -651,7 +651,7 @@ mod tests {
         assert!(result.is_err(), "the trigger rejects the later module");
         assert!(
             storage
-                .list_page_templates_by_space(space_id)
+                .list_page_templates_by_topic(topic_id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -670,13 +670,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_page_forked_from_a_template_carries_its_modules_and_its_lineage() {
-        let (storage, space_id) = make_space().await;
-        let template_id = seeded_template(&storage, space_id).await;
+        let (storage, topic_id) = make_topic().await;
+        let template_id = seeded_template(&storage, topic_id).await;
 
         let page = storage
             .create_page_from_template(
                 NewPage {
-                    space_id,
+                    topic_id,
                     title: "Monday standup".into(),
                 },
                 template_id,
@@ -707,7 +707,7 @@ mod tests {
 
         let blank = storage
             .create_page(NewPage {
-                space_id,
+                topic_id,
                 title: "Scratch".into(),
             })
             .await
@@ -721,8 +721,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn page_fork_rolls_back_when_a_later_seed_insert_fails() {
-        let (storage, space_id) = make_space().await;
-        let template_id = seeded_template(&storage, space_id).await;
+        let (storage, topic_id) = make_topic().await;
+        let template_id = seeded_template(&storage, topic_id).await;
         storage
             .with_conn(|conn| {
                 conn.execute_batch(
@@ -738,7 +738,7 @@ mod tests {
         let result = storage
             .create_page_from_template(
                 NewPage {
-                    space_id,
+                    topic_id,
                     title: "Broken fork".into(),
                 },
                 template_id,
@@ -748,7 +748,7 @@ mod tests {
         assert!(result.is_err(), "the trigger rejects the later seed");
         assert!(
             storage
-                .list_pages_by_space(space_id)
+                .list_pages_by_topic(topic_id)
                 .await
                 .unwrap()
                 .is_empty(),
@@ -776,8 +776,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn editing_a_forked_page_leaves_the_template_untouched() {
-        let (storage, space_id) = make_space().await;
-        let template_id = seeded_template(&storage, space_id).await;
+        let (storage, topic_id) = make_topic().await;
+        let template_id = seeded_template(&storage, topic_id).await;
         let before = storage
             .list_page_template_modules(template_id)
             .await
@@ -786,7 +786,7 @@ mod tests {
         let page = storage
             .create_page_from_template(
                 NewPage {
-                    space_id,
+                    topic_id,
                     title: "Monday standup".into(),
                 },
                 template_id,

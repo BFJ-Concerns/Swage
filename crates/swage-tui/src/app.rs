@@ -7,9 +7,9 @@
 use crate::event::{AppEvent, EventHandler};
 use crate::gateway::{ConnectionManager, ConnectionState};
 use crate::keybindings::{AppAction, map_key_event};
-use crate::state::{ContextReport, ContextSection, ConversationState, SpaceInfo};
+use crate::state::{ContextReport, ContextSection, ConversationState, TopicInfo};
 use crate::ui::input::InputState;
-use crate::ui::space_selector::SpaceSelectorState;
+use crate::ui::topic_selector::TopicSelectorState;
 use crate::ui::{RenderParams, calculate_layout, compute_input_height, render};
 use swage_client::error::ClientError;
 use swage_client::websocket::{AssemblyReport, ServerEvent};
@@ -52,26 +52,26 @@ pub struct App {
     pub input: InputState,
     /// Whether the context inspector panel is shown on the right.
     pub show_inspector: bool,
-    /// Space selector modal overlay.
-    pub space_selector: SpaceSelectorState,
+    /// Topic selector modal overlay.
+    pub topic_selector: TopicSelectorState,
     /// True while the application event loop should keep running.
     pub is_running: bool,
     pending_reconnect: Option<PendingReconnect>,
 }
 
 impl App {
-    /// Create an `App` targeting `gateway_url` with `space` as the initial
-    /// active space.
+    /// Create an `App` targeting `gateway_url` with `topic` as the initial
+    /// active topic.
     ///
     /// Does not connect to the gateway — connection is established inside
     /// [`run`][App::run] once the terminal is set up.
-    pub fn new(gateway_url: &str, space: SpaceInfo) -> Self {
+    pub fn new(gateway_url: &str, topic: TopicInfo) -> Self {
         Self {
-            state: ConversationState::new(space),
+            state: ConversationState::new(topic),
             connection: ConnectionManager::new(gateway_url.to_string()),
             input: InputState::new(),
             show_inspector: false,
-            space_selector: SpaceSelectorState::new(),
+            topic_selector: TopicSelectorState::new(),
             is_running: true,
             pending_reconnect: None,
         }
@@ -127,7 +127,7 @@ impl App {
     /// Apply a synchronous action to the application state.
     ///
     /// Actions that require async I/O (`SendMessage`, `NewConversation`,
-    /// space confirmation) or live viewport dimensions (scroll-down actions)
+    /// topic confirmation) or live viewport dimensions (scroll-down actions)
     /// are handled directly in the event loop and do not come through here.
     pub fn dispatch_action(&mut self, action: AppAction) {
         match action {
@@ -145,7 +145,7 @@ impl App {
             AppAction::ScrollPageUp => self.state.scroll_up(10),
             AppAction::ScrollPageDown => {}
             AppAction::NewConversation => {}
-            AppAction::OpenSpaceSelector => self.space_selector.show(),
+            AppAction::OpenTopicSelector => self.topic_selector.show(),
             // SendMessage requires async I/O — handled in event_loop.
             AppAction::SendMessage => {}
         }
@@ -255,7 +255,7 @@ impl App {
                 let params = RenderParams {
                     state: &self.state,
                     input_state: &self.input,
-                    selector_state: &self.space_selector,
+                    selector_state: &self.topic_selector,
                     connection_state: conn_state,
                     is_inspector_open: self.show_inspector,
                 };
@@ -274,25 +274,25 @@ impl App {
                 app_event = event_handler.next(&mut dormant_sink) => {
                     match app_event {
                         AppEvent::Terminal(TermEvent::Key(key)) => {
-                            if self.space_selector.is_visible() {
-                                // Route keys to the space selector overlay.
+                            if self.topic_selector.is_visible() {
+                                // Route keys to the topic selector overlay.
                                 match key.code {
-                                    KeyCode::Up => self.space_selector.select_previous(),
-                                    KeyCode::Down => self.space_selector.select_next(),
+                                    KeyCode::Up => self.topic_selector.select_previous(),
+                                    KeyCode::Down => self.topic_selector.select_next(),
                                     KeyCode::Enter => {
-                                        if let Some(space) = self.space_selector.confirm() {
-                                            self.space_selector.hide();
+                                        if let Some(topic) = self.topic_selector.confirm() {
+                                            self.topic_selector.hide();
                                             self.connection.disconnect().await;
                                             match self.connection
-                                                .connect_for_space(space.id)
+                                                .connect_for_topic(topic.id)
                                                 .await
                                             {
                                                 Ok(()) => {
                                                     // Clear stale messages, tokens, and streaming state
-                                                    // before switching spaces so the display reflects the
+                                                    // before switching topics so the display reflects the
                                                     // fresh session rather than the previous one.
                                                     self.state.clear();
-                                                    self.state.set_space(space);
+                                                    self.state.set_topic(topic);
                                                     self.state.set_conversation_id(
                                                         self.connection.conversation_id(),
                                                     );
@@ -301,13 +301,13 @@ impl App {
                                                 Err(e) => {
                                                     self.state.push_local_message(
                                                         "error",
-                                                        format!("Space switch failed: {e}"),
+                                                        format!("Topic switch failed: {e}"),
                                                     );
                                                 }
                                             }
                                         }
                                     }
-                                    KeyCode::Esc => self.space_selector.hide(),
+                                    KeyCode::Esc => self.topic_selector.hide(),
                                     _ => {}
                                 }
                             } else if let Some(action) =
@@ -628,7 +628,7 @@ mod tests {
     use uuid::Uuid;
 
     fn make_state() -> ConversationState {
-        ConversationState::new(SpaceInfo {
+        ConversationState::new(TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         })
@@ -1026,11 +1026,11 @@ mod tests {
     #[test]
     fn app_new_constructs_with_disconnected_state() {
         use crate::gateway::ConnectionState;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let app = App::new("http://127.0.0.1:3000", space);
+        let app = App::new("http://127.0.0.1:3000", topic);
         assert_eq!(
             app.connection.connection_state(),
             ConnectionState::Disconnected
@@ -1044,11 +1044,11 @@ mod tests {
     #[test]
     fn dispatch_quit_sets_is_running_false() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
         app.dispatch_action(AppAction::Quit);
         assert!(!app.is_running);
     }
@@ -1056,11 +1056,11 @@ mod tests {
     #[test]
     fn dispatch_toggle_inspector_toggles_flag() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
         assert!(!app.show_inspector);
         app.dispatch_action(AppAction::ToggleInspector);
         assert!(app.show_inspector);
@@ -1071,11 +1071,11 @@ mod tests {
     #[test]
     fn dispatch_insert_char_updates_input() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
         app.dispatch_action(AppAction::InsertChar('h'));
         app.dispatch_action(AppAction::InsertChar('i'));
         assert_eq!(app.input.text, "hi");
@@ -1084,11 +1084,11 @@ mod tests {
     #[test]
     fn dispatch_delete_char_removes_from_input() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
         app.dispatch_action(AppAction::InsertChar('x'));
         assert_eq!(app.input.text, "x");
         app.dispatch_action(AppAction::DeleteChar);
@@ -1098,37 +1098,37 @@ mod tests {
     #[test]
     fn dispatch_toggle_multi_line_toggles_mode() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
         assert!(!app.input.is_multi_line);
         app.dispatch_action(AppAction::ToggleMultiLine);
         assert!(app.input.is_multi_line);
     }
 
     #[test]
-    fn dispatch_open_space_selector_shows_overlay() {
+    fn dispatch_open_topic_selector_shows_overlay() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
-        assert!(!app.space_selector.is_visible());
-        app.dispatch_action(AppAction::OpenSpaceSelector);
-        assert!(app.space_selector.is_visible());
+        let mut app = App::new("http://127.0.0.1:3000", topic);
+        assert!(!app.topic_selector.is_visible());
+        app.dispatch_action(AppAction::OpenTopicSelector);
+        assert!(app.topic_selector.is_visible());
     }
 
     #[test]
     fn dispatch_new_conversation_is_handled_in_event_loop() {
         use crate::keybindings::AppAction;
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
         // Push a message via server event so there is something to clear.
         handle_server_event(
             &mut app.state,
@@ -1143,11 +1143,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_event_disconnects_and_queues_reconnect() {
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
 
         app.handle_gateway_result(Ok(Some(ServerEvent::Shutdown {
             reason: "restart".to_string(),
@@ -1165,11 +1165,11 @@ mod tests {
 
     #[tokio::test]
     async fn clean_close_disconnects_and_queues_reconnect() {
-        let space = SpaceInfo {
+        let topic = TopicInfo {
             id: Uuid::new_v4(),
             name: "Test".to_string(),
         };
-        let mut app = App::new("http://127.0.0.1:3000", space);
+        let mut app = App::new("http://127.0.0.1:3000", topic);
 
         app.handle_gateway_result(Ok(None)).await;
 

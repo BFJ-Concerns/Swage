@@ -562,7 +562,7 @@ Three places expose the terminal account:
    the worker partition, and partial results in one coherent view alongside
    the journal.
 3. **The `workflow_run_account` tool** — an agent tool that reads the terminal
-   account for one run, scoped to the caller's space. Useful after a run ends
+   account for one run, scoped to the caller's topic. Useful after a run ends
    without returning, to find what survived and where.
 
 ### Worker directory retention
@@ -581,10 +581,10 @@ retention claim is preserved.
 ## Carried workflows
 
 A workflow script can be carried by a skill instead of being authored as a
-standalone row in a space. In the workflow listing, a carried workflow's
+standalone row in a topic. In the workflow listing, a carried workflow's
 `carrying_skill` field names the skill that provides it. Carried workflows are
 immutable in place; an operator can shadow one by authoring a same-named
-workflow in the space.
+workflow in the topic.
 
 Each shipped skill carries its own workflows: the development-process
 skills — commission, maestro, assembly, and shakedown — carry their

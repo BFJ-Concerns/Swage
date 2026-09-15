@@ -75,7 +75,7 @@ table. The carried `driver-wave` workflow is the wave's default
 shape: it takes the prepared workspaces, the staffing row, and
 per-charter overrides, refuses a charter with no workspace or timeout,
 and places every driver leg in its own staged workspace through the
-call's `cwd` — each workspace must sit inside a directory the space
+call's `cwd` — each workspace must sit inside a directory the topic
 has attached, since placement never widens the run's filesystem
 authority. The black-box verification covers each staged workspace
 before launch, and the seat sets the wave's width through the run's

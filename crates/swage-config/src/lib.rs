@@ -39,7 +39,7 @@ pub use model::{
 pub use error::{ConfigError, ConfigProblem, ConfigProblemKind};
 
 // Discovery
-pub use discovery::{DiscoveredSpace, discover, effective_root_path, resolve_root};
+pub use discovery::{DiscoveredTopic, discover, effective_root_path, resolve_root};
 
 // Merge types — PartialConfig for programmatic overlays (task definitions)
 pub use merge::PartialConfig;

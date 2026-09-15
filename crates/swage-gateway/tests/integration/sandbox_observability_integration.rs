@@ -83,7 +83,7 @@ async fn start_test_server_with_config(config: ResolvedConfig) -> (Router, Socke
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),

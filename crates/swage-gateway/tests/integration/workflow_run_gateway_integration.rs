@@ -14,7 +14,7 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewWorkspaceAttachment, SessionStore, SpaceStore, SqliteStorage, Storage, WorkflowStore,
+    NewWorkspaceAttachment, SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
     WorkspaceAttachmentStore,
 };
 use tokio::net::TcpListener;
@@ -158,7 +158,7 @@ impl LlmProvider for ResearchSweepProvider {
             }
         } else if prompt.contains("Source: https://example.test/failed") {
             text_output(r#"{"url":"https://example.test/failed","recorded":false,"observation_id":null,"note":"unreachable"}"#.to_owned())
-        } else if prompt.contains("Organise them into the space's knowledge base.") {
+        } else if prompt.contains("Organise them into the topic's knowledge base.") {
             text_output(
                 r#"{"orientation_cards":0,"assertions":0,"note":"Nothing further to organise."}"#
                     .to_owned(),
@@ -188,10 +188,10 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
     git(&repo, &["add", "seed"]).await;
     git(&repo, &["commit", "-m", "seed"]).await;
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
+            topic_id: topic.id,
             label: "placement repository".into(),
             path: repo.to_string_lossy().into_owned(),
             permissions: vec!["read".into(), "write".into()],
@@ -201,7 +201,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
         .unwrap();
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(PlacementProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -221,7 +221,7 @@ async fn saved_workflow_runs_through_the_gateway_engine_and_persists_its_final_o
         const placements = await workerPlacements();
         return {{ placements }};"#
     );
-    let script: Value = client.post(format!("{base}/api/spaces/{}/workflow-scripts", space.id)).json(&json!({"name":"final-output","description":"engine output","source":source,"delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let script: Value = client.post(format!("{base}/api/topics/{}/workflow-scripts", topic.id)).json(&json!({"name":"final-output","description":"engine output","source":source,"delivery_grant":null})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     let started: Value = client
         .post(format!(
             "{base}/api/workflow-scripts/{}/runs",
@@ -278,13 +278,13 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let provider = Arc::new(ResearchSweepProvider {
         stage_prompts: Mutex::new(vec![]),
     });
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
@@ -301,7 +301,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     let base = format!("http://{address}");
     let client = reqwest::Client::new();
     let scripts: Value = client
-        .get(format!("{base}/api/spaces/{}/workflow-scripts", space.id))
+        .get(format!("{base}/api/topics/{}/workflow-scripts", topic.id))
         .send()
         .await
         .unwrap()
@@ -372,7 +372,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     for (stage_marker, carries_purpose) in [
         ("You are scoping a research sweep.", true),
         ("Gather one source", false),
-        ("Organise them into the space's knowledge base.", false),
+        ("Organise them into the topic's knowledge base.", false),
         ("Deliver research findings.", true),
     ] {
         let stage_prompts = prompts
@@ -425,7 +425,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
             swage_config::RESERVED_WORKFLOW_AGENT_ID,
         ),
         (
-            "Organise them into the space's knowledge base.",
+            "Organise them into the topic's knowledge base.",
             vec![
                 "knowledge_orient",
                 "knowledge_search",

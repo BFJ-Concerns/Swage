@@ -47,14 +47,14 @@ fn serialise_permissions(value: &[String]) -> Result<String, StorageError> {
 
 fn row_to_workspace(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceAttachment> {
     let id: String = row.get(0)?;
-    let space_id: String = row.get(1)?;
+    let topic_id: String = row.get(1)?;
     let permissions_json: String = row.get(4)?;
     let created_at: String = row.get(9)?;
     let updated_at: String = row.get(10)?;
 
     Ok(WorkspaceAttachment {
         id: parse_uuid(0, id)?,
-        space_id: parse_uuid(1, space_id)?,
+        topic_id: parse_uuid(1, topic_id)?,
         label: row.get(2)?,
         path: row.get(3)?,
         canonical_path: row.get(6)?,
@@ -81,11 +81,11 @@ impl WorkspaceAttachmentStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO workspace_attachments (
-                    id, space_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
+                    id, topic_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?4, 0, 0, ?7, ?7)",
                 params![
                     id.to_string(),
-                    workspace.space_id.to_string(),
+                    workspace.topic_id.to_string(),
                     &workspace.label,
                     &workspace.path,
                     &permissions_json,
@@ -96,7 +96,7 @@ impl WorkspaceAttachmentStore for SqliteStorage {
 
             Ok(WorkspaceAttachment {
                 id,
-                space_id: workspace.space_id,
+                topic_id: workspace.topic_id,
                 label: workspace.label,
                 path: workspace.path.clone(),
                 canonical_path: workspace.path,
@@ -117,7 +117,7 @@ impl WorkspaceAttachmentStore for SqliteStorage {
     ) -> Result<Option<WorkspaceAttachment>, StorageError> {
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, space_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
+                "SELECT id, topic_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
                  FROM workspace_attachments
                  WHERE id = ?1",
                 params![id.to_string()],
@@ -128,18 +128,18 @@ impl WorkspaceAttachmentStore for SqliteStorage {
         .await
     }
 
-    async fn list_workspace_attachments_by_space(
+    async fn list_workspace_attachments_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<WorkspaceAttachment>, StorageError> {
         self.with_conn(move |conn| {
             let mut statement = conn.prepare(
-                "SELECT id, space_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
+                "SELECT id, topic_id, label, path, permissions_json, is_trusted, canonical_path, is_missing, is_default, created_at, updated_at
                  FROM workspace_attachments
-                 WHERE space_id = ?1
+                 WHERE topic_id = ?1
                  ORDER BY created_at ASC, label ASC",
             )?;
-            let rows = statement.query_map(params![space_id.to_string()], row_to_workspace)?;
+            let rows = statement.query_map(params![topic_id.to_string()], row_to_workspace)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
         .await
@@ -211,27 +211,27 @@ impl WorkspaceAttachmentStore for SqliteStorage {
             })
     }
 
-    async fn set_space_default_workspace(
+    async fn set_topic_default_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Option<Uuid>,
     ) -> Result<(), StorageError> {
         let workspace_id = workspace_id.map(|id| id.to_string());
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             if let Some(ref workspace_id) = workspace_id {
-                let found_space: Option<String> = tx
+                let found_topic: Option<String> = tx
                     .query_row(
-                        "SELECT space_id FROM workspace_attachments WHERE id = ?1",
+                        "SELECT topic_id FROM workspace_attachments WHERE id = ?1",
                         params![workspace_id],
                         |row| row.get(0),
                     )
                     .optional()?;
-                match found_space {
-                    Some(found_space) if found_space == space_id.to_string() => {}
+                match found_topic {
+                    Some(found_topic) if found_topic == topic_id.to_string() => {}
                     Some(_) => {
                         return Err(rusqlite::Error::InvalidParameterName(
-                            "workspace does not belong to space".to_string(),
+                            "workspace does not belong to topic".to_string(),
                         ));
                     }
                     None => return Err(rusqlite::Error::QueryReturnedNoRows),
@@ -241,8 +241,8 @@ impl WorkspaceAttachmentStore for SqliteStorage {
             tx.execute(
                 "UPDATE workspace_attachments
                  SET is_default = 0, updated_at = ?2
-                 WHERE space_id = ?1",
-                params![space_id.to_string(), Utc::now().to_rfc3339()],
+                 WHERE topic_id = ?1",
+                params![topic_id.to_string(), Utc::now().to_rfc3339()],
             )?;
             if let Some(workspace_id) = workspace_id {
                 tx.execute(

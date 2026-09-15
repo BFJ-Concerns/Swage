@@ -30,8 +30,8 @@ pub enum AppAction {
     ScrollDown,
     /// Scroll conversation history down by one page.
     ScrollPageDown,
-    /// Open the space selector overlay.
-    OpenSpaceSelector,
+    /// Open the topic selector overlay.
+    OpenTopicSelector,
     /// Toggle the context inspector panel.
     ToggleInspector,
     /// Start a new conversation.
@@ -55,7 +55,7 @@ pub fn map_key_event(event: KeyEvent, is_multi_line: bool) -> Option<AppAction> 
     if modifiers == KeyModifiers::CONTROL {
         return match code {
             KeyCode::Char('e') => Some(AppAction::ToggleMultiLine),
-            KeyCode::Char('p') => Some(AppAction::OpenSpaceSelector),
+            KeyCode::Char('p') => Some(AppAction::OpenTopicSelector),
             KeyCode::Char('i') => Some(AppAction::ToggleInspector),
             KeyCode::Char('c') | KeyCode::Char('q') => Some(AppAction::Quit),
             KeyCode::Char('n') => Some(AppAction::NewConversation),
@@ -114,7 +114,7 @@ mod tests {
             AppAction::ScrollPageUp,
             AppAction::ScrollDown,
             AppAction::ScrollPageDown,
-            AppAction::OpenSpaceSelector,
+            AppAction::OpenTopicSelector,
             AppAction::ToggleInspector,
             AppAction::NewConversation,
             AppAction::Quit,
@@ -155,10 +155,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_p_opens_space_selector() {
+    fn ctrl_p_opens_topic_selector() {
         assert_eq!(
             map_key_event(ctrl(KeyCode::Char('p')), false),
-            Some(AppAction::OpenSpaceSelector)
+            Some(AppAction::OpenTopicSelector)
         );
     }
 

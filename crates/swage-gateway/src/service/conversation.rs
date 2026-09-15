@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
     model::{NewSession, NewThread, ThreadBranch, TurnState},
-    store::{SpaceStore, Storage},
+    store::{Storage, TopicStore},
 };
 
 use swage_protocol::client::conversation::TurnState as WireTurnState;
@@ -38,15 +38,15 @@ fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
 #[derive(Clone)]
 pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
-    pub(crate) space_store: Arc<dyn SpaceStore>,
+    pub(crate) topic_store: Arc<dyn TopicStore>,
     config: Option<(swage_config::ResolvedConfig, PathBuf)>,
 }
 
 impl ConversationService {
-    pub fn new(storage: Arc<dyn Storage>, space_store: Arc<dyn SpaceStore>) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, topic_store: Arc<dyn TopicStore>) -> Self {
         Self {
             storage,
-            space_store,
+            topic_store,
             config: None,
         }
     }
@@ -62,8 +62,8 @@ impl ConversationService {
 
     async fn resolved_effort(
         &self,
-        space_id: Uuid,
-        space_slug: &str,
+        topic_id: Uuid,
+        topic_slug: &str,
         agent_id: &str,
         selected_model_id: Option<&str>,
         requested: Option<swage_protocol::client::settings::Effort>,
@@ -77,13 +77,13 @@ impl ConversationService {
         let config = crate::turn::load_session_config_from_root(
             config_root,
             active_config.clone(),
-            space_slug,
+            topic_slug,
             agent_id,
         )?;
         let config = match crate::service::resolve_effective_agent_definition(
             self.storage.as_ref(),
             agent_id,
-            space_id,
+            topic_id,
         )
         .await
         {
@@ -113,7 +113,7 @@ impl ConversationService {
         effort.map(|effort| serde_json::json!({"effort": effort}))
     }
 
-    /// Create a new conversation in the default space.
+    /// Create a new conversation in the default topic.
     ///
     /// Also creates a default thread for the session so that process_turn has
     /// a thread_id to attach turns and messages to.
@@ -138,23 +138,23 @@ impl ConversationService {
         &self,
         request: CreateConversationRequest,
     ) -> Result<ConversationResponse, GatewayError> {
-        let space = self.space_store.get_or_create_default().await?;
-        let agent_id = self.validated_agent_id(space.id, request.agent_id).await?;
+        let topic = self.topic_store.get_or_create_default().await?;
+        let agent_id = self.validated_agent_id(topic.id, request.agent_id).await?;
         let selected_model_id = normalise_selected_model_id(request.selected_model_id);
         let effort = self
             .resolved_effort(
-                space.id,
-                &space.slug,
+                topic.id,
+                &topic.slug,
                 &agent_id,
                 selected_model_id.as_deref(),
                 request.effort,
             )
             .await?;
-        let active_workspace_attachment_id = self.default_workspace_for_space(space.id).await?;
+        let active_workspace_attachment_id = self.default_workspace_for_topic(topic.id).await?;
         let mut session = self
             .storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: agent_id.clone(),
                 metadata: Self::effort_metadata(effort),
                 active_workspace_attachment_id,
@@ -178,7 +178,7 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            space_id: session.space_id,
+            topic_id: session.topic_id,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -189,15 +189,15 @@ impl ConversationService {
     /// runs under.
     ///
     /// An absent selector means the default agent. A named selector must be
-    /// the default agent or an agent definition visible to the space
-    /// (space-scoped shadowing global) — anything else is a validation error,
+    /// the default agent or an agent definition visible to the topic
+    /// (topic-scoped shadowing global) — anything else is a validation error,
     /// never a session that silently runs under configuration the client did
     /// not choose. Trust-carrying paths that name their agent directly
-    /// (schedule runs) use `create_session_in_space_for_agent` and are not
+    /// (schedule runs) use `create_session_in_topic_for_agent` and are not
     /// validated here.
     async fn validated_agent_id(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         requested: Option<String>,
     ) -> Result<String, GatewayError> {
         let Some(agent_id) = requested else {
@@ -212,22 +212,22 @@ impl ConversationService {
         if crate::service::resolve_effective_agent_definition(
             self.storage.as_ref(),
             &agent_id,
-            space_id,
+            topic_id,
         )
         .await?
         .is_none()
         {
             return Err(GatewayError::ValidationError(format!(
-                "no agent definition named '{agent_id}' is visible to this space"
+                "no agent definition named '{agent_id}' is visible to this topic"
             )));
         }
         Ok(agent_id)
     }
 
-    /// List all conversations in the default space, ordered by most-recent activity.
+    /// List all conversations in the default topic, ordered by most-recent activity.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
-        let space = self.space_store.get_or_create_default().await?;
-        let sessions = self.storage.list_by_space(space.id).await?;
+        let topic = self.topic_store.get_or_create_default().await?;
+        let sessions = self.storage.list_by_topic(topic.id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
 
@@ -324,7 +324,7 @@ impl ConversationService {
 
         Ok(ConversationDetail {
             id: session.id,
-            space_id: session.space_id,
+            topic_id: session.topic_id,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -332,21 +332,21 @@ impl ConversationService {
         })
     }
 
-    /// List sessions belonging to a specific space.
+    /// List sessions belonging to a specific topic.
     ///
-    /// Returns `SpaceNotFound` if no space with the given ID exists.
-    pub async fn list_sessions_by_space(
+    /// Returns `TopicNotFound` if no topic with the given ID exists.
+    pub async fn list_sessions_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<ConversationSummary>, GatewayError> {
-        // Verify the space exists before listing — gives a clean 404 rather
-        // than silently returning an empty list for a non-existent space.
-        self.space_store
-            .get(space_id)
+        // Verify the topic exists before listing — gives a clean 404 rather
+        // than silently returning an empty list for a non-existent topic.
+        self.topic_store
+            .get(topic_id)
             .await?
-            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
+            .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
 
-        let sessions = self.storage.list_by_space(space_id).await?;
+        let sessions = self.storage.list_by_topic(topic_id).await?;
 
         let mut summaries = Vec::with_capacity(sessions.len());
         for session in sessions {
@@ -371,54 +371,54 @@ impl ConversationService {
         Ok(summaries)
     }
 
-    /// Create a new session in the specified space.
+    /// Create a new session in the specified topic.
     ///
-    /// Returns `SpaceNotFound` if no space with the given ID exists.
-    pub async fn create_session_in_space(
+    /// Returns `TopicNotFound` if no topic with the given ID exists.
+    pub async fn create_session_in_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_space_with_model(space_id, None)
+        self.create_session_in_topic_with_model(topic_id, None)
             .await
     }
 
-    pub async fn create_session_in_space_with_model(
+    pub async fn create_session_in_topic_with_model(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_space_for_agent(space_id, DEFAULT_AGENT_ID, selected_model_id)
+        self.create_session_in_topic_for_agent(topic_id, DEFAULT_AGENT_ID, selected_model_id)
             .await
     }
 
-    /// Create a session in a space from a client request, resolving and
+    /// Create a session in a topic from a client request, resolving and
     /// validating its agent selector.
     ///
-    /// The space is checked first so a missing space reports 404 rather than
-    /// an unknown-agent validation error against a space that does not exist.
-    pub async fn create_session_in_space_from_request(
+    /// The topic is checked first so a missing topic reports 404 rather than
+    /// an unknown-agent validation error against a topic that does not exist.
+    pub async fn create_session_in_topic_from_request(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         request: CreateConversationRequest,
     ) -> Result<ConversationResponse, GatewayError> {
-        let space = self
-            .space_store
-            .get(space_id)
+        let topic = self
+            .topic_store
+            .get(topic_id)
             .await?
-            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-        let agent_id = self.validated_agent_id(space_id, request.agent_id).await?;
+            .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+        let agent_id = self.validated_agent_id(topic_id, request.agent_id).await?;
         let selected_model_id = normalise_selected_model_id(request.selected_model_id);
         let effort = self
             .resolved_effort(
-                space_id,
-                &space.slug,
+                topic_id,
+                &topic.slug,
                 &agent_id,
                 selected_model_id.as_deref(),
                 request.effort,
             )
             .await?;
-        self.create_session_in_space_for_agent_with_effort(
-            space_id,
+        self.create_session_in_topic_for_agent_with_effort(
+            topic_id,
             &agent_id,
             selected_model_id,
             effort,
@@ -426,19 +426,19 @@ impl ConversationService {
         .await
     }
 
-    /// Create a new session in the specified space, owned by a specific agent.
+    /// Create a new session in the specified topic, owned by a specific agent.
     ///
     /// The general session-creation path: interactive conversations use the
     /// default `"gateway"` agent via the wrappers above, while fresh-policy
     /// schedule runs create sessions for their schedule's target agent.
-    pub async fn create_session_in_space_for_agent(
+    pub async fn create_session_in_topic_for_agent(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         agent_id: &str,
         selected_model_id: Option<String>,
     ) -> Result<ConversationResponse, GatewayError> {
-        self.create_session_in_space_for_agent_with_effort(
-            space_id,
+        self.create_session_in_topic_for_agent_with_effort(
+            topic_id,
             agent_id,
             selected_model_id,
             None,
@@ -446,24 +446,24 @@ impl ConversationService {
         .await
     }
 
-    async fn create_session_in_space_for_agent_with_effort(
+    async fn create_session_in_topic_for_agent_with_effort(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         agent_id: &str,
         selected_model_id: Option<String>,
         effort: Option<swage_protocol::client::settings::Effort>,
     ) -> Result<ConversationResponse, GatewayError> {
-        // Verify the space exists — return 404 rather than a FK constraint error.
-        self.space_store
-            .get(space_id)
+        // Verify the topic exists — return 404 rather than a FK constraint error.
+        self.topic_store
+            .get(topic_id)
             .await?
-            .ok_or(GatewayError::SpaceNotFound { id: space_id })?;
-        let active_workspace_attachment_id = self.default_workspace_for_space(space_id).await?;
+            .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+        let active_workspace_attachment_id = self.default_workspace_for_topic(topic_id).await?;
 
         let mut session = self
             .storage
             .create_session(NewSession {
-                space_id,
+                topic_id,
                 agent_id: agent_id.to_string(),
                 metadata: Self::effort_metadata(effort),
                 active_workspace_attachment_id,
@@ -486,7 +486,7 @@ impl ConversationService {
 
         Ok(ConversationResponse {
             id: session.id,
-            space_id: session.space_id,
+            topic_id: session.topic_id,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -639,13 +639,13 @@ impl ConversationService {
         Ok(false)
     }
 
-    async fn default_workspace_for_space(
+    async fn default_workspace_for_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Option<Uuid>, GatewayError> {
         Ok(self
             .storage
-            .list_workspace_attachments_by_space(space_id)
+            .list_workspace_attachments_by_topic(topic_id)
             .await?
             .into_iter()
             .find(|workspace| workspace.is_default && !workspace.is_missing)

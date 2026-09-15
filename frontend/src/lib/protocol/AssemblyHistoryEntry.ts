@@ -3,4 +3,4 @@
 /**
  * One turn whose persisted assembly report can be opened in the context inspector.
  */
-export type AssemblyHistoryEntry = { turn_id: string, session_id: string, space_id: string, recorded_at: string, assembly_name: string, };
+export type AssemblyHistoryEntry = { turn_id: string, session_id: string, topic_id: string, recorded_at: string, assembly_name: string, };

@@ -82,7 +82,7 @@ pub(crate) struct GatewayDispatcherRequest<'a> {
     pub(crate) config: &'a swage_config::ResolvedConfig,
     pub(crate) agent_config: &'a AgentConfig,
     pub(crate) session_metadata: Option<&'a serde_json::Value>,
-    pub(crate) space_id: Option<Uuid>,
+    pub(crate) topic_id: Option<Uuid>,
     pub(crate) active_workspace_attachment_id: Option<Uuid>,
     pub(crate) ws_tx: mpsc::UnboundedSender<ServerEvent>,
     pub(crate) session_id: Option<Uuid>,
@@ -403,7 +403,7 @@ pub(crate) async fn build_gateway_dispatcher(
         config,
         agent_config,
         session_metadata,
-        space_id,
+        topic_id,
         active_workspace_attachment_id,
         ws_tx,
         session_id,
@@ -416,7 +416,7 @@ pub(crate) async fn build_gateway_dispatcher(
         });
     }
 
-    let mut workspace_policy = match space_id {
+    let mut workspace_policy = match topic_id {
         Some(id) => Some(
             load_trusted_workspace_policy(&state.storage, id, active_workspace_attachment_id).await,
         ),
@@ -434,7 +434,7 @@ pub(crate) async fn build_gateway_dispatcher(
     let permissions = build_permission_config(
         config,
         startup_config,
-        space_id,
+        topic_id,
         session_id,
         &session_approval_grants,
     );
@@ -594,7 +594,7 @@ mod tests {
         record_degraded_execution(
             &state,
             &ExecutionIsolation::Degraded {
-                reason: "fallback_sandbox_without_namespace_isolation".into(),
+                reason: "fallback_sandbox_without_nametopic_isolation".into(),
             },
             "scheduled turn",
             Some(session_id),
@@ -702,7 +702,7 @@ mod tests {
                 config: &config,
                 agent_config: &agent_config,
                 session_metadata: None,
-                space_id: None,
+                topic_id: None,
                 active_workspace_attachment_id: None,
                 ws_tx,
                 session_id: Some(session_id),
@@ -735,7 +735,7 @@ mod tests {
                 config: &config,
                 agent_config: &agent_config,
                 session_metadata: None,
-                space_id: None,
+                topic_id: None,
                 active_workspace_attachment_id: None,
                 ws_tx,
                 session_id: Some(session_id),

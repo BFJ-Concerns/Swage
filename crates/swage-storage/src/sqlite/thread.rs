@@ -619,8 +619,8 @@ impl ThreadStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewMessage, NewSession, NewSpace, NewToolCall, NewTurn, TurnState};
-    use crate::store::{MessageStore, SessionStore, SpaceStore, ToolCallStore, TurnStore};
+    use crate::model::{NewMessage, NewSession, NewToolCall, NewTopic, NewTurn, TurnState};
+    use crate::store::{MessageStore, SessionStore, ToolCallStore, TopicStore, TurnStore};
     use swage_core::{
         Role, compact_tool_arguments_for_model, compact_tool_result_for_model,
         compact_tool_result_for_model_with_reference, tool_result_reference,
@@ -628,13 +628,13 @@ mod tests {
 
     use super::*;
 
-    // Create a storage instance and return a valid (space_id, session_id) pair.
+    // Create a storage instance and return a valid (topic_id, session_id) pair.
     async fn make_session() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        // Explicit trait qualification: both SpaceStore and ThreadStore define `create`.
-        let space = SpaceStore::create(
+        // Explicit trait qualification: both TopicStore and ThreadStore define `create`.
+        let topic = TopicStore::create(
             &storage,
-            NewSpace {
+            NewTopic {
                 name: "proj".into(),
                 slug: "proj".into(),
             },
@@ -643,14 +643,14 @@ mod tests {
         .unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-1".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
             })
             .await
             .unwrap();
-        (storage, space.id, session.id)
+        (storage, topic.id, session.id)
     }
 
     fn new_thread(session_id: Uuid) -> NewThread {
@@ -782,9 +782,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn list_by_session_excludes_other_sessions() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             &storage,
-            NewSpace {
+            NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             },
@@ -793,7 +793,7 @@ mod tests {
         .unwrap();
         let s1 = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -802,7 +802,7 @@ mod tests {
             .unwrap();
         let s2 = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

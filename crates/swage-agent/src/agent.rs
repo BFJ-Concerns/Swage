@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_tool_error_detail_collapses_whitespace_and_truncates() {
+    fn compact_tool_error_detail_collapses_whitetopic_and_truncates() {
         let detail = compact_tool_error_detail(&format!("{}\n{}", "x ".repeat(400), "ignored"));
 
         assert!(detail.ends_with("..."));
@@ -118,7 +118,7 @@ mod approval_tests {
     };
 
     use swage_storage::model::{ApprovalKind, NewSession, NewThread, NewTurn};
-    use swage_storage::store::{SessionStore, SpaceStore, ThreadStore, TurnStore};
+    use swage_storage::store::{SessionStore, ThreadStore, TopicStore, TurnStore};
     use swage_storage::{SqliteStorage, Storage, TurnState};
 
     use super::*;
@@ -127,13 +127,13 @@ mod approval_tests {
         registrar: ApprovalChannelRegistrar,
     ) -> (Agent, TurnExecutionContext) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -174,7 +174,7 @@ mod approval_tests {
             session_id: session.id,
             thread_id: thread.id,
             turn_id: turn.id,
-            space_id: Some(space.id),
+            topic_id: Some(topic.id),
         };
         (agent, execution)
     }
@@ -373,7 +373,7 @@ mod compaction_caller_tests {
         ToolCompletionResponse,
     };
     use swage_storage::model::{NewSession, NewThread};
-    use swage_storage::store::{SessionStore, SpaceStore, ThreadStore};
+    use swage_storage::store::{SessionStore, ThreadStore, TopicStore};
     use swage_storage::{SqliteStorage, Storage};
 
     use super::*;
@@ -432,13 +432,13 @@ mod compaction_caller_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn provider_without_native_counting_can_still_compact() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
-        let space = storage
+        let topic = storage
             .get_or_create_default()
             .await
-            .expect("default space");
+            .expect("default topic");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -480,7 +480,7 @@ mod compaction_caller_tests {
                         session_id: session.id,
                         thread_id: thread.id,
                         turn_id: Uuid::new_v4(),
-                        space_id: Some(space.id),
+                        topic_id: Some(topic.id),
                     },
                     user_message: "continue".into(),
                     assembled_context: messages,
@@ -1983,9 +1983,9 @@ impl Agent {
                     }
                 };
 
-                let Some(space_id) = execution.space_id else {
+                let Some(topic_id) = execution.topic_id else {
                     return Ok((
-                        "delegation is not available — space context is missing".to_string(),
+                        "delegation is not available — topic context is missing".to_string(),
                         true,
                         "error".to_string(),
                     ));
@@ -2038,7 +2038,7 @@ impl Agent {
                         &call.call_id,
                         &self.config.agent_id,
                         execution.turn_id,
-                        space_id,
+                        topic_id,
                         cancel_token.clone(),
                         completion_mode,
                     )

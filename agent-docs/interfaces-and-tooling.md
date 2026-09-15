@@ -204,15 +204,15 @@ governed system.
 
 ## Pages
 
-Pages are agent-run work surfaces inside a space, assembled from ordered
-module instances. Each page belongs to one space and carries its own module
+Pages are agent-run work surfaces inside a topic, assembled from ordered
+module instances. Each page belongs to one topic and carries its own module
 list, annotations, and provenance.
 
 ### Templates
 
-A page template is a reusable shape for a space: a named list of module
+A page template is a reusable shape for a topic: a named list of module
 rows in a fixed order. Templates are created through
-`POST /api/spaces/{space_id}/page-templates` (`CreatePageTemplateRequest`
+`POST /api/topics/{topic_id}/page-templates` (`CreatePageTemplateRequest`
 in `swage-protocol::client::page`). Each module input carries an optional
 `kind` (defaults to `"document"`) and a `source` string.
 
@@ -248,7 +248,7 @@ target kinds:
 |---|---|---|
 | `channel` | `integration`, `account`, `conversation` | An external channel (Telegram, dev DM/thread) |
 | `local_storage` | — | The gateway's local store, as a log record |
-| `page` | `page_id` | A page in the run's own space |
+| `page` | `page_id` | A page in the run's own topic |
 | `webhook` | `url` | An HTTP endpoint |
 
 `store_local_output` on the routing request adds a `local_storage` target
@@ -342,7 +342,7 @@ The crate is organised into four surface modules:
 
 | Surface | Module | Anchor type | Scope |
 |---|---|---|---|
-| Client | `src/client/` | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, spaces, settings, materials, recovery, context reports, provider sign-in |
+| Client | `src/client/` | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, topics, settings, materials, recovery, context reports, provider sign-in |
 | Hosting | `src/hosting.rs` | `HostingSurface` | Presence, operator overview, agent definitions, approvals, configuration |
 | Device | `src/device.rs` | `DeviceSurface` | Device registration, remote tool execution |
 | Channel | `src/channel.rs` | `ChannelSurface` | Inbound messages (DM/thread), delivery log, channel status |
@@ -357,7 +357,7 @@ existing field already reaches it.
 `routes.rs` (`swage-protocol::client::routes`) carries a growing manifest of
 client-surface HTTP routes: method, path template, path parameters, request
 body schema name, and response body schema name. The manifest does not yet
-cover the full client surface — the space CRUD routes are the first entries;
+cover the full client surface — the topic CRUD routes are the first entries;
 routes not yet in the manifest are registered directly on the router and are
 not covered by the OpenAPI or generated-client projections. Failures are not
 listed per route — every route answers a failure with `ApiErrorBody`,
@@ -504,8 +504,8 @@ two sandbox-eligible tools.
 | `workflow_run` | `workflow_run.rs` |
 | `workflow_list` | `workflow_list.rs` |
 | `workflow_save` | `workflow_save.rs` |
-| `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session space; a run in another space reads as absent. |
-| `workflow_run_status` | `workflow_run_status.rs` — lists the space's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same space scoping as `workflow_run_account`. |
+| `workflow_run_account` | `workflow_run_account.rs` — reads a run's terminal account. Scoped to the caller's session topic; a run in another topic reads as absent. |
+| `workflow_run_status` | `workflow_run_status.rs` — lists the topic's runs that have not ended, each with its undelivered events (a pipeline's pending hold among them), or reads one named run in any state. Same topic scoping as `workflow_run_account`. |
 
 ### Pages and delivery
 

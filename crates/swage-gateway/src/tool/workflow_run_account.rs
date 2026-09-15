@@ -11,9 +11,9 @@ use crate::{state::AppState, tool::Tool, tool_executor::GatewayToolContext};
 
 pub const WORKFLOW_RUN_ACCOUNT_TOOL: &str = "workflow_run_account";
 
-/// Read one run's account, scoped to the caller's own space.
+/// Read one run's account, scoped to the caller's own topic.
 ///
-/// A run in another space reads as absent rather than forbidden: the caller has
+/// A run in another topic reads as absent rather than forbidden: the caller has
 /// no way to know it exists, so naming it would be the disclosure.
 pub async fn account_for_run(
     state: &AppState,
@@ -31,7 +31,7 @@ pub async fn account_for_run(
         .get_workflow_run(run_id)
         .await
         .map_err(|error| error.to_string())?
-        .filter(|record| record.space_id == session.space_id)
+        .filter(|record| record.topic_id == session.topic_id)
         .ok_or_else(|| format!("workflow run {run_id} was not found"))?;
 
     let account = record
@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::state::AppState;
     use swage_storage::{
-        NewSession, NewSpace, NewWorkflowRun, SessionStore, SpaceStore, SqliteStorage, Storage,
+        NewSession, NewTopic, NewWorkflowRun, SessionStore, SqliteStorage, Storage, TopicStore,
         WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
@@ -135,7 +135,7 @@ mod tests {
     fn state(storage: Arc<SqliteStorage>) -> AppState {
         AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn SpaceStore>,
+            storage as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
@@ -153,10 +153,10 @@ mod tests {
         GatewayToolContext::new(&base, tx, storage as Arc<dyn Storage>).with_app_state(Some(state))
     }
 
-    async fn run_in(storage: &SqliteStorage, space_id: Uuid) -> Uuid {
+    async fn run_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_workflow_run(NewWorkflowRun {
-                space_id,
+                topic_id,
                 parent_run_id: None,
                 parent_seq: None,
                 script_version_id: None,
@@ -217,15 +217,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_reads_the_ending_the_partition_and_the_recovered_work() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = run_in(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = run_in(&storage, topic.id).await;
         storage
             .set_workflow_run_terminal_account(run_id, recorded_account())
             .await
             .expect("record the account");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -261,11 +261,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_run_still_going_reads_as_unended_rather_than_missing() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = run_in(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = run_in(&storage, topic.id).await;
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -289,15 +289,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_lead_cannot_read_a_terminal_account_outside_the_recorded_contract() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let run_id = run_in(&storage, space.id).await;
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let run_id = run_in(&storage, topic.id).await;
         storage
             .set_workflow_run_terminal_account(run_id, json!({"ending": "invented"}))
             .await
             .expect("record malformed account");
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -323,26 +323,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_run_in_another_space_reads_as_absent() {
+    async fn a_run_in_another_topic_reads_as_absent() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let space = storage.get_or_create_default().await.expect("space");
-        let other = SpaceStore::create(
+        let topic = storage.get_or_create_default().await.expect("topic");
+        let other = TopicStore::create(
             &*storage,
-            NewSpace {
-                name: "Other space".into(),
-                slug: "other-space".into(),
+            NewTopic {
+                name: "Other topic".into(),
+                slug: "other-topic".into(),
             },
         )
         .await
-        .expect("second space");
-        let run_id = run_in(&storage, space.id).await;
+        .expect("second topic");
+        let run_id = run_in(&storage, topic.id).await;
         storage
             .set_workflow_run_terminal_account(run_id, recorded_account())
             .await
             .expect("record the account");
         let session = storage
             .create_session(NewSession {
-                space_id: other.id,
+                topic_id: other.id,
                 agent_id: "gateway".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -358,7 +358,7 @@ mod tests {
         let error = WorkflowRunAccountTool
             .execute(json!({"run_id": run_id.to_string()}), &context)
             .await
-            .expect_err("another space's run is not readable");
+            .expect_err("another topic's run is not readable");
         assert!(error.to_string().contains("was not found"), "{error}");
     }
 }

@@ -25,7 +25,7 @@ describe("page API generated transport", () => {
       .mockResolvedValueOnce(response({ id: "module", annotations: [] }))
       .mockResolvedValueOnce(response({ id: "annotation" }));
 
-    await createPage("space-id", "Research");
+    await createPage("topic-id", "Research");
     await writePageModule("page-id", { source: "# Notes" });
     await createPageAnnotation("page-id", {
       module_id: "module-id",
@@ -33,7 +33,7 @@ describe("page API generated transport", () => {
       tags: ["review"],
     });
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/spaces/space-id/pages", {
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/topics/topic-id/pages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "Research" }),

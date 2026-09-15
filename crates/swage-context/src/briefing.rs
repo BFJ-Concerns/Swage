@@ -97,7 +97,7 @@ mod tests {
     fn identity_priority_source_and_live_substitution_are_visible() {
         let element = BriefingElement::new(ResolvedNamedElement {
             name: "current-work".into(),
-            level: HierarchyLevel::Space,
+            level: HierarchyLevel::Topic,
             path: "elements/current-work.md".into(),
             content: "Task: {{task}}; owner: {{owner}}".into(),
         });
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(element.priority(), 100);
         assert_eq!(
             element.source(),
-            "briefing 'current-work' (Space, elements/current-work.md)"
+            "briefing 'current-work' (Topic, elements/current-work.md)"
         );
         assert_eq!(
             element.content()[0].text_content(),
@@ -128,7 +128,7 @@ mod tests {
         );
         assert_eq!(
             output.report.elements[0].source,
-            "briefing 'current-work' (Space, elements/current-work.md)"
+            "briefing 'current-work' (Topic, elements/current-work.md)"
         );
     }
 
@@ -136,7 +136,7 @@ mod tests {
     fn stored_slot_shaped_values_render_once_on_both_composition_paths() {
         let resolved = ResolvedNamedElement {
             name: "current-work".into(),
-            level: HierarchyLevel::Space,
+            level: HierarchyLevel::Topic,
             path: "elements/current-work.md".into(),
             content: "Task: {{task}}".into(),
         };

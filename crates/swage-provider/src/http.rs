@@ -201,7 +201,7 @@ pub(crate) fn parse_sse_block(block: &str) -> Option<SseEvent> {
         if let Some(val) = line.strip_prefix("event:") {
             event_type = Some(val.trim_start_matches(' ').to_owned());
         } else if let Some(val) = line.strip_prefix("data:") {
-            // Leading single space is stripped per spec; additional spaces are kept.
+            // Leading single space is stripped per spec; additional topics are kept.
             let content = val.strip_prefix(' ').unwrap_or(val);
             data_lines.push(content.to_owned());
         }
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_strips_single_leading_space_from_data() {
+    fn parse_strips_single_leading_topic_from_data() {
         // SSE spec: "data: value" → "value" (one leading space stripped).
         let block = "data: value with leading space";
         let event = parse_sse_block(block).expect("should parse");

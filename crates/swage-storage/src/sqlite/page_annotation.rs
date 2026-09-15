@@ -191,8 +191,8 @@ impl PageAnnotationStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewPage, NewPageModule, NewSpace};
-    use crate::store::{PageStore, SpaceStore};
+    use crate::model::{NewPage, NewPageModule, NewTopic};
+    use crate::store::{PageStore, TopicStore};
 
     use super::*;
 
@@ -211,9 +211,9 @@ mod tests {
 
     async fn seeded() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = SpaceStore::create(
+        let topic = TopicStore::create(
             &storage,
-            NewSpace {
+            NewTopic {
                 name: "p".into(),
                 slug: "p".into(),
             },
@@ -222,7 +222,7 @@ mod tests {
         .unwrap();
         let page = storage
             .create_page(NewPage {
-                space_id: space.id,
+                topic_id: topic.id,
                 title: "Planning".into(),
             })
             .await

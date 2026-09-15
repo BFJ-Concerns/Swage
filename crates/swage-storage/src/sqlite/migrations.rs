@@ -115,19 +115,19 @@ CREATE INDEX IF NOT EXISTS idx_page_annotations_page ON page_annotations(page_id
 CREATE INDEX IF NOT EXISTS idx_page_annotations_module ON page_annotations(module_id);
 ";
 
-/// Pages — agent-run tabs on a space — and their module instances. The
+/// Pages — agent-run tabs on a topic — and their module instances. The
 /// database is authoritative for page content; the alpha wipe-and-rebuild
 /// posture applies (pages are work product, regenerable by their authors,
 /// unlike knowledge-base evidence).
 const CREATE_PAGE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS pages (
     id          TEXT NOT NULL PRIMARY KEY,
-    space_id    TEXT NOT NULL REFERENCES spaces(id),
+    topic_id    TEXT NOT NULL REFERENCES topics(id),
     title       TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_pages_space ON pages(space_id);
+CREATE INDEX IF NOT EXISTS idx_pages_topic ON pages(topic_id);
 CREATE TABLE IF NOT EXISTS page_modules (
     id          TEXT NOT NULL PRIMARY KEY,
     page_id     TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
@@ -140,20 +140,20 @@ CREATE TABLE IF NOT EXISTS page_modules (
 CREATE INDEX IF NOT EXISTS idx_page_modules_page ON page_modules(page_id);
 ";
 
-/// Page templates — the reusable module shapes a space keeps, and the
+/// Page templates — the reusable module shapes a topic keeps, and the
 /// lineage a page carries from the template it was forked from. A template's
 /// modules seed the new page's own rows at creation; the fork is a real page
 /// from birth, so lineage is a recorded origin and never a live projection
-/// (neither side's later edits reach the other). Templates are space-local.
+/// (neither side's later edits reach the other). Templates are topic-local.
 const CREATE_PAGE_TEMPLATE_TABLES: &str = "
 CREATE TABLE IF NOT EXISTS page_templates (
     id          TEXT NOT NULL PRIMARY KEY,
-    space_id    TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    topic_id    TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
     name        TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_page_templates_space ON page_templates(space_id);
+CREATE INDEX IF NOT EXISTS idx_page_templates_topic ON page_templates(topic_id);
 CREATE TABLE IF NOT EXISTS page_template_modules (
     id          TEXT NOT NULL PRIMARY KEY,
     template_id TEXT NOT NULL REFERENCES page_templates(id) ON DELETE CASCADE,
@@ -221,7 +221,7 @@ const CREATE_SESSION_VARIABLES: &str = "
 const ADD_WORKFLOW_RUN_PARKING: &str = "
     CREATE TABLE workflow_runs_parking_new (
         id                   TEXT NOT NULL PRIMARY KEY,
-        space_id             TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id             TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         script_version_id    TEXT REFERENCES workflow_script_versions(id),
         inline_workflow_id   TEXT,
         inline_workflow_name TEXT,
@@ -254,7 +254,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         terminal_account_json TEXT
     );
     INSERT INTO workflow_runs_parking_new (
-        id, space_id, script_version_id, inline_workflow_id,
+        id, topic_id, script_version_id, inline_workflow_id,
         inline_workflow_name, inline_workflow_version, carrying_skill, task,
         source, source_hash, args_json,
         budget_json, state, final_output_json, handover_json, error_message, engine_version,
@@ -264,7 +264,7 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         inherited_worker_placement_json
     )
     SELECT
-        id, space_id, script_version_id, inline_workflow_id,
+        id, topic_id, script_version_id, inline_workflow_id,
         inline_workflow_name, inline_workflow_version, NULL, NULL,
         source, source_hash, args_json,
         budget_json, state, final_output_json, NULL, error_message, engine_version,
@@ -275,8 +275,8 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     FROM workflow_runs;
     DROP TABLE workflow_runs;
     ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
-    CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
-        ON workflow_runs(space_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_topic_created
+        ON workflow_runs(topic_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
         ON workflow_runs(state);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_parent_call
@@ -468,7 +468,7 @@ const CREATE_CONTEXT_SNAPSHOTS: &str = "
 const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS workspace_attachments (
         id               TEXT NOT NULL PRIMARY KEY,
-        space_id         TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id         TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         label            TEXT NOT NULL,
         path             TEXT NOT NULL,
         permissions_json TEXT NOT NULL,
@@ -477,10 +477,10 @@ const CREATE_WORKSPACE_ATTACHMENT_TABLE: &str = "
         updated_at       TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_space_id
-        ON workspace_attachments(space_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_path
-        ON workspace_attachments(space_id, path);
+    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_topic_id
+        ON workspace_attachments(topic_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_topic_path
+        ON workspace_attachments(topic_id, path);
 ";
 
 const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
@@ -654,7 +654,7 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
 const CREATE_AGENT_MEMORY_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS agent_memories (
         id                TEXT NOT NULL PRIMARY KEY,
-        space_id        TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id        TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id           TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
         agent_id          TEXT NOT NULL,
@@ -669,8 +669,8 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
         updated_at        TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_space_agent
-        ON agent_memories(space_id, agent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_agent_memories_topic_agent
+        ON agent_memories(topic_id, agent_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_session
         ON agent_memories(session_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_agent_memories_turn
@@ -689,7 +689,7 @@ const CREATE_AGENT_MEMORY_TABLE: &str = "
             'memory_recorded',
             'agent memory recorded',
             json_object(
-                'space_id', NEW.space_id,
+                'topic_id', NEW.topic_id,
                 'turn_id', NEW.turn_id,
                 'agent_id', NEW.agent_id,
                 'memory_kind', NEW.memory_kind,
@@ -743,7 +743,7 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
         id                TEXT NOT NULL PRIMARY KEY,
         scope_kind        TEXT NOT NULL,
         session_id        TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-        space_id        TEXT REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id        TEXT REFERENCES topics(id) ON DELETE CASCADE,
         kind              TEXT NOT NULL,
         status            TEXT NOT NULL,
         filename          TEXT NOT NULL,
@@ -757,8 +757,8 @@ const CREATE_ATTACHMENT_AND_BACKGROUND_JOB_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_attachments_session_id
         ON attachments(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_attachments_space_id
-        ON attachments(space_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_attachments_topic_id
+        ON attachments(topic_id, created_at);
 
     CREATE TABLE IF NOT EXISTS background_jobs (
         id             TEXT NOT NULL PRIMARY KEY,
@@ -786,7 +786,7 @@ const CREATE_MATERIAL_TABLES: &str = "
         id                   TEXT NOT NULL PRIMARY KEY,
         scope_kind           TEXT NOT NULL,
         session_id           TEXT REFERENCES sessions(id) ON DELETE CASCADE,
-        space_id           TEXT REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id           TEXT REFERENCES topics(id) ON DELETE CASCADE,
         source_kind          TEXT NOT NULL,
         source_attachment_id TEXT REFERENCES attachments(id) ON DELETE SET NULL,
         status               TEXT NOT NULL,
@@ -801,8 +801,8 @@ const CREATE_MATERIAL_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_materials_session_id
         ON materials(session_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_materials_space_id
-        ON materials(space_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_materials_topic_id
+        ON materials(topic_id, created_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_materials_source_attachment_id
         ON materials(source_attachment_id)
         WHERE source_attachment_id IS NOT NULL;
@@ -834,9 +834,9 @@ const CREATE_ACTIVE_SKILLS: &str = "
 /// created with their final columns and constraints; there is no incremental
 /// ALTER TABLE patching required on a fresh database.
 const COMPLETE_SCHEMA: &str = "
-    -- Spaces: name + slug uniqueness. External resources attach through
-    -- workspace_attachments so spaces can exist without any workspace.
-    CREATE TABLE IF NOT EXISTS spaces (
+    -- Topics: name + slug uniqueness. External resources attach through
+    -- workspace_attachments so topics can exist without any workspace.
+    CREATE TABLE IF NOT EXISTS topics (
         id             TEXT NOT NULL PRIMARY KEY,
         name           TEXT NOT NULL UNIQUE,
         description    TEXT NOT NULL DEFAULT '',
@@ -846,9 +846,9 @@ const COMPLETE_SCHEMA: &str = "
         updated_at     TEXT NOT NULL
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_slug ON spaces(slug);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_slug ON topics(slug);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_spaces_single_default
-        ON spaces(is_default) WHERE is_default = 1;
+        ON topics(is_default) WHERE is_default = 1;
 
     -- Devices: local or paired devices available for tool execution.
     CREATE TABLE IF NOT EXISTS devices (
@@ -865,7 +865,7 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE TABLE IF NOT EXISTS workspace_attachments (
         id               TEXT NOT NULL PRIMARY KEY,
-        space_id         TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id         TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         label            TEXT NOT NULL,
         path             TEXT NOT NULL,
         permissions_json TEXT NOT NULL,
@@ -874,30 +874,30 @@ const COMPLETE_SCHEMA: &str = "
         updated_at       TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_space_id
-        ON workspace_attachments(space_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_path
-        ON workspace_attachments(space_id, path);
+    CREATE INDEX IF NOT EXISTS idx_workspace_attachments_topic_id
+        ON workspace_attachments(topic_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_topic_path
+        ON workspace_attachments(topic_id, path);
 
-    -- Sessions: belong to a space, track which agent owns the session.
+    -- Sessions: belong to a topic, track which agent owns the session.
     CREATE TABLE IF NOT EXISTS sessions (
         id         TEXT NOT NULL PRIMARY KEY,
-        space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         agent_id   TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_sessions_space_id ON sessions(space_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_topic_id ON sessions(topic_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_agent_id   ON sessions(agent_id);
 
     -- Channel links: durable one-time binding from an external conversation
-    -- origin to the space/agent/session it should resume.
+    -- origin to the topic/agent/session it should resume.
     CREATE TABLE IF NOT EXISTS channel_links (
         integration      TEXT NOT NULL,
         account          TEXT NOT NULL,
         conversation     TEXT NOT NULL,
-        space_id         TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id         TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         agent_id         TEXT NOT NULL,
         session_id       TEXT REFERENCES sessions(id) ON DELETE SET NULL,
         home_target_json TEXT,
@@ -906,14 +906,14 @@ const COMPLETE_SCHEMA: &str = "
         PRIMARY KEY (integration, account, conversation)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_channel_links_space_id
-        ON channel_links(space_id);
+    CREATE INDEX IF NOT EXISTS idx_channel_links_topic_id
+        ON channel_links(topic_id);
     CREATE INDEX IF NOT EXISTS idx_channel_links_session_id
         ON channel_links(session_id);
 
     -- Schedules: one durable definition per recurring or one-off piece of
     -- agent work. The session policy is flattened into columns: fresh rows
-    -- carry the target space/agent, continuation rows the session each run
+    -- carry the target topic/agent, continuation rows the session each run
     -- returns to.
     CREATE TABLE IF NOT EXISTS schedules (
         id             TEXT NOT NULL PRIMARY KEY,
@@ -922,7 +922,7 @@ const COMPLETE_SCHEMA: &str = "
         kind           TEXT NOT NULL,
         expression     TEXT NOT NULL,
         session_policy TEXT NOT NULL,
-        space_id       TEXT REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id       TEXT REFERENCES topics(id) ON DELETE CASCADE,
         agent_id       TEXT,
         session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
         -- Provenance: 'user' or 'agent'. creator_agent_id names the agent
@@ -1132,7 +1132,7 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE TABLE IF NOT EXISTS workflow_scripts (
         id                  TEXT NOT NULL PRIMARY KEY,
-        space_id            TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id            TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         name                TEXT NOT NULL,
         description         TEXT NOT NULL,
         delivery_grant_json TEXT,
@@ -1140,7 +1140,7 @@ const COMPLETE_SCHEMA: &str = "
         authoring_session_id TEXT,
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL,
-        UNIQUE (space_id, name)
+        UNIQUE (topic_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS workflow_script_versions (
@@ -1154,7 +1154,7 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE TABLE IF NOT EXISTS workflow_runs (
         id                  TEXT NOT NULL PRIMARY KEY,
-        space_id            TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id            TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         script_version_id   TEXT REFERENCES workflow_script_versions(id),
         inline_workflow_id  TEXT,
         inline_workflow_name TEXT,
@@ -1178,8 +1178,8 @@ const COMPLETE_SCHEMA: &str = "
         inherited_worker_placement_json TEXT
     );
 
-    CREATE INDEX IF NOT EXISTS idx_workflow_runs_space_created
-        ON workflow_runs(space_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_topic_created
+        ON workflow_runs(topic_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_state
         ON workflow_runs(state);
 
@@ -1216,15 +1216,15 @@ const ADD_WORKSPACE_ATTACHMENT_CANONICAL_STATE: &str = "
         WHERE canonical_path = '';
     ALTER TABLE workspace_attachments
         ADD COLUMN is_missing INTEGER NOT NULL DEFAULT 0;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_space_canonical_path
-        ON workspace_attachments(space_id, canonical_path);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_topic_canonical_path
+        ON workspace_attachments(topic_id, canonical_path);
 ";
 
 const ADD_WORKSPACE_ATTACHMENT_ACTIVATION: &str = "
     ALTER TABLE workspace_attachments
         ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_one_default_per_space
-        ON workspace_attachments(space_id)
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_attachments_one_default_per_topic
+        ON workspace_attachments(topic_id)
         WHERE is_default = 1;
     ALTER TABLE sessions
         ADD COLUMN active_workspace_attachment_id TEXT REFERENCES workspace_attachments(id) ON DELETE SET NULL;
@@ -1324,9 +1324,9 @@ const ADD_TURN_INBOUND_AUDIT: &str = "
     ALTER TABLE turns ADD COLUMN inbound_audit TEXT;
 ";
 
-/// Structural default-space identity.
+/// Structural default-topic identity.
 ///
-/// The default space is no longer identified by the mutable display name.
+/// The default topic is no longer identified by the mutable display name.
 /// Delegation chain tracking — nullable parent reference on turns.
 const ADD_TURN_PARENT_TURN_ID: &str = "
     ALTER TABLE turns ADD COLUMN parent_turn_id TEXT;
@@ -1402,7 +1402,7 @@ const CREATE_THREAD_BRANCHES: &str = "
     CREATE INDEX IF NOT EXISTS idx_thread_branches_parent_thread_id ON thread_branches(parent_thread_id);
 ";
 
-/// The knowledge base: a space's cumulative store of gathered external
+/// The knowledge base: a topic's cumulative store of gathered external
 /// evidence. The unit of storage is the source observation — one immutable
 /// capture of a source — with extracted text as separately versioned
 /// derivations so re-extraction never disturbs a version citations pin.
@@ -1411,14 +1411,14 @@ const CREATE_THREAD_BRANCHES: &str = "
 /// observations are not regenerable (sources change and disappear), so
 /// later migrations here may reshape freely but must preserve raw bodies
 /// and origin metadata. Raw bodies live as content-addressed files under
-/// the space data root; these tables hold metadata and extractions only.
+/// the topic data root; these tables hold metadata and extractions only.
 ///
 /// `extraction_fts` is an external-content FTS5 index over extraction
 /// text, kept in sync by triggers so no store method can forget it.
 const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
     CREATE TABLE IF NOT EXISTS source_observations (
         id                TEXT NOT NULL PRIMARY KEY,
-        space_id          TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id          TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         origin_url        TEXT,
         origin_local_path TEXT,
         retrieved_at      TEXT NOT NULL,
@@ -1430,15 +1430,15 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
         CHECK (origin_url IS NOT NULL OR origin_local_path IS NOT NULL)
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_source_observations_space_body
-        ON source_observations(space_id, body_sha256);
-    CREATE INDEX IF NOT EXISTS idx_source_observations_space
-        ON source_observations(space_id, retrieved_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_source_observations_topic_body
+        ON source_observations(topic_id, body_sha256);
+    CREATE INDEX IF NOT EXISTS idx_source_observations_topic
+        ON source_observations(topic_id, retrieved_at DESC);
 
     CREATE TABLE IF NOT EXISTS source_captures (
         id                TEXT NOT NULL PRIMARY KEY,
         observation_id    TEXT NOT NULL REFERENCES source_observations(id) ON DELETE CASCADE,
-        space_id          TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id          TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
         origin_url        TEXT,
         origin_local_path TEXT,
         capture_scope     TEXT NOT NULL,
@@ -1447,13 +1447,13 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_source_captures_scope_origin
         ON source_captures(
-            space_id,
+            topic_id,
             capture_scope,
             COALESCE(origin_url, ''),
             COALESCE(origin_local_path, '')
         );
-    CREATE INDEX IF NOT EXISTS idx_source_captures_space_scope
-        ON source_captures(space_id, capture_scope);
+    CREATE INDEX IF NOT EXISTS idx_source_captures_topic_scope
+        ON source_captures(topic_id, capture_scope);
 
     CREATE TABLE IF NOT EXISTS extraction_derivations (
         id             TEXT NOT NULL PRIMARY KEY,
@@ -1492,7 +1492,7 @@ const CREATE_KNOWLEDGE_BASE_TABLES: &str = "
 const CREATE_KNOWLEDGE_CURATION_ASSERTIONS: &str = "
     CREATE TABLE IF NOT EXISTS knowledge_curation_assertions (
         id                    TEXT NOT NULL PRIMARY KEY,
-        space_id              TEXT NOT NULL REFERENCES spaces(id),
+        topic_id              TEXT NOT NULL REFERENCES topics(id),
         observation_id        TEXT NOT NULL REFERENCES source_observations(id),
         kind                   TEXT NOT NULL CHECK (kind IN ('duplicate-of', 'superseded-by', 'stale')),
         target_observation_id TEXT REFERENCES source_observations(id),
@@ -1524,7 +1524,7 @@ const CREATE_KNOWLEDGE_CURATION_ASSERTIONS: &str = "
 const CREATE_KNOWLEDGE_CITATIONS: &str = "
     CREATE TABLE IF NOT EXISTS knowledge_citations (
         id                 TEXT NOT NULL PRIMARY KEY,
-        space_id           TEXT NOT NULL REFERENCES spaces(id),
+        topic_id           TEXT NOT NULL REFERENCES topics(id),
         observation_id     TEXT NOT NULL,
         derivation_version INTEGER NOT NULL,
         start_offset       INTEGER NOT NULL CHECK (start_offset >= 0),
@@ -1556,34 +1556,34 @@ const CREATE_KNOWLEDGE_CITATIONS: &str = "
 /// impossible at transaction commit while retaining a proper many-to-many
 /// derivation relation.
 const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
-    CREATE UNIQUE INDEX idx_source_observations_id_space
-        ON source_observations(id, space_id);
+    CREATE UNIQUE INDEX idx_source_observations_id_topic
+        ON source_observations(id, topic_id);
 
     CREATE TABLE orientation_cards (
         id                 TEXT NOT NULL PRIMARY KEY,
-        space_id           TEXT NOT NULL REFERENCES spaces(id),
+        topic_id           TEXT NOT NULL REFERENCES topics(id),
         title              TEXT NOT NULL CHECK (length(trim(title)) > 0),
         content            TEXT NOT NULL CHECK (length(trim(content)) > 0),
         authored_by        TEXT NOT NULL CHECK (length(trim(authored_by)) > 0),
         evidence_anchor_id TEXT NOT NULL UNIQUE,
         created_at         TEXT NOT NULL,
-        UNIQUE (id, space_id),
-        FOREIGN KEY (evidence_anchor_id, id, space_id)
-            REFERENCES orientation_card_observations(id, card_id, space_id)
+        UNIQUE (id, topic_id),
+        FOREIGN KEY (evidence_anchor_id, id, topic_id)
+            REFERENCES orientation_card_observations(id, card_id, topic_id)
             DEFERRABLE INITIALLY DEFERRED
     );
 
     CREATE TABLE orientation_card_observations (
         id             TEXT NOT NULL PRIMARY KEY,
         card_id        TEXT NOT NULL,
-        space_id       TEXT NOT NULL,
+        topic_id       TEXT NOT NULL,
         observation_id TEXT NOT NULL,
-        UNIQUE (id, card_id, space_id),
+        UNIQUE (id, card_id, topic_id),
         UNIQUE (card_id, observation_id),
-        FOREIGN KEY (card_id, space_id) REFERENCES orientation_cards(id, space_id)
+        FOREIGN KEY (card_id, topic_id) REFERENCES orientation_cards(id, topic_id)
             DEFERRABLE INITIALLY DEFERRED,
-        FOREIGN KEY (observation_id, space_id)
-            REFERENCES source_observations(id, space_id)
+        FOREIGN KEY (observation_id, topic_id)
+            REFERENCES source_observations(id, topic_id)
     );
 
     CREATE TABLE orientation_card_lifecycle (
@@ -1632,14 +1632,14 @@ const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
 /// Durable agent definitions — the bundle that gives a session its entire
 /// character, selected at session start by agent id.
 ///
-/// `id` is the stable agent id sessions already carry; `space_id` NULL means
-/// a global definition, and a space-scoped row with the same id shadows it.
+/// `id` is the stable agent id sessions already carry; `topic_id` NULL means
+/// a global definition, and a topic-scoped row with the same id shadows it.
 /// `tool_permissions_json` is a permission overlay that intersects with (and
 /// never expands) the resolved config's grants.
 const CREATE_AGENT_DEFINITION_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS agent_definitions (
         id                    TEXT NOT NULL,
-        space_id              TEXT REFERENCES spaces(id) ON DELETE CASCADE,
+        topic_id              TEXT REFERENCES topics(id) ON DELETE CASCADE,
         display_name          TEXT NOT NULL,
         description           TEXT NOT NULL DEFAULT '',
         instructions          TEXT NOT NULL DEFAULT '',
@@ -1650,13 +1650,13 @@ const CREATE_AGENT_DEFINITION_TABLE: &str = "
         output_max_retries    INTEGER,
         created_at            TEXT NOT NULL,
         updated_at            TEXT NOT NULL,
-        PRIMARY KEY (id, space_id)
+        PRIMARY KEY (id, topic_id)
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_definitions_global
-        ON agent_definitions(id) WHERE space_id IS NULL;
-    CREATE INDEX IF NOT EXISTS idx_agent_definitions_space
-        ON agent_definitions(space_id);
+        ON agent_definitions(id) WHERE topic_id IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_agent_definitions_topic
+        ON agent_definitions(topic_id);
 ";
 
 const CREATE_TASK_DEFINITION_TABLE: &str = "
@@ -1741,8 +1741,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch("PRAGMA foreign_keys=ON;")
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
-    // Seed the default space if it does not already exist.
-    seed_default_space(conn)
+    // Seed the default topic if it does not already exist.
+    seed_default_topic(conn)
 }
 
 fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
@@ -1802,13 +1802,13 @@ fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError>
     Ok(())
 }
 
-/// Insert the default space on first run. Idempotent via INSERT OR IGNORE.
-fn seed_default_space(conn: &Connection) -> Result<(), StorageError> {
+/// Insert the default topic on first run. Idempotent via INSERT OR IGNORE.
+fn seed_default_topic(conn: &Connection) -> Result<(), StorageError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     conn.execute(
-        "INSERT OR IGNORE INTO spaces (id, name, is_default, slug, created_at, updated_at)
+        "INSERT OR IGNORE INTO topics (id, name, is_default, slug, created_at, updated_at)
          VALUES (?1, 'default', 1, 'default', ?2, ?2)",
         params![id, now],
     )
@@ -1861,17 +1861,17 @@ mod tests {
             .expect("record applied migration");
         }
 
-        super::seed_default_space(&conn).expect("seed default space");
+        super::seed_default_topic(&conn).expect("seed default topic");
         conn
     }
 
     // Convenience: insert a session using the new schema (requires agent_id).
-    fn insert_session(conn: &Connection, space_id: &str, now: &str) -> String {
+    fn insert_session(conn: &Connection, topic_id: &str, now: &str) -> String {
         let session_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO sessions (id, space_id, agent_id, created_at, updated_at)
+            "INSERT INTO sessions (id, topic_id, agent_id, created_at, updated_at)
              VALUES (?1,?2,'agent-test',?3,?3)",
-            rusqlite::params![session_id, space_id, now],
+            rusqlite::params![session_id, topic_id, now],
         )
         .expect("insert session");
         session_id
@@ -1901,11 +1901,11 @@ mod tests {
         turn_id
     }
 
-    fn default_space_id(conn: &Connection) -> String {
-        conn.query_row("SELECT id FROM spaces WHERE name='default'", [], |r| {
+    fn default_topic_id(conn: &Connection) -> String {
+        conn.query_row("SELECT id FROM topics WHERE name='default'", [], |r| {
             r.get(0)
         })
-        .expect("default space")
+        .expect("default topic")
     }
 
     // ---------------------------------------------------------------------------
@@ -1937,10 +1937,10 @@ mod tests {
     fn existing_data_unaffected_after_migration() {
         // Insert data into the tables, then re-run migrations; data must survive.
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let _turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2009,10 +2009,10 @@ mod tests {
     fn tool_calls_parent_call_id_nullable() {
         // Existing rows should have NULL parent_call_id when not set.
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2040,7 +2040,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Spaces: slug column
+    // Topics: slug column
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -2048,7 +2048,7 @@ mod tests {
         let conn = open_migrated();
         let col_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name='slug'",
+                "SELECT COUNT(*) FROM pragma_table_info('topics') WHERE name='slug'",
                 [],
                 |r| r.get(0),
             )
@@ -2057,14 +2057,14 @@ mod tests {
     }
 
     #[test]
-    fn default_space_has_slug_default() {
+    fn default_topic_has_slug_default() {
         let conn = open_migrated();
         let slug: String = conn
-            .query_row("SELECT slug FROM spaces WHERE name = 'default'", [], |r| {
+            .query_row("SELECT slug FROM topics WHERE name = 'default'", [], |r| {
                 r.get(0)
             })
-            .expect("default space should exist with slug");
-        assert_eq!(slug, "default", "default space slug should be 'default'");
+            .expect("default topic should exist with slug");
+        assert_eq!(slug, "default", "default topic slug should be 'default'");
     }
 
     #[test]
@@ -2073,14 +2073,14 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO spaces (id, name, slug, created_at, updated_at)
+            "INSERT INTO topics (id, name, slug, created_at, updated_at)
              VALUES (?1, 'alpha', 'alpha', ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         )
         .expect("first insert should succeed");
 
         let result = conn.execute(
-            "INSERT INTO spaces (id, name, slug, created_at, updated_at)
+            "INSERT INTO topics (id, name, slug, created_at, updated_at)
              VALUES (?1, 'beta', 'alpha', ?2, ?2)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), now],
         );
@@ -2096,7 +2096,7 @@ mod tests {
         super::run_migrations(&conn).expect("second migration run should be idempotent");
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('spaces') WHERE name='slug'",
+                "SELECT COUNT(*) FROM pragma_table_info('topics') WHERE name='slug'",
                 [],
                 |r| r.get(0),
             )
@@ -2172,9 +2172,9 @@ mod tests {
             .expect("pragma_table_info query");
         assert_eq!(col_count, 1, "threads.state column should exist");
 
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
 
         // Insert a thread without specifying state — should default to 'idle'.
         let thread_id = uuid::Uuid::new_v4().to_string();
@@ -2224,9 +2224,9 @@ mod tests {
     #[test]
     fn turns_state_defaults_to_pending() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without specifying state — should default to 'pending'.
@@ -2303,9 +2303,9 @@ mod tests {
     #[test]
     fn messages_role_rejects_unknown_values() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -2356,9 +2356,9 @@ mod tests {
     #[test]
     fn tool_call_model_replay_migration_backfills_legacy_rows() {
         let conn = open_migrated_until_exclusive("041_tool_call_model_replay");
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
         let call_id = "legacy_call";
@@ -2431,9 +2431,9 @@ mod tests {
     #[test]
     fn cascade_session_delete_removes_threads() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let _thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -2454,9 +2454,9 @@ mod tests {
     #[test]
     fn cascade_thread_delete_removes_turns() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let _turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2478,9 +2478,9 @@ mod tests {
     #[test]
     fn cascade_thread_delete_removes_messages() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
@@ -2508,9 +2508,9 @@ mod tests {
     #[test]
     fn deleting_turn_orphans_but_keeps_messages() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
         let message_id = uuid::Uuid::new_v4().to_string();
@@ -2554,9 +2554,9 @@ mod tests {
     #[test]
     fn context_snapshots_cascade_delete_with_turn() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2604,9 +2604,9 @@ mod tests {
     #[test]
     fn turns_cost_microcents_is_nullable() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         // Insert a turn without cost — should default to NULL.
@@ -2645,9 +2645,9 @@ mod tests {
     #[test]
     fn approval_requests_cascade_delete_on_turn_delete() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 
@@ -2695,10 +2695,10 @@ mod tests {
     #[test]
     fn tool_calls_foreign_key_cascade_on_turn_delete() {
         let conn = open_migrated();
-        let space_id = default_space_id(&conn);
+        let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
 
-        let session_id = insert_session(&conn, &space_id, &now);
+        let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
 

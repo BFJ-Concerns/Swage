@@ -9,7 +9,7 @@ import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreatePageAnnotationRequest } from "./CreatePageAnnotationRequest";
 import type { CreatePageRequest } from "./CreatePageRequest";
 import type { CreatePageTemplateRequest } from "./CreatePageTemplateRequest";
-import type { CreateSpaceRequest } from "./CreateSpaceRequest";
+import type { CreateTopicRequest } from "./CreateTopicRequest";
 import type { DeletePageAnnotationResponse } from "./DeletePageAnnotationResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { PageAnnotationView } from "./PageAnnotationView";
@@ -23,13 +23,13 @@ import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SettingsResponse } from "./SettingsResponse";
-import type { SpaceListResponse } from "./SpaceListResponse";
-import type { SpaceResponse } from "./SpaceResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
+import type { TopicListResponse } from "./TopicListResponse";
+import type { TopicResponse } from "./TopicResponse";
 import type { TurnContextResponse } from "./TurnContextResponse";
 import type { UpdatePageAnnotationRequest } from "./UpdatePageAnnotationRequest";
-import type { UpdateSpaceRequest } from "./UpdateSpaceRequest";
+import type { UpdateTopicRequest } from "./UpdateTopicRequest";
 import type { WritePageModuleRequest } from "./WritePageModuleRequest";
 import { ApiError } from "../api/error";
 
@@ -60,39 +60,39 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
-/** List every space. */
-export async function listSpaces(): Promise<SpaceListResponse> {
-  return request<SpaceListResponse>("GET", `/api/spaces`);
+/** List every topic. */
+export async function listTopics(): Promise<TopicListResponse> {
+  return request<TopicListResponse>("GET", `/api/topics`);
 }
 
-/** Create a space. */
-export async function createSpace(body: CreateSpaceRequest): Promise<SpaceResponse> {
-  return request<SpaceResponse>("POST", `/api/spaces`, body);
+/** Create a topic. */
+export async function createTopic(body: CreateTopicRequest): Promise<TopicResponse> {
+  return request<TopicResponse>("POST", `/api/topics`, body);
 }
 
-/** Read one space. */
-export async function getSpace(id: string): Promise<SpaceResponse> {
-  return request<SpaceResponse>("GET", `/api/spaces/${encodeURIComponent(id)}`);
+/** Read one topic. */
+export async function getTopic(id: string): Promise<TopicResponse> {
+  return request<TopicResponse>("GET", `/api/topics/${encodeURIComponent(id)}`);
 }
 
-/** Update a space's name or description. */
-export async function updateSpace(id: string, body: UpdateSpaceRequest): Promise<SpaceResponse> {
-  return request<SpaceResponse>("PUT", `/api/spaces/${encodeURIComponent(id)}`, body);
+/** Update a topic's name or description. */
+export async function updateTopic(id: string, body: UpdateTopicRequest): Promise<TopicResponse> {
+  return request<TopicResponse>("PUT", `/api/topics/${encodeURIComponent(id)}`, body);
 }
 
-/** Delete a space. */
-export async function deleteSpace(id: string): Promise<void> {
-  return request<void>("DELETE", `/api/spaces/${encodeURIComponent(id)}`);
+/** Delete a topic. */
+export async function deleteTopic(id: string): Promise<void> {
+  return request<void>("DELETE", `/api/topics/${encodeURIComponent(id)}`);
 }
 
-/** List conversations in a space. */
-export async function listSpaceSessions(spaceId: string): Promise<ConversationListResponse> {
-  return request<ConversationListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/sessions`);
+/** List conversations in a topic. */
+export async function listTopicSessions(topicId: string): Promise<ConversationListResponse> {
+  return request<ConversationListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/sessions`);
 }
 
-/** Create a conversation in a space. */
-export async function createSpaceSession(spaceId: string, body?: CreateConversationRequest): Promise<ConversationResponse> {
-  return request<ConversationResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/sessions`, body);
+/** Create a conversation in a topic. */
+export async function createTopicSession(topicId: string, body?: CreateConversationRequest): Promise<ConversationResponse> {
+  return request<ConversationResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/sessions`, body);
 }
 
 /** Read a conversation. */
@@ -110,24 +110,24 @@ export async function getTurnContext(id: string): Promise<TurnContextResponse> {
   return request<TurnContextResponse>("GET", `/api/turns/${encodeURIComponent(id)}/context`);
 }
 
-/** List pages in a space. */
-export async function listPages(spaceId: string): Promise<PageListResponse> {
-  return request<PageListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/pages`);
+/** List pages in a topic. */
+export async function listPages(topicId: string): Promise<PageListResponse> {
+  return request<PageListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/pages`);
 }
 
-/** Create a page in a space. */
-export async function createPage(spaceId: string, body: CreatePageRequest): Promise<PageResponse> {
-  return request<PageResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/pages`, body);
+/** Create a page in a topic. */
+export async function createPage(topicId: string, body: CreatePageRequest): Promise<PageResponse> {
+  return request<PageResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/pages`, body);
 }
 
-/** List page templates in a space. */
-export async function listPageTemplates(spaceId: string): Promise<PageTemplateListResponse> {
-  return request<PageTemplateListResponse>("GET", `/api/spaces/${encodeURIComponent(spaceId)}/page-templates`);
+/** List page templates in a topic. */
+export async function listPageTemplates(topicId: string): Promise<PageTemplateListResponse> {
+  return request<PageTemplateListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/page-templates`);
 }
 
-/** Create a page template in a space. */
-export async function createPageTemplate(spaceId: string, body: CreatePageTemplateRequest): Promise<PageTemplateResponse> {
-  return request<PageTemplateResponse>("POST", `/api/spaces/${encodeURIComponent(spaceId)}/page-templates`, body);
+/** Create a page template in a topic. */
+export async function createPageTemplate(topicId: string, body: CreatePageTemplateRequest): Promise<PageTemplateResponse> {
+  return request<PageTemplateResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/page-templates`, body);
 }
 
 /** Read a page template. */

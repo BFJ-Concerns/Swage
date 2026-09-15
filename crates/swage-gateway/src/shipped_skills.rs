@@ -177,8 +177,8 @@ pub(crate) fn workflow_files(skill_name: &str) -> impl Iterator<Item = &'static 
         })
 }
 
-pub(crate) fn id(space_id: Uuid, name: &str) -> Uuid {
-    synthetic_id(SYNTHETIC_ID_DOMAIN, space_id, name)
+pub(crate) fn id(topic_id: Uuid, name: &str) -> Uuid {
+    synthetic_id(SYNTHETIC_ID_DOMAIN, topic_id, name)
 }
 
 #[cfg(test)]
@@ -246,10 +246,10 @@ mod tests {
 
     #[test]
     fn identifiers_are_stable_and_domain_separated() {
-        let space = Uuid::from_u128(1);
-        assert_eq!(id(space, "assembly"), id(space, "assembly"));
-        assert_ne!(id(space, "assembly"), id(Uuid::from_u128(2), "assembly"));
-        assert_ne!(id(space, "assembly"), id(space, "research"));
+        let topic = Uuid::from_u128(1);
+        assert_eq!(id(topic, "assembly"), id(topic, "assembly"));
+        assert_ne!(id(topic, "assembly"), id(Uuid::from_u128(2), "assembly"));
+        assert_ne!(id(topic, "assembly"), id(topic, "research"));
     }
 
     #[test]

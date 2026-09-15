@@ -140,7 +140,7 @@ mod tests {
     };
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::store::{
-        MessageStore, SessionStore, SpaceStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+        MessageStore, SessionStore, Storage, ThreadStore, ToolCallStore, TopicStore, TurnStore,
     };
     use swage_tool::context::MockToolContext;
     use tokio::sync::mpsc;
@@ -151,10 +151,10 @@ mod tests {
 
     async fn test_turns() -> (Arc<SqliteStorage>, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,
@@ -306,10 +306,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn reads_branch_local_copied_tool_result_reference() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

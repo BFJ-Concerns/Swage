@@ -7,7 +7,7 @@ import AppLayout from "../components/AppLayout.svelte";
 import { parseRoute } from "../router";
 import type { ConversationStore } from "../stores/conversations";
 import type { ConnectionStore } from "../stores/connection";
-import type { SpaceStore } from "../stores/spaces";
+import type { TopicStore } from "../stores/topics";
 import type { StreamingStore } from "../stores/streaming";
 import type { PagesStore } from "../stores/pages";
 import type { ConversationDetail, ConversationSummary, MessageView } from "../types";
@@ -44,7 +44,7 @@ function mockConversationStore(): ConversationStore {
 function mockConversationStoreWithMessages(messages: MessageView[]): ConversationStore {
   const detail: ConversationDetail = {
     id: "conv-1",
-    space_id: "default",
+    topic_id: "default",
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
     messages,
@@ -65,7 +65,7 @@ function mockConversationStoreWithSessions(
   }));
   const active: ConversationDetail = {
     id: summaries[activeIndex].id,
-    space_id: "default",
+    topic_id: "default",
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
     messages: [],
@@ -80,7 +80,7 @@ function mockConversationStoreWithSessions(
 function mockPagesStore(): PagesStore {
   const page = {
     id: "page-1",
-    space_id: "default",
+    topic_id: "default",
     title: "Release checklist",
     created_at: "2026-08-29T10:00:00Z",
     updated_at: "2026-08-29T10:00:00Z",
@@ -140,32 +140,32 @@ function mockStreamingStore(): StreamingStore {
   };
 }
 
-function mockSpaceStore(hasCurrentSpace = true, spaceId = "default"): SpaceStore {
-  const space = {
-    id: spaceId,
-    name: spaceId,
+function mockTopicStore(hasCurrentTopic = true, topicId = "default"): TopicStore {
+  const topic = {
+    id: topicId,
+    name: topicId,
     description: "",
-    is_default: spaceId === "default",
-    slug: spaceId,
+    is_default: topicId === "default",
+    slug: topicId,
     created_at: "",
   };
 
   return {
-    get spaces() { return hasCurrentSpace ? [space] : []; },
-    get currentSpace() { return hasCurrentSpace ? space : null; },
-    get recentSpaces() { return []; },
+    get topics() { return hasCurrentTopic ? [topic] : []; },
+    get currentTopic() { return hasCurrentTopic ? topic : null; },
+    get recentTopics() { return []; },
     get isLoading() { return false; },
-    loadSpaces: async () => {},
-    selectSpace: async () => {},
-    closeSpace: () => {},
-    createSpace: async () => {},
-    deleteSpace: async () => {},
+    loadTopics: async () => {},
+    selectTopic: async () => {},
+    closeTopic: () => {},
+    createTopic: async () => {},
+    deleteTopic: async () => {},
   };
 }
 
 interface MountOptions {
   activeSurface?: "conversation" | "operator" | "pages";
-  hasCurrentSpace?: boolean;
+  hasCurrentTopic?: boolean;
   onNavigate?: (path: string) => void;
   onSelectSurface?: (surface: "conversation" | "operator" | "pages") => void;
   routePath?: string;
@@ -184,7 +184,7 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       conversationStore: options.conversationStore ?? mockConversationStore(),
       connectionStore: mockConnectionStore(),
       streamingStore: options.streamingStore ?? mockStreamingStore(),
-      spaceStore: mockSpaceStore(options.hasCurrentSpace ?? true),
+      topicStore: mockTopicStore(options.hasCurrentTopic ?? true),
       onRetry: () => {},
       activeSurface: options.activeSurface ?? "conversation",
       onSelectSurface: options.onSelectSurface ?? (() => {}),
@@ -240,8 +240,8 @@ describe("AppLayout shell navigation", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows the space picker before a space is selected", () => {
-    component = mountLayout({ hasCurrentSpace: false });
+  it("shows the topic picker before a topic is selected", () => {
+    component = mountLayout({ hasCurrentTopic: false });
 
     expect(document.querySelector("h1")?.textContent).toBe("Choose where to work.");
     expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
@@ -312,7 +312,7 @@ describe("AppLayout shell navigation", () => {
     expect(createConversation).not.toHaveBeenCalled();
   });
 
-  it("does not retain an agent when the selected space changes", () => {
+  it("does not retain an agent when the selected topic changes", () => {
     const conversationStore = mockConversationStore();
     const createConversation = vi.spyOn(conversationStore, "createConversation");
     const layout = createClassComponent({
@@ -322,23 +322,23 @@ describe("AppLayout shell navigation", () => {
         conversationStore,
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
-        spaceStore: mockSpaceStore(),
+        topicStore: mockTopicStore(),
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
         agentDefinitions: [{
-          id: "space-one-agent", display_name: "Space one agent", description: "", instructions: "",
+          id: "topic-one-agent", display_name: "Topic one agent", description: "", instructions: "",
           model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: false, source_scope: "space",
+          output_max_retries: null, is_builtin: false, source_scope: "topic",
         }],
       },
     });
     const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
-    picker.value = "space-one-agent";
+    picker.value = "topic-one-agent";
     picker.dispatchEvent(new Event("change", { bubbles: true }));
     flushSync();
 
-    layout.$set({ spaceStore: mockSpaceStore(true, "second-space") });
+    layout.$set({ topicStore: mockTopicStore(true, "second-topic") });
     flushSync();
 
     const cleared = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
@@ -362,7 +362,7 @@ describe("AppLayout shell navigation", () => {
         conversationStore: mockConversationStore(),
         connectionStore: mockConnectionStore(),
         streamingStore: { ...mockStreamingStore(), startTurn },
-        spaceStore: mockSpaceStore(),
+        topicStore: mockTopicStore(),
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
@@ -412,7 +412,7 @@ describe("AppLayout shell navigation", () => {
   it("clears effort after the active conversation changes before the next new conversation", () => {
     const startTurn = vi.fn();
     const firstConversation = {
-      id: "first-conversation", space_id: "default", selected_model_id: null,
+      id: "first-conversation", topic_id: "default", selected_model_id: null,
       created_at: "", last_activity: "", messages: [],
     };
     const secondConversation = { ...firstConversation, id: "second-conversation" };
@@ -427,7 +427,7 @@ describe("AppLayout shell navigation", () => {
         conversationStore,
         connectionStore: mockConnectionStore(),
         streamingStore: { ...mockStreamingStore(), startTurn },
-        spaceStore: mockSpaceStore(),
+        topicStore: mockTopicStore(),
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
@@ -463,10 +463,10 @@ describe("AppLayout shell navigation", () => {
     layout.$destroy();
   });
 
-  it("renders the space switcher in the shell", () => {
+  it("renders the topic switcher in the shell", () => {
     component = mountLayout();
 
-    expect(document.querySelector('button[title="Switch space"]')?.textContent).toContain(
+    expect(document.querySelector('button[title="Switch topic"]')?.textContent).toContain(
       "Switch — default",
     );
   });
@@ -561,7 +561,7 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenNthCalledWith(2, "/settings/skills");
   });
 
-  it("navigates to the selected space workspaces from settings", () => {
+  it("navigates to the selected topic workspaces from settings", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
     const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
@@ -571,13 +571,13 @@ describe("AppLayout shell navigation", () => {
 
     flushSync(() => workspaces?.click());
 
-    expect(onNavigate).toHaveBeenCalledWith("/settings/space/default/workspaces");
+    expect(onNavigate).toHaveBeenCalledWith("/settings/topic/default/workspaces");
   });
 
-  it("opens global settings without a selected space", () => {
+  it("opens global settings without a selected topic", () => {
     const onNavigate = vi.fn();
     component = mountLayout({
-      hasCurrentSpace: false,
+      hasCurrentTopic: false,
       onNavigate,
     });
 
@@ -591,9 +591,9 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
   });
 
-  it("renders global settings without a selected space", () => {
+  it("renders global settings without a selected topic", () => {
     component = mountLayout({
-      hasCurrentSpace: false,
+      hasCurrentTopic: false,
       routePath: "/settings/providers",
     });
 
@@ -665,7 +665,7 @@ describe("ambient conversation channel", () => {
         conversationStore,
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
-        spaceStore: mockSpaceStore(),
+        topicStore: mockTopicStore(),
         onRetry: () => {},
         activeSurface: "conversation",
         pagesStore: mockPagesStore(),

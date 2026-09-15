@@ -15,8 +15,8 @@ import App from "../../App.svelte";
 import { createConversation, getConversation } from "../api/conversations";
 import type { WebSocketClient } from "../api/websocket";
 
-const space = {
-  id: "space-1",
+const topic = {
+  id: "topic-1",
   name: "Default",
   description: "",
   is_default: true,
@@ -44,7 +44,7 @@ const summaries = [
 function detail(id: string) {
   return {
     id,
-    space_id: space.id,
+    topic_id: topic.id,
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
     messages: [
@@ -70,15 +70,15 @@ vi.mock("../api/websocket", () => ({
   createWebSocketClient: () => wsClient,
 }));
 
-vi.mock("../api/spaces", () => ({
-  listSpaces: vi.fn(async () => [space]),
-  getSpace: vi.fn(async () => space),
-  createSpace: vi.fn(),
-  updateSpace: vi.fn(),
-  deleteSpace: vi.fn(),
-  setSpacesBaseUrl: vi.fn(),
-  listSpaceWorkspaces: vi.fn(async () => []),
-  listSpaceSessions: vi.fn(async () => []),
+vi.mock("../api/topics", () => ({
+  listTopics: vi.fn(async () => [topic]),
+  getTopic: vi.fn(async () => topic),
+  createTopic: vi.fn(),
+  updateTopic: vi.fn(),
+  deleteTopic: vi.fn(),
+  setTopicsBaseUrl: vi.fn(),
+  listTopicWorkspaces: vi.fn(async () => []),
+  listTopicSessions: vi.fn(async () => []),
 }));
 
 vi.mock("../api/conversations", () => ({
@@ -135,7 +135,7 @@ describe("ambient channel control path", () => {
 
   beforeEach(() => {
     window.localStorage.clear();
-    window.localStorage.setItem("swage:active-space", JSON.stringify(space.id));
+    window.localStorage.setItem("swage:active-topic", JSON.stringify(topic.id));
     vi.clearAllMocks();
   });
 
@@ -211,7 +211,7 @@ describe("ambient channel control path", () => {
 
     vi.mocked(createConversation).mockResolvedValueOnce({
       id: "conv-new",
-      space_id: space.id,
+      topic_id: topic.id,
       selected_model_id: null,
       created_at: "2026-08-29T10:10:00Z",
       last_activity: "2026-08-29T10:10:00Z",
@@ -224,7 +224,7 @@ describe("ambient channel control path", () => {
     await vi.waitFor(() => {
       expect(window.location.pathname).toBe("/conversations/conv-new");
     });
-    expect(createConversation).toHaveBeenCalledWith(space.id, undefined, undefined, undefined);
+    expect(createConversation).toHaveBeenCalledWith(topic.id, undefined, undefined, undefined);
     expect((document.querySelector(
       'main.pages-surface select[aria-label="Active conversation"]',
     ) as HTMLSelectElement).value).toBe("conv-new");

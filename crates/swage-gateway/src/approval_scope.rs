@@ -1,5 +1,5 @@
 use swage_agent::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
-use swage_storage::model::{ApprovalRequest, NewWorkspaceAttachment, Space};
+use swage_storage::model::{ApprovalRequest, NewWorkspaceAttachment, Topic};
 
 use crate::{error::ApiError, state::AppState};
 
@@ -42,18 +42,18 @@ pub(crate) async fn apply_approval_scope(
                 let (path, access) = location_context(approval)?;
                 return match scope {
                     ApprovalDecisionScope::Permanent => {
-                        let space = approval_space(state, approval).await?;
+                        let topic = approval_topic(state, approval).await?;
                         state
                             .session_approval_grants
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(crate::state::ApprovalGrantKey::location(
                                 None,
-                                Some(space.id),
+                                Some(topic.id),
                                 path.clone(),
                                 access.clone(),
                             ));
-                        persist_location_grant_for_space(state, &space, &path, &access).await
+                        persist_location_grant_for_topic(state, &topic, &path, &access).await
                     }
                     ApprovalDecisionScope::PermanentGlobal => {
                         state
@@ -80,9 +80,9 @@ pub(crate) async fn apply_approval_scope(
 
             match scope {
                 ApprovalDecisionScope::Permanent => {
-                    let space = approval_space(state, approval).await?;
+                    let topic = approval_topic(state, approval).await?;
                     let config =
-                        crate::turn::load_session_config(state, &space.slug, &approval.agent_id)
+                        crate::turn::load_session_config(state, &topic.slug, &approval.agent_id)
                             .map_err(ApiError::from)?;
                     state
                         .session_approval_grants
@@ -90,15 +90,15 @@ pub(crate) async fn apply_approval_scope(
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(crate::state::ApprovalGrantKey {
                             session_id: None,
-                            space_id: Some(space.id),
+                            topic_id: Some(topic.id),
                             kind: swage_storage::model::ApprovalKind::Tool,
                             name: tool_name.to_string(),
                             access: None,
                         });
-                    crate::settings::persist_permanent_tool_approval_for_space(
+                    crate::settings::persist_permanent_tool_approval_for_topic(
                         &state.config_root,
                         &config,
-                        &space,
+                        &topic,
                         tool_name,
                     )
                     .await
@@ -110,7 +110,7 @@ pub(crate) async fn apply_approval_scope(
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(crate::state::ApprovalGrantKey {
                             session_id: None,
-                            space_id: None,
+                            topic_id: None,
                             kind: swage_storage::model::ApprovalKind::Tool,
                             name: tool_name.to_string(),
                             access: None,
@@ -144,15 +144,15 @@ fn location_context(approval: &ApprovalRequest) -> Result<(String, String), ApiE
     Ok((path.to_string(), access.to_string()))
 }
 
-async fn persist_location_grant_for_space(
+async fn persist_location_grant_for_topic(
     state: &AppState,
-    space: &Space,
+    topic: &Topic,
     path: &str,
     access: &str,
 ) -> Result<(), ApiError> {
     let existing = state
         .storage
-        .list_workspace_attachments_by_space(space.id)
+        .list_workspace_attachments_by_topic(topic.id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
         .into_iter()
@@ -179,7 +179,7 @@ async fn persist_location_grant_for_space(
     state
         .storage
         .create_workspace_attachment(NewWorkspaceAttachment {
-            space_id: space.id,
+            topic_id: topic.id,
             label: format!("Approved {}", access),
             path: path.to_string(),
             permissions: vec![access.to_string()],
@@ -195,18 +195,18 @@ async fn persist_location_grant_globally(
     path: &str,
     access: &str,
 ) -> Result<(), ApiError> {
-    let spaces = state
-        .space_store
+    let topics = state
+        .topic_store
         .list_all()
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    for space in spaces {
-        persist_location_grant_for_space(state, &space, path, access).await?;
+    for topic in topics {
+        persist_location_grant_for_topic(state, &topic, path, access).await?;
     }
     Ok(())
 }
 
-async fn approval_space(state: &AppState, approval: &ApprovalRequest) -> Result<Space, ApiError> {
+async fn approval_topic(state: &AppState, approval: &ApprovalRequest) -> Result<Topic, ApiError> {
     let session_id = approval_session_id(state, approval).await?;
     let session = state
         .storage
@@ -216,11 +216,11 @@ async fn approval_space(state: &AppState, approval: &ApprovalRequest) -> Result<
         .ok_or_else(|| ApiError::not_found("session", session_id))?;
 
     state
-        .space_store
-        .get(session.space_id)
+        .topic_store
+        .get(session.topic_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
-        .ok_or_else(|| ApiError::not_found("space", session.space_id))
+        .ok_or_else(|| ApiError::not_found("topic", session.topic_id))
 }
 
 async fn approval_session_id(

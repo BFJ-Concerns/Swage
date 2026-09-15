@@ -34,7 +34,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
     let id: String = row.get(0)?;
     let session_id: Option<String> = row.get(2)?;
-    let space_id: Option<String> = row.get(3)?;
+    let topic_id: Option<String> = row.get(3)?;
     let created_at: String = row.get(10)?;
     let updated_at: String = row.get(11)?;
     Ok(Attachment {
@@ -50,7 +50,7 @@ fn row_to_attachment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attachment> {
                 )
             })?,
         session_id: session_id.as_deref().map(parse_uuid).transpose()?,
-        space_id: space_id.as_deref().map(parse_uuid).transpose()?,
+        topic_id: topic_id.as_deref().map(parse_uuid).transpose()?,
         kind: row
             .get::<_, String>(4)?
             .parse::<AttachmentKind>()
@@ -149,7 +149,7 @@ pub fn migrate_attachment_ingested_markdown_dedup(conn: &Connection) -> Result<(
                     a.id,
                     a.scope_kind,
                     a.session_id,
-                    a.space_id,
+                    a.topic_id,
                     a.filename,
                     a.ingested_markdown,
                     a.created_at,
@@ -180,7 +180,7 @@ pub fn migrate_attachment_ingested_markdown_dedup(conn: &Connection) -> Result<(
                 attachment_id,
                 scope_kind,
                 session_id,
-                space_id,
+                topic_id,
                 filename,
                 content_text,
                 created_at,
@@ -188,14 +188,14 @@ pub fn migrate_attachment_ingested_markdown_dedup(conn: &Connection) -> Result<(
             ) = row.map_err(|error| StorageError::MigrationFailed(error.to_string()))?;
             conn.execute(
                 "INSERT INTO materials (
-                    id, scope_kind, session_id, space_id, source_kind, source_attachment_id,
+                    id, scope_kind, session_id, topic_id, source_kind, source_attachment_id,
                     status, title, relative_path, mime_type, content_text, created_at, updated_at, archived_at
                 ) VALUES (?1, ?2, ?3, ?4, 'attachment_ingestion', ?5, 'active', ?6, ?7, 'text/markdown', ?8, ?9, ?10, NULL)",
                 params![
                     Uuid::new_v4().to_string(),
                     scope_kind,
                     session_id,
-                    space_id,
+                    topic_id,
                     attachment_id,
                     filename,
                     format!("attachments/{attachment_id}-attachment.md"),
@@ -242,14 +242,14 @@ impl AttachmentStore for SqliteStorage {
             let result = (|| -> Result<(Attachment, BackgroundJob), rusqlite::Error> {
                 conn.execute(
                     "INSERT INTO attachments (
-                        id, scope_kind, session_id, space_id, kind, status, filename,
+                        id, scope_kind, session_id, topic_id, kind, status, filename,
                         mime_type, content_bytes, byte_count, created_at, updated_at
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
                     params![
                         attachment.id.to_string(),
                         attachment.scope_kind.to_string(),
                         attachment.session_id.map(|id| id.to_string()),
-                        attachment.space_id.map(|id| id.to_string()),
+                        attachment.topic_id.map(|id| id.to_string()),
                         attachment.kind.to_string(),
                         AttachmentStatus::Pending.to_string(),
                         attachment.filename,
@@ -274,7 +274,7 @@ impl AttachmentStore for SqliteStorage {
                     ],
                 )?;
                 let attachment_record = conn.query_row(
-                    "SELECT id, scope_kind, session_id, space_id, kind, status, filename,
+                    "SELECT id, scope_kind, session_id, topic_id, kind, status, filename,
                             mime_type, content_bytes, byte_count, created_at, updated_at
                      FROM attachments WHERE id = ?1",
                     params![attachment.id.to_string()],
@@ -306,7 +306,7 @@ impl AttachmentStore for SqliteStorage {
     async fn get_attachment(&self, id: Uuid) -> Result<Option<Attachment>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, scope_kind, session_id, space_id, kind, status, filename,
+                "SELECT id, scope_kind, session_id, topic_id, kind, status, filename,
                         mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE id = ?1",
             )?;
@@ -325,7 +325,7 @@ impl AttachmentStore for SqliteStorage {
     ) -> Result<Vec<Attachment>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, scope_kind, session_id, space_id, kind, status, filename,
+                "SELECT id, scope_kind, session_id, topic_id, kind, status, filename,
                         mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE session_id = ?1 ORDER BY created_at ASC, id ASC",
             )?;
@@ -335,17 +335,17 @@ impl AttachmentStore for SqliteStorage {
         .await
     }
 
-    async fn list_attachments_by_space(
+    async fn list_attachments_by_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<Vec<Attachment>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, scope_kind, session_id, space_id, kind, status, filename,
+                "SELECT id, scope_kind, session_id, topic_id, kind, status, filename,
                         mime_type, content_bytes, byte_count, created_at, updated_at
-                 FROM attachments WHERE space_id = ?1 ORDER BY created_at ASC, id ASC",
+                 FROM attachments WHERE topic_id = ?1 ORDER BY created_at ASC, id ASC",
             )?;
-            stmt.query_map(params![space_id.to_string()], row_to_attachment)?
+            stmt.query_map(params![topic_id.to_string()], row_to_attachment)?
                 .collect()
         })
         .await
@@ -365,7 +365,7 @@ impl AttachmentStore for SqliteStorage {
                 params![id.to_string(), status.to_string(), now],
             )?;
             conn.query_row(
-                "SELECT id, scope_kind, session_id, space_id, kind, status, filename,
+                "SELECT id, scope_kind, session_id, topic_id, kind, status, filename,
                         mime_type, content_bytes, byte_count, created_at, updated_at
                  FROM attachments WHERE id = ?1",
                 params![id.to_string()],
@@ -552,7 +552,7 @@ mod tests {
 
     use super::*;
     use crate::model::{MaterialSourceKind, NewMaterial};
-    use crate::store::{MaterialStore, SpaceStore};
+    use crate::store::{MaterialStore, TopicStore};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attachment_round_trips_and_background_job_states_transition() {
@@ -565,7 +565,7 @@ mod tests {
                     id: attachment_id,
                     scope_kind: AttachmentScopeKind::Session,
                     session_id: None,
-                    space_id: None,
+                    topic_id: None,
                     kind: AttachmentKind::Document,
                     filename: "note.txt".into(),
                     mime_type: "text/plain".into(),
@@ -604,9 +604,9 @@ mod tests {
             .queue_attachment_ingestion(
                 NewAttachment {
                     id: second_attachment_id,
-                    scope_kind: AttachmentScopeKind::Space,
+                    scope_kind: AttachmentScopeKind::Topic,
                     session_id: None,
-                    space_id: None,
+                    topic_id: None,
                     kind: AttachmentKind::Document,
                     filename: "bad.bin".into(),
                     mime_type: "text/plain".into(),
@@ -645,7 +645,7 @@ mod tests {
                     id: running_attachment_id,
                     scope_kind: AttachmentScopeKind::Session,
                     session_id: None,
-                    space_id: None,
+                    topic_id: None,
                     kind: AttachmentKind::Document,
                     filename: "note.txt".into(),
                     mime_type: "text/plain".into(),
@@ -673,7 +673,7 @@ mod tests {
                     id: queued_attachment_id,
                     scope_kind: AttachmentScopeKind::Session,
                     session_id: None,
-                    space_id: None,
+                    topic_id: None,
                     kind: AttachmentKind::Document,
                     filename: "queued.txt".into(),
                     mime_type: "text/plain".into(),
@@ -719,7 +719,7 @@ mod tests {
                 id TEXT NOT NULL PRIMARY KEY,
                 scope_kind TEXT NOT NULL,
                 session_id TEXT,
-                space_id TEXT,
+                topic_id TEXT,
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 filename TEXT NOT NULL,
@@ -734,7 +734,7 @@ mod tests {
                 id TEXT NOT NULL PRIMARY KEY,
                 scope_kind TEXT NOT NULL,
                 session_id TEXT,
-                space_id TEXT,
+                topic_id TEXT,
                 source_kind TEXT NOT NULL,
                 source_attachment_id TEXT,
                 status TEXT NOT NULL,
@@ -757,9 +757,9 @@ mod tests {
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO attachments (
-                id, scope_kind, session_id, space_id, kind, status, filename, mime_type,
+                id, scope_kind, session_id, topic_id, kind, status, filename, mime_type,
                 content_bytes, byte_count, ingested_markdown, created_at, updated_at
-            ) VALUES (?1, 'space', NULL, ?2, 'document', 'ready', 'legacy.txt', 'text/plain', ?3, 6, ?4, ?5, ?5)",
+            ) VALUES (?1, 'topic', NULL, ?2, 'document', 'ready', 'legacy.txt', 'text/plain', ?3, 6, ?4, ?5, ?5)",
             params![
                 attachment_id,
                 Uuid::new_v4().to_string(),
@@ -794,15 +794,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn attachment_rows_do_not_persist_duplicate_ingested_markdown() {
         let storage = SqliteStorage::in_memory().unwrap();
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let attachment_id = Uuid::new_v4();
         let (attachment, _) = storage
             .queue_attachment_ingestion(
                 NewAttachment {
                     id: attachment_id,
-                    scope_kind: AttachmentScopeKind::Space,
+                    scope_kind: AttachmentScopeKind::Topic,
                     session_id: None,
-                    space_id: Some(space.id),
+                    topic_id: Some(topic.id),
                     kind: AttachmentKind::Document,
                     filename: "note.md".into(),
                     mime_type: "text/markdown".into(),
@@ -826,7 +826,7 @@ mod tests {
                 id: Uuid::new_v4(),
                 scope_kind: attachment.scope_kind.clone(),
                 session_id: attachment.session_id,
-                space_id: attachment.space_id,
+                topic_id: attachment.topic_id,
                 source_kind: MaterialSourceKind::AttachmentIngestion,
                 source_attachment_id: Some(attachment.id),
                 title: attachment.filename.clone(),

@@ -3,11 +3,11 @@ use serde_json::json;
 use swage_client::websocket::{AssemblyReport, ElementReport, ServerEvent};
 use swage_tui::app::{EventOutcome, handle_server_event};
 use swage_tui::keybindings::{AppAction, map_key_event};
-use swage_tui::state::{ConversationState, SpaceInfo};
+use swage_tui::state::{ConversationState, TopicInfo};
 use uuid::Uuid;
 
 fn make_state() -> ConversationState {
-    ConversationState::new(SpaceInfo {
+    ConversationState::new(TopicInfo {
         id: Uuid::new_v4(),
         name: "Alpha".to_string(),
     })
@@ -144,17 +144,17 @@ fn shutdown_event_disables_streaming_and_reports_shutdown() {
 }
 
 #[test]
-fn space_switch_updates_active_space_in_state() {
+fn topic_switch_updates_active_topic_in_state() {
     let mut state = make_state();
-    let next_space = SpaceInfo {
+    let next_topic = TopicInfo {
         id: Uuid::new_v4(),
         name: "Beta".to_string(),
     };
 
-    state.set_space(next_space.clone());
+    state.set_topic(next_topic.clone());
 
-    assert_eq!(state.active_space.id, next_space.id);
-    assert_eq!(state.active_space.name, "Beta");
+    assert_eq!(state.active_topic.id, next_topic.id);
+    assert_eq!(state.active_topic.name, "Beta");
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn keybinding_dispatch_maps_real_shortcuts() {
             KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
             false
         ),
-        Some(AppAction::OpenSpaceSelector)
+        Some(AppAction::OpenTopicSelector)
     );
     assert_eq!(
         map_key_event(

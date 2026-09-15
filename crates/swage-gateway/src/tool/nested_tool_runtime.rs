@@ -186,7 +186,7 @@ mod tests {
     use swage_storage::model::{NewSession, NewThread, NewTurn, TurnState};
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::store::{
-        SessionStore, SpaceStore, Storage, ThreadStore, ToolCallStore, TurnStore,
+        SessionStore, Storage, ThreadStore, ToolCallStore, TopicStore, TurnStore,
     };
     use swage_tool::context::{MockToolContext, ToolContext, UserInfo, serialise_tool_context};
     use swage_tool::tool::Tool;
@@ -242,10 +242,10 @@ mod tests {
     }
 
     async fn create_turn(storage: &SqliteStorage) -> uuid::Uuid {
-        let space = storage.get_or_create_default().await.unwrap();
+        let topic = storage.get_or_create_default().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                space_id: space.id,
+                topic_id: topic.id,
                 agent_id: "agent-a".into(),
                 metadata: None,
                 active_workspace_attachment_id: None,

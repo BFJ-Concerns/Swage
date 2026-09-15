@@ -50,7 +50,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("listConversations", () => {
-  it("sends GET /api/spaces/:spaceId/sessions and unwraps the conversations array", async () => {
+  it("sends GET /api/topics/:topicId/sessions and unwraps the conversations array", async () => {
     const fetchMock = vi.mocked(fetch);
     // Gateway returns { conversations: [...] } — the client must unwrap.
     fetchMock.mockResolvedValueOnce(
@@ -69,7 +69,7 @@ describe("listConversations", () => {
 
     const result = await listConversations("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/sessions", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1/sessions", {
       method: "GET",
     });
     expect(result).toHaveLength(1);
@@ -77,7 +77,7 @@ describe("listConversations", () => {
     expect(result[0].has_interrupted_turn).toBe(false);
   });
 
-  it("returns an empty array when the space has no conversations", async () => {
+  it("returns an empty array when the topic has no conversations", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       mockResponse({ conversations: [] }),
     );
@@ -98,11 +98,11 @@ describe("listConversations", () => {
 // ---------------------------------------------------------------------------
 
 describe("createConversation", () => {
-  it("sends POST /api/spaces/:spaceId/sessions and returns ConversationResponse", async () => {
+  it("sends POST /api/topics/:topicId/sessions and returns ConversationResponse", async () => {
     const fetchMock = vi.mocked(fetch);
     const created = {
       id: "new-conv",
-      space_id: "proj-1",
+      topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
     };
@@ -110,11 +110,11 @@ describe("createConversation", () => {
 
     const result = await createConversation("proj-1");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/sessions", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1/sessions", {
       method: "POST",
     });
     expect(result.id).toBe("new-conv");
-    expect(result.space_id).toBe("proj-1");
+    expect(result.topic_id).toBe("proj-1");
   });
 
   it("throws on non-2xx response", async () => {
@@ -129,7 +129,7 @@ describe("createConversation", () => {
 
     await createConversation("proj-1", "small-model", "researcher", "high");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/spaces/proj-1/sessions", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/topics/proj-1/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -150,7 +150,7 @@ describe("getConversation", () => {
     const fetchMock = vi.mocked(fetch);
     const detail = {
       id: "conv-42",
-      space_id: "default",
+      topic_id: "default",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T01:00:00Z",
       messages: [
@@ -218,7 +218,7 @@ describe("setBaseUrl", () => {
     await listConversations("proj-1");
 
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-      "http://localhost:3000/api/spaces/proj-1/sessions",
+      "http://localhost:3000/api/topics/proj-1/sessions",
       expect.objectContaining({ method: "GET" }),
     );
   });

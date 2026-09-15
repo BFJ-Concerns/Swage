@@ -189,7 +189,7 @@ mod tests {
     use std::sync::Arc;
 
     use swage_provider::LlmProvider;
-    use swage_storage::{AuditStore, SpaceStore, SqliteStorage, TaskDefinitionStore};
+    use swage_storage::{AuditStore, SqliteStorage, TaskDefinitionStore, TopicStore};
     use swage_tool::context::MockToolContext;
     use tokio::sync::mpsc;
 
@@ -201,7 +201,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn SpaceStore>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),

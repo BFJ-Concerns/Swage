@@ -74,7 +74,7 @@ async fn start_test_gateway() -> (Router, SocketAddr) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -173,26 +173,26 @@ async fn client_library_conversation_crud_against_live_gateway() {
     );
 }
 
-/// Client library space CRUD against a live gateway.
+/// Client library topic CRUD against a live gateway.
 ///
-/// Proves: the typed space methods [mkqq] correctly call the gateway's
+/// Proves: the typed topic methods [mkqq] correctly call the gateway's
 /// REST endpoints and the client response types deserialise cleanly.
 ///
-/// Motes: mkqq (space CRUD) + e32t (GatewayClient base)
+/// Motes: mkqq (topic CRUD) + e32t (GatewayClient base)
 #[tokio::test(flavor = "multi_thread")]
-async fn client_library_space_crud_against_live_gateway() {
+async fn client_library_topic_crud_against_live_gateway() {
     let (_router, addr) = start_test_gateway().await;
     let address = format!("http://{addr}");
     let client = swage_client::http::GatewayClient::new(&address);
 
-    // List spaces — should contain at least the default space.
-    let spaces = client
-        .list_spaces()
+    // List topics — should contain at least the default topic.
+    let topics = client
+        .list_topics()
         .await
-        .expect("list_spaces should succeed");
+        .expect("list_topics should succeed");
     assert!(
-        !spaces.spaces.is_empty(),
-        "should have at least the default space"
+        !topics.topics.is_empty(),
+        "should have at least the default topic"
     );
 }
 

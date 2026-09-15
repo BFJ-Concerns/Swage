@@ -5,11 +5,11 @@
   type Presentation = "commands" | "skills";
 
   interface Props {
-    spaceId: string | null;
+    topicId: string | null;
     presentation: Presentation;
   }
 
-  let { spaceId, presentation }: Props = $props();
+  let { topicId, presentation }: Props = $props();
   let skills = $state<SkillItem[]>([]);
   let selectedName = $state("");
   let loading = $state(false);
@@ -22,14 +22,14 @@
   const listLabel = $derived(isCommands ? "Available commands" : "Resolved skills");
 
   $effect(() => {
-    const currentSpaceId = spaceId;
+    const currentTopicId = topicId;
     const generation = ++loadGeneration;
     skills = [];
     selectedName = "";
     error = null;
-    if (!currentSpaceId) return;
+    if (!currentTopicId) return;
     loading = true;
-    void listSkills(currentSpaceId)
+    void listSkills(currentTopicId)
       .then((loaded) => {
         if (generation !== loadGeneration) return;
         skills = loaded;
@@ -45,7 +45,7 @@
   });
 
   function scopeLabel(skill: SkillItem): string {
-    return skill.level === "space" ? "This space" : skill.level === "agent" ? "This agent" : "Global";
+    return skill.level === "topic" ? "This topic" : skill.level === "agent" ? "This agent" : "Global";
   }
 
   function itemLabel(skill: SkillItem): string {
@@ -58,14 +58,14 @@
 </script>
 
 <section class="catalogue" aria-label={listLabel}>
-  {#if !spaceId}
-    <p class="empty">Select a space to inspect its {isCommands ? "available commands" : "resolved skills"}.</p>
+  {#if !topicId}
+    <p class="empty">Select a topic to inspect its {isCommands ? "available commands" : "resolved skills"}.</p>
   {:else if loading}
     <p class="loading">Loading {resourceName}…</p>
   {:else if error}
     <p class="error" role="alert">{error}</p>
   {:else if skills.length === 0}
-    <p class="empty">No {resourceName} are available for this space.</p>
+    <p class="empty">No {resourceName} are available for this topic.</p>
   {:else}
     <div class="catalogue-list" role="list" aria-label={listLabel}>
       {#each skills as skill (skill.name)}

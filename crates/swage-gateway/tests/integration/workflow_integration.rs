@@ -10,7 +10,7 @@ use swage_core::{
 };
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
-use swage_storage::{SpaceStore, SqliteStorage, Storage, WorkflowStore};
+use swage_storage::{SqliteStorage, Storage, TopicStore, WorkflowStore};
 
 use crate::support::{ProcessEnvGuard, start_live_server};
 
@@ -80,10 +80,10 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -94,7 +94,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
     let client = reqwest::Client::new();
 
     let list: Value = client
-        .get(format!("{base}/api/spaces/{}/workflow-scripts", space.id))
+        .get(format!("{base}/api/topics/{}/workflow-scripts", topic.id))
         .send()
         .await
         .unwrap()
@@ -142,7 +142,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
     );
 
     let authored: Value = client
-        .post(format!("{base}/api/spaces/{}/workflow-scripts", space.id))
+        .post(format!("{base}/api/topics/{}/workflow-scripts", topic.id))
         .json(&json!({
             "name": "proof",
             "description": "Authored shadow",
@@ -158,7 +158,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
         .await
         .unwrap();
     let shadowed_list: Value = client
-        .get(format!("{base}/api/spaces/{}/workflow-scripts", space.id))
+        .get(format!("{base}/api/topics/{}/workflow-scripts", topic.id))
         .send()
         .await
         .unwrap()
@@ -201,10 +201,10 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -215,7 +215,7 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
     let client = reqwest::Client::new();
 
     let started: Value = client
-        .post(format!("{base}/api/spaces/{}/workflow-runs", space.id))
+        .post(format!("{base}/api/topics/{}/workflow-runs", topic.id))
         .json(&json!({"source": "return { done: true };", "args": null, "budget": null}))
         .send()
         .await
@@ -252,10 +252,10 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
 #[tokio::test(flavor = "multi_thread")]
 async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -266,7 +266,7 @@ async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
     let client = reqwest::Client::new();
 
     let started: Value = client
-        .post(format!("{base}/api/spaces/{}/workflow-runs", space.id))
+        .post(format!("{base}/api/topics/{}/workflow-runs", topic.id))
         .json(&json!({"source": "return { done: true };", "args": null, "budget": null}))
         .send()
         .await
@@ -293,10 +293,10 @@ async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let space = storage.get_or_create_default().await.unwrap();
+    let topic = storage.get_or_create_default().await.unwrap();
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn SpaceStore>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
@@ -307,7 +307,7 @@ async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
     let client = reqwest::Client::new();
 
     let started: Value = client
-        .post(format!("{base}/api/spaces/{}/workflow-runs", space.id))
+        .post(format!("{base}/api/topics/{}/workflow-runs", topic.id))
         .json(&json!({
             "source": "return await wait({ timerMs: 120000 });",
             "args": null,

@@ -6,7 +6,7 @@ export function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
     message: "Review the queue.",
     status: "active",
     spec: { kind: "interval", every: "every 1 hours" },
-    session: { policy: "fresh", space_id: "space-1", agent_id: "gateway" },
+    session: { policy: "fresh", topic_id: "topic-1", agent_id: "gateway" },
     creator: { kind: "user" },
     routing: {
       deliver_to_origin: false,

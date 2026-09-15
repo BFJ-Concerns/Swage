@@ -15,12 +15,12 @@ pub struct SessionVariable {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Persisted context snapshot metadata for space-scoped listing.
+/// Persisted context snapshot metadata for topic-scoped listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextSnapshotRecord {
     pub turn_id: Uuid,
     pub session_id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub report_json: String,
 }
@@ -115,12 +115,12 @@ impl FromStr for TurnState {
     }
 }
 
-/// Filesystem-safe identifier for a space directory.
+/// Filesystem-safe identifier for a topic directory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct SpaceSlug(String);
+pub struct TopicSlug(String);
 
-impl SpaceSlug {
+impl TopicSlug {
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let value = value.into();
         if value.is_empty()
@@ -128,7 +128,7 @@ impl SpaceSlug {
             || !value.chars().any(|c| c.is_ascii_alphanumeric())
         {
             return Err(
-                "space slug must contain ASCII letters or digits and may only use hyphens"
+                "topic slug must contain ASCII letters or digits and may only use hyphens"
                     .to_string(),
             );
         }
@@ -140,13 +140,13 @@ impl SpaceSlug {
     }
 }
 
-impl std::fmt::Display for SpaceSlug {
+impl std::fmt::Display for TopicSlug {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::ops::Deref for SpaceSlug {
+impl std::ops::Deref for TopicSlug {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
@@ -154,19 +154,19 @@ impl std::ops::Deref for SpaceSlug {
     }
 }
 
-impl AsRef<str> for SpaceSlug {
+impl AsRef<str> for TopicSlug {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl AsRef<std::path::Path> for SpaceSlug {
+impl AsRef<std::path::Path> for TopicSlug {
     fn as_ref(&self) -> &std::path::Path {
         std::path::Path::new(self.as_str())
     }
 }
 
-impl FromStr for SpaceSlug {
+impl FromStr for TopicSlug {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -174,48 +174,48 @@ impl FromStr for SpaceSlug {
     }
 }
 
-impl From<&str> for SpaceSlug {
+impl From<&str> for TopicSlug {
     fn from(value: &str) -> Self {
-        Self::new(value).expect("space slug literals must be valid")
+        Self::new(value).expect("topic slug literals must be valid")
     }
 }
 
-impl From<String> for SpaceSlug {
+impl From<String> for TopicSlug {
     fn from(value: String) -> Self {
-        Self::new(value).expect("space slug strings must be valid")
+        Self::new(value).expect("topic slug strings must be valid")
     }
 }
 
-impl PartialEq<&str> for SpaceSlug {
+impl PartialEq<&str> for TopicSlug {
     fn eq(&self, other: &&str) -> bool {
         self.as_str() == *other
     }
 }
 
-/// A space groups conversations and provides configuration scope.
+/// A topic groups conversations and provides configuration scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Space {
+pub struct Topic {
     pub id: Uuid,
     pub name: String,
-    /// Short operator-authored summary shown in space pickers and previews.
+    /// Short operator-authored summary shown in topic pickers and previews.
     pub description: String,
-    /// True for the single built-in fallback space.
+    /// True for the single built-in fallback topic.
     ///
-    /// This is structural identity, not presentation. The space may be
-    /// renamed without ceasing to be the default space.
+    /// This is structural identity, not presentation. The topic may be
+    /// renamed without ceasing to be the default topic.
     pub is_default: bool,
-    /// Filesystem-safe identifier used for the space's directory under
-    /// `~/.swage/spaces/{slug}/`.
-    pub slug: SpaceSlug,
+    /// Filesystem-safe identifier used for the topic's directory under
+    /// `~/.swage/topics/{slug}/`.
+    pub slug: TopicSlug,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// External resource attached to a space.
+/// External resource attached to a topic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceAttachment {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub label: String,
     pub path: String,
     pub canonical_path: String,
@@ -227,11 +227,11 @@ pub struct WorkspaceAttachment {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A session (conversation) within a space, scoped to a single agent.
+/// A session (conversation) within a topic, scoped to a single agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     /// The agent that owns this session. Used to scope queries in multi-agent
     /// deployments so each agent sees only its own sessions.
     pub agent_id: String,
@@ -267,7 +267,7 @@ pub struct ChannelLink {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -375,7 +375,7 @@ pub struct AuditEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMemoryRecord {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
     pub agent_id: String,
@@ -394,7 +394,7 @@ pub struct AgentMemoryRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAgentMemoryRecord {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub session_id: Uuid,
     pub turn_id: Uuid,
     pub agent_id: String,
@@ -446,14 +446,14 @@ pub struct NewSecretRecord {
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentScopeKind {
     Session,
-    Space,
+    Topic,
 }
 
 impl std::fmt::Display for AttachmentScopeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             AttachmentScopeKind::Session => "session",
-            AttachmentScopeKind::Space => "space",
+            AttachmentScopeKind::Topic => "topic",
         };
         write!(f, "{s}")
     }
@@ -465,7 +465,7 @@ impl FromStr for AttachmentScopeKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "session" => Ok(AttachmentScopeKind::Session),
-            "space" => Ok(AttachmentScopeKind::Space),
+            "topic" => Ok(AttachmentScopeKind::Topic),
             other => Err(format!("unknown attachment scope: {other}")),
         }
     }
@@ -534,13 +534,13 @@ impl FromStr for AttachmentStatus {
     }
 }
 
-/// A durable attachment for session or space context.
+/// A durable attachment for session or topic context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub kind: AttachmentKind,
     pub status: AttachmentStatus,
     pub filename: String,
@@ -556,7 +556,7 @@ pub struct NewAttachment {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub kind: AttachmentKind,
     pub filename: String,
     pub mime_type: String,
@@ -720,7 +720,7 @@ pub struct Material {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub source_kind: MaterialSourceKind,
     pub source_attachment_id: Option<Uuid>,
     pub status: MaterialStatus,
@@ -738,7 +738,7 @@ pub struct NewMaterial {
     pub id: Uuid,
     pub scope_kind: AttachmentScopeKind,
     pub session_id: Option<Uuid>,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub source_kind: MaterialSourceKind,
     pub source_attachment_id: Option<Uuid>,
     pub title: String,
@@ -758,17 +758,17 @@ pub struct ObservationOrigin {
     pub local_path: Option<String>,
 }
 
-/// One immutable capture of an external source in a space's knowledge base.
+/// One immutable capture of an external source in a topic's knowledge base.
 ///
 /// Observations are the knowledge base's unit of storage and are never
 /// mutated or deleted: a fresh capture of the same origin is a new row, and
 /// curation reorganises through separate append-only assertions. The raw
-/// body lives as a content-addressed file under the space data root
+/// body lives as a content-addressed file under the topic data root
 /// (addressed by `body_sha256`); this row holds metadata only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceObservation {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub origin: ObservationOrigin,
     pub retrieved_at: DateTime<Utc>,
     /// Lowercase hex SHA-256 of the raw body — the body file's address.
@@ -784,7 +784,7 @@ pub struct SourceObservation {
 /// Input for recording a new source observation.
 #[derive(Debug, Clone)]
 pub struct NewSourceObservation {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub origin: ObservationOrigin,
     pub retrieved_at: DateTime<Utc>,
     pub body_sha256: String,
@@ -805,7 +805,7 @@ pub struct NewSourceObservation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceCapture {
     pub observation_id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub origin: ObservationOrigin,
     pub capture_scope: String,
     pub captured_at: DateTime<Utc>,
@@ -829,7 +829,7 @@ pub struct ExtractionDerivation {
     pub created_at: DateTime<Utc>,
 }
 
-/// One full-text search hit over a space's knowledge base.
+/// One full-text search hit over a topic's knowledge base.
 ///
 /// Carries everything a citation needs: the observation, the derivation
 /// version searched, and the matching passage. The offset is absent when a
@@ -851,7 +851,7 @@ pub struct KnowledgeSearchHit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnowledgeCitation {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub observation_id: Uuid,
     pub derivation_version: u32,
     /// Byte offset of `quoted_text` within the pinned derivation.
@@ -865,7 +865,7 @@ pub struct KnowledgeCitation {
 /// store locates the exact quote in the pinned derivation.
 #[derive(Debug, Clone)]
 pub struct NewKnowledgeCitation {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub observation_id: Uuid,
     pub derivation_version: u32,
     pub quoted_text: String,
@@ -875,7 +875,7 @@ pub struct NewKnowledgeCitation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrientationCard {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub title: String,
     pub content: String,
     pub authored_by: String,
@@ -885,7 +885,7 @@ pub struct OrientationCard {
 
 #[derive(Debug, Clone)]
 pub struct NewOrientationCard {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub title: String,
     pub content: String,
     pub authored_by: String,
@@ -945,7 +945,7 @@ impl std::str::FromStr for CurationAssertionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurationAssertion {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub observation_id: Uuid,
     pub kind: CurationAssertionKind,
     /// The preferred or replacement observation for relationship assertions.
@@ -956,7 +956,7 @@ pub struct CurationAssertion {
 /// Input for appending an observation-level curation judgement.
 #[derive(Debug, Clone)]
 pub struct NewCurationAssertion {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub observation_id: Uuid,
     pub kind: CurationAssertionKind,
     pub target_observation_id: Option<Uuid>,
@@ -965,14 +965,14 @@ pub struct NewCurationAssertion {
 /// A durable agent definition — the bundle that gives a session its entire
 /// character, selected at session start by agent id.
 ///
-/// `space_id` `None` is a global definition; a space-scoped definition with
-/// the same id shadows it within that space. The permission overlay
+/// `topic_id` `None` is a global definition; a topic-scoped definition with
+/// the same id shadows it within that topic. The permission overlay
 /// intersects with the resolved config's grants and never expands them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
     /// The stable agent id sessions carry (`sessions.agent_id`).
     pub id: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub display_name: String,
     pub description: String,
     /// The agent's own instructions, appended after operator instructions.
@@ -997,7 +997,7 @@ pub struct AgentDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAgentDefinition {
     pub id: String,
-    pub space_id: Option<Uuid>,
+    pub topic_id: Option<Uuid>,
     pub display_name: String,
     pub description: String,
     pub instructions: String,
@@ -1104,13 +1104,13 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-/// A page: an agent-run tab on a space, assembled from module instances.
+/// A page: an agent-run tab on a topic, assembled from module instances.
 ///
 /// The database is authoritative for page content; renderings are derived.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
     /// Advanced on every module mutation, so "has this page moved?" is one
@@ -1145,7 +1145,7 @@ pub struct PageModule {
 /// Input for creating a page. `id` and timestamps are storage-assigned.
 #[derive(Debug, Clone)]
 pub struct NewPage {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub title: String,
 }
 
@@ -1179,13 +1179,13 @@ pub struct PageAnnotation {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A reusable page shape a space keeps: a named set of module rows that
-/// seeds new pages. Space-local — templates are neither shared nor
+/// A reusable page shape a topic keeps: a named set of module rows that
+/// seeds new pages. Topic-local — templates are neither shared nor
 /// distributed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageTemplate {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -1217,7 +1217,7 @@ pub struct PageTemplateModule {
 /// Input for creating a page template.
 #[derive(Debug, Clone)]
 pub struct NewPageTemplate {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
 }
 
@@ -1501,7 +1501,7 @@ impl FromStr for ScheduleKind {
 /// A durable schedule definition.
 ///
 /// The session policy is first-class: fresh-policy schedules carry their
-/// target space and agent, continuation-policy schedules the session they
+/// target topic and agent, continuation-policy schedules the session they
 /// keep returning to. No agent id is copied off a session at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
@@ -1801,18 +1801,18 @@ impl NewAgentMessage {
     }
 }
 
-/// Input for creating a new space.
+/// Input for creating a new topic.
 #[derive(Debug, Clone)]
-pub struct NewSpace {
+pub struct NewTopic {
     pub name: String,
-    /// Filesystem-safe identifier for the space directory.
-    pub slug: SpaceSlug,
+    /// Filesystem-safe identifier for the topic directory.
+    pub slug: TopicSlug,
 }
 
-/// Input for attaching a workspace to a space.
+/// Input for attaching a workspace to a topic.
 #[derive(Debug, Clone)]
 pub struct NewWorkspaceAttachment {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub label: String,
     pub path: String,
     pub permissions: Vec<String>,
@@ -1822,7 +1822,7 @@ pub struct NewWorkspaceAttachment {
 /// Input for creating a new session.
 #[derive(Debug, Clone)]
 pub struct NewSession {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     /// The agent that owns this session.
     pub agent_id: String,
     /// Host-managed opaque metadata to persist with the session.
@@ -1849,7 +1849,7 @@ pub struct NewChannelLink {
     pub integration: String,
     pub account: String,
     pub conversation: String,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub agent_id: String,
     pub session_id: Option<Uuid>,
     pub home_target: Option<serde_json::Value>,
@@ -2042,7 +2042,7 @@ pub struct AppendMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowScriptRecord {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
     pub description: String,
     pub delivery_grant: Option<serde_json::Value>,
@@ -2074,7 +2074,7 @@ impl WorkflowScriptRecord {
 
 #[derive(Clone, Debug)]
 pub struct NewWorkflowScript {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub name: String,
     pub description: String,
     pub source: String,
@@ -2100,7 +2100,7 @@ pub struct WorkflowRunWorkerPlacement {
     pub path: String,
     pub can_write: bool,
     /// The durable grant provenance used to re-authorise `path` on every
-    /// worker start without widening back to the space's other attachments.
+    /// worker start without widening back to the topic's other attachments.
     pub authority_path: String,
     pub authority_context_id: Uuid,
 }
@@ -2108,7 +2108,7 @@ pub struct WorkflowRunWorkerPlacement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowRunRecord {
     pub id: Uuid,
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     /// Set on a child run started by a parent's `workflow()` call: the parent
     /// run and the journal seq of the call that started it. The pair is what
     /// makes composed-run recovery deterministic — a resumed parent finds its
@@ -2161,7 +2161,7 @@ pub struct WorkflowRunRecord {
 
 #[derive(Clone, Debug)]
 pub struct NewWorkflowRun {
-    pub space_id: Uuid,
+    pub topic_id: Uuid,
     pub parent_run_id: Option<Uuid>,
     pub parent_seq: Option<u64>,
     pub script_version_id: Option<Uuid>,
@@ -2538,31 +2538,31 @@ mod tests {
         assert!(top.parent_call_id.is_none());
     }
 
-    // --- Space slug field ---
+    // --- Topic slug field ---
 
     #[test]
-    fn space_slug_field_present_and_serialises() {
+    fn topic_slug_field_present_and_serialises() {
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let space = Space {
+        let topic = Topic {
             id,
-            name: "my-space".to_string(),
+            name: "my-topic".to_string(),
             description: String::new(),
             is_default: false,
-            slug: "my-space".into(),
+            slug: "my-topic".into(),
             created_at: now,
             updated_at: now,
         };
-        let json = serde_json::to_string(&space).expect("serialisation should succeed");
+        let json = serde_json::to_string(&topic).expect("serialisation should succeed");
         assert!(
-            json.contains("\"slug\":\"my-space\""),
+            json.contains("\"slug\":\"my-topic\""),
             "slug should appear in JSON"
         );
     }
 
     #[test]
-    fn new_space_slug_field_present() {
-        let np = NewSpace {
+    fn new_topic_slug_field_present() {
+        let np = NewTopic {
             name: "test".to_string(),
             slug: "test".into(),
         };
@@ -2570,11 +2570,11 @@ mod tests {
     }
 
     #[test]
-    fn space_slug_rejects_values_without_ascii_alphanumerics() {
-        assert!(SpaceSlug::new("").is_err());
-        assert!(SpaceSlug::new("!!! --- ___").is_err());
-        assert!(SpaceSlug::new("space/escape").is_err());
-        assert!(SpaceSlug::new("space-01").is_ok());
+    fn topic_slug_rejects_values_without_ascii_alphanumerics() {
+        assert!(TopicSlug::new("").is_err());
+        assert!(TopicSlug::new("!!! --- ___").is_err());
+        assert!(TopicSlug::new("topic/escape").is_err());
+        assert!(TopicSlug::new("topic-01").is_ok());
     }
 
     // --- ApprovalState round-trips ---
@@ -2911,11 +2911,11 @@ mod tests {
     #[test]
     fn session_includes_agent_id() {
         let id = Uuid::new_v4();
-        let space_id = Uuid::new_v4();
+        let topic_id = Uuid::new_v4();
         let now = Utc::now();
         let session = Session {
             id,
-            space_id,
+            topic_id,
             agent_id: "my-agent".to_string(),
             metadata: None,
             selected_model_id: None,
@@ -2934,7 +2934,7 @@ mod tests {
     #[test]
     fn new_session_includes_agent_id() {
         let ns = NewSession {
-            space_id: Uuid::new_v4(),
+            topic_id: Uuid::new_v4(),
             agent_id: "config-agent".to_string(),
             metadata: None,
             active_workspace_attachment_id: None,

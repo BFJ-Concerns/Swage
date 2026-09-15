@@ -64,7 +64,7 @@ pub trait ContextElement: Send + Sync {
 
     /// Human-readable provenance for the assembly report.
     ///
-    /// Examples: `"thread history"`, `"space: my-space"`, `"global prompts"`.
+    /// Examples: `"thread history"`, `"topic: my-topic"`, `"global prompts"`.
     fn source(&self) -> String;
 
     /// A bounded, safe-to-persist glimpse of this element's content.

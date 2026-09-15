@@ -169,7 +169,7 @@ a short audit-and-patch; a whole-repo write runs the full survey:
 2. **Survey** the code for evidence, building a working fact inventory — claim,
    source (file or command), audience, canonical home. The inventory is expected
    for multi-file doc sets; informal notes suffice for a README-only job. Keep it
-   in the session's scratch space, never committed to the repo. Read
+   in the session's scratch topic, never committed to the repo. Read
    `references/survey-protocol.md` before any survey of substance.
 3. **Plan.** Route facts to homes and fix the doc set (gate 2). For anything
    beyond a single-file patch, propose the plan — files plus a one-line content

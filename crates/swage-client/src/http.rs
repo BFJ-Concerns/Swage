@@ -1,7 +1,7 @@
 //! HTTP client for the Swage gateway REST API.
 //!
 //! Wraps reqwest with typed methods covering the full gateway surface:
-//! health checks, graceful shutdown, conversation CRUD, and space CRUD.
+//! health checks, graceful shutdown, conversation CRUD, and topic CRUD.
 //! Constructed from a gateway address; also supports discovery from runtime
 //! metadata so consumers don't need to know where the metadata lives.
 
@@ -11,9 +11,9 @@ use crate::error::ClientError;
 use crate::runtime::RuntimeMetadata;
 use uuid::Uuid;
 
-pub use swage_protocol::client::space::{
-    CreateSpaceRequest, CreateWorkspaceAttachmentRequest, SpaceListResponse, SpaceResponse,
-    UpdateSpaceRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
+pub use swage_protocol::client::topic::{
+    CreateTopicRequest, CreateWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
+    UpdateTopicRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
     WorkspaceAttachmentResponse,
 };
 
@@ -216,15 +216,15 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    // --- Space CRUD ---
+    // --- Topic CRUD ---
 
-    /// Creates a new space.
+    /// Creates a new topic.
     ///
-    /// Calls `POST /api/spaces` with a JSON body containing the space name.
-    /// Returns the created space on success.
-    pub async fn create_space(&self, name: &str) -> Result<SpaceResponse, ClientError> {
-        let url = format!("{}/api/spaces", self.base_url);
-        let body = CreateSpaceRequest {
+    /// Calls `POST /api/topics` with a JSON body containing the topic name.
+    /// Returns the created topic on success.
+    pub async fn create_topic(&self, name: &str) -> Result<TopicResponse, ClientError> {
+        let url = format!("{}/api/topics", self.base_url);
+        let body = CreateTopicRequest {
             name: name.to_string(),
             description: String::new(),
         };
@@ -238,12 +238,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Lists all spaces.
+    /// Lists all topics.
     ///
-    /// Calls `GET /api/spaces`. Returns a list response wrapping all known
-    /// spaces.
-    pub async fn list_spaces(&self) -> Result<SpaceListResponse, ClientError> {
-        let url = format!("{}/api/spaces", self.base_url);
+    /// Calls `GET /api/topics`. Returns a list response wrapping all known
+    /// topics.
+    pub async fn list_topics(&self) -> Result<TopicListResponse, ClientError> {
+        let url = format!("{}/api/topics", self.base_url);
         let response = self
             .client
             .get(&url)
@@ -255,10 +255,10 @@ impl GatewayClient {
 
     /// Fetches a single space by ID.
     ///
-    /// Calls `GET /api/spaces/{id}`. A missing space answers in the wire
+    /// Calls `GET /api/topics/{id}`. A missing topic answers in the wire
     /// error contract and surfaces as `ClientError::Gateway { code: NotFound, .. }`.
-    pub async fn get_space(&self, id: Uuid) -> Result<SpaceResponse, ClientError> {
-        let url = format!("{}/api/spaces/{}", self.base_url, id);
+    pub async fn get_topic(&self, id: Uuid) -> Result<TopicResponse, ClientError> {
+        let url = format!("{}/api/topics/{}", self.base_url, id);
         let response = self
             .client
             .get(&url)
@@ -268,17 +268,17 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    /// Updates a space's metadata.
+    /// Updates a topic's metadata.
     ///
-    /// Calls `PUT /api/spaces/{id}`. Fields set to `None` are omitted from the
+    /// Calls `PUT /api/topics/{id}`. Fields set to `None` are omitted from the
     /// request body and left unchanged by the gateway.
-    pub async fn update_space(
+    pub async fn update_topic(
         &self,
         id: Uuid,
         name: Option<&str>,
-    ) -> Result<SpaceResponse, ClientError> {
-        let url = format!("{}/api/spaces/{}", self.base_url, id);
-        let body = UpdateSpaceRequest {
+    ) -> Result<TopicResponse, ClientError> {
+        let url = format!("{}/api/topics/{}", self.base_url, id);
+        let body = UpdateTopicRequest {
             name: name.map(str::to_string),
             description: None,
         };
@@ -292,11 +292,11 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn list_space_workspaces(
+    pub async fn list_topic_workspaces(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<WorkspaceAttachmentListResponse, ClientError> {
-        let url = format!("{}/api/spaces/{}/workspaces", self.base_url, space_id);
+        let url = format!("{}/api/topics/{}/workspaces", self.base_url, topic_id);
         let response = self
             .client
             .get(&url)
@@ -306,12 +306,12 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn attach_space_workspace(
+    pub async fn attach_topic_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         request: CreateWorkspaceAttachmentRequest,
     ) -> Result<WorkspaceAttachmentResponse, ClientError> {
-        let url = format!("{}/api/spaces/{}/workspaces", self.base_url, space_id);
+        let url = format!("{}/api/topics/{}/workspaces", self.base_url, topic_id);
         let response = self
             .client
             .post(&url)
@@ -322,15 +322,15 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn update_space_workspace_trust(
+    pub async fn update_topic_workspace_trust(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Uuid,
         is_trusted: bool,
     ) -> Result<WorkspaceAttachmentResponse, ClientError> {
         let url = format!(
-            "{}/api/spaces/{}/workspaces/{}/trust",
-            self.base_url, space_id, workspace_id
+            "{}/api/topics/{}/workspaces/{}/trust",
+            self.base_url, topic_id, workspace_id
         );
         let response = self
             .client
@@ -342,14 +342,14 @@ impl GatewayClient {
         self.parse_response(response, &url).await
     }
 
-    pub async fn detach_space_workspace(
+    pub async fn detach_topic_workspace(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         workspace_id: Uuid,
     ) -> Result<(), ClientError> {
         let url = format!(
-            "{}/api/spaces/{}/workspaces/{}",
-            self.base_url, space_id, workspace_id
+            "{}/api/topics/{}/workspaces/{}",
+            self.base_url, topic_id, workspace_id
         );
         let response = self
             .client
@@ -361,11 +361,11 @@ impl GatewayClient {
         Ok(())
     }
 
-    /// Deletes a space by ID.
+    /// Deletes a topic by ID.
     ///
-    /// Calls `DELETE /api/spaces/{id}`. Returns `Ok(())` on success.
-    pub async fn delete_space(&self, id: Uuid) -> Result<(), ClientError> {
-        let url = format!("{}/api/spaces/{}", self.base_url, id);
+    /// Calls `DELETE /api/topics/{id}`. Returns `Ok(())` on success.
+    pub async fn delete_topic(&self, id: Uuid) -> Result<(), ClientError> {
+        let url = format!("{}/api/topics/{}", self.base_url, id);
 
         let response = self
             .client
@@ -468,37 +468,37 @@ pub use swage_protocol::client::conversation::{
 // ---------------------------------------------------------------------------
 
 impl GatewayClient {
-    /// Creates a new conversation inside a specific space, returning its metadata.
+    /// Creates a new conversation inside a specific topic, returning its metadata.
     ///
-    /// Calls `POST /api/spaces/{space_id}/sessions`. Returns 404 if the
-    /// space does not exist.
-    pub async fn create_space_conversation(
+    /// Calls `POST /api/topics/{topic_id}/sessions`. Returns 404 if the
+    /// topic does not exist.
+    pub async fn create_topic_conversation(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
     ) -> Result<ConversationResponse, ClientError> {
-        self.create_space_conversation_with_model(space_id, None)
+        self.create_topic_conversation_with_model(topic_id, None)
             .await
     }
 
-    pub async fn create_space_conversation_with_model(
+    pub async fn create_topic_conversation_with_model(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         selected_model_id: Option<&str>,
     ) -> Result<ConversationResponse, ClientError> {
-        self.create_space_conversation_for_agent(space_id, None, selected_model_id)
+        self.create_topic_conversation_for_agent(topic_id, None, selected_model_id)
             .await
     }
 
-    /// Creates a conversation in a space, naming the agent definition the new
+    /// Creates a conversation in a topic, naming the agent definition the new
     /// session runs under. `None` selects the default agent; an unknown name
     /// is rejected by the gateway with a validation error.
-    pub async fn create_space_conversation_for_agent(
+    pub async fn create_topic_conversation_for_agent(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         agent_id: Option<&str>,
         selected_model_id: Option<&str>,
     ) -> Result<ConversationResponse, ClientError> {
-        let url = format!("{}/api/spaces/{space_id}/sessions", self.base_url);
+        let url = format!("{}/api/topics/{topic_id}/sessions", self.base_url);
 
         let mut request = self.client.post(&url);
         if agent_id.is_some() || selected_model_id.is_some() {
@@ -531,7 +531,7 @@ impl GatewayClient {
             .await
     }
 
-    /// Creates a conversation in the default space, naming the agent
+    /// Creates a conversation in the default topic, naming the agent
     /// definition the new session runs under. `None` selects the default
     /// agent; an unknown name is rejected by the gateway with a validation
     /// error.
@@ -703,7 +703,7 @@ impl GatewayClient {
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
     ) -> Result<MessageResponse, ClientError> {
-        self.send_agent_message_with_space(
+        self.send_agent_message_with_topic(
             None,
             sender_agent_id,
             recipient_agent_id,
@@ -714,19 +714,19 @@ impl GatewayClient {
         .await
     }
 
-    /// Send a typed inter-agent message scoped to a space.
+    /// Send a typed inter-agent message scoped to a topic.
     /// Calls `POST /api/messages`.
-    pub async fn send_agent_message_in_space(
+    pub async fn send_agent_message_in_topic(
         &self,
-        space_id: Uuid,
+        topic_id: Uuid,
         sender_agent_id: &str,
         recipient_agent_id: &str,
         kind: &str,
         correlation_id: Option<Uuid>,
         payload: serde_json::Value,
     ) -> Result<MessageResponse, ClientError> {
-        self.send_agent_message_with_space(
-            Some(space_id),
+        self.send_agent_message_with_topic(
+            Some(topic_id),
             sender_agent_id,
             recipient_agent_id,
             kind,
@@ -736,9 +736,9 @@ impl GatewayClient {
         .await
     }
 
-    async fn send_agent_message_with_space(
+    async fn send_agent_message_with_topic(
         &self,
-        space_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
         sender_agent_id: &str,
         recipient_agent_id: &str,
         kind: &str,
@@ -751,7 +751,7 @@ impl GatewayClient {
             recipient_agent_id: recipient_agent_id.to_owned(),
             kind: kind.to_owned(),
             correlation_id,
-            space_id,
+            topic_id,
             sender_turn_id: None,
             payload,
         };
@@ -920,53 +920,53 @@ impl GatewayClient {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod space_type_tests {
+mod topic_type_tests {
     use super::*;
 
-    const SAMPLE_SPACE_JSON: &str = r#"{
+    const SAMPLE_TOPIC_JSON: &str = r#"{
         "id": "550e8400-e29b-41d4-a716-446655440000",
-        "name": "My Space",
+        "name": "My Topic",
         "description": "A workspace",
         "is_default": false,
-        "slug": "my-space",
+        "slug": "my-topic",
         "created_at": "2024-01-01T00:00:00Z"
     }"#;
 
     #[test]
-    fn space_response_deserialises_from_json() {
-        let resp: SpaceResponse = serde_json::from_str(SAMPLE_SPACE_JSON).unwrap();
-        assert_eq!(resp.name, "My Space");
-        assert_eq!(resp.slug, "my-space");
+    fn topic_response_deserialises_from_json() {
+        let resp: TopicResponse = serde_json::from_str(SAMPLE_TOPIC_JSON).unwrap();
+        assert_eq!(resp.name, "My Topic");
+        assert_eq!(resp.slug, "my-topic");
     }
 
     #[test]
-    fn space_list_response_deserialises_empty() {
-        let json = r#"{"spaces": []}"#;
-        let resp: SpaceListResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.spaces.is_empty());
+    fn topic_list_response_deserialises_empty() {
+        let json = r#"{"topics": []}"#;
+        let resp: TopicListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.topics.is_empty());
     }
 
     #[test]
-    fn space_list_response_deserialises_with_entries() {
-        let json = format!(r#"{{"spaces": [{SAMPLE_SPACE_JSON}]}}"#);
-        let resp: SpaceListResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(resp.spaces.len(), 1);
-        assert_eq!(resp.spaces[0].slug, "my-space");
+    fn topic_list_response_deserialises_with_entries() {
+        let json = format!(r#"{{"topics": [{SAMPLE_TOPIC_JSON}]}}"#);
+        let resp: TopicListResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp.topics.len(), 1);
+        assert_eq!(resp.topics[0].slug, "my-topic");
     }
 
     #[test]
-    fn create_space_request_serialises_name_only() {
-        let req = CreateSpaceRequest {
-            name: "My Space".to_string(),
+    fn create_topic_request_serialises_name_only() {
+        let req = CreateTopicRequest {
+            name: "My Topic".to_string(),
             description: String::new(),
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["name"], "My Space");
+        assert_eq!(json["name"], "My Topic");
     }
 
     #[test]
-    fn update_space_request_serialises_partial() {
-        let req = UpdateSpaceRequest {
+    fn update_topic_request_serialises_partial() {
+        let req = UpdateTopicRequest {
             name: Some("New Name".to_string()),
             description: None,
         };
@@ -976,7 +976,7 @@ mod space_type_tests {
 
     #[test]
     fn workspace_attachment_request_serialises_scope() {
-        let req = UpdateSpaceRequest {
+        let req = UpdateTopicRequest {
             name: Some("Renamed".to_string()),
             description: None,
         };
@@ -1109,7 +1109,7 @@ mod tests {
         )
         .await;
         let error = GatewayClient::new(&base)
-            .list_spaces()
+            .list_topics()
             .await
             .expect_err("a refused request fails");
         match error {
@@ -1118,7 +1118,7 @@ mod tests {
                 code,
                 message,
             } => {
-                assert_eq!(address, format!("{base}/api/spaces"));
+                assert_eq!(address, format!("{base}/api/topics"));
                 assert_eq!(code, ErrorCode::TurnInProgress);
                 assert_eq!(message, "turn already in progress for session 1");
             }
@@ -1130,7 +1130,7 @@ mod tests {
     async fn a_refusal_outside_the_contract_keeps_its_raw_body() {
         let base = one_shot_server("502 Bad Gateway", "<html>upstream down</html>").await;
         let error = GatewayClient::new(&base)
-            .list_spaces()
+            .list_topics()
             .await
             .expect_err("a refused request fails");
         match error {
@@ -1149,17 +1149,17 @@ mod tests {
     #[test]
     fn conversation_response_deserialises_from_gateway_json() {
         let id = Uuid::new_v4();
-        let space_id = Uuid::new_v4();
+        let topic_id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
-            "space_id": space_id,
+            "topic_id": topic_id,
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
         });
 
         let conv: ConversationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(conv.id, id);
-        assert_eq!(conv.space_id, space_id);
+        assert_eq!(conv.topic_id, topic_id);
     }
 
     #[test]
@@ -1215,7 +1215,7 @@ mod tests {
         let id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
-            "space_id": Uuid::new_v4(),
+            "topic_id": Uuid::new_v4(),
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "messages": [
