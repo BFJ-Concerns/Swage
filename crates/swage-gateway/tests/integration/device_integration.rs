@@ -219,7 +219,10 @@ async fn run_turn_and_collect_tool_result(
     session_metadata: Option<Value>,
 ) -> serde_json::Value {
     let client = GatewayClient::new(&format!("http://{addr}"));
-    let conversation = client.create_conversation().await.unwrap();
+    // Attaching a workspace needs a topic to attach it to, so the device
+    // turns run in one; the general scope has no workspace attachments.
+    let topic = client.create_topic("device-tests").await.unwrap();
+    let conversation = client.create_topic_conversation(topic.id).await.unwrap();
     if let Some(metadata) = session_metadata {
         state
             .storage

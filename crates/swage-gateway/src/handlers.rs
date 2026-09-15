@@ -2927,16 +2927,14 @@ mod tests {
         let swage_home = SwageHomeGuard::new();
         let target_skill_dir = swage_home
             .path()
-            .join("topics/default/agents/agent-b/skills/external-specialist");
+            .join("general/agents/agent-b/skills/external-specialist");
         std::fs::create_dir_all(&target_skill_dir).expect("create target skill directory");
         std::fs::write(
             target_skill_dir.join("SKILL.md"),
             "---\ndescription: External specialist behaviour\n---\nUse the external specialist skill.\n",
         )
         .expect("write target skill");
-        let topic_element = swage_home
-            .path()
-            .join("topics/default/elements/current-work.md");
+        let topic_element = swage_home.path().join("elements/current-work.md");
         std::fs::create_dir_all(topic_element.parent().unwrap())
             .expect("create topic element directory");
         std::fs::write(&topic_element, "Shared child grounding; task is {{task}}.")
@@ -3093,10 +3091,7 @@ mod tests {
             ("agent-a", "[\"shared\"]"),
             ("agent-b", "[\"shared\", \"target_only\"]"),
         ] {
-            let agent_dir = swage_home
-                .path()
-                .join("topics/default/agents")
-                .join(agent_id);
+            let agent_dir = swage_home.path().join("general/agents").join(agent_id);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
                 agent_dir.join("config.toml"),
@@ -3354,7 +3349,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let body = body_json(resp).await;
         assert!(body["id"].is_string(), "response should have a string id");
-        assert!(body["topic_id"].is_string());
+        // A conversation created without a topic runs in the general scope
+        // and carries no topic on the wire.
+        assert!(body.get("topic_id").is_none(), "{body}");
         assert!(body["created_at"].is_string());
         assert!(body["last_activity"].is_string());
     }
@@ -4226,17 +4223,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_default_topic_returns_409() {
+    async fn delete_general_scope_returns_409() {
         use crate::service::TopicService;
 
         let (router, storage) = make_router();
-        // Get the default topic's ID.
+        // The general scope is not a topic the API can delete.
         let svc = TopicService::new(
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             std::path::PathBuf::from(".swage"),
         );
-        let default_topic = svc.topic_store.general_scope().await.unwrap();
-        let id = default_topic.id;
+        let general = svc.topic_store.general_scope().await.unwrap();
+        let id = general.id;
 
         let resp = router
             .oneshot(

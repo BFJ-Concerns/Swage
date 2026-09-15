@@ -230,12 +230,12 @@ pub(crate) fn discover_available_for_scope(
     agent_id: Option<&str>,
 ) -> Vec<SkillDefinition> {
     let hierarchy = crate::turn::configuration_hierarchy(root, scope, agent_id);
-    let topic_dir = &hierarchy[1].1;
-    let agent_dir = hierarchy
+    let levels = hierarchy
         .iter()
-        .find(|(level, _)| *level == HierarchyLevel::Agent)
-        .and_then(|(_, path)| path.is_dir().then_some(path.as_path()));
-    SkillManager::discover_available(root, topic_dir, agent_dir).0
+        .filter(|(level, path)| *level == HierarchyLevel::Global || path.is_dir())
+        .map(|(level, path)| (level.clone(), path.as_path()))
+        .collect::<Vec<_>>();
+    SkillManager::discover_available(&levels).0
 }
 
 pub(crate) async fn discover_available_for_topic_from_config(
@@ -303,26 +303,25 @@ impl Drop for TestSkillRootGuard {
 impl SkillManager {
     /// Discover skills available to a conversation.
     ///
-    /// Builds a three-level hierarchy from `root` (Global), `topic_dir`
-    /// (Topic), and optionally `agent_dir` (Agent), then delegates to
+    /// `levels` is the scope's configuration hierarchy — Global → Topic →
+    /// Agent for a topic, Global → Agent for the general scope — as
+    /// `configuration_hierarchy` builds it; delegates to
     /// [`swage_config::skill::discover_skills`] for scanning and override
-    /// resolution.
+    /// resolution, then adds the shipped skills any authored skill of the
+    /// same name shadows.
     pub fn discover_available(
-        root: &Path,
-        topic_dir: &Path,
-        agent_dir: Option<&Path>,
+        levels: &[(HierarchyLevel, &Path)],
     ) -> (
         Vec<swage_config::skill::SkillDefinition>,
         Vec<swage_config::skill::SkillWarning>,
     ) {
-        let mut levels: Vec<(HierarchyLevel, &Path)> = vec![
-            (HierarchyLevel::Global, root),
-            (HierarchyLevel::Topic, topic_dir),
-        ];
-        if let Some(agent) = agent_dir {
-            levels.push((HierarchyLevel::Agent, agent));
-        }
-        let (mut authored, mut warnings) = swage_config::skill::discover_skills(&levels);
+        let (mut authored, mut warnings) = swage_config::skill::discover_skills(levels);
+        // The shipped projection lives at the global root, the hierarchy's
+        // first level.
+        let root = levels
+            .first()
+            .map(|(_, path)| *path)
+            .expect("a scope's hierarchy always opens with the global root");
         let authored_names = authored
             .iter()
             .map(|skill| skill.name.clone())
@@ -776,11 +775,11 @@ mod tests {
         write_skill_md(topic_dir.path(), "topic-skill", "Topic.");
         write_skill_md(agent_dir.path(), "agent-skill", "Agent.");
 
-        let (skills, warnings) = SkillManager::discover_available(
-            root_dir.path(),
-            topic_dir.path(),
-            Some(agent_dir.path()),
-        );
+        let (skills, warnings) = SkillManager::discover_available(&[
+            (CfgLevel::Global, root_dir.path()),
+            (CfgLevel::Topic, topic_dir.path()),
+            (CfgLevel::Agent, agent_dir.path()),
+        ]);
 
         for name in ["global-skill", "topic-skill", "agent-skill"] {
             assert!(skills.iter().any(|skill| skill.name == name));
@@ -798,7 +797,10 @@ mod tests {
         write_skill_md(root_dir.path(), "global-skill", "Global.");
         write_skill_md(topic_dir.path(), "topic-skill", "Topic.");
 
-        let (skills, _) = SkillManager::discover_available(root_dir.path(), topic_dir.path(), None);
+        let (skills, _) = SkillManager::discover_available(&[
+            (CfgLevel::Global, root_dir.path()),
+            (CfgLevel::Topic, topic_dir.path()),
+        ]);
 
         assert_eq!(skills.len(), 9);
         assert!(skills.iter().all(|s| s.level != CfgLevel::Agent));
@@ -817,8 +819,11 @@ mod tests {
             };
             write_skill_md(authored_base, "commission", "Authored commission.");
 
-            let (skills, warnings) =
-                SkillManager::discover_available(root.path(), topic.path(), Some(agent.path()));
+            let (skills, warnings) = SkillManager::discover_available(&[
+                (CfgLevel::Global, root.path()),
+                (CfgLevel::Topic, topic.path()),
+                (CfgLevel::Agent, agent.path()),
+            ]);
             assert!(warnings.is_empty());
             let matching = skills
                 .iter()
@@ -834,7 +839,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn projected_mutation_cannot_change_shipped_activation_body() {
         let root = TempDir::new().unwrap();
-        let topic = root.path().join("topics/default");
         crate::shipped_skill_projection::regenerate(root.path())
             .await
             .expect("render projection");
@@ -842,7 +846,8 @@ mod tests {
             crate::shipped_skill_projection::skill_dir(root.path(), "commission").join("SKILL.md");
         std::fs::write(projected, "---\ndescription: tampered\n---\nTAMPERED BODY").unwrap();
 
-        let (available, warnings) = SkillManager::discover_available(root.path(), &topic, None);
+        let (available, warnings) =
+            SkillManager::discover_available(&[(CfgLevel::Global, root.path())]);
         assert!(warnings.is_empty());
         let commission = available
             .iter()
