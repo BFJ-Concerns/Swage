@@ -511,7 +511,7 @@ mod shipped_skill_tests {
     #[test]
     fn requested_dispatch_skills_use_the_interactive_discovery_hierarchy() {
         let root = tempfile::tempdir().expect("temporary root");
-        let skill_dir = root.path().join("topics/default/skills/dispatch-proof");
+        let skill_dir = root.path().join("skills/dispatch-proof");
         std::fs::create_dir_all(&skill_dir).expect("create skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),

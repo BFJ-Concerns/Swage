@@ -369,9 +369,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
         "add(elements.find(element => element.name === 'working_norms')); add(elements.find(element => element.name === 'prompts')); add(elements.find(element => element.name === 'current-work').render());",
     )
     .unwrap();
-    let element_path = swage_home
-        .path()
-        .join("topics/default/elements/current-work.md");
+    let element_path = swage_home.path().join("elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).unwrap();
     std::fs::write(&element_path, "Current work: {{task}}").unwrap();
     let mut environment = crate::support::ProcessEnvGuard::new();
@@ -699,9 +697,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
         ],
     );
     let swage_home = tempfile::tempdir().unwrap();
-    let element_path = swage_home
-        .path()
-        .join("topics/default/elements/current-work.md");
+    let element_path = swage_home.path().join("elements/current-work.md");
     std::fs::create_dir_all(element_path.parent().unwrap()).unwrap();
     std::fs::write(&element_path, "Briefing for {{owner}}: first version").unwrap();
     std::fs::write(

@@ -152,6 +152,20 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
 // ---------------------------------------------------------------------------
 
 /// Create a skill directory with a SKILL.md at the given path.
+/// A topic whose slug matches a `topics/<slug>/` fixture directory, so the
+/// gateway resolves that directory as the topic's scope layer.
+async fn create_topic(storage: &Arc<SqliteStorage>, slug: &str) -> uuid::Uuid {
+    use swage_storage::store::TopicStore;
+    storage
+        .create(swage_storage::model::NewTopic {
+            name: slug.to_string(),
+            slug: slug.into(),
+        })
+        .await
+        .expect("create topic")
+        .id
+}
+
 fn create_skill(base: &std::path::Path, name: &str, description: &str, instructions: &str) {
     let skill_dir = base.join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -303,12 +317,11 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    // Create the Swage config hierarchy.
-    std::fs::create_dir_all(root.join("topics/default/agents/gateway")).unwrap();
+    // Create the Swage config hierarchy: a topic named "research" with a
+    // distinctive topic-level skill.
+    std::fs::create_dir_all(root.join("topics/research/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
-
-    // Create a distinctive topic-level skill.
-    let topic_dir = root.join("topics/default");
+    let topic_dir = root.join("topics/research");
     create_skill(
         &topic_dir,
         "code-review",
@@ -320,12 +333,13 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
     let _env_guard = SwageHomeGuard::set(root);
 
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) =
+    let (router, addr, storage) =
         start_test_server_with_config(fixed_response_provider("I'll review the code."), config)
             .await;
 
-    // Create a conversation.
-    let (status, body) = http(&router, "POST", "/api/conversations").await;
+    // Create a conversation in that topic.
+    let topic_id = create_topic(&storage, "research").await;
+    let (status, body) = http(&router, "POST", &format!("/api/topics/{topic_id}/sessions")).await;
     assert_eq!(status, StatusCode::CREATED);
     let conversation_id = body["id"].as_str().unwrap().to_string();
 
@@ -410,7 +424,7 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
     let root = tmp.path();
 
     // Create the config hierarchy with an agent-level skill.
-    let agent_dir = root.join("topics/default/agents/gateway");
+    let agent_dir = root.join("general/agents/gateway");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
@@ -495,10 +509,10 @@ async fn activated_skill_persists_across_multiple_turns() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    std::fs::create_dir_all(root.join("topics/default/agents/gateway")).unwrap();
+    std::fs::create_dir_all(root.join("topics/research/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
-    let topic_dir = root.join("topics/default");
+    let topic_dir = root.join("topics/research");
     create_skill(
         &topic_dir,
         "debug-helper",
@@ -509,9 +523,10 @@ async fn activated_skill_persists_across_multiple_turns() {
     let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (provider, requests) = fixed_response_provider_with_capture("Let me help.");
-    let (router, addr, _storage) = start_test_server_with_config(provider, config).await;
+    let (router, addr, storage) = start_test_server_with_config(provider, config).await;
 
-    let (status, body) = http(&router, "POST", "/api/conversations").await;
+    let topic_id = create_topic(&storage, "research").await;
+    let (status, body) = http(&router, "POST", &format!("/api/topics/{topic_id}/sessions")).await;
     assert_eq!(status, StatusCode::CREATED);
     let conversation_id = body["id"].as_str().unwrap().to_string();
 
@@ -618,7 +633,7 @@ async fn deactivating_agent_level_skill_returns_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let agent_dir = root.join("topics/default/agents/gateway");
+    let agent_dir = root.join("general/agents/gateway");
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
@@ -671,8 +686,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
 
-    let topic_dir = root.join("topics/default/agents/gateway");
-    std::fs::create_dir_all(&topic_dir).unwrap();
+    std::fs::create_dir_all(root.join("topics/research/agents/gateway")).unwrap();
     std::fs::write(root.join("config.toml"), "").unwrap();
 
     // Global skill.
@@ -686,7 +700,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     );
 
     // Topic skill with the same name — should shadow the global one.
-    let topic_base = root.join("topics/default");
+    let topic_base = root.join("topics/research");
     create_skill_with_tools(
         &topic_base,
         "code-review",
@@ -709,16 +723,9 @@ async fn skills_listing_shows_resolved_skills_with_override() {
     let (router, _addr, storage) =
         start_test_server_with_config(fixed_response_provider("ok"), config).await;
 
-    // Get the default topic ID for the query parameter.
-    use swage_storage::store::TopicStore;
-    let topic = storage.general_scope().await.unwrap();
+    let topic_id = create_topic(&storage, "research").await;
 
-    let (status, body) = http(
-        &router,
-        "GET",
-        &format!("/api/skills?topic_id={}", topic.id),
-    )
-    .await;
+    let (status, body) = http(&router, "GET", &format!("/api/skills?topic_id={topic_id}")).await;
     assert_eq!(status, StatusCode::OK);
 
     let skills = body["skills"]

@@ -10470,7 +10470,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let lead_dir = swage_home.path().join("topics/default/agents/lead");
+        let lead_dir = swage_home.path().join("general/agents/lead");
         std::fs::create_dir_all(&lead_dir).expect("create lead definition");
         let lead_config = lead_dir.join("config.toml");
         std::fs::write(
@@ -10644,9 +10644,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn workflow_agent_call_records_requested_skills_in_its_child_report() {
         let swage_home = tempfile::TempDir::new().expect("temp swage home");
-        let skill_dir = swage_home
-            .path()
-            .join("topics/default/skills/workflow-specialist");
+        let skill_dir = swage_home.path().join("skills/workflow-specialist");
         std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -13209,9 +13207,7 @@ mod tests {
         let worker_directory = tempfile::tempdir().expect("worker directory");
         grant_workspace(&storage, topic.id, worker_directory.path()).await;
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let skill_dir = swage_home
-            .path()
-            .join("topics/default/skills/workflow-specialist");
+        let skill_dir = swage_home.path().join("skills/workflow-specialist");
         std::fs::create_dir_all(&skill_dir).expect("create workflow skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
@@ -13219,7 +13215,7 @@ mod tests {
         )
         .expect("write workflow skill");
         for (agent, allow) in [("lead", "shell"), ("worker", "shell")] {
-            let agent_dir = swage_home.path().join("topics/default/agents").join(agent);
+            let agent_dir = swage_home.path().join("general/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
                 agent_dir.join("config.toml"),
@@ -13385,9 +13381,7 @@ mod tests {
         // Revoke shell after the first worker turn. The continuation must
         // re-resolve this changed bound rather than retaining the authority
         // it had when the worker session was created.
-        let lead_config = swage_home
-            .path()
-            .join("topics/default/agents/lead/config.toml");
+        let lead_config = swage_home.path().join("general/agents/lead/config.toml");
         std::fs::write(
             lead_config,
             "[tools]\nallow = [\"knowledge_search\"]\ndeny = []\nbundles = {}\n",
@@ -13713,7 +13707,7 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
         for agent in ["lead", "worker"] {
-            let agent_dir = swage_home.path().join("topics/default/agents").join(agent);
+            let agent_dir = swage_home.path().join("general/agents").join(agent);
             std::fs::create_dir_all(&agent_dir).expect("create agent config directory");
             std::fs::write(
                 agent_dir.join("config.toml"),
@@ -14260,7 +14254,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let worker_dir = swage_home.path().join("topics/default/agents/worker");
+        let worker_dir = swage_home.path().join("general/agents/worker");
         std::fs::create_dir_all(&worker_dir).expect("create worker config directory");
         std::fs::write(worker_dir.join("config.toml"), "").expect("write worker config");
         let state = AppState::new(
@@ -14377,7 +14371,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
         let swage_home = crate::test_support::SwageHomeGuard::new();
-        let lead_dir = swage_home.path().join("topics/default/agents/lead");
+        let lead_dir = swage_home.path().join("general/agents/lead");
         std::fs::create_dir_all(&lead_dir).expect("create lead config directory");
         std::fs::write(
             lead_dir.join("config.toml"),
@@ -25193,7 +25187,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn route_admission_uses_the_topic_model_catalogue() {
         let config_root = tempfile::tempdir().expect("config root");
-        let topic_config_dir = config_root.path().join("topics/default");
+        let topic_config_dir = config_root.path().join("topics/research");
         std::fs::create_dir_all(&topic_config_dir).expect("topic config directory");
         std::fs::write(
             topic_config_dir.join("config.toml"),

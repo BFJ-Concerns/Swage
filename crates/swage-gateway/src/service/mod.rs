@@ -468,9 +468,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conversation_topic_effort_uses_retained_config_root() {
+        // A topicless conversation resolves under the general scope, whose
+        // cascade is Global → Agent: the agent overlay beneath general/ is the
+        // layer that can override the global model's effort.
         let retained_root = tempfile::tempdir().expect("retained config root");
-        let topic_dir = retained_root.path().join("topics/default");
-        std::fs::create_dir_all(&topic_dir).expect("create topic config directory");
+        let topic_dir =
+            swage_core::ScopeLocation::General.agent_dir(retained_root.path(), "gateway");
+        std::fs::create_dir_all(&topic_dir).expect("create agent overlay directory");
         std::fs::write(
             retained_root.path().join("config.toml"),
             r#"

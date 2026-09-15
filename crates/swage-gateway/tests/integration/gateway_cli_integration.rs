@@ -185,14 +185,14 @@ async fn client_library_topic_crud_against_live_gateway() {
     let address = format!("http://{addr}");
     let client = swage_client::http::GatewayClient::new(&address);
 
-    // List topics — should contain at least the default topic.
+    // List topics — a fresh install has none: the general scope is not one.
     let topics = client
         .list_topics()
         .await
         .expect("list_topics should succeed");
     assert!(
-        !topics.topics.is_empty(),
-        "should have at least the default topic"
+        topics.topics.is_empty(),
+        "a fresh install lists no topics; the general scope is hidden"
     );
 }
 

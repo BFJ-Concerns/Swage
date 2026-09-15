@@ -1864,8 +1864,8 @@ impl TopicStore for MockStorage {
         let mut db = self.db.lock().await;
         match db.topics.get(&id) {
             None => Ok(false),
-            Some(p) if p.name == "default" => Err(StorageError::ConstraintViolation(
-                "cannot delete the default topic".into(),
+            Some(p) if p.is_general => Err(StorageError::ConstraintViolation(
+                "the general scope is not a topic and cannot be deleted".into(),
             )),
             _ => Ok(db.topics.remove(&id).is_some()),
         }
@@ -4556,11 +4556,13 @@ pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -
 async fn session_config_uses_root_retained_at_state_construction() {
     let constructed_root = tempfile::tempdir().expect("constructed config root");
     let redirected_root = tempfile::tempdir().expect("redirected config root");
+    // A general-scope session's only overlay is its agent's; that is where
+    // the discriminating value goes.
     for (root, ttl) in [(&constructed_root, 111_u64), (&redirected_root, 222_u64)] {
-        let topic_dir = root.path().join("topics/default");
-        std::fs::create_dir_all(&topic_dir).expect("create topic config directory");
+        let agent_dir = ScopeLocation::General.agent_dir(root.path(), "gateway");
+        std::fs::create_dir_all(&agent_dir).expect("create agent overlay directory");
         std::fs::write(
-            topic_dir.join("config.toml"),
+            agent_dir.join("config.toml"),
             format!("[communication]\nmessage_ttl_secs = {ttl}\n"),
         )
         .expect("write discriminating session config");
@@ -4587,10 +4589,10 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     let root = SwageHomeGuard::new();
     let normal_skill = root
         .path()
-        .join("topics/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+        .join("general/agents/gateway/skills/normal-agent-skill/SKILL.md");
     let reserved_skill = root
         .path()
-        .join("topics/default/agents")
+        .join("general/agents")
         .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .join("skills/reserved-agent-skill/SKILL.md");
     for (path, instructions) in [
@@ -4630,11 +4632,13 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
         None,
         root.path().to_path_buf(),
     );
-    let (available, warnings) = crate::skill::SkillManager::discover_available(
-        root.path(),
-        &root.path().join("topics/default"),
-        Some(&root.path().join("topics/default/agents/gateway")),
-    );
+    let (available, warnings) = crate::skill::SkillManager::discover_available(&[
+        (swage_config::HierarchyLevel::Global, root.path()),
+        (
+            swage_config::HierarchyLevel::Agent,
+            &ScopeLocation::General.agent_dir(root.path(), "gateway"),
+        ),
+    ]);
     assert!(
         warnings.is_empty(),
         "fixture skills must parse: {warnings:?}"
@@ -4689,10 +4693,10 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
     let root = SwageHomeGuard::new();
     let normal_skill = root
         .path()
-        .join("topics/default/agents/gateway/skills/normal-agent-skill/SKILL.md");
+        .join("general/agents/gateway/skills/normal-agent-skill/SKILL.md");
     let reserved_skill = root
         .path()
-        .join("topics/default/agents")
+        .join("general/agents")
         .join(swage_config::RESERVED_WORKFLOW_AGENT_ID)
         .join("skills/reserved-agent-skill/SKILL.md");
     for (path, instructions) in [
@@ -8783,27 +8787,21 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         "Delegated owner: {{owner}}",
     )
     .expect("write delegated briefing");
-    let topic_skill_dir = swage_home
-        .path()
-        .join("topics/default/skills/foreground-only");
+    let topic_skill_dir = swage_home.path().join("skills/foreground-only");
     std::fs::create_dir_all(&topic_skill_dir).expect("create foreground skill directory");
     std::fs::write(
         topic_skill_dir.join("SKILL.md"),
         "---\ndescription: Foreground only\n---\nUse the parent foreground skill.\n",
     )
     .expect("write foreground skill");
-    let declared_skill_dir = swage_home
-        .path()
-        .join("topics/default/skills/definition-declared");
+    let declared_skill_dir = swage_home.path().join("skills/definition-declared");
     std::fs::create_dir_all(&declared_skill_dir).expect("create declared skill directory");
     std::fs::write(
         declared_skill_dir.join("SKILL.md"),
         "---\ndescription: Definition-declared behaviour\n---\nUse the definition-declared skill.\n",
     )
     .expect("write declared skill");
-    let requested_skill_dir = swage_home
-        .path()
-        .join("topics/default/skills/delegated-specialist");
+    let requested_skill_dir = swage_home.path().join("skills/delegated-specialist");
     std::fs::create_dir_all(&requested_skill_dir)
         .expect("create requested delegated skill directory");
     std::fs::write(
@@ -8813,7 +8811,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         .expect("write requested delegated skill");
     let agent_skill_dir = swage_home
         .path()
-        .join("topics/default/agents/agent-b/skills/agent-owned-specialist");
+        .join("general/agents/agent-b/skills/agent-owned-specialist");
     std::fs::create_dir_all(&agent_skill_dir)
         .expect("create delegated agent-level skill directory");
     std::fs::write(
@@ -9300,7 +9298,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     )
     .await;
 
-    let sender_config_dir = swage_home.path().join("topics/default/agents/gateway");
+    let sender_config_dir = swage_home.path().join("general/agents/gateway");
     std::fs::create_dir_all(&sender_config_dir).expect("create sender config directory");
     std::fs::write(sender_config_dir.join("config.toml"), "not valid toml =")
         .expect("write broken dispatch-bound config");
@@ -10416,7 +10414,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
 async fn delegated_skill_selection_is_carried_by_the_composition_once() {
     let swage_home = tempfile::TempDir::new().expect("temp swage home");
     for skill in ["validated-skill", "composition-skill"] {
-        let skill_dir = swage_home.path().join("topics/default/skills").join(skill);
+        let skill_dir = swage_home.path().join("skills").join(skill);
         std::fs::create_dir_all(&skill_dir).expect("create delegated skill directory");
         std::fs::write(
             skill_dir.join("SKILL.md"),
