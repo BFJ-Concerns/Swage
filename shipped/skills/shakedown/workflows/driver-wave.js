@@ -80,11 +80,19 @@ for (const c of charters) {
   c.resolvedPrompt = c.prompt;
 }
 
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("drive");
 
 const results = await parallel(
-  charters.map((c) => () =>
-    agent(
+  charters.map((c) => () => {
+    dispatching(`drive:${c.id}`, "re-briefed", "one fresh driver per charter: a first real user meets the product cold, and no charter's session shares another's memory of it; re-dispatch and escalation are seat decisions between waves");
+    return agent(
       `${c.resolvedPrompt}
 
 Work the charter from this workspace only (${c.workspace}) — it is your whole world: launch the product from it, drive at the product's real interface, and record evidence as you go into an evidence/ directory inside it (the step record — what you did, what you observed, what you expected; captures of every user-visible surface you touched; the oracle-card comparisons for output you judged). Flag notable captures at capture time — anything that surprised you, resisted you, or seems worth a stronger judge's eyes — with a line on what seemed notable. Diagnosis is not your job: file what you observed, never why you think the product did it. An observation that fits no expected category is still filed. If you end with zero findings, file an explicit null return: what you drove, what you judged, what you attempted to break, with the evidence trail. Reply with your session report: journey coverage as driven, findings (or the null return), flagged captures, and anything you could not exercise.`,
@@ -97,8 +105,8 @@ Work the charter from this workspace only (${c.workspace}) — it is your whole 
         phase: "drive",
         identity: true,
       }
-    )
-  )
+    );
+  })
 );
 
 // identity:true keeps failed slots named: match results to charters by

@@ -148,18 +148,32 @@ First the baseline sweep: (1) READABILITY — screen every capture, no exemption
 
 Reply with the JSON last: examined, findings (each with severity and evidence), coverage_claim with coverage_claim_why, out_of_scope_concerns.`;
 
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("judge");
 
 // One thunk list covering every leg: low-risk sessions contribute one
 // combined leg; high-risk sessions contribute both stages as separate
-// concurrent dispatches over the same imported tree.
+// concurrent dispatches over the same imported tree. Every judge is fresh:
+// a judge reads evidence the driver produced and must share nothing with
+// the driver's session, and the sweep and deep legs of one session are
+// deliberately two readers, neither consuming the other's output.
+const judge = (s, kind, brief, staffing) => () => {
+  dispatching(`${kind}:${s.id}`, "re-briefed", "judges are independent of the driver and of each other by design: a fresh reader of the opposite family over the imported evidence, sharing nothing with the session it grades");
+  return agent(brief, { ...judgeOpts(s, staffing, kind), schema: findingsSchema });
+};
 const legs = [];
 for (const s of sessions) {
   if (s.riskTier === "low") {
-    legs.push({ session: s.id, kind: "combined", thunk: () => agent(combinedBrief(s), { ...judgeOpts(s, cfg.sweep, "judge"), schema: findingsSchema }) });
+    legs.push({ session: s.id, kind: "combined", thunk: judge(s, "judge", combinedBrief(s), cfg.sweep) });
   } else {
-    legs.push({ session: s.id, kind: "sweep", thunk: () => agent(sweepBrief(s), { ...judgeOpts(s, cfg.sweep, "sweep"), schema: findingsSchema }) });
-    legs.push({ session: s.id, kind: "deep", thunk: () => agent(deepBrief(s), { ...judgeOpts(s, cfg.deep, "deep"), schema: findingsSchema }) });
+    legs.push({ session: s.id, kind: "sweep", thunk: judge(s, "sweep", sweepBrief(s), cfg.sweep) });
+    legs.push({ session: s.id, kind: "deep", thunk: judge(s, "deep", deepBrief(s), cfg.deep) });
   }
 }
 const outputs = await parallel(legs.map((l) => l.thunk));

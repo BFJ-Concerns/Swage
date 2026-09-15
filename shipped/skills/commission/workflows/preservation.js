@@ -472,16 +472,24 @@ a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Pass 1: both families scan blind, in parallel. Barrier before adjudication — pass 2
 // waits for the full concern union, then feeds it to each family in bounded batches.
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// made per stage (the shipped set's rule: continue where a later turn
+// profits from a worker's accumulated context, re-brief where independence
+// is the point or the envelope differs).
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+
 phase("blind-scan");
 const blind = (
   await parallel(
-    ["gpt", "claude"].map((family) => () =>
-      agent(blindPrompt(), {
+    ["gpt", "claude"].map((family) => () => {
+      dispatching(`blind:${family}`, "re-briefed", "the blind pass sees only baseline and candidate by construction; nothing earlier in the run exists for it to continue");
+      return agent(blindPrompt(), {
         ...FAMILY[family],
         schema: blindSchema,
         label: `blind:${family}`,
-      }).then((b) => (b ? { family, ...b } : null)),
-    ),
+      }).then((b) => (b ? { family, ...b } : null));
+    }),
   )
 ).filter(Boolean);
 
@@ -520,33 +528,36 @@ const sweepView = concerns.map(({ lost_intent, kind, where, by }) => ({
   by,
 }));
 const adjudicate = async (family) => {
-  const runs = concernBatches.map((batch, k) => () =>
-    agent(adjudicationPrompt(batch, singleBatch), {
+  const runs = concernBatches.map((batch, k) => () => {
+    dispatching(`adjudicate:${family}:${k}`, "re-briefed", "the sighted pass adjudicates the union of BOTH families' concerns against the record, so a blind reviewer continuing into it would grade its own concerns with its own reasoning still in context — the story the blind pass was kept from confirming");
+    return agent(adjudicationPrompt(batch, singleBatch), {
       ...FAMILY[family],
       schema: adjudicationSchema,
       label: `adjudicate:${family}:${k}`,
-    }),
-  );
+    });
+  });
   if (!singleBatch) {
-    runs.push(() =>
-      agent(sweepPrompt(sweepView), {
+    runs.push(() => {
+      dispatching(`sweep:${family}`, "re-briefed", "the whole-set sweep reads every concern compactly; it runs beside the batched adjudicators rather than after any of them");
+      return agent(sweepPrompt(sweepView), {
         ...FAMILY[family],
         schema: adjudicationSchema,
         label: `sweep:${family}`,
-      }),
-    );
+      });
+    });
   }
   // The gains direction: one dedicated call per family over the full claim
   // union — settled-vs-unsettled needs the record, collisions need the whole
   // contract, and the claim set is small enough not to batch.
   if (newClaims.length) {
-    runs.push(() =>
-      agent(claimsPrompt(newClaims), {
+    runs.push(() => {
+      dispatching(`claims:${family}`, "re-briefed", "the gains direction reads the full claim union against the record on its own worker; it consumes no other pass's output");
+      return agent(claimsPrompt(newClaims), {
         ...FAMILY[family],
         schema: adjudicationSchema,
         label: `claims:${family}`,
-      }),
-    );
+      });
+    });
   }
   const parts = (await parallel(runs)).filter(Boolean);
   if (parts.length === 0) return null;

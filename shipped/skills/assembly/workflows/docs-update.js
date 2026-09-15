@@ -13,7 +13,11 @@ export const defaults = {
   // pin is operator-settled: change it only on the user's word, never as a
   // modernisation sweep. Writer effort is medium: the brief names the
   // covered units, but what the drift actually is and where each fact's
-  // canonical home lies are the writer's own calls.
+  // canonical home lies are the writer's own calls. The writer is one held
+  // worker — restatement, the write, and every fix round are turns of a
+  // single session — and so is the verifier, so each re-verification
+  // returns to the reader that derived the claim list; the landing is a
+  // different model's job and re-briefs.
   model: "claude-opus-4-6",
   effort: "medium",
 };
@@ -80,6 +84,24 @@ const runHold = async (stage, content, verdicts) => {
   }
 };
 
+// ------------------------------------------------------- dispatch record
+// Every dispatch records on the run journal whether it continued a held
+// worker or re-briefed a fresh one, and why — the choice is this script's,
+// per stage: a later turn that profits from accumulated context continues
+// the held worker; a stage whose value is independence, or whose envelope
+// differs from the worker's, re-briefs. `staleness()` is journalled, so a
+// decision taken on it replays identically.
+const dispatching = (label, mode, reason) => log(`[dispatch] ${label}: ${mode} — ${reason}`);
+const idleReading = async (worker) => {
+  const reading = await staleness(worker);
+  const phrase = reading.stale === true
+    ? `idle ${reading.idleMs}ms, past the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+    : reading.stale === false
+      ? `idle ${reading.idleMs}ms, within the ${reading.thresholdMs}ms threshold of route ${reading.route}`
+      : `idle ${reading.idleMs}ms, no staleness threshold declared on route ${reading.route ?? "unknown"}`;
+  return { ...reading, phrase };
+};
+
 // ---------------------------------------------------------------- restate
 phase("restate");
 
@@ -98,13 +120,23 @@ const restatePrompt = (correction) => `Read the brief at ${briefPath}. It names 
 
 Reply with: restatement (the brief in your own words — what documentation must end up true, not a paraphrase of its sentences), approach (which documents you expect to touch and why, what looks drifted, what may be newly earned), disputes (anything the brief has wrong — a covered unit that changed nothing documented, docs the brief assumes that do not exist; "" if none). Reply with the JSON last.`;
 
+// The writer is one held worker from restatement onward: the survey it
+// makes of the covered units and the existing docs to restate the brief is
+// the context the write turn starts from.
+const writer = await session({ cwd: worktree, label: "writer" });
 let sketch = null;
 let holdDecision = null;
 const rulings = [];
 for (let attempt = 0; attempt < 3; attempt++) {
-  sketch = await agent(restatePrompt(holdDecision && holdDecision.note), {
+  dispatching(
+    `restate:${attempt}`,
+    attempt === 0 ? "re-briefed" : "continued",
+    attempt === 0
+      ? "the writer's held session opens on the brief; the write and its fix rounds continue this worker"
+      : "the orchestrator corrected this worker's own restatement — it refines what it proposed rather than re-surveying the docs"
+  );
+  sketch = await send(writer, restatePrompt(holdDecision && holdDecision.note), {
     schema: restatementSchema,
-    cwd: worktree,
     label: `restate:${attempt}`,
   });
   if (!sketch) throw new Error("restatement stage returned nothing usable");
@@ -119,8 +151,10 @@ if (holdDecision.verdict !== "accept")
 // ---------------------------------------------------------------- write
 phase("write");
 
-const writeReport = await agent(
-  `Refresh this repository's documentation as this accepted restatement describes (persist trust in it — it was accepted by the orchestrator over the brief at ${briefPath}):
+dispatching("write", "continued", "the write starts from the survey this worker made to restate: the covered units' changes and the existing docs are already in its context");
+const writeReport = await send(
+  writer,
+  `Refresh this repository's documentation as this accepted restatement describes — your own restatement, as the orchestrator accepted it over the brief at ${briefPath}; persist trust in it:
 
 <accepted-restatement>
 ${JSON.stringify(sketch)}
@@ -131,7 +165,7 @@ Invoke the project-docs skill and run it scoped to the landed changes the brief'
 Work only in this worktree (${worktree}); commit as you go with plain descriptive messages; never push, never open PRs, never merge — publication is the landing stage's, not yours. Modify documentation files only — never product code, and never the agent-guidance file (AGENTS.md / CLAUDE.md): guidance-file changes are the user's to make, so compile any agent-facing guidance facts the landed changes produce into your report as a pending hand-off instead.
 
 Write ${unitDir}/report.md: the drift found (claim by claim, with what made each wrong); what was patched, written, or deliberately left; how you verified the changed claims and what you did NOT check; your overall confidence (high/medium/low) with a one-line why. Reply with a two-sentence summary and the head commit hash.`,
-  { cwd: worktree, label: "write", timeoutMs: 7200000 }
+  { label: "write", timeoutMs: 7200000 }
 );
 
 // ---------------------------------------------------------------- verify
@@ -178,9 +212,11 @@ Every command your verdict leans on is evidenced by the command line as executed
 
 Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
-let verdict = await agent(verifyPrompt(null, null), {
-  model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: "verify",
-});
+// The verifier is a held worker of the opposite family: opened blind to the
+// writer's session, then continued for every re-verification.
+const verifier = await session({ model: "gpt-5.6-terra", cwd: worktree, label: "verifier" });
+dispatching("verify", "re-briefed", "cross-family accuracy audit is independent by design: a fresh reader of the opposite family, sharing nothing with the writer's session; its re-verifications continue this worker");
+let verdict = await send(verifier, verifyPrompt(null, null), { schema: findingsSchema, label: "verify" });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
 if (!verdict.examined || !verdict.examined.trim())
   throw new Error("verifier examined-account empty — invalid report, re-run");
@@ -228,14 +264,17 @@ while (severesIn(verdict).length) {
     handover = "autonomous round limit reached with severe findings open";
     break;
   }
-  const autoFix = await agent(autoFixPrompt(rounds), {
-    effort: "medium", schema: autoFixSchema,
-    cwd: worktree, label: `fix:${rounds}`, timeoutMs: 3600000,
+  const writerIdle = await idleReading(writer);
+  dispatching(`fix:${rounds}`, "continued", `a fix round after its own write: the worker holds which claims it changed and from what evidence, so the findings land on context (${writerIdle.phrase}; continued regardless — the context is worth more than the cache)`);
+  const autoFix = await send(writer, autoFixPrompt(rounds), {
+    schema: autoFixSchema, label: `fix:${rounds}`, timeoutMs: 3600000,
   });
   if (!autoFix) throw new Error("autonomous fix round returned nothing usable — re-run, never read as applied");
   fixReport = autoFix.summary;
-  verdict = await agent(verifyPrompt(rounds, "autonomous"), {
-    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
+  const verifierIdle = await idleReading(verifier);
+  dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict: the reader re-examines the claims it derived against the fix delta (${verifierIdle.phrase}; continued regardless)`);
+  verdict = await send(verifier, verifyPrompt(rounds, "autonomous"), {
+    schema: findingsSchema, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -329,12 +368,17 @@ while (true) {
   for (const d of dispositions)
     if (d.note && d.note.trim())
       rulings.push(`on ${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`} finding index ${d.finding} (${d.disposition}): ${d.note.trim()}`);
-  fixReport = await agent(
+  const writerIdle = await idleReading(writer);
+  dispatching(`fix:${rounds}`, "continued", `a directed fix round after its own write: the dispositions name findings against claims this worker holds in context (${writerIdle.phrase}; continued regardless — the context is worth more than the cache)`);
+  fixReport = await send(
+    writer,
     `The verifier raised findings against your documentation unit (${unitDir}/${rounds === 0 ? "verdict.md" : `verdict-refix-${rounds - 1}.md`}). The orchestrator's dispositions, by finding index: ${JSON.stringify(fixList)} — with this note: "${triage.note || ""}". Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge; documentation files only — never product code, never the agent-guidance file; the changelog stays untouched. Apply exactly the dispositions marked fix — no more (an accepted-with-note finding is not yours to fix). A disposition you cannot apply honestly as written — the demanded correction would write a claim the code contradicts — stays unapplied: report it as blocked in your reply and in ${unitDir}/report.md, with why. Commit as you go. Then make the whole of ${unitDir}/report.md true about the current tree — correct every section the fixes dated, not just the sections a finding quoted. Reply with a summary and the new head commit.`,
-    { effort: "medium", cwd: worktree, label: `fix:${rounds}`, timeoutMs: 3600000 }
+    { label: `fix:${rounds}`, timeoutMs: 3600000 }
   );
-  verdict = await agent(verifyPrompt(rounds, "directed"), {
-    model: "gpt-5.6-terra", schema: findingsSchema, cwd: worktree, label: `verify:refix:${rounds}`,
+  const verifierIdle = await idleReading(verifier);
+  dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict, over the delta the orchestrator's dispositions authorised (${verifierIdle.phrase}; continued regardless)`);
+  verdict = await send(verifier, verifyPrompt(rounds, "directed"), {
+    schema: findingsSchema, label: `verify:refix:${rounds}`,
   });
   if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
   if (!verdict.examined || !verdict.examined.trim())
@@ -364,10 +408,16 @@ const landingSchema = {
 const landTarget =
   mergePolicy === "direct-merge" ? "the repository's main branch" : `the branch ${integrationBranch}`;
 
+dispatching("land", "re-briefed", "the landing runs on the GPT family at the verifier's tier, an envelope neither held worker has — a merge needs no memory of the writing, and report.md carries what it needs");
 const landing = await agent(
   `Land the finished documentation unit by direct merge — open no PR. First read ${annexeConfigPath} for push_policy. The unit branch is checked out in ${worktree}; note its head sha, then merge that head into ${landTarget}. Perform the merge in a checkout of the target branch: the repository worktree where it is already checked out, or a temporary worktree you create (git worktree add) and remove afterwards — never rewrite the target ref without a checkout. A conflicted merge is yours to resolve: keep both sides' content, then run the project's full gate on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine contradiction the sides cannot both keep, or a resolution whose gate stays red; abort the merge before reporting. A fast-forward is a normal success. Push the target branch only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, target_head} — landed true only if the unit head is an ancestor of the target branch head (verify with git merge-base --is-ancestor). Reply with the JSON last.`,
   { model: "gpt-5.6-terra", schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
 );
+
+// Closed on the success path so the journal records intent; a run ending
+// by any other path closes every worker it still holds.
+await close(writer);
+await close(verifier);
 
 // issues_findings — sub-severe findings accepted by default at the land —
 // are the orchestrator's to file to the annexe issue log.
