@@ -101,6 +101,7 @@ impl TopicService {
                         None,
                         Some(req.description.trim().to_string()),
                         None,
+                        None,
                     )
                     .await?,
             ));
@@ -152,9 +153,15 @@ impl TopicService {
             None => None,
         };
 
+        let tags = req.tags.map(|tags| {
+            tags.into_iter()
+                .map(|tag| tag.trim().to_lowercase())
+                .filter(|tag| !tag.is_empty())
+                .collect::<Vec<_>>()
+        });
         let topic = self
             .topic_store
-            .update(id, req.name, req.description, new_slug)
+            .update(id, req.name, req.description, new_slug, tags)
             .await
             .map_err(|e| match e {
                 swage_core::StorageError::NotFound { id: ref eid, .. } => {
@@ -191,6 +198,7 @@ fn topic_to_response(p: swage_storage::model::Topic) -> TopicResponse {
         name: p.name,
         description: p.description,
         slug: p.slug.to_string(),
+        tags: p.tags,
         created_at: p.created_at,
     }
 }

@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderValue, Request},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
@@ -96,7 +96,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/topics/{topic_id}/workspaces/{workspace_id}",
-            axum::routing::delete(handlers::detach_topic_workspace),
+            delete(handlers::detach_topic_workspace),
         )
         .route(
             "/api/topics/{topic_id}/workspaces/{workspace_id}/trust",
@@ -222,17 +222,26 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_effective_agent_definitions),
         )
         .route(
-            "/api/topics/{topic_id}/surfaces",
-            get(surface::list_pages_handler).post(surface::create_surface_handler),
+            "/api/sessions/{session_id}/surfaces",
+            get(surface::list_surfaces_handler).post(surface::create_surface_handler),
+        )
+        .route("/api/surface-library", get(surface::list_library_handler))
+        .route(
+            "/api/surface-library/{entry_id}",
+            get(surface::get_library_entry_handler).delete(surface::delete_library_entry_handler),
         )
         .route(
-            "/api/topics/{topic_id}/surface-templates",
-            get(surface::list_surface_templates_handler)
-                .post(surface::create_surface_template_handler),
+            "/api/surfaces/{surface_id}/save",
+            post(surface::save_surface_to_library_handler),
         )
         .route(
-            "/api/surface-templates/{template_id}",
-            get(surface::get_surface_template_handler),
+            "/api/topics/{topic_id}/default-surfaces",
+            get(surface::list_topic_default_surfaces_handler)
+                .post(surface::add_topic_default_surface_handler),
+        )
+        .route(
+            "/api/topics/{topic_id}/default-surfaces/{entry_id}",
+            delete(surface::remove_topic_default_surface_handler),
         )
         .route(
             "/api/surfaces/{surface_id}",

@@ -20,6 +20,11 @@ pub struct UpdateTopicRequest {
     pub name: Option<String>,
     #[ts(optional)]
     pub description: Option<String>,
+    /// Replace the topic's tags — the labels that narrow the surface
+    /// library's catalogue for the topic's sessions. Absent leaves them as
+    /// they are; an empty list clears them.
+    #[ts(optional)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -31,6 +36,11 @@ pub struct TopicResponse {
     pub name: String,
     pub description: String,
     pub slug: String,
+    /// Labels that narrow the surface library's catalogue for this topic's
+    /// sessions. They grant nothing and add nothing on their own.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 

@@ -1,4 +1,5 @@
-// HTTP API client for surfaces — agent-run tabs on a topic.
+// HTTP API client for surfaces — a session's work surfaces — and the shared
+// library they are preserved in.
 //
 // Wraps the gateway's surface endpoints with typed request/response handling.
 // All functions throw on HTTP errors so callers can handle failures uniformly.
@@ -10,44 +11,69 @@ import type { WriteSurfaceModuleRequest } from "../protocol/WriteSurfaceModuleRe
 import type { SurfaceAnnotationView } from "../protocol/SurfaceAnnotationView";
 import type { CreateSurfaceAnnotationRequest } from "../protocol/CreateSurfaceAnnotationRequest";
 import type { UpdateSurfaceAnnotationRequest } from "../protocol/UpdateSurfaceAnnotationRequest";
+import type { LibraryListResponse } from "../protocol/LibraryListResponse";
+import type { LibraryEntryResponse } from "../protocol/LibraryEntryResponse";
+import type { SaveSurfaceToLibraryRequest } from "../protocol/SaveSurfaceToLibraryRequest";
 import * as generated from "../protocol/client";
-import type { SurfaceTemplateListResponse } from "../protocol/SurfaceTemplateListResponse";
-import type { SurfaceTemplateResponse } from "../protocol/SurfaceTemplateResponse";
-import type { CreateSurfaceTemplateRequest } from "../protocol/CreateSurfaceTemplateRequest";
 
 export function setBaseUrl(url: string): void {
   generated.setClientBaseUrl(url);
 }
 
-export async function listSurfaces(topicId: string): Promise<SurfaceListResponse> {
-  return generated.listSurfaces(topicId);
+export async function listSurfaces(sessionId: string): Promise<SurfaceListResponse> {
+  return generated.listSurfaces(sessionId);
 }
 
 export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
   return generated.getSurface(surfaceId);
 }
 
-// A template seeds the new surface's modules and is recorded as its origin;
-// omitting it creates a blank surface.
+// A library entry seeds the new surface's modules and is recorded as its
+// origin; omitting it creates a blank surface.
 export async function createSurface(
-  topicId: string,
+  sessionId: string,
   title: string,
-  templateId?: string,
+  libraryEntryId?: string,
 ): Promise<SurfaceResponse> {
-  return generated.createSurface(topicId, { title, template_id: templateId });
+  return generated.createSurface(sessionId, { title, library_entry_id: libraryEntryId });
 }
 
-export async function listSurfaceTemplates(
-  topicId: string,
-): Promise<SurfaceTemplateListResponse> {
-  return generated.listSurfaceTemplates(topicId);
+/** The library's catalogue: names, descriptions and tags, never module content. */
+export async function listLibrary(tag?: string): Promise<LibraryListResponse> {
+  return generated.listLibrary(tag);
 }
 
-export async function createSurfaceTemplate(
+export async function getLibraryEntry(entryId: string): Promise<LibraryEntryResponse> {
+  return generated.getLibraryEntry(entryId);
+}
+
+export async function saveSurfaceToLibrary(
+  surfaceId: string,
+  body: SaveSurfaceToLibraryRequest,
+): Promise<LibraryEntryResponse> {
+  return generated.saveSurfaceToLibrary(surfaceId, body);
+}
+
+export async function deleteLibraryEntry(entryId: string): Promise<void> {
+  await generated.deleteLibraryEntry(entryId);
+}
+
+export async function listTopicDefaultSurfaces(topicId: string): Promise<LibraryListResponse> {
+  return generated.listTopicDefaultSurfaces(topicId);
+}
+
+export async function addTopicDefaultSurface(
   topicId: string,
-  body: CreateSurfaceTemplateRequest,
-): Promise<SurfaceTemplateResponse> {
-  return generated.createSurfaceTemplate(topicId, body);
+  libraryEntryId: string,
+): Promise<LibraryListResponse> {
+  return generated.addTopicDefaultSurface(topicId, { library_entry_id: libraryEntryId });
+}
+
+export async function removeTopicDefaultSurface(
+  topicId: string,
+  entryId: string,
+): Promise<void> {
+  await generated.removeTopicDefaultSurface(topicId, entryId);
 }
 
 export async function writeSurfaceModule(

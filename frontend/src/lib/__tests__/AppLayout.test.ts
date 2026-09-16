@@ -84,7 +84,7 @@ function mockConversationStoreWithSessions(
 function mockSurfacesStore(): SurfacesStore {
   const surface = {
     id: "surface-1",
-    topic_id: "default",
+    session_id: "conv-1",
     title: "Release checklist",
     created_at: "2026-08-29T10:00:00Z",
     updated_at: "2026-08-29T10:00:00Z",
@@ -102,8 +102,9 @@ function mockSurfacesStore(): SurfacesStore {
   return {
     get surfaces() { return [{ id: surface.id, title: surface.title, updated_at: surface.updated_at }]; },
     get activeSurface() { return surface; },
-    get templates() { return []; },
-    templateName: () => null,
+    get library() { return []; },
+    entryName: () => null,
+    saveToLibrary: async () => {},
     loadSurfaces: async () => {},
     openSurface: async () => {},
     closeSurface: () => {},

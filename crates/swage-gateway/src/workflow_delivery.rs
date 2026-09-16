@@ -90,7 +90,16 @@ impl SurfaceDeliveryCapability {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("no surface with id {surface_id}"))?;
-        if surface.topic_id != topic_id {
+        // A surface belongs to a session; a run may deliver to one whose
+        // session is in the run's topic — the run's own dispatching
+        // conversation, or another session working the same topic.
+        let owner = state
+            .storage
+            .get_session(surface.session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("surface {surface_id} has no session"))?;
+        if owner.topic_id != topic_id {
             return Err("surface delivery target is not in the workflow's topic".into());
         }
         Ok(Self { state, surface_id })
@@ -244,7 +253,24 @@ mod tests {
 
     use axum::{Router, http::HeaderMap, routing::post};
     use swage_protocol::client::{surface::CreateSurfaceRequest, websocket::ServerEvent};
-    use swage_storage::{NewTopic, SqliteStorage, Storage, SurfaceStore, TopicStore};
+    use swage_storage::{
+        NewSession, NewTopic, SessionOrigin, SessionStore, SqliteStorage, Storage, SurfaceStore,
+        TopicStore,
+    };
+
+    async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
+        storage
+            .create_session(NewSession {
+                topic_id,
+                agent_id: "gateway".into(),
+                origin: SessionOrigin::Direct,
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
 
     use super::*;
     use crate::secret::CreateSecretRequest;
@@ -342,12 +368,13 @@ mod tests {
         .await
         .unwrap();
         let state = state(Arc::clone(&storage));
-        let surface = crate::surface::create_page(
+        let session = session_in(&storage, topic.id).await;
+        let surface = crate::surface::create_surface(
             &state,
-            topic.id,
+            session,
             CreateSurfaceRequest {
                 title: "Daily delivery".into(),
-                template_id: None,
+                library_entry_id: None,
             },
         )
         .await
@@ -424,12 +451,13 @@ mod tests {
         .await
         .unwrap();
         let state = state(Arc::clone(&storage));
-        let surface = crate::surface::create_page(
+        let session = session_in(&storage, other_topic.id).await;
+        let surface = crate::surface::create_surface(
             &state,
-            other_topic.id,
+            session,
             CreateSurfaceRequest {
                 title: "Other surface".into(),
-                template_id: None,
+                library_entry_id: None,
             },
         )
         .await

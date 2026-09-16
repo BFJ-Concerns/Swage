@@ -1,4 +1,13 @@
-//! Surfaces — agent-run tabs on a topic, assembled from module instances.
+//! Surfaces — a session's work surfaces, assembled from module instances —
+//! and the shared library they are preserved in.
+//!
+//! A surface belongs to the session that created it and stays with that
+//! session's record. Either party can preserve one in the library with a
+//! name, a description of what it does and when to use it, and tags; any
+//! session can add a library entry as a new surface of its own. A topic's
+//! default entries open in each of its new sessions. Content travels with an
+//! entry only within the scope it was saved from: added elsewhere, the shape
+//! comes over and the modules start empty for the destination's data.
 //!
 //! The database is authoritative for surface content; every mutation lands an
 //! audit event (the surface's provenance trail) and broadcasts a live
@@ -6,22 +15,23 @@
 //! kinds are compiled-in until module authoring lands; `document` (markdown
 //! source, client-rendered) is the first.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::surface::{
-    CreateSurfaceAnnotationRequest, CreateSurfaceRequest, CreateSurfaceTemplateRequest,
-    DeleteSurfaceAnnotationResponse, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
-    SurfaceResponse, SurfaceSummary, SurfaceTemplateListResponse, SurfaceTemplateModuleView,
-    SurfaceTemplateResponse, SurfaceTemplateSummary, UpdateSurfaceAnnotationRequest,
+    CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
+    LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary, LibraryListResponse,
+    SaveSurfaceToLibraryRequest, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
+    SurfaceResponse, SurfaceSummary, TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest,
     WriteSurfaceModuleRequest,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
-    NewAuditEvent, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewSurfaceTemplate,
-    NewSurfaceTemplateModuleInput, SurfaceAnnotation, SurfaceModule,
+    LibraryEntry, LibrarySeeding, NewAuditEvent, NewLibraryEntry, NewLibraryEntryModule,
+    NewSurface, NewSurfaceAnnotation, NewSurfaceModule, Session, SurfaceAnnotation, SurfaceModule,
 };
 
 use crate::error::{ApiError, Json, Path};
@@ -32,9 +42,41 @@ use crate::state::AppState;
 /// the user cannot see.
 const MODULE_KINDS: &[&str] = &["document"];
 
-pub async fn create_page(
+async fn session_or_not_found(state: &AppState, session_id: Uuid) -> Result<Session, GatewayError> {
+    state
+        .storage
+        .get_session(session_id)
+        .await?
+        .ok_or(GatewayError::ConversationNotFound { id: session_id })
+}
+
+async fn entry_or_invalid(state: &AppState, entry_id: Uuid) -> Result<LibraryEntry, GatewayError> {
+    state
+        .storage
+        .get_library_entry(entry_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("no library entry with id {entry_id}"))
+        })
+}
+
+/// Whether a library entry's content travels into a session: only within the
+/// scope the entry was saved from. Every other scope receives the shape and
+/// supplies its own data — another topic's content never arrives by accident.
+fn seeding_for(entry: &LibraryEntry, session: &Session) -> LibrarySeeding {
+    if entry.origin_topic_id == session.topic_id {
+        LibrarySeeding::WithContent
+    } else {
+        LibrarySeeding::ShapeOnly
+    }
+}
+
+/// Create a surface for a session: blank, or seeded from a library entry.
+/// Everything is validated before anything lands, so a rejected seed leaves
+/// no surface behind.
+pub async fn create_surface(
     state: &AppState,
-    topic_id: Uuid,
+    session_id: Uuid,
     request: CreateSurfaceRequest,
 ) -> Result<SurfaceResponse, GatewayError> {
     let title = request.title.trim();
@@ -43,29 +85,23 @@ pub async fn create_page(
             "a surface needs a non-empty title".into(),
         ));
     }
-    state
-        .topic_store
-        .get(topic_id)
-        .await?
-        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
-
-    // A template seeds the surface; everything is validated before anything
-    // lands, so a rejected fork leaves no surface behind.
-    let template = match request.template_id {
-        Some(template_id) => Some(resolve_template(state, topic_id, template_id).await?),
+    let session = session_or_not_found(state, session_id).await?;
+    let entry = match request.library_entry_id {
+        Some(entry_id) => Some(entry_or_invalid(state, entry_id).await?),
         None => None,
     };
 
-    let surface = match &template {
-        Some(template) => {
+    let surface = match &entry {
+        Some(entry) => {
             state
                 .storage
-                .create_surface_from_template(
+                .create_surface_from_library(
                     NewSurface {
-                        topic_id,
+                        session_id,
                         title: title.to_string(),
                     },
-                    template.id,
+                    entry.id,
+                    seeding_for(entry, &session),
                 )
                 .await?
         }
@@ -73,34 +109,43 @@ pub async fn create_page(
             state
                 .storage
                 .create_page(NewSurface {
-                    topic_id,
+                    session_id,
                     title: title.to_string(),
                 })
                 .await?
         }
     };
 
-    let template_metadata = template
-        .as_ref()
-        .map(|template| json!({ "template_id": template.id, "template_name": template.name }));
+    let seeded_from = entry.as_ref().map(|entry| {
+        json!({
+            "library_entry_id": entry.id,
+            "name": entry.name,
+            "seeding": match seeding_for(entry, &session) {
+                LibrarySeeding::WithContent => "with_content",
+                LibrarySeeding::ShapeOnly => "shape_only",
+            },
+        })
+    });
     state
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_created".into(),
-            summary: match &template {
-                Some(template) => {
-                    format!("surface created from template '{}': {title}", template.name)
-                }
+            summary: match &entry {
+                Some(entry) => format!(
+                    "surface added from the library entry '{}': {title}",
+                    entry.name
+                ),
                 None => format!("surface created: {title}"),
             },
             metadata: json!({
-                "topic_id": surface.topic_id,
+                "session_id": session_id,
+                "topic_id": session.topic_id,
                 "title": title,
-                "forked_from": template_metadata,
+                "seeded_from": seeded_from,
             }),
         })
         .await?;
@@ -109,87 +154,60 @@ pub async fn create_page(
         surface_id: surface.id,
         module_id: None,
     });
-    let modules = state.storage.list_surface_modules(surface.id).await?;
-    Ok(SurfaceResponse {
-        id: surface.id,
-        topic_id: surface.topic_id,
-        title: surface.title,
-        created_at: surface.created_at,
-        updated_at: surface.updated_at,
-        modules: modules
-            .into_iter()
-            .map(|module| module_view(module, Vec::new()))
-            .collect(),
-        forked_from_template_id: surface.forked_from_template_id,
-        forked_at: surface.forked_at,
-    })
+    surface_response(state, surface.id).await
 }
 
-/// A template usable from this topic: it must exist and belong here.
-/// Templates are topic-local — there is no sharing across topics.
-async fn resolve_template(
+/// Preserve a surface in the shared library. The entry copies the surface's
+/// modules as they stand; the surface itself is untouched and stays with its
+/// session. Saving opens the entry nowhere.
+pub async fn save_surface_to_library(
     state: &AppState,
-    topic_id: Uuid,
-    template_id: Uuid,
-) -> Result<swage_storage::SurfaceTemplate, GatewayError> {
-    state
-        .storage
-        .get_surface_template(template_id)
-        .await?
-        .filter(|template| template.topic_id == topic_id)
-        .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no template {template_id} in topic {topic_id}"))
-        })
-}
-
-/// Create a topic's reusable surface shape. A template is inert: it seeds
-/// surfaces at their creation and is never projected into surfaces already
-/// forked from it.
-pub async fn create_surface_template(
-    state: &AppState,
-    topic_id: Uuid,
-    request: CreateSurfaceTemplateRequest,
-) -> Result<SurfaceTemplateResponse, GatewayError> {
+    surface_id: Uuid,
+    request: SaveSurfaceToLibraryRequest,
+    author: &str,
+) -> Result<LibraryEntryResponse, GatewayError> {
     let name = request.name.trim();
     if name.is_empty() {
         return Err(GatewayError::ValidationError(
-            "a template needs a non-empty name".into(),
+            "a library entry needs a non-empty name".into(),
         ));
     }
-    state
-        .topic_store
-        .get(topic_id)
-        .await?
-        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
-    // Validate every module kind before the first write: a template that
-    // seeds an unrenderable module is a surface the user cannot see.
-    for module in &request.modules {
-        let kind = module.kind.as_deref().unwrap_or("document");
-        if !MODULE_KINDS.contains(&kind) {
-            return Err(GatewayError::ValidationError(format!(
-                "unknown module kind '{kind}' — known kinds: {}",
-                MODULE_KINDS.join(", ")
-            )));
-        }
+    let description = request.description.trim();
+    if description.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "a library entry needs a description of what the surface does and when to use it"
+                .into(),
+        ));
     }
-
-    let template = state
+    let surface =
+        state.storage.get_page(surface_id).await?.ok_or_else(|| {
+            GatewayError::ValidationError(format!("no surface with id {surface_id}"))
+        })?;
+    let session = session_or_not_found(state, surface.session_id).await?;
+    let tags = normalised_tags(&request.tags);
+    let modules = state
         .storage
-        .create_surface_template_with_modules(
-            NewSurfaceTemplate {
-                topic_id,
+        .list_surface_modules(surface.id)
+        .await?
+        .into_iter()
+        .map(|module| NewLibraryEntryModule {
+            kind: module.kind,
+            position: module.position,
+            source: module.source,
+        })
+        .collect::<Vec<_>>();
+
+    let entry = state
+        .storage
+        .create_library_entry(
+            NewLibraryEntry {
                 name: name.to_string(),
+                description: description.to_string(),
+                tags,
+                origin_topic_id: session.topic_id,
+                saved_from_surface_id: Some(surface.id),
             },
-            request
-                .modules
-                .iter()
-                .enumerate()
-                .map(|(position, module)| NewSurfaceTemplateModuleInput {
-                    kind: module.kind.clone().unwrap_or_else(|| "document".into()),
-                    position: position as i32,
-                    source: module.source.clone(),
-                })
-                .collect(),
+            modules,
         )
         .await?;
 
@@ -197,51 +215,88 @@ pub async fn create_surface_template(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
-            entity_kind: "surface_template".into(),
-            entity_id: template.id.to_string(),
-            event_kind: "surface_template_created".into(),
-            summary: format!("surface template created: {name}"),
+            session_id: Some(session.id),
+            entity_kind: "surface_library_entry".into(),
+            entity_id: entry.id.to_string(),
+            event_kind: "surface_saved_to_library".into(),
+            summary: format!(
+                "surface saved to the library as '{name}': {}",
+                surface.title
+            ),
             metadata: json!({
-                "topic_id": template.topic_id,
+                "surface_id": surface.id,
+                "origin_topic_id": session.topic_id,
+                "author": author,
                 "name": name,
-                "module_count": request.modules.len(),
-                "modules": request.modules.iter().enumerate().map(|(position, module)| json!({
-                    "kind": module.kind.as_deref().unwrap_or("document"),
-                    "position": position,
-                    "source": module.source,
-                })).collect::<Vec<_>>(),
+                "description": description,
+                "tags": entry.tags,
             }),
         })
         .await?;
 
-    template_response(state, template.id).await
+    library_entry_response(state, entry.id).await
 }
 
-pub async fn template_response(
+fn normalised_tags(tags: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tags.iter()
+        .map(|tag| tag.trim().to_lowercase())
+        .filter(|tag| !tag.is_empty() && seen.insert(tag.clone()))
+        .collect()
+}
+
+/// The library's catalogue: names, descriptions and tags, never module
+/// content. `tags` narrows to entries carrying any of them; an empty list is
+/// the whole library.
+pub async fn library_catalogue(
     state: &AppState,
-    template_id: Uuid,
-) -> Result<SurfaceTemplateResponse, GatewayError> {
-    let template = state
+    tags: &[String],
+) -> Result<LibraryListResponse, GatewayError> {
+    let wanted = normalised_tags(tags);
+    let scopes = state.topic_store.list_scopes().await?;
+    let entries = state
         .storage
-        .get_surface_template(template_id)
+        .list_library_entries()
         .await?
-        .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no template with id {template_id}"))
-        })?;
-    let modules = state
-        .storage
-        .list_surface_template_modules(template.id)
-        .await?;
-    Ok(SurfaceTemplateResponse {
-        id: template.id,
-        topic_id: template.topic_id,
-        name: template.name,
-        created_at: template.created_at,
-        updated_at: template.updated_at,
+        .into_iter()
+        .filter(|entry| wanted.is_empty() || entry.tags.iter().any(|tag| wanted.contains(tag)))
+        .map(|entry| entry_summary(entry, &scopes))
+        .collect();
+    Ok(LibraryListResponse { entries })
+}
+
+fn entry_summary(entry: LibraryEntry, scopes: &[swage_storage::Topic]) -> LibraryEntrySummary {
+    LibraryEntrySummary {
+        id: entry.id,
+        name: entry.name,
+        description: entry.description,
+        tags: entry.tags,
+        origin_topic_id: scopes
+            .iter()
+            .find(|scope| scope.id == entry.origin_topic_id)
+            .and_then(|scope| scope.client_topic_id()),
+        updated_at: entry.updated_at,
+    }
+}
+
+pub async fn library_entry_response(
+    state: &AppState,
+    entry_id: Uuid,
+) -> Result<LibraryEntryResponse, GatewayError> {
+    let entry = entry_or_invalid(state, entry_id).await?;
+    let origin = state.topic_store.get(entry.origin_topic_id).await?;
+    let modules = state.storage.list_library_entry_modules(entry.id).await?;
+    Ok(LibraryEntryResponse {
+        id: entry.id,
+        name: entry.name,
+        description: entry.description,
+        tags: entry.tags,
+        origin_topic_id: origin.and_then(|topic| topic.client_topic_id()),
+        created_at: entry.created_at,
+        updated_at: entry.updated_at,
         modules: modules
             .into_iter()
-            .map(|module| SurfaceTemplateModuleView {
+            .map(|module| LibraryEntryModuleView {
                 id: module.id,
                 kind: module.kind,
                 position: module.position,
@@ -249,6 +304,123 @@ pub async fn template_response(
             })
             .collect(),
     })
+}
+
+pub async fn delete_library_entry(
+    state: &AppState,
+    entry_id: Uuid,
+    author: &str,
+) -> Result<(), GatewayError> {
+    let entry = entry_or_invalid(state, entry_id).await?;
+    if !state.storage.delete_library_entry(entry.id).await? {
+        return Err(GatewayError::Storage(StorageError::NotFound {
+            entity: "surface library entry".into(),
+            id: entry_id.to_string(),
+        }));
+    }
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "surface_library_entry".into(),
+            entity_id: entry.id.to_string(),
+            event_kind: "surface_library_entry_deleted".into(),
+            summary: format!("library entry removed: {}", entry.name),
+            metadata: json!({
+                "author": author,
+                "name": entry.name,
+                "description": entry.description,
+                "tags": entry.tags,
+            }),
+        })
+        .await?;
+    Ok(())
+}
+
+/// A topic's default surfaces, in designation order.
+pub async fn topic_defaults(
+    state: &AppState,
+    topic_id: Uuid,
+) -> Result<LibraryListResponse, GatewayError> {
+    let topic = state
+        .topic_store
+        .get(topic_id)
+        .await?
+        .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+    if topic.is_general {
+        return Err(GatewayError::TopicNotFound { id: topic_id });
+    }
+    let scopes = state.topic_store.list_scopes().await?;
+    let entries = state
+        .storage
+        .list_topic_default_entries(topic.id)
+        .await?
+        .into_iter()
+        .map(|entry| entry_summary(entry, &scopes))
+        .collect();
+    Ok(LibraryListResponse { entries })
+}
+
+pub async fn add_topic_default(
+    state: &AppState,
+    topic_id: Uuid,
+    request: TopicDefaultSurfaceRequest,
+) -> Result<LibraryListResponse, GatewayError> {
+    // The topic check first: a missing topic reports 404 before an unknown
+    // entry reports a validation error.
+    topic_defaults(state, topic_id).await?;
+    let entry = entry_or_invalid(state, request.library_entry_id).await?;
+    state
+        .storage
+        .add_topic_default_entry(topic_id, entry.id)
+        .await?;
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "topic".into(),
+            entity_id: topic_id.to_string(),
+            event_kind: "default_surface_designated".into(),
+            summary: format!(
+                "library entry '{}' designated a default surface",
+                entry.name
+            ),
+            metadata: json!({ "library_entry_id": entry.id, "name": entry.name }),
+        })
+        .await?;
+    topic_defaults(state, topic_id).await
+}
+
+pub async fn remove_topic_default(
+    state: &AppState,
+    topic_id: Uuid,
+    entry_id: Uuid,
+) -> Result<(), GatewayError> {
+    topic_defaults(state, topic_id).await?;
+    if !state
+        .storage
+        .remove_topic_default_entry(topic_id, entry_id)
+        .await?
+    {
+        return Err(GatewayError::ValidationError(format!(
+            "library entry {entry_id} is not a default surface of topic {topic_id}"
+        )));
+    }
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "topic".into(),
+            entity_id: topic_id.to_string(),
+            event_kind: "default_surface_withdrawn".into(),
+            summary: "a default surface was withdrawn".into(),
+            metadata: json!({ "library_entry_id": entry_id }),
+        })
+        .await?;
+    Ok(())
 }
 
 /// Write a module's source — replace an existing instance's content, or
@@ -626,7 +798,7 @@ pub async fn surface_response(
     // where the location is rather than having to match ids by hand.
     Ok(SurfaceResponse {
         id: surface.id,
-        topic_id: surface.topic_id,
+        session_id: surface.session_id,
         title: surface.title,
         created_at: surface.created_at,
         updated_at: surface.updated_at,
@@ -642,8 +814,8 @@ pub async fn surface_response(
                 module_view(module, hung_here)
             })
             .collect(),
-        forked_from_template_id: surface.forked_from_template_id,
-        forked_at: surface.forked_at,
+        library_entry_id: surface.library_entry_id,
+        seeded_at: surface.seeded_at,
     })
 }
 
@@ -677,13 +849,14 @@ fn annotation_view(annotation: SurfaceAnnotation) -> SurfaceAnnotationView {
 // HTTP handlers
 // ---------------------------------------------------------------------------
 
-pub async fn list_pages_handler(
+pub async fn list_surfaces_handler(
     State(state): State<AppState>,
-    Path(topic_id): Path<Uuid>,
+    Path(session_id): Path<Uuid>,
 ) -> Result<Json<SurfaceListResponse>, ApiError> {
+    session_or_not_found(&state, session_id).await?;
     let surfaces = state
         .storage
-        .list_pages_by_topic(topic_id)
+        .list_surfaces_by_session(session_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     Ok(Json(SurfaceListResponse {
@@ -700,10 +873,10 @@ pub async fn list_pages_handler(
 
 pub async fn create_surface_handler(
     State(state): State<AppState>,
-    Path(topic_id): Path<Uuid>,
+    Path(session_id): Path<Uuid>,
     Json(request): Json<CreateSurfaceRequest>,
 ) -> Result<Json<SurfaceResponse>, ApiError> {
-    Ok(Json(create_page(&state, topic_id, request).await?))
+    Ok(Json(create_surface(&state, session_id, request).await?))
 }
 
 pub async fn get_surface_handler(
@@ -751,42 +924,67 @@ pub async fn delete_surface_annotation_handler(
     Ok(Json(DeleteSurfaceAnnotationResponse { deleted: true }))
 }
 
-pub async fn list_surface_templates_handler(
+pub async fn save_surface_to_library_handler(
     State(state): State<AppState>,
-    Path(topic_id): Path<Uuid>,
-) -> Result<Json<SurfaceTemplateListResponse>, ApiError> {
-    let templates = state
-        .storage
-        .list_surface_templates_by_topic(topic_id)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    Ok(Json(SurfaceTemplateListResponse {
-        templates: templates
-            .into_iter()
-            .map(|template| SurfaceTemplateSummary {
-                id: template.id,
-                name: template.name,
-                updated_at: template.updated_at,
-            })
-            .collect(),
-    }))
-}
-
-pub async fn create_surface_template_handler(
-    State(state): State<AppState>,
-    Path(topic_id): Path<Uuid>,
-    Json(request): Json<CreateSurfaceTemplateRequest>,
-) -> Result<Json<SurfaceTemplateResponse>, ApiError> {
+    Path(surface_id): Path<Uuid>,
+    Json(request): Json<SaveSurfaceToLibraryRequest>,
+) -> Result<Json<LibraryEntryResponse>, ApiError> {
     Ok(Json(
-        create_surface_template(&state, topic_id, request).await?,
+        save_surface_to_library(&state, surface_id, request, "user").await?,
     ))
 }
 
-pub async fn get_surface_template_handler(
+/// Query parameters for the library catalogue.
+#[derive(Debug, Default, Deserialize)]
+pub struct LibraryQuery {
+    /// Narrow to entries carrying this tag.
+    pub tag: Option<String>,
+}
+
+pub async fn list_library_handler(
     State(state): State<AppState>,
-    Path(template_id): Path<Uuid>,
-) -> Result<Json<SurfaceTemplateResponse>, ApiError> {
-    Ok(Json(template_response(&state, template_id).await?))
+    Query(query): Query<LibraryQuery>,
+) -> Result<Json<LibraryListResponse>, ApiError> {
+    let tags: Vec<String> = query.tag.into_iter().collect();
+    Ok(Json(library_catalogue(&state, &tags).await?))
+}
+
+pub async fn get_library_entry_handler(
+    State(state): State<AppState>,
+    Path(entry_id): Path<Uuid>,
+) -> Result<Json<LibraryEntryResponse>, ApiError> {
+    Ok(Json(library_entry_response(&state, entry_id).await?))
+}
+
+pub async fn delete_library_entry_handler(
+    State(state): State<AppState>,
+    Path(entry_id): Path<Uuid>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    delete_library_entry(&state, entry_id, "user").await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub async fn list_topic_default_surfaces_handler(
+    State(state): State<AppState>,
+    Path(topic_id): Path<Uuid>,
+) -> Result<Json<LibraryListResponse>, ApiError> {
+    Ok(Json(topic_defaults(&state, topic_id).await?))
+}
+
+pub async fn add_topic_default_surface_handler(
+    State(state): State<AppState>,
+    Path(topic_id): Path<Uuid>,
+    Json(request): Json<TopicDefaultSurfaceRequest>,
+) -> Result<Json<LibraryListResponse>, ApiError> {
+    Ok(Json(add_topic_default(&state, topic_id, request).await?))
+}
+
+pub async fn remove_topic_default_surface_handler(
+    State(state): State<AppState>,
+    Path((topic_id, entry_id)): Path<(Uuid, Uuid)>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    remove_topic_default(&state, topic_id, entry_id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -794,8 +992,8 @@ mod tests {
     use std::sync::Arc;
 
     use swage_storage::{
-        AuditStore, NewTopic, SqliteStorage, Storage, SurfaceAnnotationStore, SurfaceStore,
-        TopicStore,
+        AuditStore, NewSession, NewTopic, SessionOrigin, SessionStore, SqliteStorage, Storage,
+        SurfaceAnnotationStore, SurfaceStore, TopicStore,
     };
 
     use super::*;
@@ -811,6 +1009,20 @@ mod tests {
         )
     }
 
+    async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
+        storage
+            .create_session(NewSession {
+                topic_id,
+                agent_id: "gateway".into(),
+                origin: SessionOrigin::Direct,
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
     /// A surface with one module, and a second surface with its own module — the
     /// second is what a cross-surface anchor would wrongly reach.
     async fn seeded() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
@@ -824,13 +1036,14 @@ mod tests {
         )
         .await
         .unwrap();
+        let session = session_in(&storage, topic.id).await;
         let state = state(Arc::clone(&storage));
-        let surface = create_page(
+        let surface = create_surface(
             &state,
-            topic.id,
+            session,
             CreateSurfaceRequest {
                 title: "Planning".into(),
-                template_id: None,
+                library_entry_id: None,
             },
         )
         .await
@@ -847,12 +1060,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let other = create_page(
+        let other = create_surface(
             &state,
-            topic.id,
+            session,
             CreateSurfaceRequest {
                 title: "Elsewhere".into(),
-                template_id: None,
+                library_entry_id: None,
             },
         )
         .await
@@ -1247,5 +1460,242 @@ mod tests {
             !serialised.contains("secret words"),
             "the event is a signal: content rides the refetch, never the event"
         );
+    }
+
+    async fn topic_named(storage: &SqliteStorage, name: &str) -> Uuid {
+        TopicStore::create(
+            storage,
+            NewTopic {
+                name: name.into(),
+                slug: name.to_lowercase().into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    fn save_request(name: &str, tags: &[&str]) -> SaveSurfaceToLibraryRequest {
+        SaveSurfaceToLibraryRequest {
+            name: name.into(),
+            description: "A daily standup: use at the start of a working day.".into(),
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+        }
+    }
+
+    async fn module_sources(state: &AppState, surface_id: Uuid) -> Vec<String> {
+        surface_response(state, surface_id)
+            .await
+            .unwrap()
+            .modules
+            .into_iter()
+            .map(|module| module.source)
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_surface_keeps_its_content_within_its_topic_and_only_its_shape_beyond() {
+        let (state, storage, surface_id, _, _) = seeded().await;
+        let origin = storage.get_page(surface_id).await.unwrap().unwrap();
+        let origin_session = storage
+            .get_session(origin.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let entry = save_surface_to_library(
+            &state,
+            surface_id,
+            save_request("Standup", &["Standup", " ops ", "standup"]),
+            "user",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            entry.tags,
+            vec!["standup", "ops"],
+            "tags are trimmed, lowered, deduplicated"
+        );
+        assert_eq!(entry.origin_topic_id, Some(origin_session.topic_id));
+        assert_eq!(entry.modules.len(), 1);
+        assert_eq!(entry.modules[0].source, "# Draft");
+        // Saving opened nothing: the origin session still has its two surfaces.
+        assert_eq!(
+            storage
+                .list_surfaces_by_session(origin_session.id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let sibling = session_in(&storage, origin_session.topic_id).await;
+        let elsewhere = session_in(&storage, topic_named(&storage, "Elsewhere").await).await;
+        let general = storage.general_scope().await.unwrap();
+        let topicless = session_in(&storage, general.id).await;
+        let add = |session: Uuid| {
+            create_surface(
+                &state,
+                session,
+                CreateSurfaceRequest {
+                    title: "Monday".into(),
+                    library_entry_id: Some(entry.id),
+                },
+            )
+        };
+        let in_topic = add(sibling).await.unwrap();
+        let in_other = add(elsewhere).await.unwrap();
+        let in_general = add(topicless).await.unwrap();
+
+        assert_eq!(in_topic.library_entry_id, Some(entry.id));
+        assert!(in_topic.seeded_at.is_some());
+        assert_eq!(module_sources(&state, in_topic.id).await, vec!["# Draft"]);
+        assert_eq!(module_sources(&state, in_other.id).await, vec![""]);
+        assert_eq!(module_sources(&state, in_general.id).await, vec![""]);
+        let created = storage
+            .list_audit_events_by_session(elsewhere)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_kind == "surface_created")
+            .expect("the add is recorded");
+        assert_eq!(created.metadata["seeded_from"]["seeding"], "shape_only");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_catalogue_carries_descriptions_and_tags_and_never_content() {
+        let (state, storage, surface_id, _, other_module_id) = seeded().await;
+        let other_surface_id = storage
+            .get_surface_module(other_module_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .surface_id;
+        save_surface_to_library(
+            &state,
+            surface_id,
+            save_request("Standup", &["daily"]),
+            "user",
+        )
+        .await
+        .unwrap();
+        save_surface_to_library(
+            &state,
+            other_surface_id,
+            SaveSurfaceToLibraryRequest {
+                name: "Retro".into(),
+                description: "A retrospective board — use at the end of a sprint.".into(),
+                tags: vec!["sprint".into()],
+            },
+            "assistant",
+        )
+        .await
+        .unwrap();
+
+        let whole = library_catalogue(&state, &[]).await.unwrap();
+        assert_eq!(whole.entries.len(), 2);
+        let serialised = serde_json::to_string(&whole).unwrap();
+        assert!(serialised.contains("use at the start of a working day"));
+        assert!(!serialised.contains("# Draft") && !serialised.contains("# Other"));
+
+        let narrowed = library_catalogue(&state, &["Sprint".into()]).await.unwrap();
+        assert_eq!(narrowed.entries.len(), 1);
+        assert_eq!(narrowed.entries[0].name, "Retro");
+        assert!(
+            library_catalogue(&state, &["nothing".into()])
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_topic_default_opens_in_its_new_sessions_and_nowhere_else() {
+        let (state, storage, surface_id, _, _) = seeded().await;
+        let origin = storage.get_page(surface_id).await.unwrap().unwrap();
+        let topic_id = storage
+            .get_session(origin.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .topic_id;
+        let entry =
+            save_surface_to_library(&state, surface_id, save_request("Standup", &[]), "user")
+                .await
+                .unwrap();
+        let defaults = add_topic_default(
+            &state,
+            topic_id,
+            TopicDefaultSurfaceRequest {
+                library_entry_id: entry.id,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(defaults.entries.len(), 1);
+
+        let service = crate::service::ConversationService::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+        );
+        let in_topic = service
+            .create_session_in_topic_for_agent(topic_id, "gateway", SessionOrigin::Direct, None)
+            .await
+            .unwrap();
+        let other_topic = topic_named(&storage, "Other").await;
+        let elsewhere = service
+            .create_session_in_topic_for_agent(other_topic, "gateway", SessionOrigin::Direct, None)
+            .await
+            .unwrap();
+
+        let opened = storage.list_surfaces_by_session(in_topic.id).await.unwrap();
+        assert_eq!(
+            opened.len(),
+            1,
+            "the new session opens with the topic's default"
+        );
+        assert_eq!(opened[0].title, "Standup");
+        assert_eq!(opened[0].library_entry_id, Some(entry.id));
+        assert_eq!(module_sources(&state, opened[0].id).await, vec!["# Draft"]);
+        assert!(
+            storage
+                .list_surfaces_by_session(elsewhere.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "another topic's session received nothing"
+        );
+
+        remove_topic_default(&state, topic_id, entry.id)
+            .await
+            .unwrap();
+        assert!(
+            topic_defaults(&state, topic_id)
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        let later = service
+            .create_session_in_topic_for_agent(topic_id, "gateway", SessionOrigin::Direct, None)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .list_surfaces_by_session(later.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_general_scope_designates_no_defaults() {
+        let (state, storage, _, _, _) = seeded().await;
+        let general = storage.general_scope().await.unwrap();
+        let error = topic_defaults(&state, general.id)
+            .await
+            .expect_err("the general scope is not a topic");
+        assert!(matches!(error, GatewayError::TopicNotFound { .. }));
     }
 }

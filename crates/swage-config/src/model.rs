@@ -266,11 +266,12 @@ impl Default for ToolPermissionConfig {
         // Knowledge-base access at registry grain: reading the topic's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
-        // Surfaces at the same grain: reading the topic's shared work
-        // surfaces and writing on them are separate powers.
+        // Surfaces at the same grain: reading the session's work surfaces,
+        // writing on them, and reaching the shared library are separate
+        // powers.
         bundles.insert(
             "surfaces-read".to_string(),
-            vec!["surface_read".to_string()],
+            vec!["surface_read".to_string(), "surface_library".to_string()],
         );
         bundles.insert(
             "surfaces-write".to_string(),

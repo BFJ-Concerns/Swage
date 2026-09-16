@@ -281,6 +281,7 @@ impl GatewayClient {
         let body = UpdateTopicRequest {
             name: name.map(str::to_string),
             description: None,
+            tags: None,
         };
         let response = self
             .client
@@ -968,6 +969,7 @@ mod topic_type_tests {
         let req = UpdateTopicRequest {
             name: Some("New Name".to_string()),
             description: None,
+            tags: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "New Name");
@@ -978,6 +980,7 @@ mod topic_type_tests {
         let req = UpdateTopicRequest {
             name: Some("Renamed".to_string()),
             description: None,
+            tags: None,
         };
         let json: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(json["name"], "Renamed");

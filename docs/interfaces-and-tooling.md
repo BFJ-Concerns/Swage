@@ -195,18 +195,29 @@ governed system without being copied out of the CLI's own store.
 
 ## Surfaces
 
-Surfaces are work surfaces inside a topic, assembled from ordered module
-instances. An agent or workflow can write to a surface's modules, and users
-can annotate individual modules with notes.
+Surfaces are a session's work surfaces, assembled from ordered module
+instances. A surface belongs to the session that created it and stays with
+that session's record: another session in the same topic does not see it. An
+agent or workflow can write to a surface's modules, and users can annotate
+individual modules with notes.
 
-### Templates
+### The shared library
 
-A surface template is a reusable shape — a named list of module rows in a
-fixed order. Creating a surface with `template_id` set seeds the new surface's
-modules from the template. The seeded modules belong to the surface from that
-point on: the template is recorded as the fork's origin (visible as
-`forked_from_template_id` on the surface), but later template edits do not
-propagate to surfaces that were forked from it.
+Either party can preserve a useful surface in the shared library, giving it a
+name, a description of what it does and when to use it, and tags. Saving
+copies the surface's modules as they stand and opens nothing anywhere; the
+surface itself is untouched. Any session — in any topic, or without one — can
+add a library entry as a new surface of its own, seeded from the entry's
+modules and recording the entry as its origin. Content travels with an entry
+only within the topic it was saved from: added to a session in another topic
+or in the general scope, the shape comes over and each module starts empty
+for the destination's own data. The copies are the session's own from birth;
+later edits on either side do not cross, and deleting an entry leaves every
+surface added from it in place.
+
+The library's catalogue lists names, descriptions and tags, never module
+content. A topic can designate library entries as its defaults, which open in
+each of the topic's new sessions; any other entry is added on demand.
 
 ### Annotations
 
@@ -228,8 +239,8 @@ disconnected.
 
 A run's output can be routed to one or more destinations. The four target
 kinds are: an external channel (Telegram, dev DM or thread), the gateway's
-local store (as a log record), a surface in the run's own topic, and a
-webhook URL. Setting `store_local_output` on the routing request adds a
+local store (as a log record), a surface owned by a session in the run's
+topic, and a webhook URL. Setting `store_local_output` on the routing request adds a
 local-storage target alongside any explicit targets.
 
 ### No-delivery records
@@ -461,7 +472,7 @@ account — see
 `workflow_run_status` and `workflow_run_account` are scoped to the caller's
 session topic: a run in another topic reads as absent rather than forbidden.
 
-**Surfaces and delivery** — `surface_read`, `surface_write`, and `run_event_post`.
+**Surfaces and delivery** — `surface_read`, `surface_write`, `surface_library`, and `run_event_post`.
 
 **Scheduling** — `schedule` and `wake_me_later`.
 

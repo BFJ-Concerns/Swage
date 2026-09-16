@@ -768,26 +768,28 @@ async fn validate_schedule_delivery_targets(
     routing: DeliveryRoutingRequest,
 ) -> Result<(), GatewayError> {
     let targets = resolve_delivery_targets(None, routing)?;
-    let topic_id = match session_policy {
-        SessionPolicy::Fresh { topic_id, .. } => *topic_id,
-        SessionPolicy::Continuation { session_id } => {
-            state
-                .storage
-                .get_session(*session_id)
-                .await?
-                .ok_or(GatewayError::ConversationNotFound { id: *session_id })?
-                .topic_id
-        }
-    };
+    // A surface belongs to one session, so only a continuation schedule can
+    // deliver to one — and only to a surface of the session it continues. A
+    // fresh-policy schedule opens a new session each run, which has no
+    // surface yet to name.
     for target in targets {
         if let crate::channel_gateway::DeliveryTarget::Surface { surface_id } = target {
             let surface = state.storage.get_page(surface_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("no surface with id {surface_id}"))
             })?;
-            if surface.topic_id != topic_id {
-                return Err(GatewayError::ValidationError(format!(
-                    "surface delivery target {surface_id} is not in the schedule's topic"
-                )));
+            match session_policy {
+                SessionPolicy::Continuation { session_id } if surface.session_id == *session_id => {
+                }
+                SessionPolicy::Continuation { .. } => {
+                    return Err(GatewayError::ValidationError(format!(
+                        "surface delivery target {surface_id} does not belong to the schedule's session"
+                    )));
+                }
+                SessionPolicy::Fresh { .. } => {
+                    return Err(GatewayError::ValidationError(format!(
+                        "surface delivery target {surface_id} needs a continuation schedule: a fresh session has no surface yet"
+                    )));
+                }
             }
         }
     }

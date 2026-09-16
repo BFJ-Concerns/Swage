@@ -96,8 +96,94 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "062_session_origin_and_archive",
             ADD_SESSION_ORIGIN_AND_ARCHIVE,
         ),
+        (
+            "063_session_surfaces_and_library",
+            SESSION_SURFACES_AND_LIBRARY,
+        ),
     ]
 }
+
+/// Surfaces belong to sessions, and the shared surface library replaces the
+/// topic-local templates. A surface row names the session it opens with;
+/// `library_entry_id` / `seeded_at` record the library entry it was seeded
+/// from, when it was. Library entries carry a name, a description written at
+/// save time (what the surface does and when to use it), catalogue tags, the
+/// scope they were saved from (`origin_topic_id`, which decides whether their
+/// content travels), and their module rows. `topic_default_surfaces` names the
+/// entries a topic opens in each new session; `topics.tags` are the labels
+/// that narrow the catalogue for a topic's sessions. The alpha posture applies:
+/// topic-owned surfaces and templates are work product regenerable by their
+/// authors, so their rows are dropped rather than migrated.
+const SESSION_SURFACES_AND_LIBRARY: &str = "
+    DROP TABLE IF EXISTS surface_annotations;
+    DROP TABLE IF EXISTS surface_modules;
+    DROP TABLE IF EXISTS surfaces;
+    DROP TABLE IF EXISTS surface_template_modules;
+    DROP TABLE IF EXISTS surface_templates;
+
+    CREATE TABLE surfaces (
+        id               TEXT NOT NULL PRIMARY KEY,
+        session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        title            TEXT NOT NULL,
+        library_entry_id TEXT REFERENCES surface_library_entries(id) ON DELETE SET NULL,
+        seeded_at        TEXT,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+    );
+    CREATE INDEX idx_surfaces_session ON surfaces(session_id, created_at);
+    CREATE TABLE surface_modules (
+        id          TEXT NOT NULL PRIMARY KEY,
+        surface_id  TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,
+        position    INTEGER NOT NULL,
+        source      TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX idx_surface_modules_surface ON surface_modules(surface_id);
+    CREATE TABLE surface_annotations (
+        id          TEXT NOT NULL PRIMARY KEY,
+        surface_id  TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+        module_id   TEXT NOT NULL REFERENCES surface_modules(id) ON DELETE CASCADE,
+        body        TEXT NOT NULL,
+        tags        TEXT NOT NULL,
+        author      TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX idx_surface_annotations_surface ON surface_annotations(surface_id);
+    CREATE INDEX idx_surface_annotations_module ON surface_annotations(module_id);
+
+    CREATE TABLE surface_library_entries (
+        id                    TEXT NOT NULL PRIMARY KEY,
+        name                  TEXT NOT NULL,
+        description           TEXT NOT NULL,
+        tags                  TEXT NOT NULL,
+        origin_topic_id       TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+        saved_from_surface_id TEXT,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+    );
+    CREATE TABLE surface_library_entry_modules (
+        id          TEXT NOT NULL PRIMARY KEY,
+        entry_id    TEXT NOT NULL REFERENCES surface_library_entries(id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,
+        position    INTEGER NOT NULL,
+        source      TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX idx_surface_library_entry_modules_entry
+        ON surface_library_entry_modules(entry_id, position);
+    CREATE TABLE topic_default_surfaces (
+        topic_id      TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+        entry_id      TEXT NOT NULL REFERENCES surface_library_entries(id) ON DELETE CASCADE,
+        designated_at TEXT NOT NULL,
+        PRIMARY KEY (topic_id, entry_id)
+    );
+
+    ALTER TABLE topics ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+";
 
 /// What opened a session, and whether the inactivity sweep has archived it.
 /// `origin_kind` is one of `direct`, `schedule_run`, `workflow_worker`,

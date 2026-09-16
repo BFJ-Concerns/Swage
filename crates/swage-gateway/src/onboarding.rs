@@ -764,7 +764,7 @@ async fn import_topic(state: &AppState, topic: RecoveryTopicRecord) -> Result<To
         let general = state.topic_store.general_scope().await?;
         state
             .topic_store
-            .update(general.id, Some(topic.name), None, Some(slug))
+            .update(general.id, Some(topic.name), None, Some(slug), None)
             .await
             .map_err(Into::into)
     } else {

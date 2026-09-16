@@ -1,5 +1,6 @@
-//! Surfaces — agent-run tabs on a topic, assembled from module instances —
-//! and the requests that create and mutate them.
+//! Surfaces — a session's work surfaces, assembled from module instances —
+//! the shared library they are preserved in, and the requests that create,
+//! save, add and mutate them.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -7,48 +8,63 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+/// Create a surface for a session. Absent `library_entry_id` creates a blank
+/// surface; present, the new surface is seeded from that library entry and
+/// records it as its origin. The seeded modules are the surface's own from
+/// birth; the entry is never projected into it afterwards.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct CreateSurfaceRequest {
     pub title: String,
-    /// Seed the new surface from a template of the same topic. Absent creates a
-    /// blank surface. The seeded modules are the surface's own from birth; the
-    /// template is recorded as the fork's origin, never projected into it.
     #[serde(default)]
     #[ts(optional)]
-    pub template_id: Option<Uuid>,
+    pub library_entry_id: Option<Uuid>,
 }
 
-/// Create a reusable surface shape for a topic, with its module rows in the
-/// order they will seed.
+/// Preserve a surface in the shared library. The description is written
+/// now and is what an agent chooses by later: say what the surface does and
+/// when to use it. Saving never opens the entry anywhere.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct CreateSurfaceTemplateRequest {
+pub struct SaveSurfaceToLibraryRequest {
     pub name: String,
+    pub description: String,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
-    pub modules: Vec<SurfaceTemplateModuleInput>,
+    pub tags: Vec<String>,
 }
 
+/// A library entry as the catalogue shows it: what it is, what it is for and
+/// how it is labelled. Module content is not part of the catalogue.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SurfaceTemplateModuleInput {
-    /// Module kind for the seeded instance ("document" first).
-    #[serde(default)]
-    #[ts(optional)]
-    pub kind: Option<String>,
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SurfaceTemplateResponse {
+pub struct LibraryEntrySummary {
     pub id: Uuid,
-    pub topic_id: Uuid,
     pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    /// The scope the surface was saved from: absent for the general scope.
+    /// A session in this scope receives the saved content when it adds the
+    /// entry; any other scope receives the shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin_topic_id: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct LibraryEntryResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin_topic_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub modules: Vec<SurfaceTemplateModuleView>,
+    pub modules: Vec<LibraryEntryModuleView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SurfaceTemplateModuleView {
+pub struct LibraryEntryModuleView {
     pub id: Uuid,
     pub kind: String,
     pub position: i32,
@@ -56,15 +72,15 @@ pub struct SurfaceTemplateModuleView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SurfaceTemplateSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub updated_at: DateTime<Utc>,
+pub struct LibraryListResponse {
+    pub entries: Vec<LibraryEntrySummary>,
 }
 
+/// Designate a library entry as one of a topic's defaults — the surfaces
+/// every new session in the topic opens with.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-pub struct SurfaceTemplateListResponse {
-    pub templates: Vec<SurfaceTemplateSummary>,
+pub struct TopicDefaultSurfaceRequest {
+    pub library_entry_id: Uuid,
 }
 
 /// Write a module's source: replace an existing instance's content, or
@@ -140,19 +156,20 @@ pub struct SurfaceModuleView {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct SurfaceResponse {
     pub id: Uuid,
-    pub topic_id: Uuid,
+    /// The session this surface belongs to.
+    pub session_id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub modules: Vec<SurfaceModuleView>,
-    /// The template this surface was forked from, if any — the recorded origin
-    /// of its seeded shape. Absent on a surface created blank.
+    /// The library entry this surface was seeded from, if any — the recorded
+    /// origin of its shape. Absent on a surface created blank.
     #[serde(default)]
     #[ts(optional, type = "string | null")]
-    pub forked_from_template_id: Option<Uuid>,
+    pub library_entry_id: Option<Uuid>,
     #[serde(default)]
     #[ts(optional, type = "string | null")]
-    pub forked_at: Option<DateTime<Utc>>,
+    pub seeded_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

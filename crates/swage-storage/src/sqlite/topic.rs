@@ -13,13 +13,15 @@ use crate::store::TopicStore;
 // Row mapping
 // ---------------------------------------------------------------------------
 
+/// Every topic read selects these columns, in `row_to_topic` order.
+const TOPIC_COLUMNS: &str = "id, name, description, is_general, slug, created_at, updated_at, tags";
+
 fn row_to_topic(row: &rusqlite::Row<'_>) -> rusqlite::Result<Topic> {
     let id: String = row.get(0)?;
-    // Column order:
-    // id(0), name(1), description(2), is_general(3), slug(4), created_at(5), updated_at(6)
     let created: String = row.get(5)?;
     let updated: String = row.get(6)?;
     let slug: String = row.get(4)?;
+    let tags: String = row.get(7)?;
 
     Ok(Topic {
         id: parse_uuid(&id)?,
@@ -27,9 +29,19 @@ fn row_to_topic(row: &rusqlite::Row<'_>) -> rusqlite::Result<Topic> {
         description: row.get(2)?,
         is_general: row.get::<_, i64>(3)? != 0,
         slug: parse_slug(&slug)?,
+        tags: decode_tags(&tags),
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
+}
+
+/// Tags live in one column as a JSON array: read and written whole.
+pub(crate) fn encode_tags(tags: &[String]) -> String {
+    serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub(crate) fn decode_tags(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
@@ -76,6 +88,7 @@ impl TopicStore for SqliteStorage {
                 description: String::new(),
                 is_general: false,
                 slug: topic.slug,
+                tags: Vec::new(),
                 created_at: now,
                 updated_at: now,
             })
@@ -86,8 +99,10 @@ impl TopicStore for SqliteStorage {
     async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, name, description, is_general, slug, created_at, updated_at
-                 FROM topics WHERE id = ?1",
+                &format!(
+                    "SELECT {TOPIC_COLUMNS}
+                 FROM topics WHERE id = ?1"
+                ),
                 params![id.to_string()],
                 row_to_topic,
             )
@@ -101,8 +116,10 @@ impl TopicStore for SqliteStorage {
         let name = name.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, description, is_general, slug, created_at, updated_at
-                 FROM topics WHERE name = ?1",
+                &format!(
+                    "SELECT {TOPIC_COLUMNS}
+                 FROM topics WHERE name = ?1"
+                ),
                 params![&name],
                 row_to_topic,
             )
@@ -115,9 +132,11 @@ impl TopicStore for SqliteStorage {
         if let Some(topic) = self
             .with_conn(|conn| {
                 conn.query_row(
-                    "SELECT id, name, description, is_general, slug, created_at, updated_at
+                    &format!(
+                        "SELECT {TOPIC_COLUMNS}
                      FROM topics
-                     WHERE is_general = 1",
+                     WHERE is_general = 1"
+                    ),
                     [],
                     row_to_topic,
                 )
@@ -145,6 +164,7 @@ impl TopicStore for SqliteStorage {
                 description: String::new(),
                 is_general: true,
                 slug: "general".into(),
+                tags: Vec::new(),
                 created_at: now,
                 updated_at: now,
             })
@@ -154,10 +174,10 @@ impl TopicStore for SqliteStorage {
 
     async fn list_all(&self) -> Result<Vec<Topic>, StorageError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, name, description, is_general, slug, created_at, updated_at
-                 FROM topics WHERE is_general = 0 ORDER BY created_at ASC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TOPIC_COLUMNS}
+                 FROM topics WHERE is_general = 0 ORDER BY created_at ASC"
+            ))?;
             let rows = stmt.query_map([], row_to_topic)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
@@ -166,10 +186,10 @@ impl TopicStore for SqliteStorage {
 
     async fn list_scopes(&self) -> Result<Vec<Topic>, StorageError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, name, description, is_general, slug, created_at, updated_at
-                 FROM topics ORDER BY is_general DESC, created_at ASC",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TOPIC_COLUMNS}
+                 FROM topics ORDER BY is_general DESC, created_at ASC"
+            ))?;
             let rows = stmt.query_map([], row_to_topic)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         })
@@ -180,8 +200,10 @@ impl TopicStore for SqliteStorage {
         let slug = slug.to_owned();
         self.with_conn(move |conn| {
             conn.query_row(
-                "SELECT id, name, description, is_general, slug, created_at, updated_at
-                 FROM topics WHERE slug = ?1",
+                &format!(
+                    "SELECT {TOPIC_COLUMNS}
+                 FROM topics WHERE slug = ?1"
+                ),
                 params![&slug],
                 row_to_topic,
             )
@@ -196,6 +218,7 @@ impl TopicStore for SqliteStorage {
         name: Option<String>,
         description: Option<String>,
         slug: Option<TopicSlug>,
+        tags: Option<Vec<String>>,
     ) -> Result<Topic, StorageError> {
         // Pre-flight: verify the topic exists.
         if self.get(id).await?.is_none() {
@@ -216,6 +239,7 @@ impl TopicStore for SqliteStorage {
                  SET name           = COALESCE(?2, name),
                      description    = COALESCE(?3, description),
                      slug           = COALESCE(?4, slug),
+                     tags           = COALESCE(?6, tags),
                      updated_at     = ?5
                  WHERE id = ?1",
                 params![
@@ -223,13 +247,16 @@ impl TopicStore for SqliteStorage {
                     name,
                     description,
                     slug.as_ref().map(TopicSlug::as_str),
-                    now
+                    now,
+                    tags.as_deref().map(encode_tags),
                 ],
             )?;
 
             conn.query_row(
-                "SELECT id, name, description, is_general, slug, created_at, updated_at
-                 FROM topics WHERE id = ?1",
+                &format!(
+                    "SELECT {TOPIC_COLUMNS}
+                 FROM topics WHERE id = ?1"
+                ),
                 params![id_str],
                 row_to_topic,
             )
@@ -307,6 +334,40 @@ mod tests {
 
         let found = storage.get_by_name("find-me").await.unwrap();
         assert!(found.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topic_tags_round_trip_and_survive_other_updates() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let created = storage
+            .create(NewTopic {
+                name: "Ops".into(),
+                slug: "ops".into(),
+            })
+            .await
+            .unwrap();
+        assert!(created.tags.is_empty());
+
+        let tagged = storage
+            .update(
+                created.id,
+                None,
+                None,
+                None,
+                Some(vec!["ops".into(), "status".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tagged.tags, vec!["ops", "status"]);
+
+        // A later update that says nothing about tags leaves them alone.
+        let renamed = storage
+            .update(created.id, Some("Operations".into()), None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(renamed.tags, vec!["ops", "status"]);
+        let listed = storage.list_all().await.unwrap();
+        assert_eq!(listed[0].tags, vec!["ops", "status"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -454,6 +515,7 @@ mod tests {
                 Some("New Name".into()),
                 None,
                 Some("new-name".into()),
+                None,
             )
             .await
             .unwrap();
@@ -474,7 +536,13 @@ mod tests {
             .unwrap();
 
         let updated = storage
-            .update(created.id, None, Some("Operations topic".into()), None)
+            .update(
+                created.id,
+                None,
+                Some("Operations topic".into()),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -494,7 +562,10 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = storage.update(created.id, None, None, None).await.unwrap();
+        let updated = storage
+            .update(created.id, None, None, None, None)
+            .await
+            .unwrap();
 
         assert_eq!(updated.name, "Stable");
         assert_eq!(updated.slug, "stable");
@@ -505,7 +576,7 @@ mod tests {
         let storage = SqliteStorage::in_memory().unwrap();
         let nonexistent = Uuid::new_v4();
         let result = storage
-            .update(nonexistent, Some("X".into()), None, None)
+            .update(nonexistent, Some("X".into()), None, None, None)
             .await;
         assert!(
             result.is_err(),

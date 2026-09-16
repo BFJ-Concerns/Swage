@@ -48,11 +48,12 @@ fn typescript_bindings_are_regenerated() {
         .expect("export update surface annotation");
     client::surface::DeleteSurfaceAnnotationResponse::export_all(&cfg)
         .expect("export delete surface annotation");
-    client::surface::CreateSurfaceTemplateRequest::export_all(&cfg)
-        .expect("export create surface template");
-    client::surface::SurfaceTemplateResponse::export_all(&cfg).expect("export surface template");
-    client::surface::SurfaceTemplateListResponse::export_all(&cfg)
-        .expect("export surface templates");
+    client::surface::SaveSurfaceToLibraryRequest::export_all(&cfg)
+        .expect("export save surface to library");
+    client::surface::LibraryEntryResponse::export_all(&cfg).expect("export library entry");
+    client::surface::LibraryListResponse::export_all(&cfg).expect("export library list");
+    client::surface::TopicDefaultSurfaceRequest::export_all(&cfg)
+        .expect("export topic default surface");
     client::topic::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
     client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
