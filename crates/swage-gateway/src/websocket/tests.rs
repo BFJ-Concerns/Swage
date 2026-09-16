@@ -1213,3 +1213,31 @@ async fn approval_decision_fires_oneshot_channel() {
     );
     assert_eq!(decision.reason, Some("Too risky".to_string()));
 }
+
+#[tokio::test]
+async fn connecting_to_an_archived_conversation_returns_it_to_the_recent_list() {
+    use swage_storage::SessionStore;
+
+    let (state, session_id, storage) = make_state_with_session_and_storage().await;
+    let archived = storage
+        .archive_inactive_sessions(chrono::Utc::now() + chrono::Duration::days(1), &[])
+        .await
+        .expect("archive");
+    assert_eq!(archived, vec![session_id]);
+
+    let rejection = check_upgrade_preconditions(&state, session_id).await;
+
+    assert!(
+        rejection.is_none(),
+        "an archived conversation is still connectable"
+    );
+    let session = storage
+        .get_session(session_id)
+        .await
+        .expect("get")
+        .expect("exists");
+    assert_eq!(
+        session.archived_at, None,
+        "resuming unarchives before the first turn"
+    );
+}

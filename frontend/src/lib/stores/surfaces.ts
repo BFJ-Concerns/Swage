@@ -70,8 +70,12 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
 
   let currentSessionId: string | null = null;
 
+  // The surface read is checked against the session current when it
+  // settles, not when it started: a read that outlives a session switch
+  // must never reinstate the previous session's surface.
   async function refreshActive(surfaceId: string): Promise<void> {
     const surface = await surfacesApi.getSurface(surfaceId);
+    if (currentSessionId !== null && surface.session_id !== currentSessionId) return;
     activeSurfaceStore.set(surface);
   }
 
@@ -89,6 +93,14 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
   // The live route, opened here rather than wired in by the shell: an open
   // surface's liveness is the store's own contract, not the caller's to remember.
   function handleSignal(event: ServerEvent): void {
+    if (event.type === "lagged") {
+      // The server dropped signals; one may have been the only signal for
+      // what is open. Refetch what is open, as after a reconnect.
+      const active = activeSurfaceState.current;
+      if (active) void refreshActive(active.id).catch(() => {});
+      if (currentSessionId) void refreshList(currentSessionId).catch(() => {});
+      return;
+    }
     if (event.type !== "surface_updated") return;
     // Refetch rather than patch: the event carries identity, not content.
     const active = activeSurfaceState.current;
@@ -154,6 +166,7 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
     ): Promise<void> {
       const surface = await surfacesApi.createSurface(sessionId, title, libraryEntryId);
       const response = await surfacesApi.listSurfaces(sessionId);
+      if (sessionId !== currentSessionId) return;
       surfacesStore.set(response.surfaces);
       activeSurfaceStore.set(surface);
     },

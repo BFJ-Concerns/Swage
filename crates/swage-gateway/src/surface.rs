@@ -63,7 +63,7 @@ async fn entry_or_invalid(state: &AppState, entry_id: Uuid) -> Result<LibraryEnt
 /// Whether a library entry's content travels into a session: only within the
 /// scope the entry was saved from. Every other scope receives the shape and
 /// supplies its own data — another topic's content never arrives by accident.
-fn seeding_for(entry: &LibraryEntry, session: &Session) -> LibrarySeeding {
+pub fn seeding_for(entry: &LibraryEntry, session: &Session) -> LibrarySeeding {
     if entry.origin_topic_id == session.topic_id {
         LibrarySeeding::WithContent
     } else {
@@ -155,6 +155,37 @@ pub async fn create_surface(
         module_id: None,
     });
     surface_response(state, surface.id).await
+}
+
+/// Seed a new session's default surfaces: its topic's designated library
+/// entries, each added as the session's own copy through the same
+/// content rule as any other add. The general scope designates none, so a
+/// topicless session opens with nothing. Called wherever a person's
+/// session is opened — the conversation service's two creation paths, the
+/// channel paths — never for a worker or a delegated child, whose surfaces
+/// are the dispatcher's concern.
+pub async fn open_default_surfaces(
+    storage: &dyn swage_storage::Storage,
+    session_id: Uuid,
+) -> Result<(), GatewayError> {
+    let session = storage
+        .get_session(session_id)
+        .await?
+        .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+    for entry in storage.list_topic_default_entries(session.topic_id).await? {
+        let seeding = seeding_for(&entry, &session);
+        storage
+            .create_surface_from_library(
+                NewSurface {
+                    session_id,
+                    title: entry.name,
+                },
+                entry.id,
+                seeding,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 /// Preserve a surface in the shared library. The entry copies the surface's

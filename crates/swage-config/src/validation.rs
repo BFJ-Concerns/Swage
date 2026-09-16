@@ -29,6 +29,10 @@ const KNOWN_SECTIONS: &[&str] = &[
     "channels",
 ];
 
+/// The longest inactivity delay a session archive may be configured with —
+/// ten years, well inside what a date arithmetic library accepts.
+pub const MAX_ARCHIVE_AFTER_DAYS: i64 = 3650;
+
 /// Top-level scalar keys (i.e. fields that live above any [section] header).
 /// These are recognised alongside `KNOWN_SECTIONS` during validation.
 const KNOWN_TOP_LEVEL_SCALARS: &[(&str, &str)] = &[("dangerously_skip_permissions", "boolean")];
@@ -398,14 +402,14 @@ fn check_field_semantics(
         }
         ("sessions", "archive_after_days") => {
             if let Value::Integer(t) = value
-                && *t < 1
+                && !(1..=MAX_ARCHIVE_AFTER_DAYS).contains(t)
             {
                 problems.push(make_problem(
                     file_path,
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
                         message: format!(
-                            "sessions.archive_after_days must be a positive integer, got {t}"
+                            "sessions.archive_after_days must be between 1 and {MAX_ARCHIVE_AFTER_DAYS}, got {t}"
                         ),
                     },
                 ));
@@ -1922,6 +1926,15 @@ allowed_fields = ["user"]
         let problems =
             validate_toml_string("[sessions]\narchive_after_days = 0\n", &path("config.toml"));
         assert_eq!(problems.len(), 1, "zero days is not a delay: {problems:?}");
+        let problems = validate_toml_string(
+            "[sessions]\narchive_after_days = 99999999\n",
+            &path("config.toml"),
+        );
+        assert_eq!(
+            problems.len(),
+            1,
+            "a delay past the bound is refused: {problems:?}"
+        );
         assert!(matches!(
             problems[0].kind,
             ConfigProblemKind::SemanticError { .. }

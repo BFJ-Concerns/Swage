@@ -31,7 +31,9 @@ use super::ServerEvent;
 pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
     matches!(
         event,
-        ServerEvent::SurfaceUpdated { .. } | ServerEvent::Shutdown { .. }
+        ServerEvent::SurfaceUpdated { .. }
+            | ServerEvent::Lagged { .. }
+            | ServerEvent::Shutdown { .. }
     )
 }
 
@@ -86,9 +88,22 @@ async fn handle_connection(socket: WebSocket, mut receiver: broadcast::Receiver<
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        // Signals are idempotent — the client refetches on the
-                        // next one, so dropped signals cost at most a delay.
+                        // Dropped signals may include the only one for a
+                        // surface the client is showing: tell it to refetch
+                        // rather than wait for a later signal that may never
+                        // come. The client answers `Lagged` as it answers a
+                        // reconnect — refetching what it has open.
                         tracing::warn!(n, "work-surface receiver lagged, {n} signal(s) dropped");
+                        match serde_json::to_string(&ServerEvent::Lagged { dropped: n }) {
+                            Ok(json) => {
+                                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to serialise lag signal");
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

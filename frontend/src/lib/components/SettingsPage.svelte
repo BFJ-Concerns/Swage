@@ -142,7 +142,7 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
-    settings.sessions.archive_after_days = Math.max(1, nullableNumber(settings.sessions.archive_after_days) ?? 7);
+    settings.sessions.archive_after_days = Math.min(3650, Math.max(1, nullableNumber(settings.sessions.archive_after_days) ?? 7));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
     try {

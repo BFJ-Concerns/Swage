@@ -1389,13 +1389,13 @@ async fn process_turn_with_composition_and_focus(
     }
 
     // A turn is active execution: an archived session it lands on returns
-    // to the recent list now, before anything else the turn does. Visibility
-    // only — the inactivity sweep hid the row and this unhides it.
-    if session.archived_at.is_some() {
-        match state.storage.unarchive_session(session_id).await {
-            Ok(_) => session.archived_at = None,
-            Err(error) => tracing::warn!(%error, "failed to unarchive the session for its turn"),
-        }
+    // to the recent list now, before anything else the turn does. Always
+    // asked, not gated on the row read above — a sweep between that read
+    // and the registration would otherwise archive a running session.
+    // Visibility only — the inactivity sweep hid the row and this unhides it.
+    match state.storage.unarchive_session(session_id).await {
+        Ok(_) => session.archived_at = None,
+        Err(error) => tracing::warn!(%error, "failed to unarchive the session for its turn"),
     }
 
     // Step 6: Canonicalise inbound content before persisting any thread message.

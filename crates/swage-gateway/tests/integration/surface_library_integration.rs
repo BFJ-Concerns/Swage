@@ -460,3 +460,152 @@ async fn deleting_a_library_entry_leaves_the_surfaces_added_from_it() {
         "the origin link clears; the surface stays"
     );
 }
+
+/// The agent's discovery path through the tool itself: the catalogue is
+/// narrowed by the session's topic tags, widened on request, carries no
+/// module content, and `add` seeds the chosen entry into the calling
+/// session through the same content rule as the HTTP path.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_library_tool_narrows_by_topic_tags_widens_on_request_and_adds_by_choice() {
+    use serde_json::json;
+    use swage_gateway::tool::Tool;
+    use swage_gateway::tool_executor::GatewayToolContext;
+    use swage_storage::store::{Storage, TopicStore};
+    use swage_tool::context::MockToolContext;
+
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(StubProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let router = build_router(state.clone());
+    let ops = make_topic(&router, "Ops").await;
+    let research = make_topic(&router, "Research").await;
+    http_json(
+        &router,
+        "PUT",
+        &format!("/api/topics/{ops}"),
+        Some(json!({ "tags": ["ops"] })),
+    )
+    .await;
+    let ops_session = make_session(&router, Some(&ops)).await;
+    let research_session = make_session(&router, Some(&research)).await;
+    let general_session = make_session(&router, None).await;
+    // Two entries: one tagged ops (from the ops topic), one tagged sprint.
+    let status_board = make_populated_surface(&router, &ops_session).await;
+    let ops_entry = save(&router, &status_board, &["ops"]).await;
+    let (_, retro) = http_json(
+        &router,
+        "POST",
+        &format!("/api/sessions/{research_session}/surfaces"),
+        Some(json!({ "title": "Retro" })),
+    )
+    .await;
+    let (_, sprint_entry) = http_json(
+        &router,
+        "POST",
+        &format!("/api/surfaces/{}/save", retro["id"].as_str().unwrap()),
+        Some(json!({ "name": "Retro", "description": "End-of-sprint retrospective.", "tags": ["sprint"] })),
+    )
+    .await;
+
+    let tool = swage_gateway::tool::surface::SurfaceLibraryTool;
+    let ctx_for = |session: &str| {
+        let base = MockToolContext::new("gateway", session.to_string());
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        (base, ws_tx)
+    };
+
+    // The ops session sees the ops-tagged catalogue first.
+    let (base, ws_tx) = ctx_for(&ops_session);
+    let ctx = GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+        .with_app_state(Some(state.clone()));
+    let narrowed = tool.execute(json!({}), &ctx).await.expect("catalogue");
+    assert_eq!(narrowed["narrowed_by_tags"], json!(["ops"]));
+    let names: Vec<&str> = narrowed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Standup"]);
+    assert!(
+        !narrowed.to_string().contains("shipped the gateway"),
+        "the catalogue carries no content"
+    );
+    // Widened on request.
+    let whole = tool
+        .execute(json!({ "all": true }), &ctx)
+        .await
+        .expect("whole library");
+    assert_eq!(whole["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(whole["narrowed_by_tags"], json!([]));
+    // An explicit tag narrows instead.
+    let by_tag = tool
+        .execute(json!({ "tag": "sprint" }), &ctx)
+        .await
+        .expect("by tag");
+    assert_eq!(by_tag["entries"][0]["name"], "Retro");
+
+    // A topicless session inherits no filter.
+    let (base, ws_tx) = ctx_for(&general_session);
+    let ctx_general =
+        GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+            .with_app_state(Some(state.clone()));
+    let unfiltered = tool
+        .execute(json!({}), &ctx_general)
+        .await
+        .expect("unfiltered");
+    assert_eq!(unfiltered["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(unfiltered["narrowed_by_tags"], json!([]));
+
+    // Adding by choice: the research session adds the ops entry and receives
+    // the shape only; the ops session adds it and receives the content.
+    let (base, ws_tx) = ctx_for(&research_session);
+    let ctx_research =
+        GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+            .with_app_state(Some(state.clone()));
+    let added = tool
+        .execute(
+            json!({ "add": ops_entry, "title": "Ops board here" }),
+            &ctx_research,
+        )
+        .await
+        .expect("add");
+    assert_eq!(added["session_id"], research_session);
+    assert_eq!(added["library_entry_id"], ops_entry);
+    let sources: Vec<&str> = added["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sources,
+        vec!["", ""],
+        "another topic's session receives the shape"
+    );
+    let added_home = tool
+        .execute(json!({ "add": ops_entry }), &ctx)
+        .await
+        .expect("add at home");
+    assert_eq!(
+        added_home["title"], "Standup",
+        "the title defaults to the entry's name"
+    );
+    let sources: Vec<&str> = added_home["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        sources,
+        vec!["## Yesterday: shipped the gateway", "## Blockers: none"]
+    );
+    let _ = sprint_entry;
+}

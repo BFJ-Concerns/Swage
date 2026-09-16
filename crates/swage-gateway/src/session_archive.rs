@@ -30,7 +30,16 @@ pub async fn archive_inactive_sessions(
     now: DateTime<Utc>,
 ) -> Result<Vec<Uuid>, GatewayError> {
     let days = state.active_config().sessions.archive_after_days;
-    let inactive_before = now - Duration::days(i64::try_from(days).unwrap_or(i64::MAX));
+    // A delay past the bound archives nothing rather than panicking the
+    // maintenance loop; validation keeps configured values well inside it.
+    let Some(delay) = i64::try_from(days).ok().and_then(Duration::try_days) else {
+        tracing::warn!(
+            days,
+            "session archive delay is out of range; nothing archived"
+        );
+        return Ok(Vec::new());
+    };
+    let inactive_before = now - delay;
     let executing: Vec<Uuid> = state.active_turns.lock().await.keys().copied().collect();
     let archived = state
         .storage

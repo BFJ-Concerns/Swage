@@ -321,6 +321,54 @@ describe("surfaces store", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.activeSurface).toBeNull();
   });
+  it("refetches what is open when the server reports dropped signals", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("before the gap")))
+      // The lag signal answers with a refetch of the surface and the list.
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("written during the gap")))
+      .mockResolvedValueOnce(jsonResponse(listBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const channel = fakeChannel();
+    const store = createSurfacesStore({ channelFactory: () => channel });
+    await store.loadSurfaces(SESSION_ID);
+    await store.openSurface(PAGE_ID);
+
+    channel.emit({ type: "lagged", dropped: 3 });
+    await vi.waitFor(() => {
+      expect(store.activeSurface?.modules[0].source).toBe("written during the gap");
+    });
+  });
+
+  it("drops a surface read that settles after the session it belonged to was left", async () => {
+    let resolveOldRead: (response: Response) => void;
+    const oldRead = new Promise<Response>((resolve) => {
+      resolveOldRead = resolve;
+    });
+    const fetchMock = vi.fn((url: string) => {
+      if (url === `/api/sessions/${SESSION_ID}/surfaces`) return Promise.resolve(jsonResponse(listBody));
+      if (url === `/api/sessions/${OTHER_SESSION_ID}/surfaces`) return Promise.resolve(jsonResponse(otherListBody));
+      if (url === "/api/surface-library") return Promise.resolve(jsonResponse(libraryBody));
+      if (url === `/api/surfaces/${PAGE_ID}`) return oldRead;
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    const opening = store.openSurface(PAGE_ID);
+    await store.loadSurfaces(OTHER_SESSION_ID);
+    expect(store.activeSurface).toBeNull();
+
+    // The old session's surface arrives late: it must not become visible.
+    resolveOldRead!(jsonResponse(surfaceBody("# Mine")));
+    await opening;
+    expect(store.activeSurface).toBeNull();
+  });
+
   it("offers the library and adds a surface seeded from the chosen entry", async () => {
     const seeded = {
       ...surfaceBody("## Yesterday"),

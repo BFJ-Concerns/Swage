@@ -705,11 +705,13 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
         ));
     }
     if let Some(sessions) = &request.sessions
-        && sessions.archive_after_days == 0
+        && !(1..=swage_config::validation::MAX_ARCHIVE_AFTER_DAYS as u64)
+            .contains(&sessions.archive_after_days)
     {
-        return Err(ApiError::validation(
-            "sessions archive delay must be at least one day".to_string(),
-        ));
+        return Err(ApiError::validation(format!(
+            "sessions archive delay must be between 1 and {} days",
+            swage_config::validation::MAX_ARCHIVE_AFTER_DAYS
+        )));
     }
     Ok(())
 }
