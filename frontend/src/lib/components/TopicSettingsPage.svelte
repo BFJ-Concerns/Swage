@@ -49,9 +49,12 @@
   let tagsNotice = $state<string | null>(null);
   let surfacesLoaded = $state(false);
 
-  onMount(() => {
-    void loadTopicSettings();
-    if (tab === "surfaces") void loadSurfaceSettings();
+  onMount(loadTopicSettings);
+
+  // The surfaces tab loads its library and defaults when it is shown,
+  // whether the page mounted on it or the user moved to it.
+  $effect(() => {
+    if (tab === "surfaces" && !surfacesLoaded) void loadSurfaceSettings();
   });
 
   async function loadSurfaceSettings(): Promise<void> {

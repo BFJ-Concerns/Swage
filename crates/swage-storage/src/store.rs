@@ -1432,8 +1432,7 @@ pub trait SurfaceAnnotationStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<SurfaceAnnotation>, StorageError>;
-    /// Every annotation on a surface — module notes and surface-level notes alike —
-    /// oldest first.
+    /// Every annotation on a surface, oldest first. Each anchors one module.
     async fn list_surface_annotations(
         &self,
         surface_id: Uuid,
