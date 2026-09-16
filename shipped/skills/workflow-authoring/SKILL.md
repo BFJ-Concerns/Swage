@@ -168,9 +168,14 @@ return { reply };
   `effort`, `cwd`, `isolation`, `label` — and spawns nothing until the
   first `send()`; each `send()` is one sequential turn on the accumulated
   context, taking only `schema`, `maxAttempts`, `timeoutMs` and `label`
-  (a second `send()` while one is unsettled, or any creation option on a
-  turn, throws `HeldWorkerError` — a bigger model or more effort is a new
-  worker, never a switch). `staleness(worker)` returns a journalled
+  (a second `send()` while one is unsettled, any creation option on a
+  turn, or a `send()` after `close()`, throws `HeldWorkerError` — a bigger
+  model or more effort is a new worker, never a switch). `send()` returns
+  what `agent()` returns under the same options (the text, or the
+  schema-validated value, or `null` when attempts are exhausted); a turn's
+  `label` names that turn in the run record, the envelope's names the
+  worker. The first `send()` on a worker is its briefing — record it as a
+  re-brief; only a later turn continues. `staleness(worker)` returns a journalled
   `{ stale, idleMs, thresholdMs, route }`: the idle gap since the last
   settled turn against the `worker_staleness_threshold_ms` of the
   provider route the worker's model resolves to; `stale` is `null` when
