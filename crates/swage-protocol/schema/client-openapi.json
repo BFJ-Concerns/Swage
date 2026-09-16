@@ -3665,6 +3665,25 @@
             "type": "object"
           },
           {
+            "description": "The server dropped `dropped` signals to this client because it fell\nbehind. Clients showing surfaces refetch what they have open, as\nafter a reconnect: a dropped signal may have been the only one.",
+            "properties": {
+              "dropped": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "lagged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "dropped"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A surface changed: it was created, or a module was written or added.\nClients showing surfaces refetch — the event is the signal, not the\ncontent.",
             "properties": {
               "module_id": {

@@ -72,10 +72,11 @@ impl TopicService {
 
         let slug = validate_topic_slug(&slugify(&req.name))?;
 
-        // Create the topic directory under the canonical Swage root.
-        let base = self.config_root.join("topics");
-        let topic_dir = base.join(&slug);
-        let memory_dir = topic_dir.join("memory");
+        // Create the topic directory under the canonical Swage root — the
+        // scope's own location, never a path assembled by hand.
+        let memory_dir = swage_core::ScopeLocation::topic(slug.as_str())
+            .data_dir(&self.config_root)
+            .join("memory");
         // Non-fatal: best-effort directory creation.
         if let Err(error) = std::fs::create_dir_all(&memory_dir) {
             tracing::warn!(

@@ -30,7 +30,7 @@ status: string, duration_ms: number, truncated: boolean, total_bytes: number | n
  *
  * Omitted from the serialised JSON when None.
  */
-parent_call_id?: string, } | { "type": "surface_updated", surface_id: string,
+parent_call_id?: string, } | { "type": "lagged", dropped: number, } | { "type": "surface_updated", surface_id: string,
 /**
  * The module written; absent for surface-level changes (creation).
  */

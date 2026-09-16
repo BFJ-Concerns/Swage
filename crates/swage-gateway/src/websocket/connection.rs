@@ -40,6 +40,13 @@ pub(crate) async fn check_upgrade_preconditions(
         }
     }
 
+    // Connecting is resuming: an archived conversation a client opens
+    // returns to the recent list now, before its first turn. Visibility
+    // only, and idempotent — a live session is unchanged.
+    if let Err(e) = state.storage.unarchive_session(session_id).await {
+        tracing::warn!(%session_id, error = %e, "failed to unarchive the resumed conversation");
+    }
+
     // Reject duplicate connections to the same conversation.
     if state.active_connections.lock().await.contains(&session_id) {
         return Some(

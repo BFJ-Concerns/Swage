@@ -123,6 +123,13 @@ pub enum ServerEvent {
         #[ts(optional)]
         parent_call_id: Option<String>,
     },
+    /// The server dropped `dropped` signals to this client because it fell
+    /// behind. Clients showing surfaces refetch what they have open, as
+    /// after a reconnect: a dropped signal may have been the only one.
+    Lagged {
+        #[ts(type = "number")]
+        dropped: u64,
+    },
     /// A surface changed: it was created, or a module was written or added.
     /// Clients showing surfaces refetch — the event is the signal, not the
     /// content.

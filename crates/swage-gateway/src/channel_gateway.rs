@@ -284,6 +284,7 @@ async fn ensure_session_for_origin(
                 active_workspace_attachment_id: None,
             })
             .await?;
+        crate::surface::open_default_surfaces(state.storage.as_ref(), session.id).await?;
         state
             .storage
             .create(swage_storage::model::NewThread {
@@ -337,6 +338,7 @@ async fn ensure_session_for_origin(
             active_workspace_attachment_id: None,
         })
         .await?;
+    crate::surface::open_default_surfaces(state.storage.as_ref(), session.id).await?;
     state
         .storage
         .create(swage_storage::model::NewThread {

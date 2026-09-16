@@ -446,8 +446,9 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
             EventOutcome::Continue
         }
 
-        // Surfaces are a web-surface concern; the terminal client ignores them.
-        ServerEvent::SurfaceUpdated { .. } => EventOutcome::Continue,
+        // Surfaces are a web-surface concern; the terminal client ignores
+        // them and the work-surface lag signal alike.
+        ServerEvent::SurfaceUpdated { .. } | ServerEvent::Lagged { .. } => EventOutcome::Continue,
 
         ServerEvent::ToolEnd {
             call_id,
