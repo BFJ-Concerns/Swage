@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, image attachments and reference admission, surface templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
+description: Turn context inspector, image attachments and reference admission, session-owned surfaces, the surface library and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -204,22 +204,36 @@ governed system.
 
 ## Surfaces
 
-Surfaces are agent-run work surfaces inside a topic, assembled from ordered
-module instances. Each surface belongs to one topic and carries its own module
-list, annotations, and provenance.
+Surfaces are a session's work surfaces, assembled from ordered module
+instances. Each surface belongs to one session (`session_id` on
+`SurfaceResponse`; `sessions.session_id` in storage, cascading with the
+session) and carries its own module list, annotations, and provenance.
+`GET/POST /api/sessions/{session_id}/surfaces` list and create a session's
+surfaces.
 
-### Templates
+### The shared library
 
-A surface template is a reusable shape for a topic: a named list of module
-rows in a fixed order. Templates are created through
-`POST /api/topics/{topic_id}/surface-templates` (`CreateSurfaceTemplateRequest`
-in `swage-protocol::client::surface`). Each module input carries an optional
-`kind` (defaults to `"document"`) and a `source` string.
+`POST /api/surfaces/{surface_id}/save` (`SaveSurfaceToLibraryRequest`: `name`,
+`description`, `tags`) copies a surface's modules into a library entry and
+records the origin topic (`origin_topic_id`, absent for the general scope).
+The description is required — it is what an agent chooses by.
+`GET /api/surface-library?tag=` is the catalogue (`LibraryListResponse`:
+names, descriptions, tags, origin; no module content);
+`GET /api/surface-library/{entry_id}` reads an entry with its module rows;
+`DELETE` removes it, leaving surfaces added from it untouched.
 
-Creating a surface with `template_id` set forks the template's modules into
-the new surface as its own from birth. The template is recorded as the fork's
-origin (`forked_from_template_id` and `forked_at` on `SurfaceResponse`) but
-is never projected into the surface — later template changes do not propagate.
+Creating a surface with `library_entry_id` set seeds it from the entry
+(`library_entry_id` and `seeded_at` on `SurfaceResponse`). Seeding carries
+the saved content only when the session's topic is the entry's origin
+(`LibrarySeeding::WithContent`); any other topic or the general scope receives
+the shape with empty modules (`ShapeOnly`). The audit event `surface_created`
+records which under `seeded_from.seeding`.
+
+`GET/POST /api/topics/{topic_id}/default-surfaces` and
+`DELETE /api/topics/{topic_id}/default-surfaces/{entry_id}` manage a topic's
+default entries; `ConversationService` opens them in every new session of the
+topic. `topics.tags` (`UpdateTopicRequest.tags`) are the labels the
+`surface_library` tool narrows the catalogue by for a topic's sessions.
 
 ### Annotations
 
@@ -248,7 +262,7 @@ target kinds:
 |---|---|---|
 | `channel` | `integration`, `account`, `conversation` | An external channel (Telegram, dev DM/thread) |
 | `local_storage` | — | The gateway's local store, as a log record |
-| `surface` | `surface_id` | A surface in the run's own topic |
+| `surface` | `surface_id` | A surface owned by the continuing session (schedules) or by a session in the run's topic (workflows) |
 | `webhook` | `url` | An HTTP endpoint |
 
 `store_local_output` on the routing request adds a `local_storage` target
@@ -511,8 +525,9 @@ two sandbox-eligible tools.
 
 | Tool | Source |
 |---|---|
-| `surface_read` | `surface.rs` |
-| `surface_write` | `surface.rs` |
+| `surface_read` | `surface.rs` — the calling session's surfaces |
+| `surface_write` | `surface.rs` — create, write, annotate, or save to the library |
+| `surface_library` | `surface.rs` — the catalogue narrowed by the session's topic tags, widened on request; add an entry to the session |
 | `run_event_post` | `run_event.rs` |
 
 ### Scheduling

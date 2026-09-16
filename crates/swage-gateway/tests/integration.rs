@@ -47,10 +47,10 @@ mod sandbox_entrypoint_integration;
 mod sandbox_observability_integration;
 #[path = "integration/schedule_integration.rs"]
 mod schedule_integration;
+#[path = "integration/surface_library_integration.rs"]
+mod surface_library_integration;
 #[path = "integration/surface_live_signal_integration.rs"]
 mod surface_live_signal_integration;
-#[path = "integration/surface_template_integration.rs"]
-mod surface_template_integration;
 #[path = "integration/workflow_metadata_gateway_integration.rs"]
 mod workflow_metadata_gateway_integration;
 #[path = "integration/workflow_resume_gateway_integration.rs"]

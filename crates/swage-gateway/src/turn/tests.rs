@@ -1753,6 +1753,7 @@ impl TopicStore for MockStorage {
             description: String::new(),
             is_general: false,
             slug: topic.slug,
+            tags: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1799,6 +1800,7 @@ impl TopicStore for MockStorage {
             description: String::new(),
             is_general: true,
             slug: "general".into(),
+            tags: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -1837,6 +1839,7 @@ impl TopicStore for MockStorage {
         name: Option<String>,
         description: Option<String>,
         slug: Option<TopicSlug>,
+        tags: Option<Vec<String>>,
     ) -> Result<Topic, StorageError> {
         let mut db = self.db.lock().await;
         match db.topics.get_mut(&id) {
@@ -1853,6 +1856,9 @@ impl TopicStore for MockStorage {
                 }
                 if let Some(s) = slug {
                     p.slug = s;
+                }
+                if let Some(t) = tags {
+                    p.tags = t;
                 }
                 p.updated_at = chrono::Utc::now();
                 Ok(p.clone())
@@ -3289,7 +3295,7 @@ impl swage_storage::SurfaceStore for MockStorage {
     async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Surface>, StorageError> {
         unimplemented!()
     }
-    async fn list_pages_by_topic(
+    async fn list_surfaces_by_session(
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::Surface>, StorageError> {
@@ -3316,48 +3322,50 @@ impl swage_storage::SurfaceStore for MockStorage {
     async fn update_surface_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
         unimplemented!()
     }
-    async fn create_surface_template(
+    async fn create_library_entry(
         &self,
-        _: swage_storage::NewSurfaceTemplate,
-    ) -> Result<swage_storage::SurfaceTemplate, StorageError> {
+        _: swage_storage::NewLibraryEntry,
+        _: Vec<swage_storage::NewLibraryEntryModule>,
+    ) -> Result<swage_storage::LibraryEntry, StorageError> {
         unimplemented!()
     }
-    async fn create_surface_template_with_modules(
-        &self,
-        _: swage_storage::NewSurfaceTemplate,
-        _: Vec<swage_storage::NewSurfaceTemplateModuleInput>,
-    ) -> Result<swage_storage::SurfaceTemplate, StorageError> {
-        unimplemented!()
-    }
-    async fn get_surface_template(
+    async fn get_library_entry(
         &self,
         _: Uuid,
-    ) -> Result<Option<swage_storage::SurfaceTemplate>, StorageError> {
+    ) -> Result<Option<swage_storage::LibraryEntry>, StorageError> {
         unimplemented!()
     }
-    async fn list_surface_templates_by_topic(
+    async fn list_library_entries(&self) -> Result<Vec<swage_storage::LibraryEntry>, StorageError> {
+        unimplemented!()
+    }
+    async fn list_library_entry_modules(
         &self,
         _: Uuid,
-    ) -> Result<Vec<swage_storage::SurfaceTemplate>, StorageError> {
+    ) -> Result<Vec<swage_storage::LibraryEntryModule>, StorageError> {
         unimplemented!()
     }
-    async fn create_surface_template_module(
-        &self,
-        _: swage_storage::NewSurfaceTemplateModule,
-    ) -> Result<swage_storage::SurfaceTemplateModule, StorageError> {
+    async fn delete_library_entry(&self, _: Uuid) -> Result<bool, StorageError> {
         unimplemented!()
     }
-    async fn list_surface_template_modules(
-        &self,
-        _: Uuid,
-    ) -> Result<Vec<swage_storage::SurfaceTemplateModule>, StorageError> {
-        unimplemented!()
-    }
-    async fn create_surface_from_template(
+    async fn create_surface_from_library(
         &self,
         _: swage_storage::NewSurface,
         _: Uuid,
+        _: swage_storage::LibrarySeeding,
     ) -> Result<swage_storage::Surface, StorageError> {
+        unimplemented!()
+    }
+    async fn list_topic_default_entries(
+        &self,
+        _: Uuid,
+    ) -> Result<Vec<swage_storage::LibraryEntry>, StorageError> {
+        // A fresh mock session opens with no default surfaces.
+        Ok(Vec::new())
+    }
+    async fn add_topic_default_entry(&self, _: Uuid, _: Uuid) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn remove_topic_default_entry(&self, _: Uuid, _: Uuid) -> Result<bool, StorageError> {
         unimplemented!()
     }
 }

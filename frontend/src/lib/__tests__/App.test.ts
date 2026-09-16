@@ -104,7 +104,7 @@ vi.mock("../api/agent-definitions", () => ({
 vi.mock("../api/surfaces", () => ({
   setBaseUrl: vi.fn(),
   listSurfaces: vi.fn(async () => ({ surfaces: [] })),
-  listSurfaceTemplates: vi.fn(async () => ({ templates: [] })),
+  listLibrary: vi.fn(async () => ({ entries: [] })),
   getSurface: vi.fn(),
   createSurface: vi.fn(),
   writeSurfaceModule: vi.fn(),

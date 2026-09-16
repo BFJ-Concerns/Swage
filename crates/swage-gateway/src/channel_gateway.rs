@@ -688,9 +688,9 @@ async fn deliver_to_target(
             let surface = state.storage.get_page(*surface_id).await?.ok_or_else(|| {
                 GatewayError::ValidationError(format!("no surface with id {surface_id}"))
             })?;
-            if surface.topic_id != session.topic_id {
+            if surface.session_id != session.id {
                 return Err(GatewayError::ValidationError(format!(
-                    "surface delivery target {surface_id} is not in the session's topic"
+                    "surface delivery target {surface_id} does not belong to the session"
                 )));
             }
             crate::surface::write_surface_module(

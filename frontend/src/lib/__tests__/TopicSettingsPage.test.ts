@@ -4,6 +4,7 @@ import { mount, unmount } from "svelte";
 
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
+import * as surfacesApi from "../api/surfaces";
 import type { Topic } from "../types";
 
 vi.mock("../api/topics", () => ({
@@ -12,6 +13,14 @@ vi.mock("../api/topics", () => ({
   listTopicSessions: vi.fn(),
   listTopicWorkspaces: vi.fn(),
   updateTopicWorkspaceTrust: vi.fn(),
+  updateTopic: vi.fn(),
+}));
+
+vi.mock("../api/surfaces", () => ({
+  addTopicDefaultSurface: vi.fn(),
+  listLibrary: vi.fn(),
+  listTopicDefaultSurfaces: vi.fn(),
+  removeTopicDefaultSurface: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -185,5 +194,45 @@ describe("TopicSettingsPage", () => {
     await flushUi();
     expect(topicsApi.detachTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1");
     expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("designates a library surface as a topic default and saves the topic's tags", async () => {
+    const standup = {
+      id: "entry-1",
+      name: "Standup",
+      description: "Daily standup notes — use at the start of a working day.",
+      tags: ["standup"],
+      updated_at: "2026-09-15T10:00:00Z",
+    };
+    vi.mocked(surfacesApi.listLibrary).mockResolvedValue({ entries: [standup] });
+    vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [] });
+    vi.mocked(surfacesApi.addTopicDefaultSurface).mockResolvedValue({ entries: [standup] });
+    vi.mocked(topicsApi.updateTopic).mockResolvedValue({ ...topic, tags: ["ops", "daily"] });
+
+    component = mount(TopicSettingsPage, {
+      target: document.body,
+      props: { topic, tab: "surfaces" },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("No default surfaces are designated.");
+    const libraryRow = document.querySelector('[aria-label="Surface library"] .record-row');
+    expect(libraryRow?.textContent).toContain("use at the start of a working day");
+    (libraryRow?.querySelector("button") as HTMLButtonElement).click();
+    await flushUi();
+
+    expect(surfacesApi.addTopicDefaultSurface).toHaveBeenCalledWith("topic-1", "entry-1");
+    expect(document.querySelector('[aria-label="Default surfaces"]')?.textContent).toContain("Standup");
+    expect(document.querySelector('[aria-label="Surface library"]')?.textContent).not.toContain("Make default");
+
+    const tags = document.querySelector<HTMLInputElement>('input[aria-label="Topic tags"]');
+    if (!tags) throw new Error("tags input missing");
+    tags.value = "ops, daily";
+    tags.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("form.tags-form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+
+    expect(topicsApi.updateTopic).toHaveBeenCalledWith("topic-1", { tags: ["ops", "daily"] });
+    expect(document.body.textContent).toContain("Saved.");
   });
 });

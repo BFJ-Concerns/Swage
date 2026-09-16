@@ -5,4 +5,9 @@
  * started without a topic — is never listed here: it is not a topic, and a
  * session in it carries no `topic_id` on the wire.
  */
-export type TopicResponse = { id: string, name: string, description: string, slug: string, created_at: string, };
+export type TopicResponse = { id: string, name: string, description: string, slug: string,
+/**
+ * Labels that narrow the surface library's catalogue for this topic's
+ * sessions. They grant nothing and add nothing on their own.
+ */
+tags?: Array<string>, created_at: string, };

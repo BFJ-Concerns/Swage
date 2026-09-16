@@ -127,6 +127,15 @@ describe("parseRoute", () => {
       settingsTopicTab: "workspaces",
       notFound: false,
     });
+    expect(parseRoute("/settings/topic/research/surfaces")).toEqual({
+      path: "/settings/topic/research/surfaces",
+      conversationId: null,
+      workflowRunId: null,
+      settingsTab: null,
+      settingsTopicSlug: "research",
+      settingsTopicTab: "surfaces",
+      notFound: false,
+    });
   });
 
   it("handles UUID-style conversation IDs", () => {

@@ -25,7 +25,7 @@ describe("surface API generated transport", () => {
       .mockResolvedValueOnce(response({ id: "module", annotations: [] }))
       .mockResolvedValueOnce(response({ id: "annotation" }));
 
-    await createSurface("topic-id", "Research");
+    await createSurface("session-id", "Research");
     await writeSurfaceModule("surface-id", { source: "# Notes" });
     await createSurfaceAnnotation("surface-id", {
       module_id: "module-id",
@@ -33,7 +33,7 @@ describe("surface API generated transport", () => {
       tags: ["review"],
     });
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/topics/topic-id/surfaces", {
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/sessions/session-id/surfaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "Research" }),

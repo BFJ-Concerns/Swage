@@ -27,10 +27,10 @@ use super::{
         SettingsResponse,
     },
     surface::{
-        CreateSurfaceAnnotationRequest, CreateSurfaceRequest, CreateSurfaceTemplateRequest,
-        DeleteSurfaceAnnotationResponse, SurfaceAnnotationView, SurfaceListResponse,
-        SurfaceModuleView, SurfaceResponse, SurfaceTemplateListResponse, SurfaceTemplateResponse,
-        UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
+        CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
+        LibraryEntryResponse, LibraryListResponse, SaveSurfaceToLibraryRequest,
+        SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse,
+        TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
     },
     topic::{CreateTopicRequest, TopicListResponse, TopicResponse, UpdateTopicRequest},
 };
@@ -382,13 +382,13 @@ pub fn routes() -> Vec<Route> {
         Route {
             operation_id: "list_surfaces",
             method: Method::Get,
-            path: "/api/topics/{topic_id}/surfaces",
+            path: "/api/sessions/{session_id}/surfaces",
             path_parameters: vec![Parameter {
-                name: "topic_id",
+                name: "session_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "List surfaces in a topic.",
+            summary: "List a session's surfaces — the work surfaces open with it.",
             request_optional: false,
 
             request: None,
@@ -400,13 +400,13 @@ pub fn routes() -> Vec<Route> {
         Route {
             operation_id: "create_surface",
             method: Method::Post,
-            path: "/api/topics/{topic_id}/surfaces",
+            path: "/api/sessions/{session_id}/surfaces",
             path_parameters: vec![Parameter {
-                name: "topic_id",
+                name: "session_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Create a surface in a topic.",
+            summary: "Create a surface for a session: blank, or seeded from a library entry.",
             request_optional: false,
 
             request: schema::<CreateSurfaceRequest>(),
@@ -416,54 +416,136 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
-            operation_id: "list_surface_templates",
+            operation_id: "list_library",
             method: Method::Get,
-            path: "/api/topics/{topic_id}/surface-templates",
-            path_parameters: vec![Parameter {
-                name: "topic_id",
-                kind: ParameterType::Uuid,
+            path: "/api/surface-library",
+            path_parameters: vec![],
+            query_parameters: vec![QueryParameter {
+                name: "tag",
+                kind: ParameterType::String,
+                required: false,
             }],
-            query_parameters: vec![],
-            summary: "List surface templates in a topic.",
+            summary: "The shared surface library's catalogue: names, descriptions and tags, never module content. `tag` narrows to entries carrying it.",
             request_optional: false,
+
             request: None,
             response: Response {
                 status: 200,
-                body: schema::<SurfaceTemplateListResponse>(),
+                body: schema::<LibraryListResponse>(),
             },
         },
         Route {
-            operation_id: "create_surface_template",
+            operation_id: "get_library_entry",
+            method: Method::Get,
+            path: "/api/surface-library/{entry_id}",
+            path_parameters: vec![Parameter {
+                name: "entry_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Read a library entry with its module rows.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<LibraryEntryResponse>(),
+            },
+        },
+        Route {
+            operation_id: "delete_library_entry",
+            method: Method::Delete,
+            path: "/api/surface-library/{entry_id}",
+            path_parameters: vec![Parameter {
+                name: "entry_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Remove an entry from the library. Surfaces seeded from it are untouched.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 204,
+                body: None,
+            },
+        },
+        Route {
+            operation_id: "save_surface_to_library",
             method: Method::Post,
-            path: "/api/topics/{topic_id}/surface-templates",
+            path: "/api/surfaces/{surface_id}/save",
+            path_parameters: vec![Parameter {
+                name: "surface_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Preserve a surface in the shared library with a name, a description of what it does and when to use it, and tags.",
+            request_optional: false,
+
+            request: schema::<SaveSurfaceToLibraryRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<LibraryEntryResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_topic_default_surfaces",
+            method: Method::Get,
+            path: "/api/topics/{topic_id}/default-surfaces",
             path_parameters: vec![Parameter {
                 name: "topic_id",
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Create a surface template in a topic.",
+            summary: "The library entries a topic opens in each of its new sessions.",
             request_optional: false,
-            request: schema::<CreateSurfaceTemplateRequest>(),
-            response: Response {
-                status: 200,
-                body: schema::<SurfaceTemplateResponse>(),
-            },
-        },
-        Route {
-            operation_id: "get_surface_template",
-            method: Method::Get,
-            path: "/api/surface-templates/{template_id}",
-            path_parameters: vec![Parameter {
-                name: "template_id",
-                kind: ParameterType::Uuid,
-            }],
-            query_parameters: vec![],
-            summary: "Read a surface template.",
-            request_optional: false,
+
             request: None,
             response: Response {
                 status: 200,
-                body: schema::<SurfaceTemplateResponse>(),
+                body: schema::<LibraryListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "add_topic_default_surface",
+            method: Method::Post,
+            path: "/api/topics/{topic_id}/default-surfaces",
+            path_parameters: vec![Parameter {
+                name: "topic_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Designate a library entry as one of a topic's default surfaces.",
+            request_optional: false,
+
+            request: schema::<TopicDefaultSurfaceRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<LibraryListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "remove_topic_default_surface",
+            method: Method::Delete,
+            path: "/api/topics/{topic_id}/default-surfaces/{entry_id}",
+            path_parameters: vec![
+                Parameter {
+                    name: "topic_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "entry_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Withdraw a library entry from a topic's default surfaces.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 204,
+                body: None,
             },
         },
         Route {

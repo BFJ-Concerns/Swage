@@ -35,7 +35,7 @@ use swage_protocol::client::schedule::{
 use swage_protocol::client::surface::CreateSurfaceRequest;
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewScheduleRun, NewTopic, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    NewScheduleRun, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
     SqliteStorage, TurnState,
 };
 
@@ -1442,13 +1442,12 @@ async fn completed_runs_deliver_to_a_surface_through_the_surface_substrate() {
     );
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
-    let topic = state.topic_store.general_scope().await.unwrap();
-    let surface = swage_gateway::surface::create_page(
+    let surface = swage_gateway::surface::create_surface(
         &state,
-        topic.id,
+        session_id,
         CreateSurfaceRequest {
             title: "Schedule output".into(),
-            template_id: None,
+            library_entry_id: None,
         },
     )
     .await
@@ -1499,58 +1498,74 @@ async fn completed_runs_deliver_to_a_surface_through_the_surface_substrate() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn surface_delivery_rejects_a_surface_outside_the_schedules_topic() {
+async fn surface_delivery_rejects_a_surface_of_another_session_and_any_fresh_policy() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
-        &dir.path().join("cross-topic-surface.db"),
+        &dir.path().join("cross-session-surface.db"),
         MockProvider::new(vec![]),
     );
+    let router = build_router(state.clone());
     let default = state.topic_store.general_scope().await.unwrap();
-    let other = state
-        .topic_store
-        .create(NewTopic {
-            name: "Elsewhere".into(),
-            slug: "elsewhere".parse().unwrap(),
-        })
-        .await
-        .unwrap();
-    let surface = swage_gateway::surface::create_page(
+    let owner = create_conversation(&router).await;
+    let other = create_conversation(&router).await;
+    let surface = swage_gateway::surface::create_surface(
         &state,
-        other.id,
+        owner,
         CreateSurfaceRequest {
-            title: "Other topic".into(),
-            template_id: None,
+            title: "Owner's surface".into(),
+            library_entry_id: None,
         },
     )
     .await
     .unwrap();
+    let routing = || {
+        Some(DeliveryRoutingRequest {
+            deliver_to_origin: false,
+            home_target: None,
+            explicit_targets: vec![DeliveryTarget::Surface {
+                surface_id: surface.id,
+            }],
+            store_local_output: false,
+        })
+    };
+    let request = |session: SessionPolicy| CreateScheduleRequest {
+        message: "write elsewhere".into(),
+        spec: ScheduleSpec::Interval {
+            every: "every 5 seconds".into(),
+        },
+        session,
+        routing: routing(),
+        gate: None,
+    };
 
     let error = schedule::create_schedule(
         &state,
-        CreateScheduleRequest {
-            message: "write elsewhere".into(),
-            spec: ScheduleSpec::Interval {
-                every: "every 5 seconds".into(),
-            },
-            session: SessionPolicy::Fresh {
-                topic_id: default.id,
-                agent_id: "gateway".into(),
-            },
-            routing: Some(DeliveryRoutingRequest {
-                deliver_to_origin: false,
-                home_target: None,
-                explicit_targets: vec![DeliveryTarget::Surface {
-                    surface_id: surface.id,
-                }],
-                store_local_output: false,
-            }),
-            gate: None,
-        },
+        request(SessionPolicy::Continuation { session_id: other }),
         ScheduleCreator::User,
     )
     .await
-    .expect_err("cross-topic surface delivery must be refused at schedule creation");
-    assert!(error.to_string().contains("schedule's topic"));
+    .expect_err("another session's surface must be refused at schedule creation");
+    assert!(error.to_string().contains("schedule's session"));
+
+    let error = schedule::create_schedule(
+        &state,
+        request(SessionPolicy::Fresh {
+            topic_id: default.id,
+            agent_id: "gateway".into(),
+        }),
+        ScheduleCreator::User,
+    )
+    .await
+    .expect_err("a fresh session has no surface to deliver to");
+    assert!(error.to_string().contains("continuation"));
+
+    schedule::create_schedule(
+        &state,
+        request(SessionPolicy::Continuation { session_id: owner }),
+        ScheduleCreator::User,
+    )
+    .await
+    .expect("the owning session's surface is a valid target");
 }
 
 #[tokio::test(flavor = "multi_thread")]

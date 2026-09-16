@@ -9,7 +9,15 @@
     listTopicSessions,
     listTopicWorkspaces,
     updateTopicWorkspaceTrust,
+    updateTopic,
   } from "../api/topics";
+  import {
+    addTopicDefaultSurface,
+    listLibrary,
+    listTopicDefaultSurfaces,
+    removeTopicDefaultSurface,
+  } from "../api/surfaces";
+  import type { LibraryEntrySummary } from "../protocol/LibraryEntrySummary";
   import type { TopicSettingsTab } from "../router";
   import type { Topic, ConversationSummary, WorkspaceAttachment } from "../types";
 
@@ -33,8 +41,76 @@
   let workspaceCanWrite = $state(true);
   let workspaceIsTrusted = $state(false);
   let isMutating = $state(false);
+  // The surface library and this topic's defaults from it, with the tags
+  // that narrow the catalogue for the topic's sessions.
+  let library = $state<LibraryEntrySummary[]>([]);
+  let defaultSurfaces = $state<LibraryEntrySummary[]>([]);
+  let tagsDraft = $state("");
+  let tagsNotice = $state<string | null>(null);
+  let surfacesLoaded = $state(false);
 
-  onMount(loadTopicSettings);
+  onMount(() => {
+    void loadTopicSettings();
+    if (tab === "surfaces") void loadSurfaceSettings();
+  });
+
+  async function loadSurfaceSettings(): Promise<void> {
+    if (!topic) return;
+    try {
+      const [catalogue, defaults] = await Promise.all([
+        listLibrary(),
+        listTopicDefaultSurfaces(topic.id),
+      ]);
+      library = catalogue.entries;
+      defaultSurfaces = defaults.entries;
+      tagsDraft = (topic.tags ?? []).join(", ");
+      surfacesLoaded = true;
+      error = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to load the surface library.";
+    }
+  }
+
+  async function designateDefault(entryId: string): Promise<void> {
+    if (!topic) return;
+    isMutating = true;
+    try {
+      defaultSurfaces = (await addTopicDefaultSurface(topic.id, entryId)).entries;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to designate the default surface.";
+    } finally {
+      isMutating = false;
+    }
+  }
+
+  async function withdrawDefault(entryId: string): Promise<void> {
+    if (!topic) return;
+    isMutating = true;
+    try {
+      await removeTopicDefaultSurface(topic.id, entryId);
+      defaultSurfaces = defaultSurfaces.filter((entry) => entry.id !== entryId);
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to withdraw the default surface.";
+    } finally {
+      isMutating = false;
+    }
+  }
+
+  async function saveTags(): Promise<void> {
+    if (!topic) return;
+    isMutating = true;
+    tagsNotice = null;
+    try {
+      const tags = tagsDraft.split(",").map((tag) => tag.trim()).filter(Boolean);
+      const updated = await updateTopic(topic.id, { tags });
+      tagsDraft = (updated.tags ?? []).join(", ");
+      tagsNotice = "Saved.";
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to save the topic's tags.";
+    } finally {
+      isMutating = false;
+    }
+  }
 
   async function loadTopicSettings(): Promise<void> {
     if (!topic) return;
@@ -182,6 +258,52 @@
           {/each}
         </div>
       </section>
+    {:else if tab === "surfaces"}
+      <section class="shell-section">
+        <h2 class="shell-section-title">Default surfaces</h2>
+        <p class="workspace-note">Library surfaces that open in each of this topic's new sessions. Any other library surface can still be added on demand.</p>
+        <div class="record-list" aria-label="Default surfaces">
+          {#each defaultSurfaces as entry (entry.id)}
+            <article class="record-row">
+              <strong>{entry.name}</strong>
+              <span>{entry.description}</span>
+              <button type="button" disabled={isMutating} onclick={() => void withdrawDefault(entry.id)}>Withdraw</button>
+            </article>
+          {:else}
+            <p class="shell-empty">{surfacesLoaded ? "No default surfaces are designated." : "Loading…"}</p>
+          {/each}
+        </div>
+      </section>
+      <section class="shell-section">
+        <h2 class="shell-section-title">Library</h2>
+        <div class="record-list" aria-label="Surface library">
+          {#each library.filter((entry) => !defaultSurfaces.some((d) => d.id === entry.id)) as entry (entry.id)}
+            <article class="record-row">
+              <strong>{entry.name}</strong>
+              <span>{entry.description}</span>
+              <span>{entry.tags.join(", ")}</span>
+              <button type="button" disabled={isMutating} onclick={() => void designateDefault(entry.id)}>Make default</button>
+            </article>
+          {:else}
+            <p class="shell-empty">{surfacesLoaded ? "Every library surface is already a default, or the library is empty." : "Loading…"}</p>
+          {/each}
+        </div>
+      </section>
+      <section class="shell-section">
+        <h2 class="shell-section-title">Tags</h2>
+        <p class="workspace-note">Labels that narrow the library catalogue an agent in this topic sees first. They grant nothing and add nothing on their own.</p>
+        <form
+          class="tags-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveTags();
+          }}
+        >
+          <input aria-label="Topic tags" placeholder="Tags, comma separated" bind:value={tagsDraft} />
+          <button type="submit" disabled={isMutating}>Save tags</button>
+          {#if tagsNotice}<span class="shell-value">{tagsNotice}</span>{/if}
+        </form>
+      </section>
     {:else if tab === "sessions"}
       <section class="shell-section">
         <h2 class="shell-section-title">Sessions</h2>
@@ -287,6 +409,12 @@
 
   .shell-row:last-child {
     border-bottom: none;
+  }
+
+  .tags-form {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
   }
 
   .shell-value {

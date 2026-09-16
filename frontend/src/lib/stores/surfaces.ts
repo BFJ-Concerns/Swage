@@ -1,4 +1,5 @@
-// Surfaces store — the topic's agent-run tabs and the one currently open.
+// Surfaces store — the session's work surfaces, the one currently open, and
+// the shared library's catalogue.
 //
 // The store owns its own live route: it opens the work-surface signal channel
 // on creation, so an open surface hears about changes whether or not the person
@@ -12,7 +13,7 @@
 import { fromStore, writable } from "svelte/store";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
 import type { SurfaceSummary } from "../protocol/SurfaceSummary";
-import type { SurfaceTemplateSummary } from "../protocol/SurfaceTemplateSummary";
+import type { LibraryEntrySummary } from "../protocol/LibraryEntrySummary";
 import type { ServerEvent } from "../types";
 import * as surfacesApi from "../api/surfaces";
 import { createWorkSurfaceChannel } from "../api/work-surface";
@@ -21,12 +22,21 @@ import type { WorkSurfaceChannel } from "../api/work-surface";
 export interface SurfacesStore {
   readonly surfaces: SurfaceSummary[];
   readonly activeSurface: SurfaceResponse | null;
-  readonly templates: SurfaceTemplateSummary[];
-  loadSurfaces(topicId: string): Promise<void>;
+  /** The library's catalogue: names, descriptions and tags, never content. */
+  readonly library: LibraryEntrySummary[];
+  loadSurfaces(sessionId: string): Promise<void>;
   openSurface(surfaceId: string): Promise<void>;
   closeSurface(): void;
-  createSurface(topicId: string, title: string, templateId?: string): Promise<void>;
-  templateName(templateId: string): string | null;
+  // Create a surface for the session: blank, or seeded from a library entry.
+  createSurface(sessionId: string, title: string, libraryEntryId?: string): Promise<void>;
+  // Preserve a surface in the library. Opens nothing; the catalogue refreshes.
+  saveToLibrary(
+    surfaceId: string,
+    name: string,
+    description: string,
+    tags?: string[],
+  ): Promise<void>;
+  entryName(entryId: string): string | null;
   writeModule(
     surfaceId: string,
     moduleId: string | null,
@@ -53,16 +63,27 @@ export interface SurfacesStoreOptions {
 export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesStore {
   const surfacesStore = writable<SurfaceSummary[]>([]);
   const activeSurfaceStore = writable<SurfaceResponse | null>(null);
-  const templatesStore = writable<SurfaceTemplateSummary[]>([]);
+  const libraryStore = writable<LibraryEntrySummary[]>([]);
   const surfacesState = fromStore(surfacesStore);
   const activeSurfaceState = fromStore(activeSurfaceStore);
-  const templatesState = fromStore(templatesStore);
+  const libraryState = fromStore(libraryStore);
 
-  let currentTopicId: string | null = null;
+  let currentSessionId: string | null = null;
 
   async function refreshActive(surfaceId: string): Promise<void> {
     const surface = await surfacesApi.getSurface(surfaceId);
     activeSurfaceStore.set(surface);
+  }
+
+  async function refreshList(sessionId: string): Promise<void> {
+    const response = await surfacesApi.listSurfaces(sessionId);
+    if (sessionId !== currentSessionId) return;
+    surfacesStore.set(response.surfaces);
+  }
+
+  async function refreshLibrary(): Promise<void> {
+    const response = await surfacesApi.listLibrary();
+    libraryStore.set(response.entries);
   }
 
   // The live route, opened here rather than wired in by the shell: an open
@@ -77,11 +98,8 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
         // manual open retries.
       });
     }
-    if (currentTopicId) {
-      void surfacesApi
-        .listSurfaces(currentTopicId)
-        .then((response) => surfacesStore.set(response.surfaces))
-        .catch(() => {});
+    if (currentSessionId) {
+      void refreshList(currentSessionId).catch(() => {});
     }
   }
 
@@ -101,27 +119,24 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
     get activeSurface() {
       return activeSurfaceState.current;
     },
-    get templates() {
-      return templatesState.current;
+    get library() {
+      return libraryState.current;
     },
 
-    async loadSurfaces(topicId: string): Promise<void> {
-      if (currentTopicId !== null && currentTopicId !== topicId) {
-        // A topic switch closes the previous topic's surface — the surface
-        // must never leave another topic's surface visible and writable.
+    async loadSurfaces(sessionId: string): Promise<void> {
+      if (currentSessionId !== null && currentSessionId !== sessionId) {
+        // A session switch closes the previous session's surface — the pane
+        // must never leave another session's surface visible and writable.
         activeSurfaceStore.set(null);
-        // The picker must not offer a previous topic's templates while this
-        // topic's request is still in flight.
-        templatesStore.set([]);
       }
-      currentTopicId = topicId;
-      const response = await surfacesApi.listSurfaces(topicId);
-      if (topicId !== currentTopicId) return;
+      currentSessionId = sessionId;
+      const response = await surfacesApi.listSurfaces(sessionId);
+      if (sessionId !== currentSessionId) return;
       surfacesStore.set(response.surfaces);
-      // Templates are topic-local: the picker only ever offers this topic's.
-      const templates = await surfacesApi.listSurfaceTemplates(topicId);
-      if (topicId !== currentTopicId) return;
-      templatesStore.set(templates.templates);
+      // The library is shared: one catalogue whichever session is open.
+      const library = await surfacesApi.listLibrary();
+      if (sessionId !== currentSessionId) return;
+      libraryStore.set(library.entries);
     },
 
     async openSurface(surfaceId: string): Promise<void> {
@@ -133,24 +148,27 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
     },
 
     async createSurface(
-      topicId: string,
+      sessionId: string,
       title: string,
-      templateId?: string,
+      libraryEntryId?: string,
     ): Promise<void> {
-      const surface = await surfacesApi.createSurface(topicId, title, templateId);
-      const response = await surfacesApi.listSurfaces(topicId);
+      const surface = await surfacesApi.createSurface(sessionId, title, libraryEntryId);
+      const response = await surfacesApi.listSurfaces(sessionId);
       surfacesStore.set(response.surfaces);
       activeSurfaceStore.set(surface);
     },
 
-    templateName(templateId: string): string | null {
-      // The recorded origin is an id; the topic's loaded templates give it a
-      // name. A template that no longer exists resolves to nothing, and the
+    async saveToLibrary(surfaceId, name, description, tags = []): Promise<void> {
+      await surfacesApi.saveSurfaceToLibrary(surfaceId, { name, description, tags });
+      await refreshLibrary();
+    },
+
+    entryName(entryId: string): string | null {
+      // The recorded origin is an id; the loaded catalogue gives it a name.
+      // An entry deleted since the seeding resolves to nothing, and the
       // caller shows the bare id rather than losing the lineage.
-      const template = templatesState.current.find(
-        (candidate) => candidate.id === templateId,
-      );
-      return template ? template.name : null;
+      const entry = libraryState.current.find((candidate) => candidate.id === entryId);
+      return entry ? entry.name : null;
     },
 
     async writeModule(

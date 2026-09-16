@@ -1,10 +1,12 @@
 <!--
-  Surfaces — the topic's agent-run work surfaces. A surface is a stack of module
+  Surfaces — the session's work surfaces. A surface is a stack of module
   instances; the document module renders markdown source. Each module carries
   the notes hung on it — the shared reference the user and the agent both
   point at instead of describing a location to each other. Agents mutate
   surfaces through their tools and the surface refreshes live off the
   surface_updated signal (the store refetches; nothing renders from events).
+  A surface belongs to this session; the shared library is how one reaches
+  another session — save it here, add it there.
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
@@ -13,27 +15,35 @@
 
   interface Props {
     store: SurfacesStore;
-    topicId: string;
+    sessionId: string;
   }
 
-  let { store, topicId }: Props = $props();
+  let { store, sessionId }: Props = $props();
 
   let newTitle = $state("");
-  // The template a new surface is forked from, "" for a blank surface. The picker
-  // reads the topic's templates; it never mutates them.
-  let newTemplateId = $state("");
+  // The library entry a new surface is seeded from, "" for a blank surface.
+  // The picker reads the catalogue; it never mutates it.
+  let newEntryId = $state("");
   // The module currently being edited by the user, if any.
   let editingModuleId = $state<string | null>(null);
   let editingSource = $state("");
   // The module whose note the user is currently composing, if any.
   let annotatingModuleId = $state<string | null>(null);
   let annotationBody = $state("");
+  // The save-to-library form for the open surface, when it is showing.
+  let savingToLibrary = $state(false);
+  let saveName = $state("");
+  let saveDescription = $state("");
+  let saveTags = $state("");
+  let saveNotice = $state<string | null>(null);
 
   $effect(() => {
-    // A template belongs to one topic: switching topics must not carry a
-    // selection the new topic's picker never offered into the next create.
-    newTemplateId = "";
-    void store.loadSurfaces(topicId);
+    // A picker selection belongs to one session's view: switching sessions
+    // must not carry a selection into the next create.
+    newEntryId = "";
+    savingToLibrary = false;
+    saveNotice = null;
+    void store.loadSurfaces(sessionId);
   });
 
   function renderDocument(source: string): string {
@@ -46,10 +56,31 @@
   async function createSurface(): Promise<void> {
     const title = newTitle.trim();
     if (!title) return;
-    const templateId = newTemplateId;
+    const entryId = newEntryId;
     newTitle = "";
-    newTemplateId = "";
-    await store.createSurface(topicId, title, templateId || undefined);
+    newEntryId = "";
+    await store.createSurface(sessionId, title, entryId || undefined);
+  }
+
+  function startSaving(): void {
+    const surface = store.activeSurface;
+    if (!surface) return;
+    savingToLibrary = true;
+    saveName = surface.title;
+    saveDescription = "";
+    saveTags = "";
+    saveNotice = null;
+  }
+
+  async function saveToLibrary(): Promise<void> {
+    const surface = store.activeSurface;
+    const name = saveName.trim();
+    const description = saveDescription.trim();
+    if (!surface || !name || !description) return;
+    const tags = saveTags.split(",").map((tag) => tag.trim()).filter(Boolean);
+    await store.saveToLibrary(surface.id, name, description, tags);
+    savingToLibrary = false;
+    saveNotice = `Saved to the library as “${name}”.`;
   }
 
   function startEditing(moduleId: string, source: string): void {
@@ -95,11 +126,11 @@
       }}
     >
       <input placeholder="New surface title" bind:value={newTitle} />
-      {#if store.templates.length > 0}
-        <select aria-label="Template" bind:value={newTemplateId}>
+      {#if store.library.length > 0}
+        <select aria-label="From the library" bind:value={newEntryId}>
           <option value="">Blank surface</option>
-          {#each store.templates as template (template.id)}
-            <option value={template.id}>{template.name}</option>
+          {#each store.library as entry (entry.id)}
+            <option value={entry.id} title={entry.description}>{entry.name}</option>
           {/each}
         </select>
       {/if}
@@ -122,15 +153,40 @@
   <section aria-label="Surface">
     {#if store.activeSurface}
       <h2>{store.activeSurface.title}</h2>
-      {#if store.activeSurface.forked_from_template_id}
-        {@const originId = store.activeSurface.forked_from_template_id}
+      {#if store.activeSurface.library_entry_id}
+        {@const originId = store.activeSurface.library_entry_id}
         <p class="lineage">
-          Forked from <strong
-            >{store.templateName(originId) ?? originId}</strong
-          > — this surface's modules are its own; the template is unaffected by
+          Added from the library entry <strong
+            >{store.entryName(originId) ?? originId}</strong
+          > — this surface's modules are its own; the entry is unaffected by
           edits here.
         </p>
       {/if}
+      <div class="surface-actions">
+        {#if savingToLibrary}
+          <form
+            class="save-form"
+            aria-label="Save to the library"
+            onsubmit={(event) => {
+              event.preventDefault();
+              void saveToLibrary();
+            }}
+          >
+            <input aria-label="Library name" placeholder="Name" bind:value={saveName} />
+            <input
+              aria-label="Library description"
+              placeholder="What it does and when to use it"
+              bind:value={saveDescription}
+            />
+            <input aria-label="Library tags" placeholder="Tags, comma separated" bind:value={saveTags} />
+            <button type="submit" disabled={!saveName.trim() || !saveDescription.trim()}>Save</button>
+            <button type="button" onclick={() => (savingToLibrary = false)}>Cancel</button>
+          </form>
+        {:else}
+          <button type="button" onclick={startSaving}>Save to library</button>
+          {#if saveNotice}<span class="save-notice">{saveNotice}</span>{/if}
+        {/if}
+      </div>
       {#each store.activeSurface.modules as module (module.id)}
         <article class="module" data-kind={module.kind}>
           {#if editingModuleId === module.id}
@@ -205,7 +261,7 @@
         Add module
       </button>
     {:else}
-      <p class="empty">Open a surface, or create one — agents can write here too.</p>
+      <p class="empty">Open a surface, or create one — agents can write here too. A surface belongs to this session; save it to the library to use it elsewhere.</p>
     {/if}
   </section>
 </div>
@@ -288,6 +344,24 @@
     color: var(--ink-soft);
     font-size: 0.9em;
     margin: 0 0 8px;
+  }
+
+  .surface-actions {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    margin: 0 0 12px;
+  }
+
+  .save-form {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .save-notice {
+    color: var(--ink-soft);
+    font-size: 0.9em;
   }
 
   .empty {

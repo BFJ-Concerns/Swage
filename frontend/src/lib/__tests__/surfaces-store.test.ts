@@ -36,8 +36,8 @@ function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void; recon
 
 const PAGE_ID = "11111111-1111-4111-8111-111111111111";
 const MODULE_ID = "22222222-2222-4222-8222-222222222222";
-const TOPIC_ID = "33333333-3333-4333-8333-333333333333";
-const OTHER_TOPIC_ID = "66666666-6666-4666-8666-666666666666";
+const SESSION_ID = "33333333-3333-4333-8333-333333333333";
+const OTHER_SESSION_ID = "66666666-6666-4666-8666-666666666666";
 const ANNOTATION_ID = "44444444-4444-4444-8444-444444444444";
 
 function jsonResponse(body: unknown): Response {
@@ -62,7 +62,7 @@ function annotationBody(body: string, author: string) {
 function surfaceBody(source: string, annotations: unknown[] = []) {
   return {
     id: PAGE_ID,
-    topic_id: TOPIC_ID,
+    session_id: SESSION_ID,
     title: "Planning",
     created_at: "2026-08-28T00:00:00Z",
     updated_at: "2026-08-28T00:00:00Z",
@@ -85,23 +85,23 @@ const listBody = {
   ],
 };
 
-const TEMPLATE_ID = "44444444-4444-4444-8444-444444444444";
+const ENTRY_ID = "44444444-4444-4444-8444-444444444444";
 
-const templateListBody = {
-  templates: [
-    { id: TEMPLATE_ID, name: "Standup", updated_at: "2026-08-28T00:00:00Z" },
+const libraryBody = {
+  entries: [
+    {
+      id: ENTRY_ID,
+      name: "Standup",
+      description: "Daily standup notes — use at the start of a working day.",
+      tags: ["standup"],
+      updated_at: "2026-08-28T00:00:00Z",
+    },
   ],
 };
 
 const otherListBody = {
   surfaces: [
     { id: "77777777-7777-4777-8777-777777777777", title: "Other planning", updated_at: "2026-08-28T00:00:00Z" },
-  ],
-};
-
-const otherTemplateListBody = {
-  templates: [
-    { id: "88888888-8888-4888-8888-888888888888", name: "Retrospective", updated_at: "2026-08-28T00:00:00Z" },
   ],
 };
 
@@ -115,85 +115,78 @@ describe("surfaces store", () => {
     vi.restoreAllMocks();
   });
 
-  it("loads the topic's surfaces and opens one", async () => {
+  it("loads the session's surfaces and the library, and opens one", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("# Hello")));
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
-    await store.loadSurfaces(TOPIC_ID);
+    await store.loadSurfaces(SESSION_ID);
     expect(store.surfaces).toHaveLength(1);
     expect(store.surfaces[0].title).toBe("Planning");
+    expect(store.library.map((entry) => entry.name)).toEqual(["Standup"]);
 
     await store.openSurface(PAGE_ID);
     expect(store.activeSurface?.modules[0].source).toBe("# Hello");
     expect(fetchMock).toHaveBeenCalledWith(
-      `/api/topics/${TOPIC_ID}/surfaces`,
+      `/api/sessions/${SESSION_ID}/surfaces`,
       expect.anything(),
     );
+    expect(fetchMock).toHaveBeenCalledWith("/api/surface-library", expect.anything());
   });
 
-  it("keeps the current topic's surfaces and templates when a previous template load finishes late", async () => {
-    let resolvePreviousTemplates: (response: Response) => void;
-    let previousTemplateRequests = 0;
-    const previousTemplates = new Promise<Response>((resolve) => {
-      resolvePreviousTemplates = resolve;
+  it("closes the previous session's surface on a session switch and ignores its late responses", async () => {
+    let resolvePreviousLibrary: (response: Response) => void;
+    let libraryRequests = 0;
+    const previousLibrary = new Promise<Response>((resolve) => {
+      resolvePreviousLibrary = resolve;
     });
     const fetchMock = vi.fn((url: string) => {
-      if (url === `/api/topics/${TOPIC_ID}/surfaces`) {
+      if (url === `/api/sessions/${SESSION_ID}/surfaces`) {
         return Promise.resolve(jsonResponse(listBody));
       }
-      if (url === `/api/topics/${TOPIC_ID}/surface-templates`) {
-        previousTemplateRequests += 1;
-        return previousTemplateRequests === 1
-          ? Promise.resolve(jsonResponse(templateListBody))
-          : previousTemplates;
+      if (url === `/api/surfaces/${PAGE_ID}`) {
+        return Promise.resolve(jsonResponse(surfaceBody("# Mine")));
       }
-      if (url === `/api/topics/${OTHER_TOPIC_ID}/surfaces`) {
+      if (url === `/api/sessions/${OTHER_SESSION_ID}/surfaces`) {
         return Promise.resolve(jsonResponse(otherListBody));
       }
-      if (url === `/api/topics/${OTHER_TOPIC_ID}/surface-templates`) {
-        return Promise.resolve(jsonResponse(otherTemplateListBody));
+      if (url === "/api/surface-library") {
+        libraryRequests += 1;
+        return libraryRequests === 2
+          ? previousLibrary
+          : Promise.resolve(jsonResponse(libraryBody));
       }
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
-    await store.loadSurfaces(TOPIC_ID);
-    const previousLoad = store.loadSurfaces(TOPIC_ID);
-    await vi.waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        `/api/topics/${TOPIC_ID}/surface-templates`,
-        expect.anything(),
-      );
-    });
+    await store.loadSurfaces(SESSION_ID);
+    await store.openSurface(PAGE_ID);
+    expect(store.activeSurface?.id).toBe(PAGE_ID);
+    const previousLoad = store.loadSurfaces(SESSION_ID);
+    await vi.waitFor(() => expect(libraryRequests).toBe(2));
 
-    const currentLoad = store.loadSurfaces(OTHER_TOPIC_ID);
-    // A visible previous-topic picker is cleared before B's response settles.
-    expect(store.templates).toEqual([]);
+    const currentLoad = store.loadSurfaces(OTHER_SESSION_ID);
+    // The other session's surface is never left open and writable.
+    expect(store.activeSurface).toBeNull();
     await currentLoad;
     expect(store.surfaces.map((surface) => surface.title)).toEqual(["Other planning"]);
-    expect(store.templates.map((template) => template.name)).toEqual([
-      "Retrospective",
-    ]);
 
-    resolvePreviousTemplates!(jsonResponse(templateListBody));
+    resolvePreviousLibrary!(jsonResponse(libraryBody));
     await previousLoad;
     expect(store.surfaces.map((surface) => surface.title)).toEqual(["Other planning"]);
-    expect(store.templates.map((template) => template.name)).toEqual([
-      "Retrospective",
-    ]);
   });
 
   it("refetches the open surface when its surface_updated signal arrives", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("before")))
       // The event answers with a refetch of the surface and the list.
       .mockResolvedValueOnce(jsonResponse(surfaceBody("after")))
@@ -202,7 +195,7 @@ describe("surfaces store", () => {
 
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
-    await store.loadSurfaces(TOPIC_ID);
+    await store.loadSurfaces(SESSION_ID);
     await store.openSurface(PAGE_ID);
     expect(store.activeSurface?.modules[0].source).toBe("before");
 
@@ -220,14 +213,14 @@ describe("surfaces store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("before disconnect")))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("written while disconnected")));
     vi.stubGlobal("fetch", fetchMock);
 
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
-    await store.loadSurfaces(TOPIC_ID);
+    await store.loadSurfaces(SESSION_ID);
     await store.openSurface(PAGE_ID);
 
     channel.reconnect();
@@ -240,7 +233,7 @@ describe("surfaces store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
       // The signal answers with a refetch: the note the agent left arrives
       // on the module it names, through the authoritative read path.
@@ -256,7 +249,7 @@ describe("surfaces store", () => {
 
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
-    await store.loadSurfaces(TOPIC_ID);
+    await store.loadSurfaces(SESSION_ID);
     await store.openSurface(PAGE_ID);
     expect(store.activeSurface?.modules[0].annotations).toEqual([]);
 
@@ -283,7 +276,7 @@ describe("surfaces store", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
       .mockResolvedValueOnce(
         jsonResponse(annotationBody("mine, on this module", "user")),
@@ -296,7 +289,7 @@ describe("surfaces store", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
-    await store.loadSurfaces(TOPIC_ID);
+    await store.loadSurfaces(SESSION_ID);
     await store.openSurface(PAGE_ID);
 
     await store.annotate(PAGE_ID, MODULE_ID, "mine, on this module");
@@ -328,68 +321,98 @@ describe("surfaces store", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(store.activeSurface).toBeNull();
   });
-  it("offers the topic's templates and forks a surface from the chosen one", async () => {
-    const forked = {
+  it("offers the library and adds a surface seeded from the chosen entry", async () => {
+    const seeded = {
       ...surfaceBody("## Yesterday"),
-      forked_from_template_id: TEMPLATE_ID,
-      forked_at: "2026-08-28T00:00:00Z",
+      library_entry_id: ENTRY_ID,
+      seeded_at: "2026-08-28T00:00:00Z",
     };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       // The create, then the list refresh that follows it.
-      .mockResolvedValueOnce(jsonResponse(forked))
+      .mockResolvedValueOnce(jsonResponse(seeded))
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createSurfacesStore();
-    await store.loadSurfaces(TOPIC_ID);
-    expect(store.templates.map((template) => template.name)).toEqual([
-      "Standup",
-    ]);
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    expect(store.library.map((entry) => entry.name)).toEqual(["Standup"]);
 
-    await store.createSurface(TOPIC_ID, "Monday standup", TEMPLATE_ID);
+    await store.createSurface(SESSION_ID, "Monday standup", ENTRY_ID);
     const createCall = fetchMock.mock.calls[2];
-    expect(createCall[0]).toBe(`/api/topics/${TOPIC_ID}/surfaces`);
+    expect(createCall[0]).toBe(`/api/sessions/${SESSION_ID}/surfaces`);
     expect(requestBody(createCall)).toEqual({
       title: "Monday standup",
-      template_id: TEMPLATE_ID,
+      library_entry_id: ENTRY_ID,
     });
     // The seeded modules and the recorded origin come back on the surface the
-    // create returned — the surface reads lineage from there.
+    // create returned — the pane reads lineage from there.
     expect(store.activeSurface?.modules[0].source).toBe("## Yesterday");
-    expect(store.activeSurface?.forked_from_template_id).toBe(TEMPLATE_ID);
+    expect(store.activeSurface?.library_entry_id).toBe(ENTRY_ID);
   });
 
-  it("names the template a forked surface came from, and yields nothing for one that is gone", async () => {
+  it("names the entry a seeded surface came from, and yields nothing for one that is gone", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody));
+      .mockResolvedValueOnce(jsonResponse(libraryBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createSurfacesStore();
-    await store.loadSurfaces(TOPIC_ID);
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
 
-    expect(store.templateName(TEMPLATE_ID)).toBe("Standup");
-    // A template deleted since the fork resolves to nothing, so the surface
+    expect(store.entryName(ENTRY_ID)).toBe("Standup");
+    // An entry deleted since the seeding resolves to nothing, so the pane
     // falls back to the recorded id rather than dropping the lineage.
-    expect(store.templateName("55555555-5555-4555-8555-555555555555")).toBeNull();
+    expect(store.entryName("55555555-5555-4555-8555-555555555555")).toBeNull();
   });
 
-  it("creates a blank surface when no template is chosen", async () => {
+  it("creates a blank surface when no entry is chosen", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(listBody))
-      .mockResolvedValueOnce(jsonResponse(templateListBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
       .mockResolvedValueOnce(jsonResponse(surfaceBody("")))
       .mockResolvedValueOnce(jsonResponse(listBody));
     vi.stubGlobal("fetch", fetchMock);
 
-    const store = createSurfacesStore();
-    await store.loadSurfaces(TOPIC_ID);
-    await store.createSurface(TOPIC_ID, "Scratch");
-    expect(requestBody(fetchMock.mock.calls[2]).template_id).toBeUndefined();
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    await store.createSurface(SESSION_ID, "Scratch");
+    expect(requestBody(fetchMock.mock.calls[2]).library_entry_id).toBeUndefined();
+  });
+
+  it("saves the open surface to the library with its description and tags, then refreshes the catalogue", async () => {
+    const saved = {
+      id: "99999999-9999-4999-8999-999999999999",
+      name: "Planning",
+      description: "A planning board — use when a piece of work needs sequencing.",
+      tags: ["planning"],
+      updated_at: "2026-08-28T00:00:00Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
+      .mockResolvedValueOnce(jsonResponse({ ...saved, created_at: saved.updated_at, modules: [] }))
+      .mockResolvedValueOnce(jsonResponse({ entries: [saved, ...libraryBody.entries] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    await store.saveToLibrary(PAGE_ID, "Planning", saved.description, ["planning"]);
+
+    const [url, init] = fetchMock.mock.calls[2];
+    expect(url).toBe(`/api/surfaces/${PAGE_ID}/save`);
+    expect(JSON.parse(init.body as string)).toEqual({
+      name: "Planning",
+      description: saved.description,
+      tags: ["planning"],
+    });
+    // Saving opened nothing: the session's own list is untouched.
+    expect(store.surfaces).toHaveLength(1);
+    expect(store.library.map((entry) => entry.name)).toEqual(["Planning", "Standup"]);
   });
 });

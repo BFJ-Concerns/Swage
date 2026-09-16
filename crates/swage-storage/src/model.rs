@@ -213,6 +213,10 @@ pub struct Topic {
     /// Filesystem-safe identifier used for a topic's directory under
     /// `~/.swage/topics/{slug}/`; the general scope's slug is `general`.
     pub slug: TopicSlug,
+    /// Operator-chosen labels. They narrow the surface library's catalogue
+    /// for the topic's sessions by default; they grant nothing and add
+    /// nothing on their own.
+    pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1218,18 +1222,21 @@ pub struct Turn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Surface {
     pub id: Uuid,
-    pub topic_id: Uuid,
+    /// The session this surface belongs to. A surface is the session's own:
+    /// it opens with the session, stays with the session's record, and is
+    /// shared with other sessions only by way of the library.
+    pub session_id: Uuid,
     pub title: String,
     pub created_at: DateTime<Utc>,
     /// Advanced on every module mutation, so "has this surface moved?" is one
     /// column read.
     pub updated_at: DateTime<Utc>,
-    /// The template this surface was forked from, if any. Recorded origin, not
-    /// a live link: the surface's modules are its own from birth, and neither
-    /// side's later edits reach the other.
-    pub forked_from_template_id: Option<Uuid>,
-    /// When the fork happened, alongside `forked_from_template_id`.
-    pub forked_at: Option<DateTime<Utc>>,
+    /// The library entry this surface was seeded from, if any. Recorded
+    /// origin, not a live link: the surface's modules are its own from birth,
+    /// and neither side's later edits reach the other.
+    pub library_entry_id: Option<Uuid>,
+    /// When the seeding happened, alongside `library_entry_id`.
+    pub seeded_at: Option<DateTime<Utc>>,
 }
 
 /// A module instance on a surface: work product seeded from a canonical module
@@ -1253,7 +1260,7 @@ pub struct SurfaceModule {
 /// Input for creating a surface. `id` and timestamps are storage-assigned.
 #[derive(Debug, Clone)]
 pub struct NewSurface {
-    pub topic_id: Uuid,
+    pub session_id: Uuid,
     pub title: String,
 }
 
@@ -1287,14 +1294,28 @@ pub struct SurfaceAnnotation {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A reusable surface shape a topic keeps: a named set of module rows that
-/// seeds new surfaces. Topic-local — templates are neither shared nor
-/// distributed.
+/// A surface preserved in the shared library for reuse across sessions,
+/// topics and the general scope. The entry carries the surface's shape and
+/// content as saved; a session that adds it gets a copy seeded from these
+/// rows, and the copy is the session's own from birth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SurfaceTemplate {
+pub struct LibraryEntry {
     pub id: Uuid,
-    pub topic_id: Uuid,
+    /// The catalogue name.
     pub name: String,
+    /// What the surface does and when to use it — written when it was saved,
+    /// and what an agent chooses by.
+    pub description: String,
+    /// Catalogue labels; a topic's tags narrow the catalogue to entries
+    /// sharing one.
+    pub tags: Vec<String>,
+    /// The scope (topic or the general scope) the surface was saved from.
+    /// Seeding into a session of this scope keeps the saved content; seeding
+    /// anywhere else keeps the shape and leaves the content to the
+    /// destination.
+    pub origin_topic_id: Uuid,
+    /// The surface the entry was saved from, when it still exists.
+    pub saved_from_surface_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1309,41 +1330,48 @@ pub struct NewSurfaceAnnotation {
     pub author: String,
 }
 
-/// A module row on a template: the same shape a surface module has, copied
-/// into the forked surface's own rows at creation.
+/// A module row a library entry keeps: the same shape a surface module has,
+/// copied into a session's own rows when the entry is added.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SurfaceTemplateModule {
+pub struct LibraryEntryModule {
     pub id: Uuid,
-    pub template_id: Uuid,
+    pub entry_id: Uuid,
     pub kind: String,
     pub position: i32,
+    /// The module's source as saved — the populated content.
     pub source: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// Input for creating a surface template.
+/// Input for saving a surface to the library. The modules are copied from
+/// the surface in position order at save time.
 #[derive(Debug, Clone)]
-pub struct NewSurfaceTemplate {
-    pub topic_id: Uuid,
+pub struct NewLibraryEntry {
     pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub origin_topic_id: Uuid,
+    pub saved_from_surface_id: Option<Uuid>,
 }
 
-/// Input for a module seeded into a template at its creation.
+/// A module's shape and content as the library keeps it.
 #[derive(Debug, Clone)]
-pub struct NewSurfaceTemplateModuleInput {
+pub struct NewLibraryEntryModule {
     pub kind: String,
     pub position: i32,
     pub source: String,
 }
 
-/// Input for adding a module row to a template.
-#[derive(Debug, Clone)]
-pub struct NewSurfaceTemplateModule {
-    pub template_id: Uuid,
-    pub kind: String,
-    pub position: i32,
-    pub source: String,
+/// How a library entry's modules are seeded into a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibrarySeeding {
+    /// The session is in the entry's origin scope: the saved content comes
+    /// with the shape.
+    WithContent,
+    /// The session is in another scope: the shape comes over, each module's
+    /// content starts empty for the destination's own data.
+    ShapeOnly,
 }
 
 /// A message within a thread.
@@ -2666,6 +2694,7 @@ mod tests {
             description: String::new(),
             is_general: false,
             slug: "my-topic".into(),
+            tags: Vec::new(),
             created_at: now,
             updated_at: now,
         };

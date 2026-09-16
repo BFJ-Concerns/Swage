@@ -1113,10 +1113,10 @@
         "type": "object"
       },
       "CreateSurfaceRequest": {
+        "description": "Create a surface for a session. Absent `library_entry_id` creates a blank\nsurface; present, the new surface is seeded from that library entry and\nrecords it as its origin. The seeded modules are the surface's own from\nbirth; the entry is never projected into it afterwards.",
         "properties": {
-          "template_id": {
+          "library_entry_id": {
             "default": null,
-            "description": "Seed the new surface from a template of the same topic. Absent creates a\nblank surface. The seeded modules are the surface's own from birth; the\ntemplate is recorded as the fork's origin, never projected into it.",
             "format": "uuid",
             "type": [
               "string",
@@ -1129,25 +1129,6 @@
         },
         "required": [
           "title"
-        ],
-        "type": "object"
-      },
-      "CreateSurfaceTemplateRequest": {
-        "description": "Create a reusable surface shape for a topic, with its module rows in the\norder they will seed.",
-        "properties": {
-          "modules": {
-            "default": [],
-            "items": {
-              "$ref": "#/components/schemas/SurfaceTemplateModuleInput"
-            },
-            "type": "array"
-          },
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name"
         ],
         "type": "object"
       },
@@ -1781,6 +1762,137 @@
           "version",
           "retrieved_at",
           "passage"
+        ],
+        "type": "object"
+      },
+      "LibraryEntryModuleView": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "position",
+          "source"
+        ],
+        "type": "object"
+      },
+      "LibraryEntryResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "modules": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryEntryModuleView"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin_topic_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "tags",
+          "created_at",
+          "updated_at",
+          "modules"
+        ],
+        "type": "object"
+      },
+      "LibraryEntrySummary": {
+        "description": "A library entry as the catalogue shows it: what it is, what it is for and\nhow it is labelled. Module content is not part of the catalogue.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin_topic_id": {
+            "description": "The scope the surface was saved from: absent for the general scope.\nA session in this scope receives the saved content when it adds the\nentry; any other scope receives the shape.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "tags",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "LibraryListResponse": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/LibraryEntrySummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
         ],
         "type": "object"
       },
@@ -2959,6 +3071,29 @@
           "providers",
           "default_model",
           "models"
+        ],
+        "type": "object"
+      },
+      "SaveSurfaceToLibraryRequest": {
+        "description": "Preserve a surface in the shared library. The description is written\nnow and is what an agent chooses by later: say what the surface does and\nwhen to use it. Saving never opens the entry anywhere.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "description"
         ],
         "type": "object"
       },
@@ -4747,26 +4882,18 @@
             "format": "date-time",
             "type": "string"
           },
-          "forked_at": {
-            "default": null,
-            "format": "date-time",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "forked_from_template_id": {
-            "default": null,
-            "description": "The template this surface was forked from, if any — the recorded origin\nof its seeded shape. Absent on a surface created blank.",
-            "format": "uuid",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "id": {
             "format": "uuid",
             "type": "string"
+          },
+          "library_entry_id": {
+            "default": null,
+            "description": "The library entry this surface was seeded from, if any — the recorded\norigin of its shape. Absent on a surface created blank.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "modules": {
             "items": {
@@ -4774,11 +4901,20 @@
             },
             "type": "array"
           },
-          "title": {
+          "seeded_at": {
+            "default": null,
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "The session this surface belongs to.",
+            "format": "uuid",
             "type": "string"
           },
-          "topic_id": {
-            "format": "uuid",
+          "title": {
             "type": "string"
           },
           "updated_at": {
@@ -4788,7 +4924,7 @@
         },
         "required": [
           "id",
-          "topic_id",
+          "session_id",
           "title",
           "created_at",
           "updated_at",
@@ -4813,123 +4949,6 @@
         "required": [
           "id",
           "title",
-          "updated_at"
-        ],
-        "type": "object"
-      },
-      "SurfaceTemplateListResponse": {
-        "properties": {
-          "templates": {
-            "items": {
-              "$ref": "#/components/schemas/SurfaceTemplateSummary"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "templates"
-        ],
-        "type": "object"
-      },
-      "SurfaceTemplateModuleInput": {
-        "properties": {
-          "kind": {
-            "default": null,
-            "description": "Module kind for the seeded instance (\"document\" first).",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "source"
-        ],
-        "type": "object"
-      },
-      "SurfaceTemplateModuleView": {
-        "properties": {
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "position": {
-            "format": "int32",
-            "type": "integer"
-          },
-          "source": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "position",
-          "source"
-        ],
-        "type": "object"
-      },
-      "SurfaceTemplateResponse": {
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "modules": {
-            "items": {
-              "$ref": "#/components/schemas/SurfaceTemplateModuleView"
-            },
-            "type": "array"
-          },
-          "name": {
-            "type": "string"
-          },
-          "topic_id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "topic_id",
-          "name",
-          "created_at",
-          "updated_at",
-          "modules"
-        ],
-        "type": "object"
-      },
-      "SurfaceTemplateSummary": {
-        "properties": {
-          "id": {
-            "format": "uuid",
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
           "updated_at"
         ],
         "type": "object"
@@ -5119,6 +5138,19 @@
         ],
         "type": "object"
       },
+      "TopicDefaultSurfaceRequest": {
+        "description": "Designate a library entry as one of a topic's defaults — the surfaces\nevery new session in the topic opens with.",
+        "properties": {
+          "library_entry_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "library_entry_id"
+        ],
+        "type": "object"
+      },
       "TopicListResponse": {
         "properties": {
           "topics": {
@@ -5152,6 +5184,14 @@
           },
           "slug": {
             "type": "string"
+          },
+          "tags": {
+            "default": [],
+            "description": "Labels that narrow the surface library's catalogue for this topic's\nsessions. They grant nothing and add nothing on their own.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -5370,6 +5410,16 @@
           "name": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "tags": {
+            "description": "Replace the topic's tags — the labels that narrow the surface\nlibrary's catalogue for the topic's sessions. Absent leaves them as\nthey are; an empty list clears them.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
               "null"
             ]
           }
@@ -8156,6 +8206,78 @@
         "summary": "The recent-sessions list across every scope, newest activity first, automated sessions grouped beneath their source; `topic_id` narrows to a topic and `archived=true` lists the archived sessions instead."
       }
     },
+    "/api/sessions/{session_id}/surfaces": {
+      "get": {
+        "operationId": "list_surfaces",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List a session's surfaces — the work surfaces open with it."
+      },
+      "post": {
+        "operationId": "create_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSurfaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create a surface for a session: blank, or seeded from a library entry."
+      }
+    },
     "/api/settings": {
       "get": {
         "operationId": "get_settings",
@@ -8509,13 +8631,67 @@
         "summary": "Update a surface annotation."
       }
     },
-    "/api/surface-templates/{template_id}": {
+    "/api/surface-library": {
       "get": {
-        "operationId": "get_surface_template",
+        "operationId": "list_library",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tag",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The shared surface library's catalogue: names, descriptions and tags, never module content. `tag` narrows to entries carrying it."
+      }
+    },
+    "/api/surface-library/{entry_id}": {
+      "delete": {
+        "operationId": "delete_library_entry",
         "parameters": [
           {
             "in": "path",
-            "name": "template_id",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Remove an entry from the library. Surfaces seeded from it are untouched."
+      },
+      "get": {
+        "operationId": "get_library_entry",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
             "required": true,
             "schema": {
               "format": "uuid",
@@ -8528,7 +8704,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SurfaceTemplateResponse"
+                  "$ref": "#/components/schemas/LibraryEntryResponse"
                 }
               }
             },
@@ -8538,7 +8714,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Read a surface template."
+        "summary": "Read a library entry with its module rows."
       }
     },
     "/api/surfaces/{surface_id}": {
@@ -8655,6 +8831,48 @@
           }
         },
         "summary": "Write a surface module."
+      }
+    },
+    "/api/surfaces/{surface_id}/save": {
+      "post": {
+        "operationId": "save_surface_to_library",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSurfaceToLibraryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryEntryResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Preserve a surface in the shared library with a name, a description of what it does and when to use it, and tags."
       }
     },
     "/api/topics": {
@@ -8804,6 +9022,112 @@
         "summary": "Update a topic's name or description."
       }
     },
+    "/api/topics/{topic_id}/default-surfaces": {
+      "get": {
+        "operationId": "list_topic_default_surfaces",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The library entries a topic opens in each of its new sessions."
+      },
+      "post": {
+        "operationId": "add_topic_default_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TopicDefaultSurfaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Designate a library entry as one of a topic's default surfaces."
+      }
+    },
+    "/api/topics/{topic_id}/default-surfaces/{entry_id}": {
+      "delete": {
+        "operationId": "remove_topic_default_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Withdraw a library entry from a topic's default surfaces."
+      }
+    },
     "/api/topics/{topic_id}/sessions": {
       "get": {
         "operationId": "list_topic_sessions",
@@ -8874,150 +9198,6 @@
           }
         },
         "summary": "Create a conversation in a topic."
-      }
-    },
-    "/api/topics/{topic_id}/surface-templates": {
-      "get": {
-        "operationId": "list_surface_templates",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SurfaceTemplateListResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "List surface templates in a topic."
-      },
-      "post": {
-        "operationId": "create_surface_template",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateSurfaceTemplateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SurfaceTemplateResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Create a surface template in a topic."
-      }
-    },
-    "/api/topics/{topic_id}/surfaces": {
-      "get": {
-        "operationId": "list_surfaces",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SurfaceListResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "List surfaces in a topic."
-      },
-      "post": {
-        "operationId": "create_surface",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "topic_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateSurfaceRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SurfaceResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Create a surface in a topic."
       }
     },
     "/api/turns/{id}/context": {

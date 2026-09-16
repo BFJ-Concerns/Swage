@@ -177,6 +177,7 @@ impl ConversationService {
                 agent_id,
             })
             .await?;
+        self.open_default_surfaces(session.id).await?;
 
         Ok(ConversationResponse {
             id: session.id,
@@ -504,6 +505,7 @@ impl ConversationService {
                 agent_id: agent_id.to_string(),
             })
             .await?;
+        self.open_default_surfaces(session.id).await?;
 
         Ok(ConversationResponse {
             id: session.id,
@@ -644,6 +646,41 @@ impl ConversationService {
     // ---------------------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------------------
+
+    /// A new session opens with its topic's default surfaces, each added as
+    /// the session's own copy of the designated library entry. The service
+    /// has no broadcast channel or audit context of its own, so the copies
+    /// are seeded directly: the surface's audit trail begins at its first
+    /// write, and there is nothing open yet to signal.
+    async fn open_default_surfaces(&self, session_id: Uuid) -> Result<(), GatewayError> {
+        let session = self
+            .storage
+            .get_session(session_id)
+            .await?
+            .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+        for entry in self
+            .storage
+            .list_topic_default_entries(session.topic_id)
+            .await?
+        {
+            let seeding = if entry.origin_topic_id == session.topic_id {
+                swage_storage::LibrarySeeding::WithContent
+            } else {
+                swage_storage::LibrarySeeding::ShapeOnly
+            };
+            self.storage
+                .create_surface_from_library(
+                    swage_storage::NewSurface {
+                        session_id,
+                        title: entry.name,
+                    },
+                    entry.id,
+                    seeding,
+                )
+                .await?;
+        }
+        Ok(())
+    }
 
     /// Returns true if any thread in the session has an Interrupted turn.
     async fn has_interrupted_turn_in_session(

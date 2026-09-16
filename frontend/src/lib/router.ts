@@ -21,7 +21,7 @@ export type SettingsTab =
   | "display"
   | "account";
 
-export type TopicSettingsTab = "overview" | "workspaces" | "sessions";
+export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces";
 
 export interface Route {
   path: string;
@@ -97,7 +97,7 @@ export function parseRoute(pathname: string): Route {
     };
   }
   const topicSettingsMatch = pathname.match(
-    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions))?$/,
+    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces))?$/,
   );
   if (topicSettingsMatch) {
     return {

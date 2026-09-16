@@ -8,15 +8,17 @@ import type { ConversationResponse } from "./ConversationResponse";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
 import type { CreateSurfaceRequest } from "./CreateSurfaceRequest";
-import type { CreateSurfaceTemplateRequest } from "./CreateSurfaceTemplateRequest";
 import type { CreateTopicRequest } from "./CreateTopicRequest";
 import type { DeleteSurfaceAnnotationResponse } from "./DeleteSurfaceAnnotationResponse";
+import type { LibraryEntryResponse } from "./LibraryEntryResponse";
+import type { LibraryListResponse } from "./LibraryListResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
+import type { SaveSurfaceToLibraryRequest } from "./SaveSurfaceToLibraryRequest";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
@@ -24,8 +26,7 @@ import type { SurfaceAnnotationView } from "./SurfaceAnnotationView";
 import type { SurfaceListResponse } from "./SurfaceListResponse";
 import type { SurfaceModuleView } from "./SurfaceModuleView";
 import type { SurfaceResponse } from "./SurfaceResponse";
-import type { SurfaceTemplateListResponse } from "./SurfaceTemplateListResponse";
-import type { SurfaceTemplateResponse } from "./SurfaceTemplateResponse";
+import type { TopicDefaultSurfaceRequest } from "./TopicDefaultSurfaceRequest";
 import type { TopicListResponse } from "./TopicListResponse";
 import type { TopicResponse } from "./TopicResponse";
 import type { TurnContextResponse } from "./TurnContextResponse";
@@ -130,29 +131,52 @@ export async function getTurnContext(id: string): Promise<TurnContextResponse> {
   return request<TurnContextResponse>("GET", `/api/turns/${encodeURIComponent(id)}/context`);
 }
 
-/** List surfaces in a topic. */
-export async function listSurfaces(topicId: string): Promise<SurfaceListResponse> {
-  return request<SurfaceListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/surfaces`);
+/** List a session's surfaces — the work surfaces open with it. */
+export async function listSurfaces(sessionId: string): Promise<SurfaceListResponse> {
+  return request<SurfaceListResponse>("GET", `/api/sessions/${encodeURIComponent(sessionId)}/surfaces`);
 }
 
-/** Create a surface in a topic. */
-export async function createSurface(topicId: string, body: CreateSurfaceRequest): Promise<SurfaceResponse> {
-  return request<SurfaceResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/surfaces`, body);
+/** Create a surface for a session: blank, or seeded from a library entry. */
+export async function createSurface(sessionId: string, body: CreateSurfaceRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/sessions/${encodeURIComponent(sessionId)}/surfaces`, body);
 }
 
-/** List surface templates in a topic. */
-export async function listSurfaceTemplates(topicId: string): Promise<SurfaceTemplateListResponse> {
-  return request<SurfaceTemplateListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/surface-templates`);
+/** The shared surface library's catalogue: names, descriptions and tags, never module content. `tag` narrows to entries carrying it. */
+export async function listLibrary(tag?: string): Promise<LibraryListResponse> {
+  const query = new URLSearchParams();
+  if (tag !== undefined) query.set("tag", tag);
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<LibraryListResponse>("GET", `/api/surface-library${suffix}`);
 }
 
-/** Create a surface template in a topic. */
-export async function createSurfaceTemplate(topicId: string, body: CreateSurfaceTemplateRequest): Promise<SurfaceTemplateResponse> {
-  return request<SurfaceTemplateResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/surface-templates`, body);
+/** Read a library entry with its module rows. */
+export async function getLibraryEntry(entryId: string): Promise<LibraryEntryResponse> {
+  return request<LibraryEntryResponse>("GET", `/api/surface-library/${encodeURIComponent(entryId)}`);
 }
 
-/** Read a surface template. */
-export async function getSurfaceTemplate(templateId: string): Promise<SurfaceTemplateResponse> {
-  return request<SurfaceTemplateResponse>("GET", `/api/surface-templates/${encodeURIComponent(templateId)}`);
+/** Remove an entry from the library. Surfaces seeded from it are untouched. */
+export async function deleteLibraryEntry(entryId: string): Promise<void> {
+  return request<void>("DELETE", `/api/surface-library/${encodeURIComponent(entryId)}`);
+}
+
+/** Preserve a surface in the shared library with a name, a description of what it does and when to use it, and tags. */
+export async function saveSurfaceToLibrary(surfaceId: string, body: SaveSurfaceToLibraryRequest): Promise<LibraryEntryResponse> {
+  return request<LibraryEntryResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/save`, body);
+}
+
+/** The library entries a topic opens in each of its new sessions. */
+export async function listTopicDefaultSurfaces(topicId: string): Promise<LibraryListResponse> {
+  return request<LibraryListResponse>("GET", `/api/topics/${encodeURIComponent(topicId)}/default-surfaces`);
+}
+
+/** Designate a library entry as one of a topic's default surfaces. */
+export async function addTopicDefaultSurface(topicId: string, body: TopicDefaultSurfaceRequest): Promise<LibraryListResponse> {
+  return request<LibraryListResponse>("POST", `/api/topics/${encodeURIComponent(topicId)}/default-surfaces`, body);
+}
+
+/** Withdraw a library entry from a topic's default surfaces. */
+export async function removeTopicDefaultSurface(topicId: string, entryId: string): Promise<void> {
+  return request<void>("DELETE", `/api/topics/${encodeURIComponent(topicId)}/default-surfaces/${encodeURIComponent(entryId)}`);
 }
 
 /** Read a surface. */

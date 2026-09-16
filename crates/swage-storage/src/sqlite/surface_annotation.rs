@@ -194,8 +194,8 @@ impl SurfaceAnnotationStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewSurface, NewSurfaceModule, NewTopic};
-    use crate::store::{SurfaceStore, TopicStore};
+    use crate::model::{NewSession, NewSurface, NewSurfaceModule, NewTopic, SessionOrigin};
+    use crate::store::{SessionStore, SurfaceStore, TopicStore};
 
     use super::*;
 
@@ -223,9 +223,19 @@ mod tests {
         )
         .await
         .unwrap();
+        let session = storage
+            .create_session(NewSession {
+                topic_id: topic.id,
+                agent_id: "gateway".into(),
+                origin: SessionOrigin::Direct,
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
         let surface = storage
             .create_page(NewSurface {
-                topic_id: topic.id,
+                session_id: session.id,
                 title: "Planning".into(),
             })
             .await

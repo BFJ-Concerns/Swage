@@ -8,23 +8,22 @@ use crate::model::{
     ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
     DeviceRegistration, ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit,
-    Material, Message, NewAgentDefinition, NewAgentMemoryRecord, NewAgentMessage,
-    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
-    NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
-    NewKnowledgeCitation, NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun,
-    NewSecretRecord, NewSession, NewSourceObservation, NewSurface, NewSurfaceAnnotation,
-    NewSurfaceModule, NewSurfaceTemplate, NewSurfaceTemplateModule, NewSurfaceTemplateModuleInput,
-    NewTaskDefinition, NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent,
-    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection,
-    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
-    PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate,
-    SecretRecord, Session, SessionActivity, SessionListing, SessionVariable, SourceCapture,
-    SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, SurfaceTemplate,
-    SurfaceTemplateModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord,
-    Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message, NewAgentDefinition,
+    NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
+    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewCurationAssertion,
+    NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry,
+    NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard, NewSchedule,
+    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
+    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
+    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
+    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
+    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SessionActivity, SessionListing, SessionVariable,
+    SourceCapture, SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnState,
+    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +55,7 @@ pub trait TopicStore: Send + Sync {
         name: Option<String>,
         description: Option<String>,
         slug: Option<TopicSlug>,
+        tags: Option<Vec<String>>,
     ) -> Result<Topic, StorageError>;
     /// Delete a topic and cascade its sessions.
     ///
@@ -1343,8 +1343,11 @@ pub trait ProviderRoundStore: Send + Sync {
 pub trait SurfaceStore: Send + Sync {
     async fn create_page(&self, surface: NewSurface) -> Result<Surface, StorageError>;
     async fn get_page(&self, id: Uuid) -> Result<Option<Surface>, StorageError>;
-    /// All surfaces of a topic, oldest first.
-    async fn list_pages_by_topic(&self, topic_id: Uuid) -> Result<Vec<Surface>, StorageError>;
+    /// A session's surfaces, oldest first — the surfaces open with it.
+    async fn list_surfaces_by_session(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<Surface>, StorageError>;
     async fn create_surface_module(
         &self,
         module: NewSurfaceModule,
@@ -1362,42 +1365,55 @@ pub trait SurfaceStore: Send + Sync {
         id: Uuid,
         source: &str,
     ) -> Result<(), StorageError>;
-    async fn create_surface_template(
+    /// Save a surface to the library: the entry and every module it keeps
+    /// land in one transaction, so a reader never sees a half-saved entry.
+    async fn create_library_entry(
         &self,
-        template: NewSurfaceTemplate,
-    ) -> Result<SurfaceTemplate, StorageError>;
-    /// Create a template and every module it seeds in one transaction, so a
-    /// reader can never observe a partially configured template.
-    async fn create_surface_template_with_modules(
+        entry: NewLibraryEntry,
+        modules: Vec<NewLibraryEntryModule>,
+    ) -> Result<LibraryEntry, StorageError>;
+    async fn get_library_entry(&self, id: Uuid) -> Result<Option<LibraryEntry>, StorageError>;
+    /// The whole library, newest first. Callers narrow by tag; the catalogue
+    /// is small and the narrowing is a client-side filter over names,
+    /// descriptions and tags, never over module content.
+    async fn list_library_entries(&self) -> Result<Vec<LibraryEntry>, StorageError>;
+    /// An entry's module rows in position order.
+    async fn list_library_entry_modules(
         &self,
-        template: NewSurfaceTemplate,
-        modules: Vec<NewSurfaceTemplateModuleInput>,
-    ) -> Result<SurfaceTemplate, StorageError>;
-    async fn get_surface_template(&self, id: Uuid)
-    -> Result<Option<SurfaceTemplate>, StorageError>;
-    /// A topic's templates, oldest first.
-    async fn list_surface_templates_by_topic(
-        &self,
-        topic_id: Uuid,
-    ) -> Result<Vec<SurfaceTemplate>, StorageError>;
-    async fn create_surface_template_module(
-        &self,
-        module: NewSurfaceTemplateModule,
-    ) -> Result<SurfaceTemplateModule, StorageError>;
-    /// A template's module rows in position order.
-    async fn list_surface_template_modules(
-        &self,
-        template_id: Uuid,
-    ) -> Result<Vec<SurfaceTemplateModule>, StorageError>;
-    /// Create a surface seeded from a template's modules, recording the fork's
-    /// origin on the surface. The surface row and its seeded modules land in one
-    /// write, so a half-seeded surface cannot be observed. The copied rows are
-    /// the surface's own from birth — later edits on either side do not cross.
-    async fn create_surface_from_template(
+        entry_id: Uuid,
+    ) -> Result<Vec<LibraryEntryModule>, StorageError>;
+    /// Delete a library entry and its modules. Surfaces seeded from it keep
+    /// their rows and their recorded origin. Returns true if it existed.
+    async fn delete_library_entry(&self, id: Uuid) -> Result<bool, StorageError>;
+    /// Add a library entry to a session: a new surface seeded from the
+    /// entry's modules, its origin recorded on the surface. `seeding` decides
+    /// whether the saved content comes over or only the shape. The surface
+    /// row and its seeded modules land in one write.
+    async fn create_surface_from_library(
         &self,
         surface: NewSurface,
-        template_id: Uuid,
+        entry_id: Uuid,
+        seeding: LibrarySeeding,
     ) -> Result<Surface, StorageError>;
+    /// The library entries a topic opens in each of its new sessions, in the
+    /// order they were designated.
+    async fn list_topic_default_entries(
+        &self,
+        topic_id: Uuid,
+    ) -> Result<Vec<LibraryEntry>, StorageError>;
+    /// Designate a library entry as one of a topic's defaults. Idempotent.
+    async fn add_topic_default_entry(
+        &self,
+        topic_id: Uuid,
+        entry_id: Uuid,
+    ) -> Result<(), StorageError>;
+    /// Withdraw a library entry from a topic's defaults. Returns true if it
+    /// was a default.
+    async fn remove_topic_default_entry(
+        &self,
+        topic_id: Uuid,
+        entry_id: Uuid,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Annotations on a surface's modules: the notes a user and an agent both hang
@@ -1562,6 +1578,7 @@ mod tests {
             _: Option<String>,
             _: Option<String>,
             _: Option<TopicSlug>,
+            _: Option<Vec<String>>,
         ) -> Result<Topic, StorageError> {
             unimplemented!()
         }
@@ -2248,7 +2265,7 @@ mod tests {
         async fn get_page(&self, _: Uuid) -> Result<Option<Surface>, StorageError> {
             unimplemented!()
         }
-        async fn list_pages_by_topic(&self, _: Uuid) -> Result<Vec<Surface>, StorageError> {
+        async fn list_surfaces_by_session(&self, _: Uuid) -> Result<Vec<Surface>, StorageError> {
             unimplemented!()
         }
         async fn create_surface_module(
@@ -2266,48 +2283,46 @@ mod tests {
         async fn update_surface_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn create_surface_template(
+        async fn create_library_entry(
             &self,
-            _: NewSurfaceTemplate,
-        ) -> Result<SurfaceTemplate, StorageError> {
+            _: NewLibraryEntry,
+            _: Vec<NewLibraryEntryModule>,
+        ) -> Result<LibraryEntry, StorageError> {
             unimplemented!()
         }
-        async fn create_surface_template_with_modules(
-            &self,
-            _: NewSurfaceTemplate,
-            _: Vec<NewSurfaceTemplateModuleInput>,
-        ) -> Result<SurfaceTemplate, StorageError> {
+        async fn get_library_entry(&self, _: Uuid) -> Result<Option<LibraryEntry>, StorageError> {
             unimplemented!()
         }
-        async fn get_surface_template(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<SurfaceTemplate>, StorageError> {
+        async fn list_library_entries(&self) -> Result<Vec<LibraryEntry>, StorageError> {
             unimplemented!()
         }
-        async fn list_surface_templates_by_topic(
+        async fn list_library_entry_modules(
             &self,
             _: Uuid,
-        ) -> Result<Vec<SurfaceTemplate>, StorageError> {
+        ) -> Result<Vec<LibraryEntryModule>, StorageError> {
             unimplemented!()
         }
-        async fn create_surface_template_module(
-            &self,
-            _: NewSurfaceTemplateModule,
-        ) -> Result<SurfaceTemplateModule, StorageError> {
+        async fn delete_library_entry(&self, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
-        async fn list_surface_template_modules(
-            &self,
-            _: Uuid,
-        ) -> Result<Vec<SurfaceTemplateModule>, StorageError> {
-            unimplemented!()
-        }
-        async fn create_surface_from_template(
+        async fn create_surface_from_library(
             &self,
             _: NewSurface,
             _: Uuid,
+            _: LibrarySeeding,
         ) -> Result<Surface, StorageError> {
+            unimplemented!()
+        }
+        async fn list_topic_default_entries(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<LibraryEntry>, StorageError> {
+            unimplemented!()
+        }
+        async fn add_topic_default_entry(&self, _: Uuid, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn remove_topic_default_entry(&self, _: Uuid, _: Uuid) -> Result<bool, StorageError> {
             unimplemented!()
         }
     }

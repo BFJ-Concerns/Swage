@@ -150,6 +150,11 @@
     if (!currentTopic) return;
     onNavigate?.(`/settings/topic/${encodeURIComponent(currentTopic.slug)}/workspaces`);
   }
+
+  function openCurrentTopicSurfaces(): void {
+    if (!currentTopic) return;
+    onNavigate?.(`/settings/topic/${encodeURIComponent(currentTopic.slug)}/surfaces`);
+  }
 </script>
 
 {#if inScope}
@@ -195,6 +200,7 @@
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
         {#if currentTopic}
           <button class:active={settingsTopicTab === "workspaces"} onclick={openCurrentTopicWorkspaces}>Workspaces</button>
+          <button class:active={settingsTopicTab === "surfaces"} onclick={openCurrentTopicSurfaces}>Surfaces</button>
         {/if}
       </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
@@ -229,8 +235,10 @@
   -->
   <main class="surfaces-surface">
     <div class="work">
-      {#if surfacesStore && currentTopic}
-        <SurfacesPane store={surfacesStore} topicId={currentTopic.id} />
+      {#if surfacesStore && activeConversation}
+        <SurfacesPane store={surfacesStore} sessionId={activeConversation.id} />
+      {:else}
+        <p class="no-session">Surfaces belong to a session: select or start a conversation to open its surfaces.</p>
       {/if}
     </div>
     <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
@@ -257,5 +265,6 @@
      two-column rule, mirrored: the work takes the wide column. */
   .surfaces-surface { display: grid; grid-template-columns: 1fr minmax(20rem, 33%); height: calc(100vh - 4rem); }
   .surfaces-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
+  .no-session { padding: 1rem; color: var(--ink-soft); }
   .operator { min-width: 0; overflow: auto; }
 </style>
