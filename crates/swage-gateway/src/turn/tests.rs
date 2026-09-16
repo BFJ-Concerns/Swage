@@ -3293,13 +3293,13 @@ impl swage_storage::SurfaceStore for MockStorage {
         unimplemented!()
     }
     async fn get_page(&self, _: Uuid) -> Result<Option<swage_storage::Surface>, StorageError> {
-        unimplemented!()
+        Ok(None)
     }
     async fn list_surfaces_by_session(
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::Surface>, StorageError> {
-        unimplemented!()
+        Ok(Vec::new())
     }
     async fn create_surface_module(
         &self,
@@ -3333,10 +3333,10 @@ impl swage_storage::SurfaceStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Option<swage_storage::LibraryEntry>, StorageError> {
-        unimplemented!()
+        Ok(None)
     }
     async fn list_library_entries(&self) -> Result<Vec<swage_storage::LibraryEntry>, StorageError> {
-        unimplemented!()
+        Ok(Vec::new())
     }
     async fn list_library_entry_modules(
         &self,
@@ -3345,7 +3345,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         unimplemented!()
     }
     async fn delete_library_entry(&self, _: Uuid) -> Result<bool, StorageError> {
-        unimplemented!()
+        Ok(false)
     }
     async fn create_surface_from_library(
         &self,
@@ -3366,7 +3366,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         unimplemented!()
     }
     async fn remove_topic_default_entry(&self, _: Uuid, _: Uuid) -> Result<bool, StorageError> {
-        unimplemented!()
+        Ok(false)
     }
 }
 
