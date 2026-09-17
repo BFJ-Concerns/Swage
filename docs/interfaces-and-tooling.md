@@ -219,12 +219,29 @@ The library's catalogue lists names, descriptions and tags, never module
 content. A topic can designate library entries as its defaults, which open in
 each of the topic's new sessions; any other entry is added on demand.
 
+The web UI shows the catalogue on the **Library** page, reachable from the
+top bar of any session, from the front door, and from the surfaces pane.
+From a session the page adds an entry as one of that session's surfaces and
+opens it; from the front door it is read-only until a session is in view.
+Entries can be removed there. A save or removal — from any session, by the
+user or an agent — reaches every open catalogue live, without a reload.
+
 ### Annotations
 
 Annotations are notes attached to individual modules of a surface. Each note
 carries a body and optional tags. Updating an annotation replaces its body
 and tags together; the prior text is preserved in the surface's provenance
-trail. Deleting an annotation removes it permanently.
+trail. Deleting an annotation removes it permanently. The surfaces pane
+offers all three: **Add note** on a module, and **Edit** and **Remove** on
+each note.
+
+### Surface addresses
+
+An open surface has an address — `/conversations/{id}/surfaces/{surface_id}`
+— so a surface can be linked to, bookmarked, and returned to with the
+browser's back button. Opening a surface from the pane or adding one from
+the library moves the address to it; loading an address opens the surface
+it names once the session's surfaces are listed.
 
 Annotation addresses stop at module grain: there is no way to annotate the
 surface as a whole or a position inside a module's content.
@@ -233,7 +250,8 @@ surface as a whole or a position inside a module's content.
 
 When a WebSocket connection to a surface's work surface drops and reconnects,
 the surface state is refetched to pick up any writes that landed while
-disconnected.
+disconnected. The same channel carries library changes, so a catalogue on
+screen refetches when an entry is saved or removed anywhere.
 
 ## Delivery targets
 
@@ -424,8 +442,9 @@ Other useful recipes:
 ## Client-side route handling
 
 The web UI uses a minimal, framework-free SPA router. It pattern-matches the
-browser's URL path against the application's routes (conversations, settings,
-root) and keeps the active conversation stable across browser navigation.
+browser's URL path against the application's routes (the front door,
+conversations and their surfaces, the surface library, workflow runs,
+settings) and keeps the active conversation stable across browser navigation.
 
 When the browser navigates to a conversation URL that is already the active
 conversation — the common case for back/forward navigation — the router skips
@@ -437,7 +456,8 @@ conversation in place rather than evicting working state.
 
 For a conversation URL that is not the currently active one, the router loads
 it normally. A 404 falls back to the root with a notice; other errors
-propagate.
+propagate. When a scope was in view, the composer stays open in it so the
+next message starts a fresh session there; otherwise the front door serves.
 
 The router's dependency on the conversation store is a narrow injected
 interface — four members rather than a coupling to the store's internals.

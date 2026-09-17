@@ -48,6 +48,7 @@ function mockConversationStore(): ConversationStore {
 function mockConversationStoreWithMessages(messages: MessageView[]): ConversationStore {
   const detail: ConversationDetail = {
     id: "conv-1",
+    agent_id: "gateway",
     topic_id: "default",
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
@@ -62,6 +63,7 @@ function mockConversationStoreWithSessions(
 ): ConversationStore {
   const summaries: ConversationSummary[] = previews.map((preview, index) => ({
     id: `conv-${index + 1}`,
+    agent_id: "gateway",
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
     message_preview: preview,
@@ -69,6 +71,7 @@ function mockConversationStoreWithSessions(
   }));
   const active: ConversationDetail = {
     id: summaries[activeIndex].id,
+    agent_id: "gateway",
     topic_id: "default",
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
@@ -108,9 +111,11 @@ function mockSurfacesStore(): SurfacesStore {
     loadSurfaces: async () => {},
     openSurface: async () => {},
     closeSurface: () => {},
-    createSurface: async () => {},
+    createSurface: async () => null,
+    refreshLibrary: async () => {},
     writeModule: async () => {},
     annotate: async () => {},
+    updateAnnotation: async () => {},
     removeAnnotation: async () => {},
     stopListening: () => {},
   };
@@ -170,6 +175,9 @@ function mockTopicStore(hasCurrentTopic = true, topicId = "default"): TopicStore
 interface MountOptions {
   activeSurface?: "conversation" | "operator" | "surfaces";
   hasCurrentTopic?: boolean;
+  // A session about to start: the shell is in scope with the composer open.
+  // Defaults to a pending start in the mock topic, so the shell renders.
+  pendingStart?: { topicId: string | null; agentId: string | null } | null;
   onNavigate?: (path: string) => void;
   onSelectSurface?: (surface: "conversation" | "operator" | "surfaces") => void;
   routePath?: string;
@@ -189,6 +197,10 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       connectionStore: mockConnectionStore(),
       streamingStore: options.streamingStore ?? mockStreamingStore(),
       topicStore: mockTopicStore(options.hasCurrentTopic ?? true),
+      pendingStart:
+        options.pendingStart === undefined
+          ? { topicId: (options.hasCurrentTopic ?? true) ? "default" : null, agentId: null }
+          : options.pendingStart,
       onRetry: () => {},
       activeSurface: options.activeSurface ?? "conversation",
       onSelectSurface: options.onSelectSurface ?? (() => {}),
@@ -244,11 +256,84 @@ describe("AppLayout shell navigation", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows the topic picker before a topic is selected", () => {
-    component = mountLayout({ hasCurrentTopic: false });
+  it("shows the recent-sessions front door with the session-start control when nothing is in view", () => {
+    component = mountLayout({ hasCurrentTopic: false, pendingStart: null });
 
-    expect(document.querySelector("h1")?.textContent).toBe("Choose where to work.");
+    expect(document.querySelector('[aria-label="Recent sessions"]')).not.toBeNull();
+    expect(document.querySelector('[aria-label="Start a session"]')).not.toBeNull();
     expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
+    // The start control offers a session with no topic first.
+    const options = Array.from(document.querySelectorAll('select[aria-label="Topic"] option'))
+      .map((option) => option.textContent);
+    expect(options[0]).toContain("No topic");
+  });
+
+  it("starts a session in the chosen scope without creating a conversation", () => {
+    const onStartSession = vi.fn();
+    const conversationStore = mockConversationStore();
+    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    component = mount(AppLayout, {
+      target: document.body,
+      props: {
+        conversationStore,
+        connectionStore: mockConnectionStore(),
+        streamingStore: mockStreamingStore(),
+        topicStore: mockTopicStore(true, "research"),
+        pendingStart: null,
+        onStartSession,
+        onRetry: () => {},
+        activeSurface: "conversation",
+        onSelectSurface: () => {},
+      },
+    });
+    const topic = document.querySelector('select[aria-label="Topic"]') as HTMLSelectElement;
+    topic.value = "research";
+    topic.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    const start = Array.from(document.querySelectorAll('[aria-label="Start a session"] button'))
+      .find((button) => button.textContent?.trim() === "Start") as HTMLButtonElement;
+    flushSync(() => start.click());
+
+    expect(onStartSession).toHaveBeenCalledWith({ topicId: "research", agentId: null });
+    expect(createConversation).not.toHaveBeenCalled();
+  });
+
+  it("names the session's scope in the bar and links a topic to its settings", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate });
+
+    const scope = document.querySelector('[aria-label="Session scope"]');
+    expect(scope?.textContent).toContain("default");
+    flushSync(() => (scope?.querySelector("button") as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenCalledWith("/settings/topic/default/overview");
+  });
+
+  it("names the general scope for a session without a topic", () => {
+    component = mountLayout({ hasCurrentTopic: false, pendingStart: { topicId: null, agentId: null } });
+
+    const scope = document.querySelector('[aria-label="Session scope"]');
+    expect(scope?.textContent).toContain("General");
+    expect(scope?.querySelector("button")).toBeNull();
+  });
+
+  it("opens the shared library from the surface controls and returns from it", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/library", surfacesStore: mockSurfacesStore() });
+
+    expect(document.querySelector('[aria-label="Surface library"]')).not.toBeNull();
+    expect(surfaceButton("Library").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
+    flushSync(() => (document.querySelector('[aria-label="Close library"]') as HTMLButtonElement).click());
+    expect(onNavigate).toHaveBeenCalledWith("/");
+  });
+
+  it("offers the library from the front door without a session to add to", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ hasCurrentTopic: false, pendingStart: null, onNavigate });
+    const library = Array.from(document.querySelectorAll("main.landing button"))
+      .find((button) => button.textContent?.trim() === "Library") as HTMLButtonElement;
+    flushSync(() => library.click());
+    expect(onNavigate).toHaveBeenCalledWith("/library");
   });
 
   it("renders the conversation surface with its list, messages, and composer", () => {
@@ -327,6 +412,7 @@ describe("AppLayout shell navigation", () => {
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
         topicStore: mockTopicStore(),
+        pendingStart: { topicId: "default", agentId: null },
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
@@ -367,6 +453,7 @@ describe("AppLayout shell navigation", () => {
         connectionStore: mockConnectionStore(),
         streamingStore: { ...mockStreamingStore(), startTurn },
         topicStore: mockTopicStore(),
+        pendingStart: { topicId: "default", agentId: null },
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
@@ -417,6 +504,7 @@ describe("AppLayout shell navigation", () => {
     const startTurn = vi.fn();
     const firstConversation = {
       id: "first-conversation", topic_id: "default", selected_model_id: null,
+      agent_id: "gateway",
       created_at: "", last_activity: "", messages: [],
     };
     const secondConversation = { ...firstConversation, id: "second-conversation" };
@@ -432,6 +520,7 @@ describe("AppLayout shell navigation", () => {
         connectionStore: mockConnectionStore(),
         streamingStore: { ...mockStreamingStore(), startTurn },
         topicStore: mockTopicStore(),
+        pendingStart: { topicId: "default", agentId: null },
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
@@ -467,18 +556,10 @@ describe("AppLayout shell navigation", () => {
     layout.$destroy();
   });
 
-  it("renders the topic switcher in the shell", () => {
-    component = mountLayout();
-
-    expect(document.querySelector('button[title="Switch topic"]')?.textContent).toContain(
-      "Switch — default",
-    );
-  });
-
   it("marks conversation as the selected surface", () => {
     component = mountLayout();
 
-    expect(surfaceButton("Conversations").getAttribute("aria-pressed")).toBe("true");
+    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("true");
     expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
   });
 
@@ -520,8 +601,8 @@ describe("AppLayout shell navigation", () => {
       });
 
       expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-      expect(surfaceButton("Conversations").getAttribute("aria-pressed")).toBe("false");
-      expect(surfaceButton("Conversations").classList.contains("active")).toBe(false);
+      expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
+      expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
       expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
       expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
       expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
@@ -565,11 +646,24 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenNthCalledWith(2, "/settings/skills");
   });
 
-  it("navigates to the selected topic workspaces from settings", () => {
+  it("lists every topic in the settings sections and opens its page", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
     const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
-    const workspaces = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+    const topic = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
+      (button) => button.textContent?.trim() === "default",
+    );
+
+    flushSync(() => topic?.click());
+
+    expect(onNavigate).toHaveBeenCalledWith("/settings/topic/default/overview");
+  });
+
+  it("navigates to a topic's workspaces from its settings page tabs", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/topic/default/overview" });
+    const tabs = document.querySelector('nav[aria-label="Topic settings sections"]');
+    const workspaces = Array.from(tabs?.querySelectorAll("button") ?? []).find(
       (button) => button.textContent?.trim() === "Workspaces",
     );
 
@@ -578,10 +672,11 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/topic/default/workspaces");
   });
 
-  it("opens global settings without a selected topic", () => {
+  it("opens global settings from the front door", () => {
     const onNavigate = vi.fn();
     component = mountLayout({
       hasCurrentTopic: false,
+      pendingStart: null,
       onNavigate,
     });
 
@@ -595,14 +690,15 @@ describe("AppLayout shell navigation", () => {
     expect(onNavigate).toHaveBeenCalledWith("/settings/providers");
   });
 
-  it("renders global settings without a selected topic", () => {
+  it("renders global settings from the front door without the sessions list beneath", () => {
     component = mountLayout({
       hasCurrentTopic: false,
+      pendingStart: null,
       routePath: "/settings/providers",
     });
 
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-    expect(document.body.textContent).not.toContain("Choose where to work.");
+    expect(document.querySelector('[aria-label="Recent sessions"]')).toBeNull();
   });
 });
 
@@ -670,6 +766,7 @@ describe("ambient conversation channel", () => {
         connectionStore: mockConnectionStore(),
         streamingStore: mockStreamingStore(),
         topicStore: mockTopicStore(),
+        pendingStart: { topicId: "default", agentId: null },
         onRetry: () => {},
         activeSurface: "conversation",
         surfacesStore: mockSurfacesStore(),
@@ -726,6 +823,42 @@ describe("ambient conversation channel", () => {
     expect(selectConversation).toHaveBeenCalledWith("conv-2");
     expect(document.querySelector('main.surfaces-surface [aria-label="Surface"] h2')?.textContent)
       .toBe("Release checklist");
+  });
+
+  it("opens the surface the URL names and keeps the address in step with the one opened", () => {
+    const onNavigate = vi.fn();
+    const surfacesStore = mockSurfacesStore();
+    const openSurface = vi.spyOn(surfacesStore, "openSurface");
+    component = mountLayout({
+      activeSurface: "surfaces",
+      surfacesStore,
+      onNavigate,
+      conversationStore: mockConversationStoreWithMessages([]),
+      routePath: "/conversations/conv-1/surfaces/surface-1",
+    });
+    flushSync();
+
+    // The routed surface is already the open one, so nothing is refetched...
+    expect(openSurface).not.toHaveBeenCalled();
+    // ...and choosing it from the list addresses it.
+    const entry = document.querySelector(
+      'main.surfaces-surface aside[aria-label="Surfaces"] li button',
+    ) as HTMLButtonElement;
+    flushSync(() => entry.click());
+    expect(onNavigate).toHaveBeenCalledWith("/conversations/conv-1/surfaces/surface-1");
+  });
+
+  it("reaches the library from the work surface", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({
+      activeSurface: "surfaces",
+      surfacesStore: mockSurfacesStore(),
+      onNavigate,
+      conversationStore: mockConversationStoreWithMessages([]),
+    });
+    const link = document.querySelector("main.surfaces-surface .library-link") as HTMLButtonElement;
+    flushSync(() => link.click());
+    expect(onNavigate).toHaveBeenCalledWith("/library");
   });
 
   it("starts a conversation from the work surface", () => {

@@ -140,6 +140,10 @@ pub enum ServerEvent {
         #[ts(optional)]
         module_id: Option<Uuid>,
     },
+    /// The shared surface library changed: an entry was saved or removed.
+    /// Clients showing the catalogue refetch it — the event is the signal,
+    /// not the content.
+    LibraryUpdated { entry_id: Uuid },
     /// Context assembly completed for a turn.
     ///
     /// Contains the full assembly report for diagnostics and token budget

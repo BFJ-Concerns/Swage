@@ -20,6 +20,7 @@ type MountedComponent = ReturnType<typeof mount>;
 function makeConversation(overrides: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
     id: "conv-1",
+    agent_id: "gateway",
     created_at: "2026-03-20T08:00:00Z",
     last_activity: "2026-03-20T08:00:00Z",
     message_preview: "Hello there",
@@ -150,6 +151,7 @@ describe("ConversationList", () => {
     const conv = makeConversation({ id: "active-one" });
     const activeDetail: ConversationDetail = {
       id: "active-one",
+      agent_id: "gateway",
       topic_id: "proj-1",
       created_at: conv.created_at,
       last_activity: conv.last_activity,
@@ -169,6 +171,7 @@ describe("ConversationList", () => {
     ];
     const activeDetail: ConversationDetail = {
       id: "a",
+      agent_id: "gateway",
       topic_id: "proj-1",
       created_at: conversations[0].created_at,
       last_activity: conversations[0].last_activity,

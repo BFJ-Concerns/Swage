@@ -709,6 +709,10 @@
       },
       "ConversationDetail": {
         "properties": {
+          "agent_id": {
+            "description": "The agent definition the session runs under.",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -744,6 +748,7 @@
         },
         "required": [
           "id",
+          "agent_id",
           "created_at",
           "last_activity",
           "messages"
@@ -766,6 +771,10 @@
       },
       "ConversationResponse": {
         "properties": {
+          "agent_id": {
+            "description": "The agent definition the session runs under.",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -795,6 +804,7 @@
         },
         "required": [
           "id",
+          "agent_id",
           "created_at",
           "last_activity"
         ],
@@ -802,6 +812,10 @@
       },
       "ConversationSummary": {
         "properties": {
+          "agent_id": {
+            "description": "The agent definition the session runs under.",
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -832,6 +846,7 @@
         },
         "required": [
           "id",
+          "agent_id",
           "created_at",
           "last_activity",
           "has_interrupted_turn"
@@ -3706,6 +3721,24 @@
             "required": [
               "type",
               "surface_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The shared surface library changed: an entry was saved or removed.\nClients showing the catalogue refetch it — the event is the signal,\nnot the content.",
+            "properties": {
+              "entry_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "library_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "entry_id"
             ],
             "type": "object"
           },

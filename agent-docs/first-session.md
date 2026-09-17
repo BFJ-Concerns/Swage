@@ -1,15 +1,15 @@
 ---
-description: First-session walkthrough — open a topic, optionally attach and trust a workspace, start a conversation with a chosen agent
+description: First-session walkthrough — start a session with or without a topic, optionally attach and trust a workspace, choose the agent it runs under
 ---
 
 # First session
 
 After the gateway is running and a provider is configured (README), a
-first session needs only an opened topic. Attaching a workspace and
-trusting it are optional — they give agents file access and project
-guidance, but a conversation can start without either.
+first session needs nothing else. A topic, an attached workspace and trust
+in it are optional — they give agents their own memory, file access and
+project guidance, but a conversation can start without any of them.
 
-## Open a topic
+## The front door
 
 The web UI opens to the recent-sessions list (`GET /api/sessions`): every
 scope's sessions ordered by their latest user or assistant message, with
@@ -18,22 +18,35 @@ under a `conversation`, `schedule` or `workflow_run` source). `?topic_id=`
 narrows the list to a topic; `?archived=true` lists the sessions the
 inactivity sweep has hidden (`[sessions] archive_after_days`, default 7;
 a turn on an archived session unarchives it). Every session records its
-origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`). The
-topic cards sit beneath the list. A fresh install has no topics: a
-conversation started without one runs in the general scope — general memory,
-the general knowledge base, no inherited files or context from any topic —
-and carries no `topic_id` on the wire. Select a topic card to preview it, then
-select **Open**.
+origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`).
+Selecting an entry resumes it (`/conversations/{id}`, or
+`/conversations/{id}/surfaces/{surface_id}` with a surface open).
 
-Topics are created from the topic picker; every topic carries its own
-conversations, agents, instructions, skills, and workspace attachments. The
-general scope is not a topic: `GET /api/topics` never lists it, and it cannot
-be opened or deleted.
+Beneath the list, the **New session** control takes a topic (or none) and
+an agent, then **Start** opens the composer in that scope. Nothing is
+created until the first message: the composer's send creates the
+conversation (`POST /api/topics/{topic_id}/sessions`, or
+`POST /api/conversations` for the general scope) and then sends. A start
+abandoned before the first message leaves no session behind. **+ New
+topic** creates a topic (`POST /api/topics`) without starting a session.
+
+## Topics
+
+A topic is optional shared context — memory, knowledge base, attached
+workspaces, configuration — for the sessions started in it. A session
+started without one runs in the general scope: general memory, the general
+knowledge base, no inherited files or context from any topic, and no
+`topic_id` on the wire. `GET /api/topics` never lists the general scope,
+and it cannot be opened or deleted.
+
+The top bar names the session's scope; a topic's name links to its settings
+page (`/settings/topic/{slug}/{overview|workspaces|surfaces|sessions}`),
+where its description, workspaces, default surfaces, tags and sessions are
+managed. Every topic is also listed in the settings section navigation.
 
 ## Attach a workspace
 
-Inside the opened topic, select **Settings** in the top navigation, then
-select **Workspaces** in the settings section navigation.
+Open the topic's settings page and select its **Workspaces** tab.
 
 The workspace form takes a filesystem path to an existing repository
 directory. The gateway canonicalises whatever it receives, so a relative
@@ -66,15 +79,20 @@ instructions).
 
 ## Start a conversation with a chosen agent
 
-The message input area includes an agent picker that lists the topic's
-effective agent definitions — the shipped default (`"gateway"`, display
-name **Swage default**) plus any operator-authored definitions visible to
-the topic. Selecting an agent and submitting the first message creates a
-conversation bound to that definition and navigates to it immediately.
+The agent picker — on the front door's **New session** control, and in the
+composer until the first message — lists the scope's effective agent
+definitions: the shipped default (`"gateway"`, display name **Swage
+default**) plus any operator-authored definitions visible to the topic, or
+the global ones for the general scope. Selecting an agent and submitting the
+first message creates a conversation bound to that definition and navigates
+to it immediately.
 
-The picker queries `GET /api/topics/{topicId}/agent-definitions`. The
-`agent_id` field of `CreateConversationRequest` carries the selection;
-omitting it uses the default. See
+The picker queries `GET /api/topics/{topicId}/agent-definitions`, or
+`GET /api/agent-definitions` for the general scope. The `agent_id` field of
+`CreateConversationRequest` carries the selection; omitting it uses the
+default. Every conversation read (`ConversationResponse`,
+`ConversationSummary`, `ConversationDetail`) carries the `agent_id` the
+session runs under. See
 [Agents and permissions — Effective agent registry](agents-and-permissions.md#effective-agent-registry)
 for what the registry contains and how definitions shadow.
 

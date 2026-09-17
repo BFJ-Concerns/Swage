@@ -1033,6 +1033,10 @@
     "ConversationDetail": {
       "type": "object",
       "properties": {
+        "agent_id": {
+          "description": "The agent definition the session runs under.",
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -1068,6 +1072,7 @@
       },
       "required": [
         "id",
+        "agent_id",
         "created_at",
         "last_activity",
         "messages"
@@ -1090,6 +1095,10 @@
     "ConversationResponse": {
       "type": "object",
       "properties": {
+        "agent_id": {
+          "description": "The agent definition the session runs under.",
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -1119,6 +1128,7 @@
       },
       "required": [
         "id",
+        "agent_id",
         "created_at",
         "last_activity"
       ]
@@ -1126,6 +1136,10 @@
     "ConversationSummary": {
       "type": "object",
       "properties": {
+        "agent_id": {
+          "description": "The agent definition the session runs under.",
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -1156,6 +1170,7 @@
       },
       "required": [
         "id",
+        "agent_id",
         "created_at",
         "last_activity",
         "has_interrupted_turn"
@@ -4030,6 +4045,24 @@
           "required": [
             "type",
             "surface_id"
+          ]
+        },
+        {
+          "description": "The shared surface library changed: an entry was saved or removed.\nClients showing the catalogue refetch it — the event is the signal,\nnot the content.",
+          "type": "object",
+          "properties": {
+            "entry_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "library_updated"
+            }
+          },
+          "required": [
+            "type",
+            "entry_id"
           ]
         },
         {

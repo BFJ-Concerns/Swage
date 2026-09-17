@@ -6,7 +6,7 @@
 ## General
 
 - [Agents and permissions](agent-docs/agents-and-permissions.md): Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, and topic-targeted session creation
-- [First session](agent-docs/first-session.md): First-session walkthrough — open a topic, optionally attach and trust a workspace, start a conversation with a chosen agent
-- [Interfaces and tooling](agent-docs/interfaces-and-tooling.md): Turn context inspector, image attachments and reference admission, surface templates and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
+- [First session](agent-docs/first-session.md): First-session walkthrough — start a session with or without a topic, optionally attach and trust a workspace, choose the agent it runs under
+- [Interfaces and tooling](agent-docs/interfaces-and-tooling.md): Turn context inspector, image attachments and reference admission, session-owned surfaces, the surface library and annotations, delivery targets, device registration, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 - [Workflow engine](agent-docs/workflow-engine.md): Run lifecycle, journal/replay, budget partitions (including per-route), run detail (dispatch, provider rounds, usage, liveness, worktree completion, termination), terminal account (ending, worker partition, partial results, retention), parking, wake gate, worker sessions, cancellation, failure handover, and carried workflows
 <!-- doc-index:end -->

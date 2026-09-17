@@ -472,23 +472,48 @@ Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_pol
 # First session
 
 After the gateway is running and a provider is configured (README), a
-first session needs only an opened topic. Attaching a workspace and
-trusting it are optional — they give agents file access and project
-guidance, but a conversation can start without either.
+first session needs nothing else. A topic, an attached workspace and trust
+in it are optional — they give agents their own memory, file access and
+project guidance, but a conversation can start without any of them.
 
-## Open a topic
+## The front door
 
-The web UI opens to the topic picker. A fresh install has one topic
-(`default`, marked **Default**). Select a topic card to preview it, then
-select **Open**.
+The web UI opens to the recent-sessions list (`GET /api/sessions`): every
+scope's sessions ordered by their latest user or assistant message, with
+automated sessions grouped beneath their source (`entries[].automated`
+under a `conversation`, `schedule` or `workflow_run` source). `?topic_id=`
+narrows the list to a topic; `?archived=true` lists the sessions the
+inactivity sweep has hidden (`[sessions] archive_after_days`, default 7;
+a turn on an archived session unarchives it). Every session records its
+origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`).
+Selecting an entry resumes it (`/conversations/{id}`, or
+`/conversations/{id}/surfaces/{surface_id}` with a surface open).
 
-Topics are created from the topic picker; every topic carries its own
-conversations, agents, instructions, skills, and workspace attachments.
+Beneath the list, the **New session** control takes a topic (or none) and
+an agent, then **Start** opens the composer in that scope. Nothing is
+created until the first message: the composer's send creates the
+conversation (`POST /api/topics/{topic_id}/sessions`, or
+`POST /api/conversations` for the general scope) and then sends. A start
+abandoned before the first message leaves no session behind. **+ New
+topic** creates a topic (`POST /api/topics`) without starting a session.
+
+## Topics
+
+A topic is optional shared context — memory, knowledge base, attached
+workspaces, configuration — for the sessions started in it. A session
+started without one runs in the general scope: general memory, the general
+knowledge base, no inherited files or context from any topic, and no
+`topic_id` on the wire. `GET /api/topics` never lists the general scope,
+and it cannot be opened or deleted.
+
+The top bar names the session's scope; a topic's name links to its settings
+page (`/settings/topic/{slug}/{overview|workspaces|surfaces|sessions}`),
+where its description, workspaces, default surfaces, tags and sessions are
+managed. Every topic is also listed in the settings section navigation.
 
 ## Attach a workspace
 
-Inside the opened topic, select **Settings** in the top navigation, then
-select **Workspaces** in the settings section navigation.
+Open the topic's settings page and select its **Workspaces** tab.
 
 The workspace form takes a filesystem path to an existing repository
 directory. The gateway canonicalises whatever it receives, so a relative
@@ -521,15 +546,20 @@ instructions).
 
 ## Start a conversation with a chosen agent
 
-The message input area includes an agent picker that lists the topic's
-effective agent definitions — the shipped default (`"gateway"`, display
-name **Swage default**) plus any operator-authored definitions visible to
-the topic. Selecting an agent and submitting the first message creates a
-conversation bound to that definition and navigates to it immediately.
+The agent picker — on the front door's **New session** control, and in the
+composer until the first message — lists the scope's effective agent
+definitions: the shipped default (`"gateway"`, display name **Swage
+default**) plus any operator-authored definitions visible to the topic, or
+the global ones for the general scope. Selecting an agent and submitting the
+first message creates a conversation bound to that definition and navigates
+to it immediately.
 
-The picker queries `GET /api/topics/{topicId}/agent-definitions`. The
-`agent_id` field of `CreateConversationRequest` carries the selection;
-omitting it uses the default. See
+The picker queries `GET /api/topics/{topicId}/agent-definitions`, or
+`GET /api/agent-definitions` for the general scope. The `agent_id` field of
+`CreateConversationRequest` carries the selection; omitting it uses the
+default. Every conversation read (`ConversationResponse`,
+`ConversationSummary`, `ConversationDetail`) carries the `agent_id` the
+session runs under. See
 [Agents and permissions — Effective agent registry](agents-and-permissions.md#effective-agent-registry)
 for what the registry contains and how definitions shadow.
 
@@ -744,22 +774,45 @@ governed system.
 
 ## Surfaces
 
-Surfaces are agent-run work surfaces inside a topic, assembled from ordered
-module instances. Each surface belongs to one topic and carries its own module
-list, annotations, and provenance.
+Surfaces are a session's work surfaces, assembled from ordered module
+instances. Each surface belongs to one session (`session_id` on
+`SurfaceResponse`; `sessions.session_id` in storage, cascading with the
+session) and carries its own module list, annotations, and provenance.
+`GET/POST /api/sessions/{session_id}/surfaces` list and create a session's
+surfaces.
 
-### Templates
+### The shared library
 
-A surface template is a reusable shape for a topic: a named list of module
-rows in a fixed order. Templates are created through
-`POST /api/topics/{topic_id}/surface-templates` (`CreateSurfaceTemplateRequest`
-in `swage-protocol::client::surface`). Each module input carries an optional
-`kind` (defaults to `"document"`) and a `source` string.
+`POST /api/surfaces/{surface_id}/save` (`SaveSurfaceToLibraryRequest`: `name`,
+`description`, `tags`) copies a surface's modules into a library entry and
+records the origin topic (`origin_topic_id`, absent for the general scope).
+The description is required — it is what an agent chooses by.
+`GET /api/surface-library?tag=` is the catalogue (`LibraryListResponse`:
+names, descriptions, tags, origin; no module content);
+`GET /api/surface-library/{entry_id}` reads an entry with its module rows;
+`DELETE` removes it, leaving surfaces added from it untouched.
 
-Creating a surface with `template_id` set forks the template's modules into
-the new surface as its own from birth. The template is recorded as the fork's
-origin (`forked_from_template_id` and `forked_at` on `SurfaceResponse`) but
-is never projected into the surface — later template changes do not propagate.
+Creating a surface with `library_entry_id` set seeds it from the entry
+(`library_entry_id` and `seeded_at` on `SurfaceResponse`). Seeding carries
+the saved content only when the session's topic is the entry's origin
+(`LibrarySeeding::WithContent`); any other topic or the general scope receives
+the shape with empty modules (`ShapeOnly`). The audit event `surface_created`
+records which under `seeded_from.seeding`.
+
+`GET/POST /api/topics/{topic_id}/default-surfaces` and
+`DELETE /api/topics/{topic_id}/default-surfaces/{entry_id}` manage a topic's
+default entries; `ConversationService` opens them in every new session of the
+topic. `topics.tags` (`UpdateTopicRequest.tags`) are the labels the
+`surface_library` tool narrows the catalogue by for a topic's sessions.
+
+A save or delete broadcasts `ServerEvent::LibraryUpdated { entry_id }` on
+the work-surface channel (`/api/work-surface/ws`), delivered like
+`surface_updated`: identity only, no content. The frontend's surfaces store
+answers it by refetching the catalogue, so the library page
+(`/library`, `SurfaceLibrary.svelte`) and the surfaces pane's picker show a
+new entry without a reload. From a session the page adds an entry through
+the ordinary create route and navigates to the new surface; from the front
+door (no session) it is read-only.
 
 ### Annotations
 
@@ -770,13 +823,24 @@ module grain — there is no per-surface or intra-module positioning.
 displaced text survives in the surface's provenance trail.
 
 Deleting an annotation returns `DeleteSurfaceAnnotationResponse { deleted:
-true }`. The delete is permanent — there is no soft-delete or archive.
+true }`. The delete is permanent — there is no soft-delete or archive. The
+surfaces pane (`SurfacesPane.svelte`) exposes create, update
+(`store.updateAnnotation` → `PUT /api/surface-annotations/{id}`) and delete.
+
+### Surface addresses
+
+`/conversations/{id}/surfaces/{surface_id}` (`Route.surfaceId`;
+`conversationPath(id, surfaceId)` in `router.ts`) addresses an open surface.
+`SurfacesPane` opens the routed surface once the session's list is loaded
+and reports the surface the user opens (`onOpenSurface`) so the shell keeps
+the URL in step; a deep link or Back restores the surface with the session.
 
 ### Work-surface reconnect
 
 When a WebSocket connection to a surface's work surface drops and reconnects,
 the frontend refetches the surface state to pick up any writes that landed
-while disconnected.
+while disconnected. `library_updated` rides the same channel and refetches
+the catalogue.
 
 ## Delivery targets
 
@@ -788,7 +852,7 @@ target kinds:
 |---|---|---|
 | `channel` | `integration`, `account`, `conversation` | An external channel (Telegram, dev DM/thread) |
 | `local_storage` | — | The gateway's local store, as a log record |
-| `surface` | `surface_id` | A surface in the run's own topic |
+| `surface` | `surface_id` | A surface owned by the continuing session (schedules) or by a session in the run's topic (workflows) |
 | `webhook` | `url` | An HTTP endpoint |
 
 `store_local_output` on the routing request adds a `local_storage` target
@@ -969,11 +1033,13 @@ budget.
 ## Client-side route preservation
 
 The SPA router (`frontend/src/lib/router.ts`) is framework-free: `parseRoute`
-pattern-matches the URL; `createRouter` manages `pushState` navigation and
-`popstate` listening.
+pattern-matches the URL (`/`, `/conversations/{id}`,
+`/conversations/{id}/surfaces/{surface_id}`, `/library`,
+`/workflow-runs/{id}`, `/settings/...`, `/settings/topic/{slug}/...`);
+`createRouter` manages `pushState` navigation and `popstate` listening.
 
-`applyLocation()` (`router.ts:130`) runs on every URL change. When the URL
-contains a conversation ID:
+`applyLocation()` runs on every URL change. When the URL contains a
+conversation ID:
 
 - **Already active:** calls `checkConversationExists` — a lightweight `GET`
   that confirms the conversation exists without re-fetching it. On 404,
@@ -983,14 +1049,21 @@ contains a conversation ID:
 - **Different conversation:** calls `selectConversation`, which fully loads
   it. On 404, falls back to root. On other errors, the error propagates.
 
-The `conversationStore` dependency is injected as a four-member interface
-(`router.ts:47`), wired in `App.svelte:170`. `clearActiveConversation`
-disconnects the WebSocket before clearing the store, preventing orphaned
-connections.
+The `conversationStore` dependency is injected as a four-member interface,
+wired in `App.svelte`. `clearActiveConversation` disconnects the WebSocket
+before clearing the store, preventing orphaned connections.
 
 Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial surface
-loads alike.
+loads alike. When a scope was in view, `App.svelte` keeps a pending start in
+it (the composer stays open; the next message creates a session there);
+otherwise the front door serves.
+
+Session creation is fenced against a scope change: `createAndNavigate`
+captures a scope generation before the request and hands the store a
+`shouldInstall` check, so a session created for one scope is neither listed
+nor activated once the user has moved to another (it exists in the scope it
+was asked for, and the recent list finds it).
 
 ## Gateway tools
 
@@ -1051,8 +1124,9 @@ two sandbox-eligible tools.
 
 | Tool | Source |
 |---|---|
-| `surface_read` | `surface.rs` |
-| `surface_write` | `surface.rs` |
+| `surface_read` | `surface.rs` — the calling session's surfaces |
+| `surface_write` | `surface.rs` — create, write, annotate, or save to the library |
+| `surface_library` | `surface.rs` — the catalogue narrowed by the session's topic tags, widened on request; add an entry to the session |
 | `run_event_post` | `run_event.rs` |
 
 ### Scheduling
@@ -1909,10 +1983,10 @@ Activate the research skill on a session (via `activate_skill`), then
 dispatch its carried workflow with `workflow_run`:
 
 ```json
-{ "name": "research-sweep", "args": { "topic": "…", "purpose": "…", "maxSources": 8 } }
+{ "name": "research-sweep", "args": { "subject": "…", "purpose": "…", "maxSources": 8 } }
 ```
 
-- `topic` — what to research, as the user phrased it.
+- `subject` — what to research, as the user phrased it.
 - `purpose` — what the findings must serve; the synthesis is judged
   against this.
 - `maxSources` — optional ceiling on sources gathered (default 8).

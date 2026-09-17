@@ -107,12 +107,14 @@ describe("AgentDefinitionsPanel", () => {
     expect(detail?.textContent?.match(/Not set/g)?.length).toBe(4);
   });
 
-  it("does not fetch configuration without a selected topic", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
+  it("lists the general scope's definitions when no topic is selected", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
+      definitions: [definition("gateway", "built_in", { display_name: "Swage default", is_builtin: true })],
+    }), { status: 200 }));
     component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: null } });
 
-    expect(document.body.textContent).toContain("Select a topic");
-    expect(fetchSpy).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Swage default"));
+    expect(fetchSpy).toHaveBeenCalledWith("/api/agent-definitions", { method: "GET" });
   });
 
   it("requests and renders the inventory for a newly selected topic", async () => {

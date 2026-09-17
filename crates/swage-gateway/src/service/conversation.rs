@@ -182,6 +182,7 @@ impl ConversationService {
         Ok(ConversationResponse {
             id: session.id,
             topic_id: topic.client_topic_id(),
+            agent_id: session.agent_id.clone(),
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -246,6 +247,7 @@ impl ConversationService {
 
             summaries.push(ConversationSummary {
                 id: session.id,
+                agent_id: session.agent_id.clone(),
                 selected_model_id: session.selected_model_id,
                 created_at: session.created_at,
                 last_activity: session.updated_at,
@@ -335,6 +337,7 @@ impl ConversationService {
         Ok(ConversationDetail {
             id: session.id,
             topic_id: topic.client_topic_id(),
+            agent_id: session.agent_id.clone(),
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -370,6 +373,7 @@ impl ConversationService {
 
             summaries.push(ConversationSummary {
                 id: session.id,
+                agent_id: session.agent_id.clone(),
                 selected_model_id: session.selected_model_id,
                 created_at: session.created_at,
                 last_activity: session.updated_at,
@@ -510,6 +514,7 @@ impl ConversationService {
         Ok(ConversationResponse {
             id: session.id,
             topic_id: topic.client_topic_id(),
+            agent_id: session.agent_id.clone(),
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,

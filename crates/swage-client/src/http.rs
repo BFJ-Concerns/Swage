@@ -1155,6 +1155,7 @@ mod tests {
         let json = serde_json::json!({
             "id": id,
             "topic_id": topic_id,
+            "agent_id": "gateway",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
         });
@@ -1169,6 +1170,7 @@ mod tests {
         let id = Uuid::new_v4();
         let json_with_preview = serde_json::json!({
             "id": id,
+            "agent_id": "gateway",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "message_preview": "Hello, world",
@@ -1176,6 +1178,7 @@ mod tests {
         });
         let json_no_preview = serde_json::json!({
             "id": id,
+            "agent_id": "gateway",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "message_preview": null,
@@ -1200,6 +1203,7 @@ mod tests {
             "conversations": [
                 {
                     "id": Uuid::new_v4(),
+                    "agent_id": "gateway",
                     "created_at": "2025-01-01T00:00:00Z",
                     "last_activity": "2025-01-01T01:00:00Z",
                     "message_preview": null,
@@ -1218,6 +1222,7 @@ mod tests {
         let json = serde_json::json!({
             "id": id,
             "topic_id": Uuid::new_v4(),
+            "agent_id": "gateway",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "messages": [

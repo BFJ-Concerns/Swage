@@ -597,6 +597,49 @@ async fn deleting_topic_does_not_affect_other_topics() {
 // The recent-sessions list over HTTP
 // ---------------------------------------------------------------------------
 
+/// A session without a topic runs under the general scope's agent
+/// definitions: the built-in default and every global definition, with no
+/// topic-scoped definition shadowing them. The listing is the same shape a
+/// topic's is, so the composer offers the same picker either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_general_scope_lists_the_agent_definitions_a_topicless_session_can_run_under() {
+    let (router, _storage) = make_test_router();
+
+    let (status, listed) = http_json(&router, "GET", "/api/agent-definitions", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let definitions = listed["definitions"].as_array().expect("definitions");
+    assert_eq!(
+        definitions.len(),
+        1,
+        "a fresh install offers the built-in default: {listed}"
+    );
+    assert_eq!(definitions[0]["id"], "gateway");
+    assert_eq!(definitions[0]["is_builtin"], true);
+
+    // Every conversation read carries the agent the session runs under.
+    let (_, created) = http_json(
+        &router,
+        "POST",
+        "/api/conversations",
+        Some(json!({ "agent_id": "gateway" })),
+    )
+    .await;
+    assert_eq!(created["agent_id"], "gateway", "{created}");
+    let (_, detail) = http_json(
+        &router,
+        "GET",
+        &format!("/api/conversations/{}", created["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(detail["agent_id"], "gateway", "{detail}");
+    let (_, listed) = http_json(&router, "GET", "/api/conversations", None).await;
+    assert_eq!(
+        listed["conversations"][0]["agent_id"], "gateway",
+        "{listed}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_recent_list_spans_topics_and_the_general_scope_and_narrows_by_topic() {
     let (router, _storage) = make_test_router();

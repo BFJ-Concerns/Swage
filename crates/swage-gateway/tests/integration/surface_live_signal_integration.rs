@@ -66,16 +66,26 @@ async fn next_surface_signal(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> Value {
+    next_signal_of_kind(socket, "surface_updated").await
+}
+
+/// Read frames until one is a signal of the given kind, or the wait runs out.
+async fn next_signal_of_kind(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    kind: &str,
+) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let frame = tokio::time::timeout_at(deadline, socket.next())
             .await
-            .expect("a surface_updated signal should arrive on the work-surface channel")
+            .unwrap_or_else(|_| panic!("a {kind} signal should arrive on the work-surface channel"))
             .expect("the channel should stay open")
             .expect("frame");
         if let tungstenite::Message::Text(text) = frame {
             let value: Value = serde_json::from_str(&text).expect("json frame");
-            if value["type"] == "surface_updated" {
+            if value["type"] == kind {
                 return value;
             }
         }
@@ -211,5 +221,81 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
         !frame.contains("checked this against the tag"),
         "the signal carries identity only — the surface reads the note through \
          the surface, never off the event: {frame}"
+    );
+}
+
+/// Saving a surface to the library signals every open catalogue, so a
+/// library page or picker on another session shows the new entry without a
+/// reload; the signal carries the entry's identity, never its content.
+#[tokio::test(flavor = "multi_thread")]
+async fn saving_to_the_library_signals_open_catalogues_by_identity_only() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            topic_id: topic.id,
+            agent_id: "assistant".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(StubProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/work-surface/ws"))
+            .await
+            .expect("the work-surface channel takes no identity");
+
+    let base = MockToolContext::new("assistant", session.id.to_string());
+    let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+        .with_app_state(Some(state.clone()));
+
+    let write = swage_gateway::tool::surface::SurfaceWriteTool;
+    let surface = write
+        .execute(json!({ "title": "Release checklist" }), &ctx)
+        .await
+        .expect("the agent creates the surface");
+    let surface_id = surface["id"].as_str().expect("surface id").to_string();
+    next_surface_signal(&mut socket).await;
+
+    let saved = write
+        .execute(
+            json!({
+                "surface_id": surface_id,
+                "save_as": "Release checklist",
+                "description": "Walks a release from tag to announcement; use before shipping.",
+                "tags": ["release"],
+            }),
+            &ctx,
+        )
+        .await
+        .expect("the agent saves the surface");
+    let entry_id = saved["id"].as_str().expect("entry id");
+
+    let signal = next_signal_of_kind(&mut socket, "library_updated").await;
+    assert_eq!(signal["entry_id"], entry_id);
+    let frame = serde_json::to_string(&signal).unwrap();
+    assert!(
+        !frame.contains("tag to announcement"),
+        "the signal carries identity only — the catalogue is read through the \
+         library, never off the event: {frame}"
     );
 }

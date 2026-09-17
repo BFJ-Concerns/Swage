@@ -89,18 +89,12 @@
     opacity: 1;
   }
 
+  /* The active segment inverts: ink fill, paper text. Both are named
+     tokens rather than currentColor, which would resolve against the
+     segment's own (already inverted) text colour and paint paper on paper. */
   .opt.active {
-    background: currentColor;
+    background: var(--ink);
+    color: var(--paper);
     opacity: 1;
-  }
-
-  /*
-    Trick to invert text colour against the currentColor fill: the parent of
-    this component decides what "currentColor" is. Active buttons paint that
-    colour as background; the text needs to be the opposite. We use a CSS
-    custom property the parent sets, falling back to paper.
-  */
-  .opt.active {
-    color: var(--toggle-active-fg, var(--paper));
   }
 </style>

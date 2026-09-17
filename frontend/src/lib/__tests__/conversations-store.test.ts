@@ -27,6 +27,7 @@ vi.mock("../api/conversations", () => ({
 function makeSummary(id: string, last_activity = "2026-01-01T00:00:00Z") {
   return {
     id,
+    agent_id: "gateway",
     created_at: "2026-01-01T00:00:00Z",
     last_activity,
     message_preview: null,
@@ -38,6 +39,7 @@ function makeDetail(id: string) {
   return {
     id,
     topic_id: "default",
+    agent_id: "gateway",
     created_at: "2026-01-01T00:00:00Z",
     last_activity: "2026-01-01T00:00:00Z",
     messages: [] as import("../types").MessageView[],
@@ -193,6 +195,7 @@ describe("createConversation", () => {
     const store = createConversationStore();
     const resp = {
       id: "new-conv",
+      agent_id: "gateway",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -222,6 +225,7 @@ describe("createConversation", () => {
 
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
+      agent_id: "gateway",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -236,6 +240,7 @@ describe("createConversation", () => {
     const store = createConversationStore();
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
+      agent_id: "gateway",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -533,6 +538,7 @@ describe("createConversation (topic-scoped)", () => {
     const store = createConversationStore();
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
+      agent_id: "gateway",
       topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",

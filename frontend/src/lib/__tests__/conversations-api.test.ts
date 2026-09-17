@@ -58,6 +58,7 @@ describe("listConversations", () => {
         conversations: [
           {
             id: "conv-1",
+            agent_id: "gateway",
             created_at: "2026-01-01T00:00:00Z",
             last_activity: "2026-01-01T00:00:00Z",
             message_preview: "Hello",
@@ -102,6 +103,7 @@ describe("createConversation", () => {
     const fetchMock = vi.mocked(fetch);
     const created = {
       id: "new-conv",
+      agent_id: "gateway",
       topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
@@ -121,6 +123,7 @@ describe("createConversation", () => {
     const fetchMock = vi.mocked(fetch);
     const created = {
       id: "general-conv",
+      agent_id: "gateway",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
     };
@@ -166,6 +169,7 @@ describe("getConversation", () => {
     const fetchMock = vi.mocked(fetch);
     const detail = {
       id: "conv-42",
+      agent_id: "gateway",
       topic_id: "default",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T01:00:00Z",

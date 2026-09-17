@@ -27,6 +27,7 @@ const topic = {
 const summaries = [
   {
     id: "conv-1",
+    agent_id: "gateway",
     created_at: "2026-08-29T10:00:00Z",
     last_activity: "2026-08-29T10:00:00Z",
     message_preview: "Release checklist review",
@@ -34,6 +35,7 @@ const summaries = [
   },
   {
     id: "conv-2",
+    agent_id: "gateway",
     created_at: "2026-08-29T10:05:00Z",
     last_activity: "2026-08-29T10:05:00Z",
     message_preview: "Ledger migration",
@@ -215,6 +217,7 @@ describe("ambient channel control path", () => {
 
     vi.mocked(createConversation).mockResolvedValueOnce({
       id: "conv-new",
+      agent_id: "gateway",
       topic_id: topic.id,
       selected_model_id: null,
       created_at: "2026-08-29T10:10:00Z",

@@ -264,6 +264,9 @@ pub async fn save_surface_to_library(
             }),
         })
         .await?;
+    let _ = state
+        .broadcast
+        .send(ServerEvent::LibraryUpdated { entry_id: entry.id });
 
     library_entry_response(state, entry.id).await
 }
@@ -366,6 +369,9 @@ pub async fn delete_library_entry(
             }),
         })
         .await?;
+    let _ = state
+        .broadcast
+        .send(ServerEvent::LibraryUpdated { entry_id: entry.id });
     Ok(())
 }
 

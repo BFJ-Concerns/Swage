@@ -3,6 +3,8 @@
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
 
   interface Props {
+    // The scope whose effective definitions are shown: a topic, or null
+    // for the general scope.
     topicId: string | null;
   }
 
@@ -21,7 +23,6 @@
     definitions = [];
     selectedId = "";
     error = null;
-    if (!currentTopicId) return;
     loading = true;
     void listEffectiveAgentDefinitions(currentTopicId)
       .then((loaded) => {
@@ -50,14 +51,12 @@
 </script>
 
 <section class="agent-definitions" aria-label="Agent definitions">
-  {#if !topicId}
-    <p class="empty">Select a topic to inspect its effective agent definitions.</p>
-  {:else if loading}
+  {#if loading}
     <p class="loading">Loading agent definitions…</p>
   {:else if error}
     <p class="error" role="alert">{error}</p>
   {:else if definitions.length === 0}
-    <p class="empty">No agent definitions are available for this topic.</p>
+    <p class="empty">No agent definitions are available for this {topicId ? "topic" : "scope"}.</p>
   {:else}
     <div class="definition-list" role="list" aria-label="Effective agent definitions">
       {#each definitions as definition (definition.id)}

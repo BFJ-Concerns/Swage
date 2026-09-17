@@ -1,10 +1,13 @@
 <!-- Topic-scoped settings pane. Global provider/runtime settings stay in
-     SettingsPage; this component only reads topic-owned data. -->
+     SettingsPage; this component owns the topic's own data: its description,
+     attached workspaces (including relinking a folder that has moved), its
+     default surfaces and tags, and its sessions. -->
 <script lang="ts">
   import { onMount } from "svelte";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachTopicWorkspace,
+    deleteTopic,
     detachTopicWorkspace,
     listTopicSessions,
     listTopicWorkspaces,
@@ -24,9 +27,25 @@
   interface Props {
     topic: Topic | null;
     tab?: TopicSettingsTab;
+    onNavigate?: (path: string) => void;
+    // The topic's description changed or the topic was deleted: the parent
+    // reloads its topic list.
+    onTopicsChanged?: () => void | Promise<void>;
   }
 
-  let { topic, tab = "overview" }: Props = $props();
+  let { topic, tab = "overview", onNavigate, onTopicsChanged }: Props = $props();
+
+  const tabs: { id: TopicSettingsTab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "workspaces", label: "Workspaces" },
+    { id: "surfaces", label: "Surfaces" },
+    { id: "sessions", label: "Sessions" },
+  ];
+
+  function openTab(next: TopicSettingsTab): void {
+    if (!topic) return;
+    onNavigate?.(`/settings/topic/${encodeURIComponent(topic.slug)}/${next}`);
+  }
 
   let workspaces = $state<WorkspaceAttachment[]>([]);
   // Attaching decides whether the new folder becomes the topic's working
@@ -48,6 +67,17 @@
   let tagsDraft = $state("");
   let tagsNotice = $state<string | null>(null);
   let surfacesLoaded = $state(false);
+  // The description as edited here; saved explicitly.
+  let aboutDraft = $state("");
+  let aboutNotice = $state<string | null>(null);
+  // Replacement paths typed for workspaces whose folder is missing.
+  let relinkDrafts = $state<Record<string, string>>({});
+  let relinkingWorkspaceId = $state<string | null>(null);
+  let pendingDelete = $state(false);
+
+  $effect(() => {
+    aboutDraft = topic?.description ?? "";
+  });
 
   onMount(loadTopicSettings);
 
@@ -126,11 +156,75 @@
       workspaces = workspaceList;
       worktopicsLoaded = true;
       sessions = sessionList;
+      relinkDrafts = Object.fromEntries(
+        workspaceList.map((workspace) => [workspace.id, relinkDrafts[workspace.id] ?? ""]),
+      );
       error = null;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to load topic settings.";
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function saveAbout(): Promise<void> {
+    if (!topic) return;
+    isMutating = true;
+    aboutNotice = null;
+    try {
+      const updated = await updateTopic(topic.id, { description: aboutDraft.trim() });
+      aboutDraft = updated.description ?? "";
+      aboutNotice = "Saved.";
+      await onTopicsChanged?.();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to save the topic's description.";
+    } finally {
+      isMutating = false;
+    }
+  }
+
+  async function removeTopic(): Promise<void> {
+    if (!topic) return;
+    isMutating = true;
+    try {
+      await deleteTopic(topic.id);
+      await onTopicsChanged?.();
+      onNavigate?.("/settings/providers");
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to delete the topic.";
+      isMutating = false;
+    }
+  }
+
+  function setRelinkDraft(workspaceId: string, value: string): void {
+    relinkDrafts = { ...relinkDrafts, [workspaceId]: value };
+  }
+
+  // A folder that has moved is reattached at its new path with the same
+  // label, access and trust; the old attachment is released first so the
+  // working-folder role passes to the new one.
+  async function relinkWorkspace(workspace: WorkspaceAttachment): Promise<void> {
+    if (!topic) return;
+    const replacementPath = relinkDrafts[workspace.id]?.trim();
+    if (!replacementPath) return;
+    relinkingWorkspaceId = workspace.id;
+    isMutating = true;
+    try {
+      await detachTopicWorkspace(topic.id, workspace.id);
+      await attachTopicWorkspace(topic.id, {
+        path: replacementPath,
+        label: workspace.label,
+        permissions: workspace.permissions,
+        is_trusted: workspace.is_trusted,
+        set_as_default: workspace.is_default,
+      });
+      setRelinkDraft(workspace.id, "");
+      await loadTopicSettings();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to relink workspace.";
+    } finally {
+      relinkingWorkspaceId = null;
+      isMutating = false;
     }
   }
 
@@ -197,6 +291,13 @@
         <h1 class="title">{topic.name}</h1>
         <p class="sub">Topic-scoped configuration and attached workspace state for {topic.slug}.</p>
       </div>
+      {#if onNavigate}
+        <nav class="topic-tabs" aria-label="Topic settings sections">
+          {#each tabs as entry (entry.id)}
+            <button type="button" class:active={tab === entry.id} aria-pressed={tab === entry.id} onclick={() => openTab(entry.id)}>{entry.label}</button>
+          {/each}
+        </nav>
+      {/if}
     </div>
 
     {#if error}
@@ -223,6 +324,35 @@
           </div>
         </div>
       </section>
+      <section class="shell-section">
+        <h2 class="shell-section-title">About</h2>
+        <p class="workspace-note">What this topic is for. Sessions in the topic see it as orientation.</p>
+        <form
+          class="about-form"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void saveAbout();
+          }}
+        >
+          <textarea aria-label="Topic about text" rows="3" placeholder="What is this topic for?" bind:value={aboutDraft}></textarea>
+          <div class="workspace-actions">
+            <button type="submit" disabled={isMutating || aboutDraft.trim() === (topic.description ?? "")}>Save about</button>
+            {#if aboutNotice}<span class="shell-value">{aboutNotice}</span>{/if}
+          </div>
+        </form>
+      </section>
+      <section class="shell-section">
+        <h2 class="shell-section-title">Delete</h2>
+        <p class="workspace-note">Deleting the topic removes its sessions and their surfaces. Library entries saved from it remain.</p>
+        {#if pendingDelete}
+          <div class="workspace-actions">
+            <button type="button" class="danger" disabled={isMutating} onclick={() => void removeTopic()}>Delete {topic.name}</button>
+            <button type="button" onclick={() => (pendingDelete = false)}>Keep</button>
+          </div>
+        {:else}
+          <button type="button" class="danger" onclick={() => (pendingDelete = true)}>Delete topic…</button>
+        {/if}
+      </section>
     {:else if tab === "workspaces"}
       <section class="shell-section">
         <h2 class="shell-section-title">Workspaces</h2>
@@ -247,6 +377,27 @@
               <strong>{workspace.label}</strong>
               <span>{workspace.path}</span>
               <span>{workspace.is_trusted ? "trusted" : "untrusted"} · {workspace.permissions.join(", ")}{workspace.is_default ? " · working folder" : ""}</span>
+              {#if workspace.is_missing}
+                <div class="missing-workspace">
+                  <span class="missing-label">Missing folder</span>
+                  <div class="relink-row">
+                    <input
+                      type="text"
+                      value={relinkDrafts[workspace.id] ?? ""}
+                      placeholder="/new/path/to/folder"
+                      aria-label={`Replacement path for ${workspace.label}`}
+                      oninput={(event) => setRelinkDraft(workspace.id, event.currentTarget.value)}
+                    />
+                    <button
+                      type="button"
+                      onclick={() => void relinkWorkspace(workspace)}
+                      disabled={relinkingWorkspaceId === workspace.id || !(relinkDrafts[workspace.id] ?? "").trim()}
+                    >
+                      {relinkingWorkspaceId === workspace.id ? "Relinking…" : "Relink"}
+                    </button>
+                  </div>
+                </div>
+              {/if}
               <div class="workspace-actions">
                 {#if workspace.is_trusted}
                   <button type="button" onclick={() => void setWorkspaceTrust(workspace, false)} disabled={isMutating}>Revoke trust</button>
@@ -314,8 +465,10 @@
           {#each sessions as session (session.id)}
             <article class="record-row">
               <strong>{session.message_preview || "Untitled session"}</strong>
-              <span>{session.id}</span>
-              <span>{new Date(session.last_activity).toLocaleString()}</span>
+              <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
+              {#if onNavigate}
+                <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>
+              {/if}
             </article>
           {:else}
             <p class="shell-empty">No sessions have been created in this topic.</p>
@@ -441,6 +594,25 @@
   }
 
   .workspace-note { max-width: 64ch; }
+  .topic-tabs { display: flex; gap: 6px; flex-wrap: wrap; align-self: flex-start; }
+  .topic-tabs button {
+    border: 1px solid var(--ink);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 4px 10px;
+    font-family: var(--font-mono);
+    font-size: var(--font-label-sm);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .topic-tabs button.active { background: var(--ink); color: var(--paper); }
+  .about-form { display: flex; flex-direction: column; gap: 8px; max-width: 64ch; }
+  .about-form textarea { width: 100%; border: 1px solid var(--rule-soft); background: var(--paper); color: var(--ink); font: inherit; padding: 6px 8px; }
+  .missing-workspace { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .missing-label { color: var(--error); font-family: var(--font-mono); font-size: var(--font-label-sm); letter-spacing: 0.08em; text-transform: uppercase; }
+  .relink-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .relink-row input { flex: 1; min-width: 14rem; border: 1px solid var(--rule-soft); background: var(--paper); color: var(--ink); font: inherit; padding: 4px 8px; }
 
   .workspace-form { display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(10rem, .6fr) auto; gap: 10px; align-items: end; padding: 12px 0; border-bottom: 1px dotted var(--rule-soft); }
   .workspace-form label { display: grid; gap: 5px; font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
@@ -450,7 +622,8 @@
   button:disabled { cursor: wait; opacity: .6; }
   .workspace-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
   .workspace-actions button { background: var(--paper); color: var(--ink); }
-  .workspace-actions .danger { border-color: var(--accent); color: var(--accent); }
+  button.danger { background: var(--paper); border-color: var(--error); color: var(--error); }
+  button.danger:hover:not(:disabled) { background: var(--error); color: var(--paper); }
   @media (max-width: 760px) { .workspace-form { grid-template-columns: 1fr; } }
 
   .notice {
