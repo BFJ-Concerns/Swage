@@ -26,12 +26,14 @@ use super::ServerEvent;
 /// Whether a broadcast event is a work-surface signal.
 ///
 /// `SurfaceUpdated` tells an open surface that a surface it may be showing has
+/// changed; `LibraryUpdated` tells a catalogue view that the shared library
 /// changed; `Shutdown` tells it the gateway is going away. Everything else on
 /// the broadcast channel belongs to a conversation or to observability.
 pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
     matches!(
         event,
         ServerEvent::SurfaceUpdated { .. }
+            | ServerEvent::LibraryUpdated { .. }
             | ServerEvent::Lagged { .. }
             | ServerEvent::Shutdown { .. }
     )

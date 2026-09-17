@@ -34,7 +34,7 @@ parent_call_id?: string, } | { "type": "lagged", dropped: number, } | { "type": 
 /**
  * The module written; absent for surface-level changes (creation).
  */
-module_id?: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
+module_id?: string, } | { "type": "library_updated", entry_id: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
 /**
  * Validated, parsed JSON output when an output schema was configured and
  * validation passed. Absent (serialised as omitted) when no schema is

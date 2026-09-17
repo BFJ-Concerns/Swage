@@ -134,9 +134,12 @@ impl SubscriptionState {
                 self.is_subscribed(ObservabilityChannel::Tools)
             }
 
-            // Surface updates and the work-surface lag signal are primary UI
-            // signals for the work surfaces, not observability: always delivered.
-            ServerEvent::SurfaceUpdated { .. } | ServerEvent::Lagged { .. } => true,
+            // Surface and library updates and the work-surface lag signal are
+            // primary UI signals for the work surfaces, not observability:
+            // always delivered.
+            ServerEvent::SurfaceUpdated { .. }
+            | ServerEvent::LibraryUpdated { .. }
+            | ServerEvent::Lagged { .. } => true,
 
             // Retry progress is observability noise — only deliver to subscribers.
             ServerEvent::OutputSchemaRetry { .. } => {

@@ -4,10 +4,15 @@
   Startup sequence:
     1. Create stores (synchronous, no IO).
     2. Wire cross-store events: connection → streaming, reconnect → refresh.
-    3. onMount: load topics (restoring the last open topic), load conversations
-       for the selected topic, then initialise router (reads URL, selects any
-       conversation referenced by the path).
+    3. onMount: load the topic list, then initialise the router (reads the
+       URL, selects any conversation referenced by the path — which brings
+       that conversation's topic into scope).
     4. Render: loading splash → layout, or error screen if the gateway is unreachable.
+
+  The front door is the recent-sessions list; a topic is the context a
+  session carries, never a place the user must open first. Starting a session
+  from the front door opens the composer in the chosen scope (a topic or
+  none) and the first message creates the conversation there.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
@@ -26,7 +31,7 @@
     type StreamingStore,
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
-  import { createRouter } from "./lib/router";
+  import { conversationPath, createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
   import {
@@ -111,19 +116,43 @@
     // conversation without a topic runs in the general scope and moves no
     // topic into scope.
     const conv = conversationStore.activeConversation;
-    if (conv?.topic_id && topicStore.currentTopic?.id !== conv.topic_id) {
-      await topicStore.selectTopic(conv.topic_id);
-      await conversationStore.loadConversations(conv.topic_id);
-    } else if (conv && !conv.topic_id && !topicStore.currentTopic) {
-      // Resuming a general-scope session from the recent list: the sidebar
-      // shows the general scope's conversations beside it.
-      await conversationStore.loadConversations(null);
-    }
+    if (conv) await bringScopeIntoView(conv.topic_id ?? null);
 
+    // Selecting a session settles any pending start: the composer now
+    // belongs to this conversation.
+    pendingStart = null;
     connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
-    router.navigate(`/conversations/${id}`);
+    // The URL may already name one of this session's surfaces (a deep link
+    // or a browser Back): keep it, so the surface opens.
+    const surfaceId =
+      currentRoute.conversationId === id ? currentRoute.surfaceId : null;
+    router.navigate(conversationPath(id, surfaceId));
   }
+
+  // The sidebar and agent list follow the session's scope: its topic, or
+  // the general scope for a session without one. A scope already in view
+  // is left alone so nothing reloads needlessly.
+  async function bringScopeIntoView(topicId: string | null): Promise<void> {
+    const inView = topicStore.currentTopic?.id ?? null;
+    if (topicId && inView !== topicId) {
+      await topicStore.selectTopic(topicId);
+    } else if (!topicId && inView) {
+      topicStore.closeTopic();
+    } else if (inView === topicId && scopeLoadedFor === topicId) {
+      return;
+    }
+    scopeLoadedFor = topicId;
+    await conversationStore.loadConversations(topicId);
+    try {
+      agentDefinitions = await listEffectiveAgentDefinitions(topicId);
+    } catch (error) {
+      console.error("Failed to load agent definitions:", error);
+    }
+  }
+  // The scope whose sidebar and agent list are loaded; null for the general
+  // scope, undefined before any load.
+  let scopeLoadedFor: string | null | undefined = undefined;
 
   async function selectAndNavigate(id: string): Promise<void> {
     try {
@@ -133,10 +162,12 @@
     }
   }
 
-  // Creates a conversation in the current topic, connects, and navigates to
+  // Creates a conversation in the scope in view, connects, and navigates to
   // it. Returns the new conversation's id, or null when creation failed —
   // the auto-create composer path uses the id to decide whether its pending
-  // turn can be dispatched.
+  // turn can be dispatched. The scope is captured when creation starts and
+  // checked when it settles: a session created for one scope is never
+  // activated after the user has moved to another.
   async function createAndNavigate(
     selectedModelId?: string | null,
     agentId?: string | null,
@@ -144,22 +175,38 @@
   ): Promise<string | null> {
     try {
       keepSurfaceForConversation();
-      // The selected topic, or none: a conversation started without a topic
+      // The scope in view, or none: a conversation started without a topic
       // runs in the general scope.
       const topicId = topicStore.currentTopic?.id ?? null;
-      await conversationStore.createConversation(topicId, selectedModelId, agentId, effort);
-      const id = conversationStore.activeConversation?.id;
-      if (id) {
-        connectionStore.connectTo(id);
-        router.navigate(`/conversations/${id}`);
-        return id;
+      const generation = ++scopeGeneration;
+      await conversationStore.createConversation(
+        topicId,
+        selectedModelId,
+        agentId,
+        effort,
+        () => generation === scopeGeneration,
+      );
+      if (generation !== scopeGeneration) {
+        // The scope changed while the request was in flight. The session
+        // exists in the scope it was asked for; it is not brought into the
+        // one now in view.
+        return null;
       }
-      return null;
+      const id = conversationStore.activeConversation?.id;
+      if (!id) return null;
+      pendingStart = null;
+      connectionStore.connectTo(id);
+      router.navigate(conversationPath(id));
+      return id;
     } catch (err) {
       console.error("Failed to create conversation:", err);
       return null;
     }
   }
+
+  // Bumped whenever the scope in view changes, so an in-flight creation can
+  // tell it has been overtaken.
+  let scopeGeneration = 0;
 
   function startNewConversation(agentId?: string): void {
     void createAndNavigate(undefined, agentId);
@@ -214,6 +261,15 @@
   function handleRouteChange(route: Route): void {
     currentRoute = route;
     notFound = route.notFound;
+    // A URL that names a surface means the work surface: the pane opens the
+    // surface once the session is in view.
+    if (route.surfaceId) activeSurface = "surfaces";
+    // A conversation the URL named is gone. Someone who was working in a
+    // scope stays there with the composer ready, so the next message starts
+    // afresh where they were; with no scope in view, the front door serves.
+    if (route.notFound && scopeLoadedFor !== undefined && !pendingStart) {
+      pendingStart = { topicId: scopeLoadedFor, agentId: null };
+    }
   }
 
   const router = createRouter({
@@ -246,7 +302,14 @@
   let modelOptions = $state<string[]>([]);
   let modelCatalogueReady = $state(false);
   let defaultModelId = $state<string | null>(null);
+  // The definitions offered by the scope in view: the composer's agent list.
   let agentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
+  // The definitions offered by the scope chosen on the front door's start
+  // control, which may differ from the scope in view.
+  let startAgentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
+  // A session about to start: the scope and agent chosen on the front door.
+  // The composer is open; the first message creates the conversation.
+  let pendingStart = $state<{ topicId: string | null; agentId: string | null } | null>(null);
   const desktopRuntime = getDesktopRuntime();
 
   async function refreshModelCatalogue(): Promise<void> {
@@ -374,55 +437,67 @@
   // Startup
   // ---------------------------------------------------------------------------
 
-  // Starts a general-assistant conversation from the picker: no topic is
-  // brought into scope, the session runs in the general scope.
-  function startWithoutTopic(): void {
-    void createAndNavigate();
+  // Starts a session from the front door: the chosen scope comes into view
+  // with the composer open, and the first message creates the conversation
+  // there. Nothing is created until then, so an abandoned start leaves no
+  // empty session behind.
+  async function startSession(choice: { topicId: string | null; agentId: string | null }): Promise<void> {
+    try {
+      scopeGeneration += 1;
+      connectionStore.disconnect();
+      conversationStore.clearActiveConversation();
+      activeSurface = "conversation";
+      pendingStart = choice;
+      router.navigate("/");
+      await bringScopeIntoView(choice.topicId);
+    } catch (err) {
+      console.error("Failed to start a session:", err);
+    }
   }
 
-  // Back to the front door: no topic open, no conversation selected, so the
-  // recent-sessions list owns the body again.
+  // The front door's start control changed its scope: offer that scope's
+  // agents. The request is checked when it settles so a slow answer for an
+  // earlier choice never replaces a later one.
+  let startScopeGeneration = 0;
+  async function loadStartAgentDefinitions(topicId: string | null): Promise<void> {
+    const generation = ++startScopeGeneration;
+    try {
+      const definitions = await listEffectiveAgentDefinitions(topicId);
+      if (generation === startScopeGeneration) startAgentDefinitions = definitions;
+    } catch (error) {
+      if (generation === startScopeGeneration) startAgentDefinitions = [];
+      console.error("Failed to load agent definitions:", error);
+    }
+  }
+
+  async function createTopic(name: string): Promise<void> {
+    await topicStore.createTopic(name);
+    // Creating a topic is not opening it: the front door stays as it was,
+    // with the new topic offered in its selector.
+    topicStore.closeTopic();
+  }
+
+  // Back to the front door: no session in view, so the recent-sessions list
+  // owns the body again. The scope in view is left as it is — it is context
+  // for the next start, not a place the user was standing.
   function showRecentSessions(): void {
+    scopeGeneration += 1;
     connectionStore.disconnect();
     conversationStore.clearActiveConversation();
-    topicStore.closeTopic();
+    pendingStart = null;
     router.navigate("/");
-  }
-
-  // Called by TopicSelector when the user switches topics.
-  // Reloads the conversation list for the newly active topic and clears
-  // any cross-topic UI state (active conversation, WebSocket connection).
-  async function handleTopicChange(): Promise<void> {
-    try {
-      const topicId = topicStore.currentTopic?.id;
-      if (!topicId) return;
-
-      // Drop the WebSocket — it was bound to the previous topic's session.
-      connectionStore.disconnect();
-      // Drop the active conversation too: left in place, the old topic's
-      // conversation would keep rendering and the composer would send into it.
-      conversationStore.clearActiveConversation();
-      // Reset the URL so the router doesn't try to restore a stale conversation.
-      router.navigate("/");
-      // Load the new topic's conversations.
-      await conversationStore.loadConversations(topicId);
-      agentDefinitions = await listEffectiveAgentDefinitions(topicId);
-    } catch (err) {
-      console.error("Failed to switch topic:", err);
-    }
   }
 
   onMount(async () => {
     try {
-      // 1. Load the topic list and restore the last explicitly opened topic.
+      // 1. Load the topic list. No topic is restored as "open": the front
+      //    door is the recent-sessions list, and a session brings its own
+      //    scope into view when it is selected.
       await topicStore.loadTopics();
-      if (topicStore.currentTopic) {
-        await conversationStore.loadConversations(topicStore.currentTopic.id);
-      }
+      topicStore.closeTopic();
 
-      // 2. Fetch global model settings. Topic-scoped data (conversations,
-      //    scoped runtime state loads when a topic is opened — either via the
-      //    picker or by a deep-linked conversation that selects its topic.
+      // 2. Fetch global model settings. Scoped data (conversations, agent
+      //    definitions) loads when a session comes into view.
       try {
         await refreshModelCatalogue();
       } catch (error) {
@@ -430,15 +505,8 @@
       }
 
       // 3. Apply the URL. If it points at a conversation, selectAndNavigate
-      //    will bring its topic into scope along the way.
+      //    will bring its scope into view along the way.
       await router.init();
-      if (topicStore.currentTopic) {
-        try {
-          agentDefinitions = await listEffectiveAgentDefinitions(topicStore.currentTopic.id);
-        } catch (error) {
-          console.error("Failed to load agent definitions:", error);
-        }
-      }
     } catch {
       // Any failure here means the gateway is unreachable. Show a clear error
       // rather than a blank screen with no indication of what went wrong.
@@ -486,8 +554,11 @@
     {connectionStore}
     streamingStore={composerStreamingStore}
     {topicStore}
-    onTopicChange={handleTopicChange}
-    onStartWithoutTopic={startWithoutTopic}
+    {pendingStart}
+    onStartSession={(choice) => void startSession(choice)}
+    onCreateTopic={createTopic}
+    {startAgentDefinitions}
+    onStartScopeChange={(topicId) => void loadStartAgentDefinitions(topicId)}
     onOpenSessions={showRecentSessions}
     onRetry={handleRetry}
     {activeSurface}

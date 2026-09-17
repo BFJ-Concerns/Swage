@@ -432,6 +432,23 @@ describe("surfaces store", () => {
     expect(requestBody(fetchMock.mock.calls[2]).library_entry_id).toBeUndefined();
   });
 
+  it("adds a surface to a session it has not listed yet and shows it", async () => {
+    // The library page reached straight from a conversation: the store has
+    // no session yet, and the entry is added to the one in view.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("## Yesterday")))
+      .mockResolvedValueOnce(jsonResponse(listBody));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    const created = await store.createSurface(SESSION_ID, "Standup", ENTRY_ID);
+
+    expect(created?.id).toBe(PAGE_ID);
+    expect(store.activeSurface?.id).toBe(PAGE_ID);
+    expect(store.surfaces.map((surface) => surface.id)).toEqual([PAGE_ID]);
+  });
+
   it("saves the open surface to the library with its description and tags, then refreshes the catalogue", async () => {
     const saved = {
       id: "99999999-9999-4999-8999-999999999999",

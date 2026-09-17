@@ -5,4 +5,8 @@ export type ConversationResponse = { id: string,
  * The topic the session runs under; absent for a session started
  * without one, which runs in the general scope.
  */
-topic_id?: string, selected_model_id?: string, created_at: string, last_activity: string, };
+topic_id?: string,
+/**
+ * The agent definition the session runs under.
+ */
+agent_id: string, selected_model_id?: string, created_at: string, last_activity: string, };

@@ -222,6 +222,10 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_effective_agent_definitions),
         )
         .route(
+            "/api/agent-definitions",
+            get(handlers::list_general_agent_definitions),
+        )
+        .route(
             "/api/sessions/{session_id}/surfaces",
             get(surface::list_surfaces_handler).post(surface::create_surface_handler),
         )

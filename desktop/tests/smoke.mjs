@@ -24,15 +24,15 @@ function createConversationState(id, topicId) {
   };
 }
 
-function createMockGateway() {
-  const topic = {
-    id: "topic-default",
-    name: "Default",
-    description: "Smoke-test topic",
-    slug: "default",
-    created_at: "2026-04-17T12:00:00Z",
-  };
+const topic = {
+  id: "topic-default",
+  name: "Default",
+  description: "Smoke-test topic",
+  slug: "default",
+  created_at: "2026-04-17T12:00:00Z",
+};
 
+function createMockGateway() {
   const conversations = new Map();
   const socketsByConversation = new Map();
   const transportSockets = new Set();
@@ -43,6 +43,7 @@ function createMockGateway() {
       .sort((left, right) => right.last_activity.localeCompare(left.last_activity))
       .map((conversation) => ({
         id: conversation.id,
+        agent_id: "gateway",
         created_at: conversation.created_at,
         last_activity: conversation.last_activity,
         message_preview: conversation.messages.at(-1)?.content ?? null,
@@ -117,6 +118,31 @@ function createMockGateway() {
           last_activity: conversation.last_activity,
           automated: [],
         })),
+      });
+      return;
+    }
+
+    if (
+      request.method === "GET"
+      && (pathname === "/api/agent-definitions"
+        || pathname === `/api/topics/${topic.id}/agent-definitions`)
+    ) {
+      writeJson(response, 200, {
+        definitions: [
+          {
+            id: "gateway",
+            display_name: "Swage default",
+            description: "",
+            instructions: "",
+            model_id: null,
+            tool_permissions: null,
+            skills: [],
+            output_schema: null,
+            output_max_retries: null,
+            is_builtin: true,
+            source_scope: "built_in",
+          },
+        ],
       });
       return;
     }
@@ -196,6 +222,7 @@ function createMockGateway() {
       writeJson(response, 200, {
         id,
         topic_id: topic.id,
+        agent_id: "gateway",
         created_at: conversation.created_at,
         last_activity: conversation.last_activity,
       });
@@ -349,12 +376,11 @@ function createMockGateway() {
 }
 
 async function createConversationAndWaitForReply(page, expectedRuntimeText) {
-  const defaultTopic = page.getByRole("article", { name: "Topic Default" });
-  await defaultTopic
-    .getByRole("button", { name: "Preview topic Default", exact: true })
-    .click();
-  await defaultTopic.getByRole("button", { name: "Open", exact: true }).click();
-  await page.getByRole("button", { name: /\+ new conversation/i }).click();
+  // The front door: choose the topic on the start control and start a
+  // session there. Nothing is created until the first message.
+  const start = page.getByRole("region", { name: "Start a session" });
+  await start.getByRole("combobox", { name: "Topic" }).selectOption(topic.id);
+  await start.getByRole("button", { name: "Start", exact: true }).click();
   await page
     .getByPlaceholder("Send a message — Shift+Enter for a new line")
     .fill("Hello from smoke");

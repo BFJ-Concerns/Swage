@@ -306,7 +306,28 @@ pub async fn list_effective_agent_definitions(
     State(state): State<AppState>,
     Path(topic_id): Path<Uuid>,
 ) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
-    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), topic_id)
+    effective_agent_definitions_for_scope(&state, topic_id).await
+}
+
+/// `GET /api/agent-definitions` — the agent definitions a session started
+/// without a topic can run under: the global definitions and the built-in
+/// default, resolved against the general scope.
+pub async fn list_general_agent_definitions(
+    State(state): State<AppState>,
+) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
+    let general = state
+        .topic_store
+        .general_scope()
+        .await
+        .map_err(GatewayError::from)?;
+    effective_agent_definitions_for_scope(&state, general.id).await
+}
+
+async fn effective_agent_definitions_for_scope(
+    state: &AppState,
+    scope_id: Uuid,
+) -> Result<Json<EffectiveAgentDefinitionListResponse>, ApiError> {
+    let definitions = crate::service::effective_agent_definitions(state.storage.as_ref(), scope_id)
         .await?
         .into_iter()
         .map(effective_agent_definition_response)
@@ -1176,8 +1197,9 @@ pub async fn get_thread_detail(
 /// Query parameters for `GET /api/skills`.
 #[derive(Debug, Deserialize)]
 pub struct SkillsQueryParams {
-    /// ID of the topic to list skills for (required).
-    pub topic_id: Uuid,
+    /// The topic whose hierarchy to resolve skills against; absent resolves
+    /// the general scope, which has no topic layer.
+    pub topic_id: Option<Uuid>,
     /// Agent ID to include agent-level skills. When provided, the agent's
     /// directory is searched for a `skills/` folder.
     pub agent_id: Option<String>,
@@ -1190,8 +1212,9 @@ pub struct SkillsQueryParams {
 /// Returns 200 with `{ skills: [...] }`, sorted agent-first then alphabetically.
 ///
 /// Returns 404 if `topic_id` does not correspond to a known topic.
-/// Returns 400 if `topic_id` is missing or not a valid UUID (axum `Query`
-/// extractor enforces this automatically).
+/// Returns 400 if `topic_id` is not a valid UUID (axum `Query` extractor
+/// enforces this automatically). Without a `topic_id`, lists the general
+/// scope's skills: the global layer and the agent's own.
 ///
 /// When the Swage config root directory does not exist (e.g. on a fresh
 /// install or in a test environment without `SWAGE_HOME`), returns an empty
@@ -1202,17 +1225,21 @@ pub async fn list_skills(
 ) -> Result<Json<SkillListResponse>, ApiError> {
     use swage_config::HierarchyLevel;
 
-    // Verify the topic exists — return 404 for unknown IDs.
-    let topic = state
-        .topic_store
-        .get(params.topic_id)
-        .await
-        .map_err(|e| ApiError::from(GatewayError::Storage(e)))?
-        .ok_or({
-            ApiError::from(GatewayError::TopicNotFound {
-                id: params.topic_id,
-            })
-        })?;
+    // Verify the topic exists — return 404 for unknown IDs. No topic means
+    // the general scope.
+    let topic = match params.topic_id {
+        Some(topic_id) => state
+            .topic_store
+            .get(topic_id)
+            .await
+            .map_err(|e| ApiError::from(GatewayError::Storage(e)))?
+            .ok_or(ApiError::from(GatewayError::TopicNotFound { id: topic_id }))?,
+        None => state
+            .topic_store
+            .general_scope()
+            .await
+            .map_err(|e| ApiError::from(GatewayError::Storage(e)))?,
+    };
 
     // Skill discovery is best-effort beneath the root retained by this gateway.
     let root = state.config_root.clone();
@@ -1236,7 +1263,7 @@ pub async fn list_skills(
                 id: s.shipped.then(|| {
                     let shipped = crate::shipped_skills::find_by_name(&s.name)
                         .expect("shipped definition has a catalogue entry");
-                    crate::shipped_skills::id(params.topic_id, shipped.name)
+                    crate::shipped_skills::id(topic.id, shipped.name)
                 }),
                 name: s.name,
                 display_name: s.display_name,

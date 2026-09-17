@@ -346,6 +346,7 @@ mod tests {
             Json(serde_json::json!({
                 "id": conversation_id,
                 "topic_id": topic_id,
+                "agent_id": "gateway",
                 "created_at": Utc::now(),
                 "last_activity": Utc::now(),
             })),

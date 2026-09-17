@@ -235,6 +235,15 @@ default entries; `ConversationService` opens them in every new session of the
 topic. `topics.tags` (`UpdateTopicRequest.tags`) are the labels the
 `surface_library` tool narrows the catalogue by for a topic's sessions.
 
+A save or delete broadcasts `ServerEvent::LibraryUpdated { entry_id }` on
+the work-surface channel (`/api/work-surface/ws`), delivered like
+`surface_updated`: identity only, no content. The frontend's surfaces store
+answers it by refetching the catalogue, so the library page
+(`/library`, `SurfaceLibrary.svelte`) and the surfaces pane's picker show a
+new entry without a reload. From a session the page adds an entry through
+the ordinary create route and navigates to the new surface; from the front
+door (no session) it is read-only.
+
 ### Annotations
 
 Annotations are notes hung on individual modules of a surface, anchored at
@@ -244,13 +253,24 @@ module grain — there is no per-surface or intra-module positioning.
 displaced text survives in the surface's provenance trail.
 
 Deleting an annotation returns `DeleteSurfaceAnnotationResponse { deleted:
-true }`. The delete is permanent — there is no soft-delete or archive.
+true }`. The delete is permanent — there is no soft-delete or archive. The
+surfaces pane (`SurfacesPane.svelte`) exposes create, update
+(`store.updateAnnotation` → `PUT /api/surface-annotations/{id}`) and delete.
+
+### Surface addresses
+
+`/conversations/{id}/surfaces/{surface_id}` (`Route.surfaceId`;
+`conversationPath(id, surfaceId)` in `router.ts`) addresses an open surface.
+`SurfacesPane` opens the routed surface once the session's list is loaded
+and reports the surface the user opens (`onOpenSurface`) so the shell keeps
+the URL in step; a deep link or Back restores the surface with the session.
 
 ### Work-surface reconnect
 
 When a WebSocket connection to a surface's work surface drops and reconnects,
 the frontend refetches the surface state to pick up any writes that landed
-while disconnected.
+while disconnected. `library_updated` rides the same channel and refetches
+the catalogue.
 
 ## Delivery targets
 
@@ -443,11 +463,13 @@ budget.
 ## Client-side route preservation
 
 The SPA router (`frontend/src/lib/router.ts`) is framework-free: `parseRoute`
-pattern-matches the URL; `createRouter` manages `pushState` navigation and
-`popstate` listening.
+pattern-matches the URL (`/`, `/conversations/{id}`,
+`/conversations/{id}/surfaces/{surface_id}`, `/library`,
+`/workflow-runs/{id}`, `/settings/...`, `/settings/topic/{slug}/...`);
+`createRouter` manages `pushState` navigation and `popstate` listening.
 
-`applyLocation()` (`router.ts:130`) runs on every URL change. When the URL
-contains a conversation ID:
+`applyLocation()` runs on every URL change. When the URL contains a
+conversation ID:
 
 - **Already active:** calls `checkConversationExists` — a lightweight `GET`
   that confirms the conversation exists without re-fetching it. On 404,
@@ -457,14 +479,21 @@ contains a conversation ID:
 - **Different conversation:** calls `selectConversation`, which fully loads
   it. On 404, falls back to root. On other errors, the error propagates.
 
-The `conversationStore` dependency is injected as a four-member interface
-(`router.ts:47`), wired in `App.svelte:170`. `clearActiveConversation`
-disconnects the WebSocket before clearing the store, preventing orphaned
-connections.
+The `conversationStore` dependency is injected as a four-member interface,
+wired in `App.svelte`. `clearActiveConversation` disconnects the WebSocket
+before clearing the store, preventing orphaned connections.
 
 Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial surface
-loads alike.
+loads alike. When a scope was in view, `App.svelte` keeps a pending start in
+it (the composer stays open; the next message creates a session there);
+otherwise the front door serves.
+
+Session creation is fenced against a scope change: `createAndNavigate`
+captures a scope generation before the request and hands the store a
+`shouldInstall` check, so a session created for one scope is neither listed
+nor activated once the user has moved to another (it exists in the scope it
+was asked for, and the recent list finds it).
 
 ## Gateway tools
 

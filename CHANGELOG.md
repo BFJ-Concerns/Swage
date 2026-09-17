@@ -6,6 +6,10 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- The web UI's front door is the recent-sessions list with a **New session** control beneath it: choose a topic or none and the agent to run under, and the composer opens in that scope — the first message creates the conversation, so an abandoned start leaves nothing behind. The topic picker and the top-bar topic switcher are gone; a session's topic (or **General**) is named in the top bar and links to the topic's settings page, which now carries the topic's description, workspace relinking and deletion alongside its workspaces, default surfaces, tags and sessions. Every topic is listed in the settings sections.
+- The shared surface library has its own page (`/library`), reachable from the top bar, the front door and the surfaces pane, where entries are filtered, added to the open session, and removed. Saving or removing an entry broadcasts `library_updated` on the work-surface channel, so open catalogues refresh without a reload.
+- An open surface has an address (`/conversations/{id}/surfaces/{surface_id}`): surfaces can be linked to and restored with the browser's back button. Notes on a module can be edited in place.
+- Conversation reads (`ConversationResponse`, `ConversationSummary`, `ConversationDetail`) carry the `agent_id` the session runs under. `GET /api/agent-definitions` lists the definitions a session without a topic can run under, and `GET /api/skills` without `topic_id` resolves the general scope's skills.
 - The web UI opens to a recent-sessions list across every topic and the general scope, ordered by the latest user or assistant message, with a topic filter (**All sessions** by default) and an archived view; automated sessions — schedule runs, workflow workers, delegated children — are grouped beneath the conversation or schedule that caused them. Every session records its origin, and workflow runs record the session that dispatched them (`GET /api/sessions`).
 - Sessions with no user or assistant message for a configurable number of days (`[sessions] archive_after_days`, default 7, set under Settings → Automation) are archived out of the recent list. Only a session with a turn executing is exempt; a new turn on an archived session returns it, and archiving cancels nothing.
 
@@ -18,6 +22,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Starting a session and moving to another scope before the gateway answers no longer activates the late session where the user now stands; it exists in the scope it was asked for and the recent list finds it.
+- The top bar and the two-column surfaces wrap and stack on phone-sized viewports instead of clipping at the right edge, so every control stays reachable.
 - A topic's default working folder and an explicitly selected workspace now pass the same trust gate as every other attachment: an untrusted selection grants no file access, and revoking trust removes the access it granted while leaving its configured permissions in place.
 - `gateway restart` now tells a restart that failed after stopping the gateway apart from one refused before it, so the caller knows whether a running gateway was lost.
 - The event-posting tool now names the event kind and payload shape an assembly decision accepts, including each finding disposition's fields and values; its previous example led a lead to post an answer the hold ignored.

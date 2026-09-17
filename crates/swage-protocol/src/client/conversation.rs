@@ -49,6 +49,8 @@ pub struct ConversationResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub topic_id: Option<Uuid>,
+    /// The agent definition the session runs under.
+    pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,
@@ -59,6 +61,8 @@ pub struct ConversationResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 pub struct ConversationSummary {
     pub id: Uuid,
+    /// The agent definition the session runs under.
+    pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,
@@ -76,6 +80,8 @@ pub struct ConversationDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub topic_id: Option<Uuid>,
+    /// The agent definition the session runs under.
+    pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_model_id: Option<String>,

@@ -1,34 +1,34 @@
 ---
-description: End-to-end walkthrough of a first session — opening a topic, optionally attaching and trusting a workspace, and starting a conversation with a chosen agent
+description: End-to-end walkthrough of a first session — starting a session with or without a topic, optionally attaching and trusting a workspace, and choosing the agent it runs under
 ---
 
 # First session
 
 The [README](../README.md) covers building, starting, and configuring the
 gateway. Once it is running with at least one provider configured, the web
-UI is where the first session begins. A first session needs only an opened
-topic — attaching a workspace and trusting it are optional steps that give
-agents file access and project guidance, but a conversation can start
-without either.
+UI is where the first session begins. A first session needs nothing else —
+a topic, a workspace attached to it, and trust in that workspace are
+optional steps that give agents their own memory, file access and project
+guidance, but a conversation can start without any of them.
 
-## Open a topic
+## The front door
 
 Opening the web UI presents the recent-sessions list — every session across
-every topic and the general scope, newest message first — with the topic
-cards beneath it. **All sessions** is the default view; the topic buttons
-narrow the list to one topic without opening it, and **Archived** shows the
-sessions the inactivity sweep has hidden. Automated sessions (a schedule's
-runs, a workflow's workers, delegated children) sit beneath the conversation
-or schedule that caused them, each still its own session. Select any entry
-to resume it; **All sessions** in the top bar returns here.
+every topic and the general scope, newest message first. **All sessions** is
+the default view; the topic buttons narrow the list to one topic without
+changing anything else, and **Archived** shows the sessions the inactivity
+sweep has hidden. Automated sessions (a schedule's runs, a workflow's
+workers, delegated children) sit beneath the conversation or schedule that
+caused them, each still its own session. Select any entry to resume it with
+its conversation and surfaces; **All sessions** in the top bar returns here.
 
-A fresh install has no topics: a conversation started without one runs as a
-general assistant in the general scope, with general memory and the general
-knowledge base, and inherits nothing from any topic. Create a topic from the
-cards when work should keep its own memory, attached workspaces and
-configuration; click a card to preview it (its name, last-opened time,
-conversation count, and any attached workspaces appear below the grid), then
-click **Open** to enter it.
+Beneath the list is the **New session** control. Choose a topic from its
+selector, or leave it at **No topic — general assistant**; choose the agent
+the session should run under (the operator's default is preselected); then
+click **Start**. The composer opens in that scope, and the first message
+creates the conversation there. Nothing is created until then, so a start
+you walk away from leaves no empty session behind. **+ New topic** beside
+the selector creates a topic without starting anything.
 
 Sessions nobody has spoken in for seven days leave the recent list. The
 delay is set under **Settings → Automation → Session archiving**. Only a
@@ -36,14 +36,25 @@ session with a turn executing stays regardless of age; a new turn on an
 archived session brings it back, and archiving cancels nothing and blocks no
 scheduled continuation.
 
-A topic is an isolated working area: it holds its own conversations,
-agents, instructions, skills, and workspace attachments. The general scope
-is not a topic — it is never listed, and cannot be opened or deleted.
+## Topics
+
+A topic is optional shared context: its own memory and knowledge base, its
+attached workspaces, and its configuration, applied to every session started
+in it. A session started without one is a fully usable general assistant in
+the general scope — general memory, the general knowledge base, the ordinary
+granted tools — and inherits nothing from any topic, least of all the last
+one used. The general scope is not a topic: it is never listed, and cannot
+be opened or deleted.
+
+The top bar names the session's topic (or **General**). Clicking a topic's
+name opens its settings page, where its description, workspaces, default
+surfaces, tags and sessions are managed; every topic is also listed in the
+**Settings** sections.
 
 ## Attach a workspace
 
-Inside the topic, click **Settings** in the top navigation bar. The
-settings panel opens with several section tabs; click **Workspaces**.
+Open the topic's settings — click its name in the top bar, or choose it
+under **Settings** — and click the **Workspaces** tab.
 
 The workspaces section shows an empty list and a path field. Type the
 path to the repository directory you want this topic to work with — for
@@ -88,17 +99,22 @@ topic entirely.
 
 ## Start a conversation
 
-The message input area at the bottom of the topic includes an agent picker
-alongside the text field. The picker is available whenever there is no
-active conversation in the opened topic. It lists the topic's effective
-agent definitions — the shipped default (**Swage default**) plus any
-operator-authored definitions visible to the topic. Select an agent, type a
-message, and submit: the gateway creates the conversation bound to that
-agent definition and navigates to it immediately.
+The agent picker appears on the front door's **New session** control and,
+once a session has started, in the composer's toolbar until the first
+message is sent. It lists the scope's effective agent definitions — the
+shipped default (**Swage default**) plus any operator-authored definitions
+visible to the topic, or the global ones for a session without a topic.
+Select an agent, type a message, and submit: the gateway creates the
+conversation bound to that agent definition and navigates to it immediately.
+The agent a session runs under is part of every conversation read, so the
+governing definition is visible before the first message.
 
 If only the shipped default is available (a fresh install with no
 operator-authored definitions), the picker has one entry and the choice is
 automatic.
+
+**+ New** in the conversation list or the channel's session bar starts
+another session in the same scope with the agent currently picked.
 
 [Agents and permissions](agents-and-permissions.md#what-agents-are-available)
 covers what the registry contains and how topic-scoped definitions shadow

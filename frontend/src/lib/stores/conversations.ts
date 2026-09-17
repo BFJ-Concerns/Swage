@@ -16,8 +16,17 @@ export interface ConversationStore {
   selectConversation(id: string): Promise<void>;
   // topicId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
-  // threading topicId through every intermediate component.
-  createConversation(topicId?: string | null, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): Promise<void>;
+  // threading topicId through every intermediate component. `shouldInstall`
+  // is asked once the gateway has answered: when it says no, the created
+  // session is neither listed nor activated here — the caller has moved on,
+  // and the session waits in its own scope's records.
+  createConversation(
+    topicId?: string | null,
+    selectedModelId?: string | null,
+    agentId?: string | null,
+    effort?: import("../protocol/Effort").Effort | null,
+    shouldInstall?: () => boolean,
+  ): Promise<void>;
   deleteConversation(id: string): Promise<void>;
   // Drops the active conversation without touching the server — used when the
   // selected topic changes so a conversation from the old topic can't linger
@@ -181,15 +190,17 @@ export function createConversationStore(): ConversationStore {
       }
     },
 
-    async createConversation(topicId, selectedModelId, agentId, effort) {
+    async createConversation(topicId, selectedModelId, agentId, effort, shouldInstall) {
       // No topic means the general scope: the gateway creates the session
       // there and reports no topic on it.
       const resp = await api.createConversation(topicId ?? null, selectedModelId, agentId, effort);
+      if (shouldInstall && !shouldInstall()) return;
 
       // Build the detail object locally — avoids an extra round-trip.
       const detail: ConversationDetail = {
         id: resp.id,
         topic_id: resp.topic_id ?? undefined,
+        agent_id: resp.agent_id,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
@@ -199,6 +210,7 @@ export function createConversationStore(): ConversationStore {
       // Build the summary for the list. The new conversation has no messages yet.
       const summary: ConversationSummary = {
         id: resp.id,
+        agent_id: resp.agent_id,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,

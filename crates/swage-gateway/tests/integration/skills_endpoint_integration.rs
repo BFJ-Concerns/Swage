@@ -176,6 +176,24 @@ async fn known_topic_fresh_config_root_returns_shipped_catalogue() {
     assert!(skills.iter().all(|skill| skill["id"].as_str().is_some()));
 }
 
+/// Without a topic the listing resolves the general scope: the shipped
+/// catalogue and the global layer, with no topic layer to consult. A session
+/// started without a topic sees exactly this set.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_topic_lists_the_general_scopes_skills() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("fresh-swage-root");
+    std::fs::create_dir(&root).unwrap();
+    let (router, _storage) = make_router(&root);
+
+    let (status, body) = get(&router, "/api/skills").await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let skills = body["skills"].as_array().expect("skills array");
+    assert_eq!(skills.len(), 7, "the general scope offers the shipped set");
+    assert!(skills.iter().all(|skill| skill["level"] == "global"));
+}
+
 /// Skills at global level appear with level="global".
 #[tokio::test(flavor = "multi_thread")]
 async fn global_skills_appear_in_listing() {

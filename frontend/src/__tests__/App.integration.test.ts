@@ -185,6 +185,7 @@ function makeConversationSummary(
 ): ConversationSummary {
   return {
     id: "conv-1",
+    agent_id: "gateway",
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
     message_preview: "Earlier message",
@@ -198,6 +199,7 @@ function makeConversationDetail(
 ): ConversationDetail {
   return {
     id: "conv-1",
+    agent_id: "gateway",
     topic_id: "proj-default",
     created_at: "2026-04-07T12:00:00Z",
     last_activity: "2026-04-07T12:00:00Z",
@@ -357,25 +359,23 @@ function setPath(path: string): void {
 }
 
 /**
- * Open a topic from the picker. Swage lands on the topic picker on entry, so
- * tests that need a topic open must go through it. Clicking a card's Open
- * button triggers `openTopic` in TopicPicker.
+ * Start a session from the front door. Swage lands on the recent-sessions
+ * list; a test that needs the shell open in a topic's scope starts a session
+ * there — nothing is created until the first message, so the composer is
+ * open with the topic in view.
  */
-async function openTopicFromPicker(name: string): Promise<void> {
-  const card = Array.from(
-    document.querySelectorAll<HTMLElement>(".topic-card"),
-  ).find((el) => el.textContent?.includes(name));
-
-  if (!card) {
-    throw new Error(`Topic card with name "${name}" not found in picker`);
-  }
-
-  const openBtn = card.querySelector<HTMLButtonElement>(".open-btn");
-  if (!openBtn) {
-    throw new Error(`Open button missing on topic card "${name}"`);
-  }
-
-  flushSync(() => openBtn.click());
+async function startSessionInTopic(topicId: string | null): Promise<void> {
+  const topicSelect = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]');
+  if (!topicSelect) throw new Error("the session-start control is not on screen");
+  flushSync(() => {
+    topicSelect.value = topicId ?? "";
+    topicSelect.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  const start = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('[aria-label="Start a session"] button'),
+  ).find((button) => button.textContent?.trim() === "Start");
+  if (!start) throw new Error("the Start button is not on screen");
+  flushSync(() => start.click());
   await settleUi();
 }
 
@@ -417,19 +417,99 @@ describe("App", () => {
     localStorage.clear();
   });
 
-  it("opens the persisted topic and loads its conversations on reload", async () => {
+  it("opens to the front door regardless of a previously open topic", async () => {
     const restoredTopic = makeTopic({ id: "proj-restored", name: "Restored" });
     localStorage.setItem("swage:active-topic", restoredTopic.id);
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic(), restoredTopic]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
-      makeConversationSummary({ id: "conv-restored", message_preview: "Restored work" }),
-    ]);
 
     component = mount(App, { target: document.body });
-    await waitForText("Restored work");
+    await settleUi();
 
-    expect(conversationsApi.listConversations).toHaveBeenCalledWith("proj-restored");
-    expect(document.body.textContent).not.toContain("Choose where to work");
+    // Sessions are the front door: no topic's conversations are loaded
+    // until a session brings its scope into view.
+    expect(conversationsApi.listConversations).not.toHaveBeenCalled();
+    expect(document.querySelector('[aria-label="Recent sessions"]')).not.toBeNull();
+    expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
+  });
+
+  it("starts a general-assistant session from the front door and creates it on the first message", async () => {
+    const created: ConversationResponse = {
+      id: "conv-general",
+      agent_id: "gateway",
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    };
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(null);
+
+    // The shell opens in the general scope with the composer, and nothing
+    // has been created yet.
+    expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain("General");
+    expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(null);
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "Hello, general assistant";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => (document.querySelector<HTMLButtonElement>(".action.send")!).click());
+    await settleUi();
+
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(null, null, null, null);
+    expect(window.location.pathname).toBe("/conversations/conv-general");
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-general");
+  });
+
+  it("keeps a session created for one scope out of the scope the user moved to meanwhile", async () => {
+    const topic = makeTopic();
+    let resolveCreation: (value: ConversationResponse) => void = () => {};
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([topic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    vi.mocked(conversationsApi.createConversation).mockReturnValueOnce(
+      new Promise<ConversationResponse>((resolve) => {
+        resolveCreation = resolve;
+      }),
+    );
+
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(topic.id);
+
+    // The first message starts creating a session in the topic...
+    const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
+    flushSync(() => {
+      textarea!.value = "Start in the topic";
+      textarea!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => (document.querySelector<HTMLButtonElement>(".action.send")!).click());
+    await settleUi();
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(topic.id, null, null, null);
+
+    // ...and the user leaves for the front door before it settles.
+    const allSessions = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "All sessions");
+    flushSync(() => allSessions!.click());
+    await settleUi();
+
+    resolveCreation({
+      id: "conv-late",
+      agent_id: "gateway",
+      topic_id: topic.id,
+      created_at: "2026-04-07T12:03:00Z",
+      last_activity: "2026-04-07T12:03:00Z",
+    });
+    await settleUi();
+
+    // The late session is not activated where the user now stands.
+    expect(window.location.pathname).toBe("/");
+    expect(websocketHarness.clientFor("conv-late")).toBeUndefined();
+    expect(document.querySelector('[aria-label="Recent sessions"]')).not.toBeNull();
   });
 
   it("opens to the recent-sessions list and resumes a session from it", async () => {
@@ -466,8 +546,8 @@ describe("App", () => {
     component = mount(App, { target: document.body });
     await waitForText("Pick up where we left off");
     expect(sessionsApi.listRecentSessions).toHaveBeenCalledWith(null, false);
-    // Both the recent list and the topic cards are on the front door.
-    expect(document.body.textContent).toContain("Choose where to work");
+    // The recent list and the session-start control share the front door.
+    expect(document.querySelector('[aria-label="Start a session"]')).not.toBeNull();
 
     const row = document.querySelector<HTMLButtonElement>(".recent-sessions .row.source");
     if (!row) throw new Error("recent session row missing");
@@ -477,7 +557,8 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/conversations/conv-recent");
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-recent");
     expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultTopic.id);
-    expect(document.body.textContent).not.toContain("Choose where to work");
+    expect(document.querySelector('[aria-label="Start a session"]')).toBeNull();
+    expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain(defaultTopic.name);
   });
 
   it("connects exactly once when popstate selects a different conversation", async () => {
@@ -608,7 +689,7 @@ describe("App", () => {
       "Conversation not found",
     );
     expect(websocketHarness.clientFor("stale-id")).toBeUndefined();
-    await openTopicFromPicker("default");
+    await startSessionInTopic("proj-default");
     expect(
       document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
     ).not.toBeNull();
@@ -633,6 +714,7 @@ describe("App", () => {
     const deletedConversation = makeConversationSummary({ id: "deleted-id" });
     const replacementConversation: ConversationResponse = {
       id: "replacement-id",
+      agent_id: "gateway",
       topic_id: "proj-default",
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -908,7 +990,7 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    await openTopicFromPicker(defaultTopic.name);
+    await startSessionInTopic(defaultTopic.id);
 
     const selectButton = document.querySelector<HTMLButtonElement>(
       ".conversation-select-btn",
@@ -940,9 +1022,9 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // The app lands on the topic picker — open the default topic so the
-    // shell navigation and its runtime context render.
-    await openTopicFromPicker("default");
+    // The app lands on the front door — start a session so the shell
+    // navigation and its runtime context render.
+    await startSessionInTopic("proj-default");
 
     const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
@@ -952,6 +1034,7 @@ describe("App", () => {
     const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-new",
+      agent_id: "gateway",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -974,8 +1057,8 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    // Open the topic so ConversationList (and its "New" button) renders.
-    await openTopicFromPicker(defaultTopic.name);
+    // Start a session in the topic so ConversationList (and its "New" button) renders.
+    await startSessionInTopic(defaultTopic.id);
 
     const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
     expect(newButton).not.toBeNull();
@@ -1000,12 +1083,14 @@ describe("App", () => {
     const existing = makeConversationSummary({ id: "conv-existing" });
     const createdFromChannel: ConversationResponse = {
       id: "conv-channel-new",
+      agent_id: "gateway",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
     const createdFromSidebar: ConversationResponse = {
       id: "conv-sidebar-new",
+      agent_id: "gateway",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:04:00Z",
       last_activity: "2026-04-07T12:04:00Z",
@@ -1066,6 +1151,7 @@ describe("App", () => {
     const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-auto",
+      agent_id: "gateway",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1077,7 +1163,7 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    await openTopicFromPicker(defaultTopic.name);
+    await startSessionInTopic(defaultTopic.id);
 
     const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
     expect(textarea).not.toBeNull();
@@ -1099,6 +1185,7 @@ describe("App", () => {
     const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-agent",
+      agent_id: "gateway",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1118,7 +1205,7 @@ describe("App", () => {
 
     component = mount(App, { target: document.body });
     await settleUi();
-    await openTopicFromPicker(defaultTopic.name);
+    await startSessionInTopic(defaultTopic.id);
 
     const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
     expect(picker).not.toBeNull();
@@ -1718,7 +1805,7 @@ describe("App", () => {
     );
     component = mount(App, { target: document.body });
     await settleUi();
-    await openTopicFromPicker(defaultTopic.name);
+    await startSessionInTopic(defaultTopic.id);
 
     const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
     const operatorButton = Array.from(
@@ -1740,7 +1827,7 @@ describe("App", () => {
     expect(document.body.textContent).toContain("Local device");
   });
 
-  it("shows missing topic workspaces and relinks them before opening", async () => {
+  it("shows missing topic workspaces in the topic's settings and relinks them", async () => {
     const defaultTopic = makeTopic({ name: "Topic" });
     const missingWorkspace = makeWorkspaceAttachment({ is_missing: true });
     const relinkedWorkspace = makeWorkspaceAttachment({
@@ -1757,18 +1844,8 @@ describe("App", () => {
     vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValueOnce(undefined);
     vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(relinkedWorkspace);
 
+    setPath("/settings/topic/default/workspaces");
     component = mount(App, { target: document.body });
-    await settleUi();
-
-    const card = Array.from(
-      document.querySelectorAll<HTMLElement>(".topic-card"),
-    ).find((el) => el.textContent?.includes(defaultTopic.name));
-    expect(card).toBeDefined();
-    // Preview/selection is triggered by the topic-name button, not the card
-    // container (UI audit f-2 — card is no longer a single interactive widget).
-    const nameBtn = card!.querySelector<HTMLButtonElement>(".topic-name-btn");
-    expect(nameBtn).toBeDefined();
-    flushSync(() => nameBtn!.click());
     await waitForText("Missing folder");
 
     const relinkInput = document.querySelector<HTMLInputElement>(
@@ -1785,7 +1862,7 @@ describe("App", () => {
     ).find((button) => button.textContent?.includes("Relink"));
     expect(relinkButton).toBeDefined();
     flushSync(() => relinkButton!.click());
-    await waitForText("Workspace relinked.");
+    await settleUi();
 
     expect(topicsApi.detachTopicWorkspace).toHaveBeenCalledWith(
       defaultTopic.id,

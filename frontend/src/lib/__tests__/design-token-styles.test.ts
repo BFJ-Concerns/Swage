@@ -15,8 +15,9 @@ import operatorDashboard from "../components/OperatorDashboard.svelte?raw";
 import operatorHistoryPane from "../components/OperatorHistoryPane.svelte?raw";
 import scheduleAutomationPanel from "../components/ScheduleAutomationPanel.svelte?raw";
 import topicOperations from "../components/TopicOperations.svelte?raw";
-import topicPicker from "../components/TopicPicker.svelte?raw";
-import topicSelector from "../components/TopicSelector.svelte?raw";
+import sessionStart from "../components/SessionStart.svelte?raw";
+import surfaceLibrary from "../components/SurfaceLibrary.svelte?raw";
+import recentSessions from "../components/RecentSessions.svelte?raw";
 import toolCallDisplay from "../components/ToolCallDisplay.svelte?raw";
 import turnContextInspector from "../components/TurnContextInspector.svelte?raw";
 import displayPreferences from "../components/settings/DisplayPreferencesSettingsPanel.svelte?raw";
@@ -37,8 +38,9 @@ const RETINTED_COMPONENTS = {
   OperatorHistoryPane: operatorHistoryPane,
   ScheduleAutomationPanel: scheduleAutomationPanel,
   TopicOperations: topicOperations,
-  TopicPicker: topicPicker,
-  TopicSelector: topicSelector,
+  SessionStart: sessionStart,
+  SurfaceLibrary: surfaceLibrary,
+  RecentSessions: recentSessions,
   ToolCallDisplay: toolCallDisplay,
   TurnContextInspector: turnContextInspector,
   DisplayPreferencesSettingsPanel: displayPreferences,

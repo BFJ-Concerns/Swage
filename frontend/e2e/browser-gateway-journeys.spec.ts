@@ -78,16 +78,25 @@ async function listConcurrentSuite(): Promise<void> {
   if (code !== 0) throw new Error(`Concurrent suite listing failed (${code}):\n${output}`);
 }
 
+/**
+ * From the front door, start a session in the general scope: the composer
+ * opens and the first message creates the conversation. A page already in
+ * a session (the composer visible) is left where it is.
+ */
 async function openComposer(page: Page): Promise<void> {
-  const openTopic = page.getByRole("button", { name: "Open" });
-  if (await openTopic.isVisible()) await openTopic.click();
-  await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+  const composer = page.getByRole("textbox", { name: "Message" });
+  if (!(await composer.isVisible())) {
+    await page
+      .getByRole("region", { name: "Start a session" })
+      .getByRole("button", { name: "Start", exact: true })
+      .click();
+  }
+  await expect(composer).toBeVisible();
 }
 
 async function send(page: Page, prompt: string): Promise<void> {
   await page.goto("/");
-  const openTopic = page.getByRole("button", { name: "Open" });
-  if (await openTopic.isVisible()) await openTopic.click();
+  await openComposer(page);
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeEnabled();
   await composer.fill(prompt);
@@ -287,7 +296,7 @@ test("renders the dark-theme status badge and controlled provider error", async 
   await expect(connectedBadge).toBeVisible();
   await expect(connectedBadge).toHaveCSS("background-color", "rgb(255, 248, 238)");
 
-  await page.getByRole("button", { name: "Conversation" }).click();
+  await page.getByRole("button", { name: "Conversation", exact: true }).click();
   await send(page, "controlled provider failure");
   const error = page.getByRole("alert");
   await expect(error).toContainText("Controlled provider failure");

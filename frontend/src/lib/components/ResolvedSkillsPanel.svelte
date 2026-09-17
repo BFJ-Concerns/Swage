@@ -27,7 +27,6 @@
     skills = [];
     selectedName = "";
     error = null;
-    if (!currentTopicId) return;
     loading = true;
     void listSkills(currentTopicId)
       .then((loaded) => {
@@ -58,14 +57,12 @@
 </script>
 
 <section class="catalogue" aria-label={listLabel}>
-  {#if !topicId}
-    <p class="empty">Select a topic to inspect its {isCommands ? "available commands" : "resolved skills"}.</p>
-  {:else if loading}
+  {#if loading}
     <p class="loading">Loading {resourceName}…</p>
   {:else if error}
     <p class="error" role="alert">{error}</p>
   {:else if skills.length === 0}
-    <p class="empty">No {resourceName} are available for this topic.</p>
+    <p class="empty">No {resourceName} are available for this {topicId ? "topic" : "scope"}.</p>
   {:else}
     <div class="catalogue-list" role="list" aria-label={listLabel}>
       {#each skills as skill (skill.name)}

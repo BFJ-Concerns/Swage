@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { ApiError } from "../api/error";
 import { createRouter, parseRoute } from "../router";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/")).toEqual({
       path: "/",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: null,
@@ -40,6 +43,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/conversations/abc-123")).toEqual({
       path: "/conversations/abc-123",
       conversationId: "abc-123",
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: null,
@@ -52,6 +57,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/workflow-runs/run-42")).toEqual({
       path: "/workflow-runs/run-42",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: "run-42",
       settingsTab: null,
       settingsTopicSlug: null,
@@ -64,6 +71,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/other/path")).toEqual({
       path: "/",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: null,
@@ -76,6 +85,8 @@ describe("parseRoute", () => {
     expect(parseRoute("")).toEqual({
       path: "/",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: null,
@@ -88,6 +99,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/workflow-runs/run-9")).toEqual({
       path: "/workflow-runs/run-9",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: "run-9",
       settingsTab: null,
       settingsTopicSlug: null,
@@ -100,6 +113,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/generation")).toEqual({
       path: "/settings/generation",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: "generation",
       settingsTopicSlug: null,
@@ -121,6 +136,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/topic/research/workspaces")).toEqual({
       path: "/settings/topic/research/workspaces",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: "research",
@@ -130,6 +147,8 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/topic/research/surfaces")).toEqual({
       path: "/settings/topic/research/surfaces",
       conversationId: null,
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: "research",
@@ -218,6 +237,29 @@ describe("navigate", () => {
 // ---------------------------------------------------------------------------
 
 describe("popstate", () => {
+  it.each([
+    ["a missing conversation", new ApiError(404, "not_found", "conversation x not found")],
+    ["an id the gateway cannot parse", new ApiError(422, "validation_error", "Invalid URL")],
+  ])("falls back to the root with a notice for %s", async (_label, failure) => {
+    window.history.replaceState(null, "", "/conversations/not-an-id");
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: null,
+        checkConversationExists: async () => {},
+        clearActiveConversation: vi.fn(),
+        selectConversation: async () => {
+          throw failure;
+        },
+      },
+    });
+
+    await router.init();
+
+    expect(router.currentRoute.notFound).toBe(true);
+    expect(router.currentRoute.path).toBe("/");
+    expect(window.location.pathname).toBe("/");
+  });
+
   it("ignores a stale 404 from an earlier non-active selection after newer navigation", async () => {
     window.history.replaceState(null, "", "/conversations/active-conv");
     let popstateHandler: EventListener | null = null;
@@ -385,6 +427,8 @@ describe("init with conversation store", () => {
     expect(router.currentRoute).toEqual({
       path: "/conversations/new-conv",
       conversationId: "new-conv",
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: null,
@@ -429,6 +473,8 @@ describe("init with conversation store", () => {
     expect(router.currentRoute).toEqual({
       path: "/conversations/second-conv",
       conversationId: "second-conv",
+      surfaceId: null,
+      library: false,
       workflowRunId: null,
       settingsTab: null,
       settingsTopicSlug: null,

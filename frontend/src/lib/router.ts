@@ -3,6 +3,8 @@
 // Manages browser history and maps URLs to active conversation state.
 // This is a minimal SPA router — no framework dependency needed.
 
+import { ApiError } from "./api/error";
+
 // Settings sub-surfaces reachable from the overlay nav. Providers, agents,
 // generation presets, automation, recovery, and display are wired; the
 // remainder are rendered as non-functional shells until backends exist.
@@ -26,6 +28,11 @@ export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surface
 export interface Route {
   path: string;
   conversationId: string | null;
+  // Set with `conversationId` when the URL names one of the session's
+  // surfaces, so a surface is a place the address bar can point at.
+  surfaceId: string | null;
+  // Set when the URL is the shared surface library's catalogue.
+  library: boolean;
   // Set when the URL names a workflow run, so the run's recorded journal
   // and terminal account can be read back on its own surface.
   workflowRunId: string | null;
@@ -35,6 +42,21 @@ export interface Route {
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
+}
+
+// The route every pattern starts from: the front door, nothing selected.
+function rootRoute(pathname = "/", notFound = false): Route {
+  return {
+    path: pathname,
+    conversationId: null,
+    surfaceId: null,
+    library: false,
+    workflowRunId: null,
+    settingsTab: null,
+    settingsTopicSlug: null,
+    settingsTopicTab: null,
+    notFound,
+  };
 }
 
 export interface Router {
@@ -66,34 +88,30 @@ export interface RouterOptions {
  * Derive a Route from a URL pathname.
  *
  * Recognised patterns:
- *   /                       → root, no active conversation
- *   /conversations/:id      → load conversation with that ID
- *   /workflow-runs/:id      → read back that run's record and terminal account
- *   anything else           → treated as root (unrecognised paths get SPA fallback)
+ *   /                                   → root, no active conversation
+ *   /conversations/:id                  → load conversation with that ID
+ *   /conversations/:id/surfaces/:sid    → that conversation with one of its surfaces open
+ *   /library                            → the shared surface library's catalogue
+ *   /workflow-runs/:id                  → read back that run's record and terminal account
+ *   anything else                       → treated as root (unrecognised paths get SPA fallback)
  */
 export function parseRoute(pathname: string): Route {
-  const match = pathname.match(/^\/conversations\/([^/]+)$/);
+  const match = pathname.match(/^\/conversations\/([^/]+)(?:\/surfaces\/([^/]+))?$/);
   if (match) {
     return {
-      path: pathname,
+      ...rootRoute(pathname),
       conversationId: match[1],
-      workflowRunId: null,
-      settingsTab: null,
-      settingsTopicSlug: null,
-      settingsTopicTab: null,
-      notFound: false,
+      surfaceId: match[2] === undefined ? null : decodeURIComponent(match[2]),
     };
+  }
+  if (pathname === "/library") {
+    return { ...rootRoute(pathname), library: true };
   }
   const workflowRunMatch = pathname.match(/^\/workflow-runs\/([^/]+)$/);
   if (workflowRunMatch) {
     return {
-      path: pathname,
-      conversationId: null,
+      ...rootRoute(pathname),
       workflowRunId: decodeURIComponent(workflowRunMatch[1]),
-      settingsTab: null,
-      settingsTopicSlug: null,
-      settingsTopicTab: null,
-      notFound: false,
     };
   }
   const topicSettingsMatch = pathname.match(
@@ -101,13 +119,9 @@ export function parseRoute(pathname: string): Route {
   );
   if (topicSettingsMatch) {
     return {
-      path: pathname,
-      conversationId: null,
-      workflowRunId: null,
-      settingsTab: null,
+      ...rootRoute(pathname),
       settingsTopicSlug: decodeURIComponent(topicSettingsMatch[1]),
       settingsTopicTab: (topicSettingsMatch[2] as TopicSettingsTab | undefined) ?? "overview",
-      notFound: false,
     };
   }
   const settingsMatch = pathname.match(
@@ -115,24 +129,26 @@ export function parseRoute(pathname: string): Route {
   );
   if (settingsMatch) {
     return {
-      path: pathname,
-      conversationId: null,
-      workflowRunId: null,
+      ...rootRoute(pathname),
       settingsTab: (settingsMatch[1] as SettingsTab | undefined) ?? "providers",
-      settingsTopicSlug: null,
-      settingsTopicTab: null,
-      notFound: false,
     };
   }
-  return {
-    path: "/",
-    conversationId: null,
-    workflowRunId: null,
-    settingsTab: null,
-    settingsTopicSlug: null,
-    settingsTopicTab: null,
-    notFound: false,
-  };
+  return rootRoute();
+}
+
+// A conversation the URL names is gone (404) or was never an id at all
+// (422: the gateway could not parse it). Either way the link is stale. The
+// gateway's contract error carries the status; an error outside the contract
+// carries it in its message.
+function isNotAConversation(error: Error): boolean {
+  if (error instanceof ApiError) return error.status === 404 || error.status === 422;
+  return error.message.startsWith("HTTP 404 ") || error.message.startsWith("HTTP 422 ");
+}
+
+/** The address of a conversation, or of one of its surfaces. */
+export function conversationPath(conversationId: string, surfaceId?: string | null): string {
+  const base = `/conversations/${encodeURIComponent(conversationId)}`;
+  return surfaceId ? `${base}/surfaces/${encodeURIComponent(surfaceId)}` : base;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,22 +183,14 @@ export function createRouter(options?: RouterOptions): Router {
         if (generation !== navigationGeneration) {
           return;
         }
-        if (error instanceof Error && error.message.startsWith("HTTP 404 ")) {
+        if (error instanceof Error && isNotAConversation(error)) {
           if (isActiveConversation) {
             options.conversationStore.clearActiveConversation();
           }
           // The ID in the URL is stale (conversation deleted or never existed).
           // Fall back to the root and flag the not-found state so the UI
           // can show an appropriate notice.
-          updateRoute({
-            path: "/",
-            conversationId: null,
-            workflowRunId: null,
-            settingsTab: null,
-            settingsTopicSlug: null,
-            settingsTopicTab: null,
-            notFound: true,
-          });
+          updateRoute(rootRoute("/", true));
           window.history.replaceState(null, "", "/");
         } else if (isActiveConversation) {
           // A transient existence-check failure must not evict a working

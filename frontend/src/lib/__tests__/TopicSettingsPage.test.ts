@@ -60,6 +60,7 @@ describe("TopicSettingsPage", () => {
     vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
       {
         id: "session-1",
+        agent_id: "gateway",
         created_at: "2026-05-26T10:00:00Z",
         last_activity: "2026-05-26T10:05:00Z",
         message_preview: "Review the release",

@@ -6,7 +6,9 @@
   surfaces through their tools and the surface refreshes live off the
   surface_updated signal (the store refetches; nothing renders from events).
   A surface belongs to this session; the shared library is how one reaches
-  another session — save it here, add it there.
+  another session — save it here, add it there. The open surface has an
+  address: the pane opens the surface the URL names and reports the one the
+  user opens so the URL follows.
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
@@ -16,9 +18,14 @@
   interface Props {
     store: SurfacesStore;
     sessionId: string;
+    // The surface the URL names; opened once the session's list is loaded.
+    routedSurfaceId?: string | null;
+    // The user opened a surface (or closed one, with null): keep the URL in step.
+    onOpenSurface?: (surfaceId: string | null) => void;
+    onOpenLibrary?: () => void;
   }
 
-  let { store, sessionId }: Props = $props();
+  let { store, sessionId, routedSurfaceId = null, onOpenSurface, onOpenLibrary }: Props = $props();
 
   let newTitle = $state("");
   // The library entry a new surface is seeded from, "" for a blank surface.
@@ -30,6 +37,9 @@
   // The module whose note the user is currently composing, if any.
   let annotatingModuleId = $state<string | null>(null);
   let annotationBody = $state("");
+  // The note being reworded in place, if any.
+  let editingAnnotationId = $state<string | null>(null);
+  let editingAnnotationBody = $state("");
   // The save-to-library form for the open surface, when it is showing.
   let savingToLibrary = $state(false);
   let saveName = $state("");
@@ -46,6 +56,21 @@
     void store.loadSurfaces(sessionId);
   });
 
+  // The URL names a surface: open it, unless it is already the open one. A
+  // surface the session does not have is left unopened — the list shows
+  // what there is, and the address is corrected when the user opens one.
+  $effect(() => {
+    const wanted = routedSurfaceId;
+    if (!wanted || store.activeSurface?.id === wanted) return;
+    if (!store.surfaces.some((surface) => surface.id === wanted)) return;
+    void store.openSurface(wanted);
+  });
+
+  function open(surfaceId: string): void {
+    void store.openSurface(surfaceId);
+    onOpenSurface?.(surfaceId);
+  }
+
   function renderDocument(source: string): string {
     // Same discipline as conversation markdown: parse, then sanitise —
     // module source is shared work product and may quote anything.
@@ -59,7 +84,8 @@
     const entryId = newEntryId;
     newTitle = "";
     newEntryId = "";
-    await store.createSurface(sessionId, title, entryId || undefined);
+    const created = await store.createSurface(sessionId, title, entryId || undefined);
+    if (created) onOpenSurface?.(created.id);
   }
 
   function startSaving(): void {
@@ -106,6 +132,20 @@
     annotationBody = "";
   }
 
+  function startEditingAnnotation(annotationId: string, body: string): void {
+    editingAnnotationId = annotationId;
+    editingAnnotationBody = body;
+  }
+
+  async function saveAnnotationEdit(tags: string[]): Promise<void> {
+    const surface = store.activeSurface;
+    const body = editingAnnotationBody.trim();
+    if (!surface || editingAnnotationId === null || !body) return;
+    const annotationId = editingAnnotationId;
+    editingAnnotationId = null;
+    await store.updateAnnotation(surface.id, annotationId, body, tags);
+  }
+
   async function saveAnnotation(): Promise<void> {
     const surface = store.activeSurface;
     const body = annotationBody.trim();
@@ -141,13 +181,19 @@
         <li>
           <button
             class:active={store.activeSurface?.id === surface.id}
-            onclick={() => void store.openSurface(surface.id)}
+            aria-current={store.activeSurface?.id === surface.id ? "page" : undefined}
+            onclick={() => open(surface.id)}
           >
             {surface.title}
           </button>
         </li>
+      {:else}
+        <li class="none">No surfaces yet.</li>
       {/each}
     </ul>
+    {#if onOpenLibrary}
+      <button type="button" class="library-link" onclick={onOpenLibrary}>Browse the library</button>
+    {/if}
   </aside>
 
   <section aria-label="Surface">
@@ -213,25 +259,46 @@
               {#each module.annotations as annotation (annotation.id)}
                 <li data-annotation-id={annotation.id}>
                   <span class="annotation-author">{annotation.author}</span>
-                  <!-- Notes are other parties' words: sanitised like module
-                       source, and rendered as what someone said, never as
-                       anything the surface acts on. -->
-                  <span class="annotation-body"
-                    >{@html renderDocument(annotation.body)}</span
-                  >
-                  {#each annotation.tags as tag (tag)}
-                    <span class="annotation-tag">{tag}</span>
-                  {/each}
-                  <button
-                    class="annotation-remove"
-                    onclick={() =>
-                      void store.removeAnnotation(
-                        store.activeSurface!.id,
-                        annotation.id,
-                      )}
-                  >
-                    Remove
-                  </button>
+                  {#if editingAnnotationId === annotation.id}
+                    <form
+                      class="annotation-form"
+                      aria-label="Edit note"
+                      onsubmit={(event) => {
+                        event.preventDefault();
+                        void saveAnnotationEdit(annotation.tags);
+                      }}
+                    >
+                      <input aria-label="Note text" bind:value={editingAnnotationBody} />
+                      <button type="submit">Save</button>
+                      <button type="button" onclick={() => (editingAnnotationId = null)}>Cancel</button>
+                    </form>
+                  {:else}
+                    <!-- Notes are other parties' words: sanitised like module
+                         source, and rendered as what someone said, never as
+                         anything the surface acts on. -->
+                    <span class="annotation-body"
+                      >{@html renderDocument(annotation.body)}</span
+                    >
+                    {#each annotation.tags as tag (tag)}
+                      <span class="annotation-tag">{tag}</span>
+                    {/each}
+                    <button
+                      class="annotation-edit"
+                      onclick={() => startEditingAnnotation(annotation.id, annotation.body)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      class="annotation-remove"
+                      onclick={() =>
+                        void store.removeAnnotation(
+                          store.activeSurface!.id,
+                          annotation.id,
+                        )}
+                    >
+                      Remove
+                    </button>
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -276,6 +343,14 @@
     overflow: auto;
   }
 
+  /* Phone-sized: the surface list sits above the open surface. */
+  @media (max-width: 720px) {
+    .surfaces {
+      grid-template-columns: 1fr;
+      height: auto;
+    }
+  }
+
   aside ul {
     list-style: none;
     padding: 0;
@@ -287,6 +362,29 @@
 
   aside button.active {
     font-weight: 600;
+  }
+
+  aside .none {
+    color: var(--ink-soft);
+    font-size: 0.9em;
+  }
+
+  .library-link {
+    margin-top: 8px;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--ink-soft);
+    font-family: var(--font-mono);
+    font-size: var(--font-label-sm);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-decoration: underline dotted;
+    cursor: pointer;
+  }
+
+  .library-link:hover {
+    color: var(--ink-orange);
   }
 
   .module {

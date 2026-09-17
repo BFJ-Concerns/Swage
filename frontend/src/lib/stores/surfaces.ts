@@ -8,7 +8,9 @@
 // always comes from the authoritative read path, never from event payloads.
 // Annotations — the notes the user and the agent hang on the same module —
 // travel with the surface on that refetch, so an agent's note appears without a
-// reload by the same route a module edit does.
+// reload by the same route a module edit does. The library_updated signal
+// refetches the shared catalogue the same way, so an entry saved by an agent
+// or from another session is offered here without a reload.
 
 import { fromStore, writable } from "svelte/store";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
@@ -28,7 +30,15 @@ export interface SurfacesStore {
   openSurface(surfaceId: string): Promise<void>;
   closeSurface(): void;
   // Create a surface for the session: blank, or seeded from a library entry.
-  createSurface(sessionId: string, title: string, libraryEntryId?: string): Promise<void>;
+  // Resolves to the surface, or null when the session was left meanwhile.
+  createSurface(
+    sessionId: string,
+    title: string,
+    libraryEntryId?: string,
+  ): Promise<SurfaceResponse | null>;
+  // Reread the shared catalogue — the library page's own load, and the
+  // answer to a library_updated signal.
+  refreshLibrary(): Promise<void>;
   // Preserve a surface in the library. Opens nothing; the catalogue refreshes.
   saveToLibrary(
     surfaceId: string,
@@ -46,6 +56,13 @@ export interface SurfacesStore {
   annotate(
     surfaceId: string,
     moduleId: string,
+    body: string,
+    tags?: string[],
+  ): Promise<void>;
+  // Reword a note in place; the annotation keeps its module and author.
+  updateAnnotation(
+    surfaceId: string,
+    annotationId: string,
     body: string,
     tags?: string[],
   ): Promise<void>;
@@ -99,6 +116,12 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
       const active = activeSurfaceState.current;
       if (active) void refreshActive(active.id).catch(() => {});
       if (currentSessionId) void refreshList(currentSessionId).catch(() => {});
+      return;
+    }
+    if (event.type === "library_updated") {
+      // The catalogue is shared: whoever saved or removed an entry, the
+      // picker offering it must show the library as it now is.
+      void refreshLibrary().catch(() => {});
       return;
     }
     if (event.type !== "surface_updated") return;
@@ -163,13 +186,20 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
       sessionId: string,
       title: string,
       libraryEntryId?: string,
-    ): Promise<void> {
+    ): Promise<SurfaceResponse | null> {
+      // A session that has not listed its surfaces yet (the library page
+      // reached straight from a conversation) becomes the current one: the
+      // surface it just gained is the one to show.
+      if (currentSessionId === null) currentSessionId = sessionId;
       const surface = await surfacesApi.createSurface(sessionId, title, libraryEntryId);
       const response = await surfacesApi.listSurfaces(sessionId);
-      if (sessionId !== currentSessionId) return;
+      if (sessionId !== currentSessionId) return null;
       surfacesStore.set(response.surfaces);
       activeSurfaceStore.set(surface);
+      return surface;
     },
+
+    refreshLibrary,
 
     async saveToLibrary(surfaceId, name, description, tags = []): Promise<void> {
       await surfacesApi.saveSurfaceToLibrary(surfaceId, { name, description, tags });
@@ -209,6 +239,16 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
       });
       // The note comes back through the same read path as everything else
       // on the surface — the response body is a receipt, not the source.
+      await refreshActive(surfaceId);
+    },
+
+    async updateAnnotation(
+      surfaceId: string,
+      annotationId: string,
+      body: string,
+      tags: string[] = [],
+    ): Promise<void> {
+      await surfacesApi.updateSurfaceAnnotation(annotationId, { body, tags });
       await refreshActive(surfaceId);
     },
 
