@@ -34,7 +34,7 @@ function fakeChannel(): WorkSurfaceChannel & { emit(event: unknown): void; recon
   };
 }
 
-const PAGE_ID = "11111111-1111-4111-8111-111111111111";
+const SURFACE_ID = "11111111-1111-4111-8111-111111111111";
 const MODULE_ID = "22222222-2222-4222-8222-222222222222";
 const SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_SESSION_ID = "66666666-6666-4666-8666-666666666666";
@@ -61,7 +61,7 @@ function annotationBody(body: string, author: string) {
 
 function surfaceBody(source: string, annotations: unknown[] = []) {
   return {
-    id: PAGE_ID,
+    id: SURFACE_ID,
     session_id: SESSION_ID,
     title: "Planning",
     created_at: "2026-08-28T00:00:00Z",
@@ -81,7 +81,7 @@ function surfaceBody(source: string, annotations: unknown[] = []) {
 
 const listBody = {
   surfaces: [
-    { id: PAGE_ID, title: "Planning", updated_at: "2026-08-28T00:00:00Z" },
+    { id: SURFACE_ID, title: "Planning", updated_at: "2026-08-28T00:00:00Z" },
   ],
 };
 
@@ -129,7 +129,7 @@ describe("surfaces store", () => {
     expect(store.surfaces[0].title).toBe("Planning");
     expect(store.library.map((entry) => entry.name)).toEqual(["Standup"]);
 
-    await store.openSurface(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
     expect(store.activeSurface?.modules[0].source).toBe("# Hello");
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/sessions/${SESSION_ID}/surfaces`,
@@ -148,7 +148,7 @@ describe("surfaces store", () => {
       if (url === `/api/sessions/${SESSION_ID}/surfaces`) {
         return Promise.resolve(jsonResponse(listBody));
       }
-      if (url === `/api/surfaces/${PAGE_ID}`) {
+      if (url === `/api/surfaces/${SURFACE_ID}`) {
         return Promise.resolve(jsonResponse(surfaceBody("# Mine")));
       }
       if (url === `/api/sessions/${OTHER_SESSION_ID}/surfaces`) {
@@ -166,8 +166,8 @@ describe("surfaces store", () => {
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
     await store.loadSurfaces(SESSION_ID);
-    await store.openSurface(PAGE_ID);
-    expect(store.activeSurface?.id).toBe(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
+    expect(store.activeSurface?.id).toBe(SURFACE_ID);
     const previousLoad = store.loadSurfaces(SESSION_ID);
     await vi.waitFor(() => expect(libraryRequests).toBe(2));
 
@@ -196,12 +196,12 @@ describe("surfaces store", () => {
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
     await store.loadSurfaces(SESSION_ID);
-    await store.openSurface(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
     expect(store.activeSurface?.modules[0].source).toBe("before");
 
     channel.emit({
       type: "surface_updated",
-      surface_id: PAGE_ID,
+      surface_id: SURFACE_ID,
       module_id: MODULE_ID,
     });
     await vi.waitFor(() => {
@@ -221,7 +221,7 @@ describe("surfaces store", () => {
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
     await store.loadSurfaces(SESSION_ID);
-    await store.openSurface(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
 
     channel.reconnect();
     await vi.waitFor(() => {
@@ -250,12 +250,12 @@ describe("surfaces store", () => {
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
     await store.loadSurfaces(SESSION_ID);
-    await store.openSurface(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
     expect(store.activeSurface?.modules[0].annotations).toEqual([]);
 
     channel.emit({
       type: "surface_updated",
-      surface_id: PAGE_ID,
+      surface_id: SURFACE_ID,
       module_id: MODULE_ID,
       // A payload the store must never render: content comes from the
       // refetch, so nothing shaped like this may reach the surface.
@@ -290,12 +290,12 @@ describe("surfaces store", () => {
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
     await store.loadSurfaces(SESSION_ID);
-    await store.openSurface(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
 
-    await store.annotate(PAGE_ID, MODULE_ID, "mine, on this module");
+    await store.annotate(SURFACE_ID, MODULE_ID, "mine, on this module");
 
     const [url, init] = fetchMock.mock.calls[3];
-    expect(url).toBe(`/api/surfaces/${PAGE_ID}/annotations`);
+    expect(url).toBe(`/api/surfaces/${SURFACE_ID}/annotations`);
     expect(JSON.parse(init.body as string)).toEqual({
       module_id: MODULE_ID,
       body: "mine, on this module",
@@ -314,7 +314,7 @@ describe("surfaces store", () => {
     const store = createSurfacesStore({ channelFactory: () => channel });
     channel.emit({
       type: "surface_updated",
-      surface_id: PAGE_ID,
+      surface_id: SURFACE_ID,
       module_id: MODULE_ID,
     });
     // No topic loaded, nothing open: the signal is inert.
@@ -335,7 +335,7 @@ describe("surfaces store", () => {
     const channel = fakeChannel();
     const store = createSurfacesStore({ channelFactory: () => channel });
     await store.loadSurfaces(SESSION_ID);
-    await store.openSurface(PAGE_ID);
+    await store.openSurface(SURFACE_ID);
 
     channel.emit({ type: "lagged", dropped: 3 });
     await vi.waitFor(() => {
@@ -352,14 +352,14 @@ describe("surfaces store", () => {
       if (url === `/api/sessions/${SESSION_ID}/surfaces`) return Promise.resolve(jsonResponse(listBody));
       if (url === `/api/sessions/${OTHER_SESSION_ID}/surfaces`) return Promise.resolve(jsonResponse(otherListBody));
       if (url === "/api/surface-library") return Promise.resolve(jsonResponse(libraryBody));
-      if (url === `/api/surfaces/${PAGE_ID}`) return oldRead;
+      if (url === `/api/surfaces/${SURFACE_ID}`) return oldRead;
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
     await store.loadSurfaces(SESSION_ID);
-    const opening = store.openSurface(PAGE_ID);
+    const opening = store.openSurface(SURFACE_ID);
     await store.loadSurfaces(OTHER_SESSION_ID);
     expect(store.activeSurface).toBeNull();
 
@@ -444,9 +444,9 @@ describe("surfaces store", () => {
     const store = createSurfacesStore({ channelFactory: fakeChannel });
     const created = await store.createSurface(SESSION_ID, "Standup", ENTRY_ID);
 
-    expect(created?.id).toBe(PAGE_ID);
-    expect(store.activeSurface?.id).toBe(PAGE_ID);
-    expect(store.surfaces.map((surface) => surface.id)).toEqual([PAGE_ID]);
+    expect(created?.id).toBe(SURFACE_ID);
+    expect(store.activeSurface?.id).toBe(SURFACE_ID);
+    expect(store.surfaces.map((surface) => surface.id)).toEqual([SURFACE_ID]);
   });
 
   it("saves the open surface to the library with its description and tags, then refreshes the catalogue", async () => {
@@ -467,10 +467,10 @@ describe("surfaces store", () => {
 
     const store = createSurfacesStore({ channelFactory: fakeChannel });
     await store.loadSurfaces(SESSION_ID);
-    await store.saveToLibrary(PAGE_ID, "Planning", saved.description, ["planning"]);
+    await store.saveToLibrary(SURFACE_ID, "Planning", saved.description, ["planning"]);
 
     const [url, init] = fetchMock.mock.calls[2];
-    expect(url).toBe(`/api/surfaces/${PAGE_ID}/save`);
+    expect(url).toBe(`/api/surfaces/${SURFACE_ID}/save`);
     expect(JSON.parse(init.body as string)).toEqual({
       name: "Planning",
       description: saved.description,

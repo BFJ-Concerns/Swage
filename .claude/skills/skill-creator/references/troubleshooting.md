@@ -23,7 +23,7 @@ Diagnostic patterns for runtime skills that are not behaving as expected. Use af
 Activation in Swage is user-driven or automatic — the agent does not choose to activate skills. So this splits by intended activation path:
 
 - **Meant to be activated by the user (slash command).** The user picks from the skill list. That list carries the name, display name, level, and tools too, but the `description` is the main relevance clue — a generic or vague one gives little to recognise. State what the skill does in one short clause and name the situation it addresses. Confirm the slash name (the directory name) is what the user is typing, and that it is lowercase `[a-z0-9-]+`.
-- **Meant to be always on (agent-level auto-activation).** Only skills discovered at the **agent** level are auto-activated at session start. A skill that should always be on but lives at the space or global level will not auto-activate — move it under the agent's `skills/` directory. Confirm it is not shadowed by a same-named skill at a more specific level.
+- **Meant to be always on (agent-level auto-activation).** Only skills discovered at the **agent** level are auto-activated at session start. A skill that should always be on but lives at the topic or global level will not auto-activate — move it under the agent's `skills/` directory. Confirm it is not shadowed by a same-named skill at a more specific level.
 
 ## The Skill Stays Active Longer Than Wanted
 
@@ -31,7 +31,7 @@ Activation in Swage is user-driven or automatic — the agent does not choose to
 
 This is usually working as designed, not a bug — and the skill body cannot fix it, because the agent has no way to deactivate a skill.
 
-- **Agent-level skills are active for the whole session and cannot be deactivated** (`AgentLevelCannotDeactivate`). If a skill should not always be on, it does not belong at the agent level — move it to space or global so the user activates it deliberately.
+- **Agent-level skills are active for the whole session and cannot be deactivated** (`AgentLevelCannotDeactivate`). If a skill should not always be on, it does not belong at the agent level — move it to topic or global so the user activates it deliberately.
 - **User-activated skills persist per session** (stored in the SQLite `active_skills` table) until the user deactivates them via the client. If a skill should be short-lived, that is a usage expectation to set with the user, not something the body can enforce.
 
 Do not try to solve this by writing an "unload when done" instruction into the body — there is no agent-facing skill tool for it to call.
