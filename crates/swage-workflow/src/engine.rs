@@ -109,7 +109,7 @@ pub fn script_meta(source: &str) -> Result<ScriptMeta, String> {
 
 /// Return a leading portable `meta` object and the source following it.
 fn split_meta_header(source: &str) -> Result<Option<(&str, &str)>, String> {
-    let rest = &source[skip_whitetopic_and_comments(source)..];
+    let rest = &source[skip_whitespace_and_comments(source)..];
     let Some(after_export) = rest.strip_prefix("export") else {
         return Ok(None);
     };
@@ -267,7 +267,7 @@ fn skip_meta_value(source: &str, start: usize) -> usize {
 /// already contain one.
 fn extract_defaults(source: &str) -> Result<(Option<String>, &str), String> {
     let body = split_meta_header(source)?.map_or(source, |(_, body)| body);
-    let header_end = skip_whitetopic_and_comments(body);
+    let header_end = skip_whitespace_and_comments(body);
     let rest = &body[header_end..];
     let Some(after_keyword) = rest.strip_prefix("export") else {
         return Ok((None, body));
@@ -299,7 +299,7 @@ fn extract_defaults(source: &str) -> Result<(Option<String>, &str), String> {
 
 /// Byte offset of the first token past leading whitespace and `//`/`/* */`
 /// comments — where a `defaults` header may legitimately start.
-fn skip_whitetopic_and_comments(source: &str) -> usize {
+fn skip_whitespace_and_comments(source: &str) -> usize {
     let bytes = source.as_bytes();
     let mut index = 0usize;
     loop {

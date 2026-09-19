@@ -4,7 +4,7 @@ How this run uses the ledger — the header `build/ledger.md` and the
 per-obligation records in `build/obligations/` — the run's only authority
 on what is done. The layout, record format, status vocabulary, and the
 rules they hold are the shared contract in
-[references/build-ledger.md](references/build-ledger.md): both build phases
+[build-ledger.md](build-ledger.md): both build phases
 write that one format, so read it first. This file carries what is specific
 to the assembly run — deriving the obligation set, and reconciling on
 resume.

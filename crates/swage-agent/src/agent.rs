@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_tool_error_detail_collapses_whitetopic_and_truncates() {
+    fn compact_tool_error_detail_collapses_whitespace_and_truncates() {
         let detail = compact_tool_error_detail(&format!("{}\n{}", "x ".repeat(400), "ignored"));
 
         assert!(detail.ends_with("..."));
