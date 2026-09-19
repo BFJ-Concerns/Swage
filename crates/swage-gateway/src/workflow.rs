@@ -44,8 +44,12 @@ use swage_workflow::{
     recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
+
+use parking::RunParking;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+mod parking;
 
 use crate::{
     error::{ApiError, Json, Path},
@@ -1884,46 +1888,6 @@ impl ChannelWorkflowHost {
                 Ok(())
             }
         }
-    }
-}
-
-/// Close admission for a durable park, unless work is already queued for the
-/// loop. A command taken off the channel but not yet dispatched — one a
-/// failed park attempt handed back — is as much queued work as one still on
-/// the channel: parking over it would dispatch it into a parked run, and the
-/// wake's replay would then run it a second time.
-fn begin_host_park(
-    admission: &StdMutex<HostCommandAdmission>,
-    commands: &mpsc::UnboundedReceiver<HostCommand>,
-    deferred_commands: &std::collections::VecDeque<HostCommand>,
-) -> bool {
-    let mut admission = admission.lock().expect("host command admission");
-    if matches!(admission.state, HostCommandAdmissionState::Open)
-        && commands.is_empty()
-        && deferred_commands.is_empty()
-    {
-        admission.state = HostCommandAdmissionState::Parking;
-        true
-    } else {
-        false
-    }
-}
-
-fn finish_host_park(admission: &StdMutex<HostCommandAdmission>, parked: bool) -> Vec<HostCommand> {
-    let deferred = {
-        let mut admission = admission.lock().expect("host command admission");
-        admission.state = if parked {
-            HostCommandAdmissionState::Parked
-        } else {
-            HostCommandAdmissionState::Open
-        };
-        std::mem::take(&mut admission.deferred)
-    };
-    if parked {
-        deferred.into_iter().for_each(HostCommand::reject_parked);
-        Vec::new()
-    } else {
-        deferred
     }
 }
 
@@ -4348,36 +4312,24 @@ async fn run_host_commands_inner(
     );
     let replay_release_rank = Arc::new(AtomicU64::new(0));
     let replay_release_notify = Arc::new(Notify::new());
-    // Pending wait() timers by script-assigned timer id. Firing never writes
-    // the journal; the race's verdict does — ConfirmTimer completes the
-    // entry (timer won), AbandonTimer cancels the armed sleep and leaves it
-    // `started` (timer beaten) — so a completed timer entry always means the
-    // timer won a wait, however close the race. The entry id is None when
-    // replay found the entry already completed (confirm is then a no-op).
-    let mut pending_timers: std::collections::HashMap<u64, CancellationToken> =
-        std::collections::HashMap::new();
+    // Timer firing never writes the journal; the race's verdict does —
+    // ConfirmTimer completes the entry (timer won), AbandonTimer cancels the
+    // armed sleep and leaves it `started` (timer beaten) — so a completed
+    // timer entry always means the timer won a wait, however close the race.
+    // The entry id is None when replay found the entry already completed
+    // (confirm is then a no-op).
     let mut timer_entries: std::collections::HashMap<u64, Option<Uuid>> =
         std::collections::HashMap::new();
-    // Reply senders for timers that parked the run. Held, never resolved:
-    // the engine is being torn down, and dropping a reply early would race
-    // an error into a script that is still halting. The loop ends when the
-    // engine's channel closes, and by then nothing awaits these.
-    let mut parked_replies: Vec<oneshot::Sender<Result<Value, String>>> = Vec::new();
-    // The recorded due time once this run has parked. Later timer commands
-    // draining from the queue lower it (a run wakes at its EARLIEST due),
-    // never raise it.
-    let mut parked_due: Option<chrono::DateTime<chrono::Utc>> = None;
-    // Host work dispatched by this loop and not yet settled — agent calls,
-    // child workflows, gate evaluations. The park guard reads this counter
-    // rather than the journal: an intent row is written inside the spawned
-    // task, so the journal can lag the dispatch and miss live work.
-    let in_flight = Arc::new(AtomicU32::new(0));
+    // Every live truth the durable park guard reads — armed timers,
+    // unsettled spawned work, handed-back commands, admission, the recorded
+    // wake — has one owner (workflow/parking.rs). The arms that can park
+    // ask it; nothing else reads those truths.
+    let mut parking = RunParking::new(admission, park);
     // The terminal handover is assembled only after every accepted agent
     // call has settled and registered its failure reference.
     let mut agent_tasks = tokio::task::JoinSet::new();
-    let mut deferred_commands = std::collections::VecDeque::new();
     loop {
-        let command = match deferred_commands.pop_front() {
+        let command = match parking.next_deferred() {
             Some(command) => command,
             None => match commands.recv().await {
                 Some(command) => command,
@@ -5058,8 +5010,7 @@ async fn run_host_commands_inner(
                 let replay_release_rank = Arc::clone(&replay_release_rank);
                 let replay_release_notify = Arc::clone(&replay_release_notify);
                 let failed_agent_calls = Arc::clone(&failed_agent_calls);
-                in_flight.fetch_add(1, Ordering::SeqCst);
-                let in_flight = Arc::clone(&in_flight);
+                let work = parking.begin_work();
                 // The channel is the deterministic boundary. Assigning sequence
                 // numbers inside spawned tasks would make scheduler timing part of
                 // the journal, which is an especially unhelpful kind of experiment.
@@ -5291,12 +5242,9 @@ async fn run_host_commands_inner(
                             }
                         }
                     }
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                    #[cfg(test)]
-                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
+                    let settled = work.settle();
                     let _ = reply.send(result);
-                    #[cfg(test)]
-                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
+                    settled.hand_off(run_id).await;
                 });
             }
             HostCommand::Workflow {
@@ -5328,8 +5276,7 @@ async fn run_host_commands_inner(
                 let current_seq = seq.fetch_add(1, Ordering::SeqCst);
                 let existing = replay.get(current_seq as usize).cloned();
                 let state = state.clone();
-                in_flight.fetch_add(1, Ordering::SeqCst);
-                let in_flight = Arc::clone(&in_flight);
+                let work = parking.begin_work();
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
                 let replay_release_notify = Arc::clone(&replay_release_notify);
@@ -5407,16 +5354,13 @@ async fn run_host_commands_inner(
                             }
                         }
                     };
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                    #[cfg(test)]
-                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
+                    let settled = work.settle();
                     let _ = reply.send(result);
-                    #[cfg(test)]
-                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
+                    settled.hand_off(run_id).await;
                 });
             }
             HostCommand::AbandonTimer { timer_id } => {
-                if let Some(token) = pending_timers.remove(&timer_id) {
+                if let Some(token) = parking.disarm_timer(timer_id) {
                     token.cancel();
                 }
             }
@@ -5486,57 +5430,56 @@ async fn run_host_commands_inner(
                 // joins the park — a run wakes at its EARLIEST due, so a
                 // later, shorter timer lowers wake_at and a longer one
                 // changes nothing.
-                if let Some(current_due) = parked_due {
-                    let earliest = current_due.min(due);
-                    if earliest < current_due {
-                        if let Err(error) = state
-                            .storage
-                            .set_workflow_run_parked(run_id, earliest)
-                            .await
+                let reply = match parking.join_park(reply) {
+                    Ok(()) => {
+                        if let Some(current_due) = parking.parked_due()
+                            && due < current_due
                         {
-                            tracing::warn!(%run_id, %error, "could not lower a parked run's wake time");
-                        } else {
-                            parked_due = Some(earliest);
+                            if let Err(error) =
+                                state.storage.set_workflow_run_parked(run_id, due).await
+                            {
+                                tracing::warn!(%run_id, %error, "could not lower a parked run's wake time");
+                            } else {
+                                parking.lower_wake(due);
+                            }
                         }
+                        continue;
                     }
-                    parked_replies.push(reply);
-                    continue;
-                }
-                // A durable parked wait: a long enough sleep, with no other
-                // timer armed, no host work in flight, and no sibling command
-                // already queued, tears the engine down instead of holding an
-                // OS thread on a timer. The run
-                // records when it is due; the waker resumes it by replay,
-                // and this same arm then fires the remainder. These guards
-                // are load-bearing: an in-flight call would be
-                // double-executed by wake replay if it were still
-                // unsettled, and an armed or queued sibling timer would die
-                // unfired. The in-flight counter and command queue are
-                // loop-owned truth — the journal can lag a dispatch, so it
-                // must not be the guard.
-                if effective_ms >= park_threshold_ms
-                    && pending_timers.is_empty()
-                    && in_flight.load(Ordering::SeqCst) == 0
-                    && begin_host_park(&admission, &commands, &deferred_commands)
-                {
-                    let park_result = state.storage.set_workflow_run_parked(run_id, due).await;
-                    deferred_commands.extend(finish_host_park(&admission, park_result.is_ok()));
-                    match park_result {
-                        Ok(()) => {
-                            parked_due = Some(due);
-                            park.cancel();
-                            parked_replies.push(reply);
-                            continue;
+                    Err(reply) => reply,
+                };
+                // A durable parked wait: a long enough sleep, with nothing
+                // alive the park would lose (the guard in
+                // workflow/parking.rs), tears the engine down instead of
+                // holding an OS thread on a timer. The run records when it
+                // is due; the waker resumes it by replay, and this same arm
+                // then fires the remainder.
+                let reply = if effective_ms >= park_threshold_ms {
+                    match parking.try_park(&commands) {
+                        Ok(attempt) => {
+                            let park_result =
+                                state.storage.set_workflow_run_parked(run_id, due).await;
+                            let landed = match park_result {
+                                Ok(()) => Some(due),
+                                Err(error) => {
+                                    // Park bookkeeping failed: fall through
+                                    // to an in-process wait — slower, never
+                                    // wrong.
+                                    tracing::warn!(%run_id, %error, "could not park workflow run; keeping its engine");
+                                    None
+                                }
+                            };
+                            match parking.settle_park(attempt, landed, reply) {
+                                None => continue,
+                                Some(reply) => reply,
+                            }
                         }
-                        Err(error) => {
-                            // Park bookkeeping failed: fall through to an
-                            // in-process wait — slower, never wrong.
-                            tracing::warn!(%run_id, %error, "could not park workflow run; keeping its engine");
-                        }
+                        Err(_refusal) => reply,
                     }
-                }
+                } else {
+                    reply
+                };
                 let abandon = CancellationToken::new();
-                pending_timers.insert(timer_id, abandon.clone());
+                parking.arm_timer(timer_id, abandon.clone());
                 // The firing only reports; it writes nothing. The journal
                 // settles on the race's verdict via ConfirmTimer.
                 tokio::spawn(async move {
@@ -5557,7 +5500,7 @@ async fn run_host_commands_inner(
                 });
             }
             HostCommand::ConfirmTimer { timer_id, reply } => {
-                pending_timers.remove(&timer_id);
+                parking.disarm_timer(timer_id);
                 let result = match timer_entries.get(&timer_id) {
                     // Replayed-completed: nothing to write.
                     Some(None) => Ok(()),
@@ -5701,59 +5644,108 @@ async fn run_host_commands_inner(
                         }
                     },
                 };
-                match complete_await_event(&state, run_id, entry_id, current_seq, &kinds).await {
-                    Ok(Some(result)) => {
-                        let _ = reply.send(Ok(result));
-                    }
-                    Ok(None) => {
-                        let distant = chrono::Utc::now() + chrono::Duration::days(36500);
-                        match state
-                            .storage
-                            .park_workflow_run_if_no_matching_events(run_id, distant, &kinds)
+                let reply =
+                    match complete_await_event(&state, run_id, entry_id, current_seq, &kinds).await
+                    {
+                        Ok(Some(result)) => {
+                            let _ = reply.send(Ok(result));
+                            continue;
+                        }
+                        Ok(None) => reply,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
+                    };
+                // Already parked by a sibling wait: this wait joins the park.
+                // A post wakes the parked run, and the replay re-reads here.
+                let mut reply = match parking.join_park(reply) {
+                    Ok(()) => continue,
+                    Err(reply) => reply,
+                };
+                // The same guard a timer or a hold honours (workflow/parking.rs)
+                // — a wait beside live work watches in process instead.
+                if let Ok(attempt) = parking.try_park(&commands) {
+                    let distant = chrono::Utc::now() + chrono::Duration::days(36500);
+                    let park_result = state
+                        .storage
+                        .park_workflow_run_if_no_matching_events(run_id, distant, &kinds)
+                        .await;
+                    let landed = matches!(park_result, Ok(true)).then_some(distant);
+                    let Some(returned) = parking.settle_park(attempt, landed, reply) else {
+                        continue;
+                    };
+                    reply = returned;
+                    match park_result {
+                        Ok(true) => unreachable!("a landed park holds its reply"),
+                        Ok(false) => {
+                            // The pending read and park are deliberately
+                            // separated by script work. The storage CAS
+                            // closes that window: if a matching post won,
+                            // consume it now instead of sleeping past it.
+                            match complete_await_event(
+                                &state,
+                                run_id,
+                                entry_id,
+                                current_seq,
+                                &kinds,
+                            )
                             .await
-                        {
-                            Ok(true) => {
-                                parked_due = Some(distant);
-                                park.cancel();
-                                parked_replies.push(reply);
-                            }
-                            Ok(false) => {
-                                // The pending read and park are deliberately
-                                // separated by script work. The storage CAS
-                                // closes that window: if a matching post won,
-                                // consume it now instead of sleeping past it.
-                                match complete_await_event(
-                                    &state,
-                                    run_id,
-                                    entry_id,
-                                    current_seq,
-                                    &kinds,
-                                )
-                                .await
-                                {
-                                    Ok(Some(result)) => {
-                                        let _ = reply.send(Ok(result));
-                                    }
-                                    Ok(None) => {
-                                        let _ = reply.send(Err(
-                                            "WorkflowCancelledError: run changed state before event wait could park"
-                                                .into(),
-                                        ));
-                                    }
-                                    Err(error) => {
-                                        let _ = reply.send(Err(error));
-                                    }
+                            {
+                                Ok(Some(result)) => {
+                                    let _ = reply.send(Ok(result));
+                                }
+                                Ok(None) => {
+                                    let _ = reply.send(Err(
+                                        "WorkflowCancelledError: run changed state before event wait could park"
+                                            .into(),
+                                    ));
+                                }
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
                                 }
                             }
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error.to_string()));
+                            continue;
+                        }
+                    }
+                }
+                // The guard refused: watch for the post in process. The
+                // watcher ends when the script stops waiting (its receiver
+                // is dropped on cancellation or engine teardown).
+                let watch_state = state.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            () = reply.closed() => return,
+                            () = tokio::time::sleep(std::time::Duration::from_millis(
+                                REFUSED_PARK_WATCH_INTERVAL_MS,
+                            )) => {}
+                        }
+                        match complete_await_event(
+                            &watch_state,
+                            run_id,
+                            entry_id,
+                            current_seq,
+                            &kinds,
+                        )
+                        .await
+                        {
+                            Ok(Some(result)) => {
+                                let _ = reply.send(Ok(result));
+                                return;
+                            }
+                            Ok(None) => {}
                             Err(error) => {
-                                let _ = reply.send(Err(error.to_string()));
+                                let _ = reply.send(Err(error));
+                                return;
                             }
                         }
                     }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                }
+                });
             }
             HostCommand::Hold {
                 request,
@@ -5862,18 +5854,17 @@ async fn run_host_commands_inner(
                 // Already parked by a sibling wait: this hold joins the park
                 // rather than lowering the run's wake, which nothing but an
                 // answer can bring forward.
-                if parked_due.is_some() {
-                    parked_replies.push(reply);
-                    continue;
-                }
-                // Parking honours the same guards a durable timer wait does:
-                // an in-flight or queued call would be replayed before it had
-                // settled, and an armed or queued sibling timer would die
-                // unfired. An answered sibling must also reach the script
-                // first: it may be the winner of a concurrent race while
-                // this hold remains open. Raising a hold is itself
-                // idempotent, so when a guard refuses the park the engine
-                // simply stays up and watches the decision in process.
+                let reply = match parking.join_park(reply) {
+                    Ok(()) => continue,
+                    Err(reply) => reply,
+                };
+                // Parking honours the guards a durable timer wait does (the
+                // model in workflow/parking.rs), plus one of its own: an
+                // answered sibling must reach the script first, since it may
+                // be the winner of a concurrent race while this hold remains
+                // open. Raising a hold is itself idempotent, so when a guard
+                // refuses the park the engine simply stays up and watches
+                // the decision in process.
                 let answered_concurrent_hold = replay_has_answered_concurrent_hold(
                     &state,
                     run_id,
@@ -5881,11 +5872,12 @@ async fn run_host_commands_inner(
                     current_seq,
                 )
                 .await;
-                if pending_timers.is_empty()
-                    && in_flight.load(Ordering::SeqCst) == 0
-                    && !answered_concurrent_hold
-                    && begin_host_park(&admission, &commands, &deferred_commands)
-                {
+                let admitted = if answered_concurrent_hold {
+                    None
+                } else {
+                    parking.try_park(&commands).ok()
+                };
+                let reply = if let Some(attempt) = admitted {
                     let distant = chrono::Utc::now() + chrono::Duration::days(36500);
                     #[cfg(test)]
                     workflow_pause_test_hook::pause(PAUSE_BEFORE_HOLD_PARK, run_id).await;
@@ -5893,17 +5885,12 @@ async fn run_host_commands_inner(
                         .storage
                         .park_workflow_run_if_hold_open(run_id, distant, hold.id)
                         .await;
-                    deferred_commands.extend(finish_host_park(
-                        &admission,
-                        matches!(park_result, Ok(true)),
-                    ));
+                    let landed = matches!(park_result, Ok(true)).then_some(distant);
+                    let Some(reply) = parking.settle_park(attempt, landed, reply) else {
+                        continue;
+                    };
                     match park_result {
-                        Ok(true) => {
-                            parked_due = Some(distant);
-                            park.cancel();
-                            parked_replies.push(reply);
-                            continue;
-                        }
+                        Ok(true) => unreachable!("a landed park holds its reply"),
                         Ok(false) => {
                             // The storage CAS closes the window between
                             // opening the hold and parking on it: an answer
@@ -5930,7 +5917,9 @@ async fn run_host_commands_inner(
                             continue;
                         }
                     }
-                }
+                } else {
+                    reply
+                };
                 let watch_state = state.clone();
                 let hold_id = hold.id;
                 tokio::spawn(async move {
@@ -5943,7 +5932,7 @@ async fn run_host_commands_inner(
                                 return;
                             }
                             () = tokio::time::sleep(std::time::Duration::from_millis(
-                                HOLD_WATCH_INTERVAL_MS,
+                                REFUSED_PARK_WATCH_INTERVAL_MS,
                             )) => {}
                         }
                         match settle_answered_hold(&watch_state, entry_id, hold_id).await {
@@ -6403,8 +6392,7 @@ async fn run_host_commands_inner(
                 let hash = journal_args_hash(&request_json);
                 let existing = replay.get(current_seq as usize).cloned();
                 let state = state.clone();
-                in_flight.fetch_add(1, Ordering::SeqCst);
-                let in_flight = Arc::clone(&in_flight);
+                let work = parking.begin_work();
                 let replay_agent_ranks = Arc::clone(&replay_agent_ranks);
                 let replay_release_rank = Arc::clone(&replay_release_rank);
                 let replay_release_notify = Arc::clone(&replay_release_notify);
@@ -6466,12 +6454,9 @@ async fn run_host_commands_inner(
                             }
                         }
                     };
-                    in_flight.fetch_sub(1, Ordering::SeqCst);
-                    #[cfg(test)]
-                    let in_flight_at_reply = in_flight.load(Ordering::SeqCst);
+                    let settled = work.settle();
                     let _ = reply.send(result);
-                    #[cfg(test)]
-                    completion_handoff_test_support::pause(run_id, in_flight_at_reply).await;
+                    settled.hand_off(run_id).await;
                 });
             }
             HostCommand::Deliver {
@@ -6961,9 +6946,10 @@ async fn complete_event_post(
     Ok(result)
 }
 
-/// How often a hold that could not park re-reads its decision. Only reached
-/// when a park guard refused — a parked run is woken by the answer itself.
-const HOLD_WATCH_INTERVAL_MS: u64 = 200;
+/// How often a wait that could not park — a hold, an event wait — re-reads
+/// what it waits for. Only reached when the park guard refused; a parked run
+/// is woken by the answer or the post itself.
+const REFUSED_PARK_WATCH_INTERVAL_MS: u64 = 200;
 
 /// Whether this replayed hold has an answered sibling that was open alongside
 /// it. The answer is runnable work: keeping the engine alive lets it reach
@@ -20210,6 +20196,88 @@ mod tests {
             .expect("hold reply")
             .expect("verdict");
         assert_eq!(answer["verdict"], "ship");
+
+        release.notify_one();
+        assert_eq!(
+            gate_receive
+                .await
+                .expect("gate reply")
+                .expect("gate result")["wake"],
+            true
+        );
+        drop(tx);
+        task.await.expect("host loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_event_wait_beside_an_in_flight_call_refuses_the_park_and_takes_the_post_in_process()
+    {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let provider = Arc::new(BlockingGateProvider {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let (storage, state, run) = event_gate_fixture(provider).await;
+        let (tx, task) = spawn_event_loop(state.clone(), run.id, run.topic_id, vec![]);
+
+        send_post_event(
+            &tx,
+            "worker.completion",
+            serde_json::json!({"worker": "w1"}),
+        )
+        .await
+        .expect("post the event the gate reads");
+        let (gate_reply, gate_receive) = oneshot::channel();
+        tx.send(HostCommand::Gate {
+            request: GateRequest {
+                criteria: "wake when the worker has settled".into(),
+                model: None,
+            },
+            cancellation: CancellationToken::new(),
+            reply: gate_reply,
+        })
+        .expect("start a gate evaluation");
+        // The evaluation is now inside the provider: the call is in flight.
+        entered.notified().await;
+
+        let (reply, receive) = oneshot::channel();
+        tx.send(HostCommand::AwaitEvent {
+            request: AwaitEventRequest {
+                kinds: vec!["operator.decision".into()],
+            },
+            reply,
+        })
+        .expect("wait for a decision");
+        // The wait has been considered: a later post is answered by the
+        // in-process watcher, so ask the loop something and read the run.
+        send_post_event(&tx, "operator.note", serde_json::json!({}))
+            .await
+            .expect("the loop is still serving");
+        let waiting = storage
+            .get_workflow_run(run.id)
+            .await
+            .expect("read run")
+            .expect("run");
+        assert_eq!(
+            waiting.state, "running",
+            "an in-flight call refuses the durable park: wake replay would run it twice"
+        );
+        assert!(waiting.wake_at.is_none());
+
+        send_post_event(
+            &tx,
+            "operator.decision",
+            serde_json::json!({"verdict": "accept"}),
+        )
+        .await
+        .expect("post the awaited event");
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), receive)
+            .await
+            .expect("the refusing engine still watches for the post")
+            .expect("await reply")
+            .expect("event");
+        assert_eq!(answer["payload"]["verdict"], "accept");
 
         release.notify_one();
         assert_eq!(
