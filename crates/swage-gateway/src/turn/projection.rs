@@ -140,6 +140,7 @@ pub(super) async fn project_agent_events(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(%error, "failed to persist compaction record");
                     if let Err(audit_error) = record_durability::record_reconstruction_gap(
                         state.storage.as_ref(),
@@ -299,6 +300,7 @@ pub(super) async fn project_agent_events(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    // Reconstructive record (record_durability.rs).
                     tracing::warn!(error = %e, "failed to persist provider response witness");
                     if let Err(audit_error) = record_durability::record_reconstruction_gap(
                         state.storage.as_ref(),
@@ -458,6 +460,10 @@ pub(super) async fn project_agent_events(
                 };
 
                 if let Some(structured_output) = structured_output.as_ref() {
+                    // Constitutive record (record_durability.rs): the
+                    // structured output is the work, so its loss fails the
+                    // turn whether or not the gap event lands — the
+                    // contract's worked example of a class-1 seam.
                     use swage_storage::store::TurnStore;
                     if let Err(error) = TurnStore::update_structured_output(
                         state.storage.as_ref(),
