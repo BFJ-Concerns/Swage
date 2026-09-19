@@ -47,7 +47,7 @@ use swage_storage::{NewAuditEvent, Storage};
 /// move on. A *constitutive* (class 1) seam may also call this so the
 /// trail names its gap, but calling it is never that seam's whole
 /// response: class 1 loss fails the turn regardless of whether this event
-/// lands (the structured-output seam in turn.rs is the worked example).
+/// lands (the structured-output seam in turn/projection.rs is the worked example).
 pub(crate) async fn record_reconstruction_gap(
     storage: &dyn Storage,
     session_id: Option<Uuid>,

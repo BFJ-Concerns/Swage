@@ -8,6 +8,11 @@
 //! while the person decides and returns to `Processing` on any decision that
 //! lets it continue; a timeout follows the configured timeout policy and a
 //! cancelled wait leaves the turn interrupted.
+//!
+//! Every write here is a constitutive record (record_durability.rs): the
+//! approval row, its decision, and the turn's state transitions are the
+//! work, so each propagates its storage error with `?` and the turn fails
+//! loudly — never a warn-and-continue.
 
 use super::{
     AppState, ApprovalKind, ApprovalState, ApprovalTimeoutPolicy, CancellationToken, GatewayError,

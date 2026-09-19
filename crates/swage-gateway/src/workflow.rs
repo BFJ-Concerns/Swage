@@ -5018,9 +5018,14 @@ async fn run_host_commands_inner(
                     let _permit = match semaphore.acquire().await {
                         Ok(permit) => permit,
                         Err(_) => {
+                            // A refusal is a reply like any other: the
+                            // ticket settles before it, or the run could
+                            // never park again.
+                            let settled = work.settle();
                             let _ = reply.send(Err(WorkflowHostError::Message(
                                 "workflow concurrency gate closed".into(),
                             )));
+                            settled.hand_off(run_id).await;
                             return;
                         }
                     };

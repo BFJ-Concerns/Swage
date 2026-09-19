@@ -66,10 +66,11 @@ struct ParkedWait {
 }
 
 /// One unit of spawned host work. The loop takes a ticket before spawning
-/// and the task settles it after its result is known — explicitly, never on
-/// drop: a task that dies without settling leaves the run unparkable by
-/// design, because replay must not be allowed to re-run work whose outcome
-/// is unknown.
+/// and the task settles it once its result is known, before it replies —
+/// on every path that replies, an early refusal included. Settlement is
+/// explicit, never on drop: a task that dies without replying leaves the
+/// run unparkable by design, because replay must not be allowed to re-run
+/// work whose outcome is unknown.
 #[must_use = "settle the ticket once the work's result is known"]
 pub(super) struct WorkTicket {
     in_flight: Arc<AtomicU32>,
@@ -195,7 +196,13 @@ impl RunParking {
     /// The park guard. Admits only when nothing alive would be lost, and
     /// then closes admission so a command sent while storage is asked is
     /// deferred rather than dispatched. `commands` is the loop's channel,
-    /// read for emptiness only.
+    /// read for emptiness only — and read under the admission lock, because
+    /// the host's `send` puts a command on the channel under that same lock
+    /// while admission is open: checked before the lock, a send could land
+    /// between the check and the close, and the loop would dispatch it into
+    /// a parked run. The timer and in-flight truths need no lock — only
+    /// this loop arms timers and takes tickets, and a ticket settling
+    /// concurrently only lowers the count.
     pub(super) fn try_park(
         &mut self,
         commands: &mpsc::UnboundedReceiver<HostCommand>,
@@ -206,10 +213,10 @@ impl RunParking {
         if self.in_flight.load(Ordering::SeqCst) != 0 {
             return Err(ParkRefusal::WorkInFlight);
         }
+        let mut admission = self.admission.lock().expect("host command admission");
         if !commands.is_empty() || !self.deferred.is_empty() {
             return Err(ParkRefusal::QueuedCommand);
         }
-        let mut admission = self.admission.lock().expect("host command admission");
         if !matches!(admission.state, HostCommandAdmissionState::Open) {
             return Err(ParkRefusal::AdmissionClosed);
         }
