@@ -75,7 +75,7 @@ and their frontmatter:
 
 - **`llms.txt`** — the llms.txt format: a hand-written header (H1 title,
   blockquote summary) above the marker, then a generated region of H2-grouped
-  link lists, one entry per agent page (`[title](path)`, plus `: description`
+  link lists, one entry per agent page (a `title` link to its path, plus `: description`
   only where frontmatter supplies one), grouped by subdirectory.
 - **`llms-full.txt`** — the whole agent set concatenated, fully generated.
 - **`docs/README.md`** — the human index: a hand-written preamble above the

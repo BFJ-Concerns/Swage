@@ -594,7 +594,7 @@ mod tests {
         record_degraded_execution(
             &state,
             &ExecutionIsolation::Degraded {
-                reason: "fallback_sandbox_without_nametopic_isolation".into(),
+                reason: "fallback_sandbox_without_namespace_isolation".into(),
             },
             "scheduled turn",
             Some(session_id),

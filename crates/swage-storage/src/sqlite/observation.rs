@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn search_with_only_whitetopic_returns_no_hits() {
+    async fn search_with_only_whitespace_returns_no_hits() {
         let (storage, topic_id) = storage_with_topic().await;
 
         let hits = storage
