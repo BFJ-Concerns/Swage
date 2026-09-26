@@ -1,5 +1,7 @@
 //! Storage layer with SQLite persistence.
 
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures;
 pub mod model;
 pub mod sqlite;
 pub mod store;

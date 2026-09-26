@@ -454,6 +454,7 @@ impl SessionStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    use crate::fixtures::new_session;
     use crate::model::{Message, NewMessage, NewThread, NewTopic, NewWorkspaceAttachment};
     use crate::store::{TopicStore, WorkspaceAttachmentStore};
     use swage_core::Role;
@@ -475,16 +476,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_and_get_session() {
         let (storage, topic_id) = make_storage_with_topic().await;
-        let session = storage
-            .create_session(NewSession {
-                topic_id,
-                agent_id: "test-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
-            })
-            .await
-            .unwrap();
+        let session = storage.create_session(new_session(topic_id)).await.unwrap();
 
         assert_eq!(session.topic_id, topic_id);
 
@@ -496,28 +488,10 @@ mod tests {
     async fn list_sessions_ordered_by_updated_at_desc() {
         let (storage, topic_id) = make_storage_with_topic().await;
 
-        let s1 = storage
-            .create_session(NewSession {
-                topic_id,
-                agent_id: "test-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
-            })
-            .await
-            .unwrap();
+        let s1 = storage.create_session(new_session(topic_id)).await.unwrap();
         // Bump s1 so it has a later updated_at.
         storage.update_activity(s1.id).await.unwrap();
-        let s2 = storage
-            .create_session(NewSession {
-                topic_id,
-                agent_id: "test-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
-            })
-            .await
-            .unwrap();
+        let s2 = storage.create_session(new_session(topic_id)).await.unwrap();
         storage.update_activity(s2.id).await.unwrap();
 
         let sessions = storage.list_by_topic(topic_id).await.unwrap();
@@ -585,16 +559,6 @@ mod tests {
         created_at
     }
 
-    fn direct(topic_id: Uuid) -> NewSession {
-        NewSession {
-            topic_id,
-            agent_id: "test-agent".to_string(),
-            origin: SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn a_session_records_what_opened_it() {
         let (storage, topic_id) = make_storage_with_topic().await;
@@ -602,7 +566,7 @@ mod tests {
         let session = storage
             .create_session(NewSession {
                 origin: SessionOrigin::ScheduleRun { schedule_id },
-                ..direct(topic_id)
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
@@ -615,9 +579,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_recent_list_orders_by_the_latest_user_or_assistant_message() {
         let (storage, topic_id) = make_storage_with_topic().await;
-        let quiet = storage.create_session(direct(topic_id)).await.unwrap();
-        let spoken = storage.create_session(direct(topic_id)).await.unwrap();
-        let tooled = storage.create_session(direct(topic_id)).await.unwrap();
+        let quiet = storage.create_session(new_session(topic_id)).await.unwrap();
+        let spoken = storage.create_session(new_session(topic_id)).await.unwrap();
+        let tooled = storage.create_session(new_session(topic_id)).await.unwrap();
         // The quiet session is newest by creation; the spoken one has a user
         // message; the tooled one only a tool message, which does not count.
         let said = say(&storage, spoken.id, Role::User, "hello").await;
@@ -643,8 +607,11 @@ mod tests {
     async fn the_recent_list_spans_every_scope_and_narrows_to_one() {
         let (storage, topic_id) = make_storage_with_topic().await;
         let general = storage.general_scope().await.unwrap();
-        let in_topic = storage.create_session(direct(topic_id)).await.unwrap();
-        let in_general = storage.create_session(direct(general.id)).await.unwrap();
+        let in_topic = storage.create_session(new_session(topic_id)).await.unwrap();
+        let in_general = storage
+            .create_session(new_session(general.id))
+            .await
+            .unwrap();
 
         let everywhere = storage
             .list_recent_sessions(SessionListing::default())
@@ -670,9 +637,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn the_archive_sweep_hides_inactive_sessions_and_spares_the_executing_and_the_recent() {
         let (storage, topic_id) = make_storage_with_topic().await;
-        let stale = storage.create_session(direct(topic_id)).await.unwrap();
-        let executing = storage.create_session(direct(topic_id)).await.unwrap();
-        let fresh = storage.create_session(direct(topic_id)).await.unwrap();
+        let stale = storage.create_session(new_session(topic_id)).await.unwrap();
+        let executing = storage.create_session(new_session(topic_id)).await.unwrap();
+        let fresh = storage.create_session(new_session(topic_id)).await.unwrap();
         let old = say(&storage, stale.id, Role::Assistant, "long ago").await;
         backdate_message(&storage, old.id, 10).await;
         let old_but_busy = say(&storage, executing.id, Role::Assistant, "long ago too").await;
@@ -728,7 +695,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_archived_session_returns_when_unarchived() {
         let (storage, topic_id) = make_storage_with_topic().await;
-        let session = storage.create_session(direct(topic_id)).await.unwrap();
+        let session = storage.create_session(new_session(topic_id)).await.unwrap();
         let old = say(&storage, session.id, Role::User, "long ago").await;
         backdate_message(&storage, old.id, 30).await;
         storage
@@ -759,16 +726,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_session_returns_true_then_false() {
         let (storage, topic_id) = make_storage_with_topic().await;
-        let session = storage
-            .create_session(NewSession {
-                topic_id,
-                agent_id: "test-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
-            })
-            .await
-            .unwrap();
+        let session = storage.create_session(new_session(topic_id)).await.unwrap();
 
         assert!(storage.delete_session(session.id).await.unwrap());
         assert!(!storage.delete_session(session.id).await.unwrap());
@@ -779,11 +737,8 @@ mod tests {
         let (storage, topic_id) = make_storage_with_topic().await;
         let session = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "my-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
@@ -804,11 +759,9 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "my-agent".to_string(),
-                origin: SessionOrigin::Direct,
                 metadata: Some(metadata.clone()),
-                active_workspace_attachment_id: None,
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
@@ -834,11 +787,9 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "my-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
                 active_workspace_attachment_id: Some(workspace.id),
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
@@ -860,31 +811,22 @@ mod tests {
         // Create sessions for two different agents.
         let s1 = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "alpha".to_string(),
-                origin: crate::model::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
         let _s2 = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "beta".to_string(),
-                origin: crate::model::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
         let s3 = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "alpha".to_string(),
-                origin: crate::model::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..new_session(topic_id)
             })
             .await
             .unwrap();
@@ -913,16 +855,7 @@ mod tests {
     async fn cascade_delete_removes_sessions() {
         // Deleting a session should also remove its turns via ON DELETE CASCADE.
         let (storage, topic_id) = make_storage_with_topic().await;
-        let session = storage
-            .create_session(NewSession {
-                topic_id,
-                agent_id: "test-agent".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
-            })
-            .await
-            .unwrap();
+        let session = storage.create_session(new_session(topic_id)).await.unwrap();
         storage.delete_session(session.id).await.unwrap();
 
         assert!(storage.get_session(session.id).await.unwrap().is_none());

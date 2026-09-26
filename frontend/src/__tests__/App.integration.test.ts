@@ -22,6 +22,10 @@ import * as operatorApi from "../lib/api/operator";
 import * as sessionsApi from "../lib/api/sessions";
 import * as settingsApi from "../lib/api/settings";
 import * as topicsApi from "../lib/api/topics";
+import {
+  makeConversationDetail,
+  makeConversationSummary,
+} from "../lib/__tests__/fixtures/conversations";
 import type { EffectiveAgentDefinitionResponse } from "../lib/protocol/EffectiveAgentDefinitionResponse";
 import type {
   ClientEvent,
@@ -86,10 +90,16 @@ const websocketHarness = vi.hoisted(() => {
     },
     factory: vi.fn(createClient),
     fireEvent(event: ServerEvent, conversationId?: string) {
-      (conversationId ? clientsByConversation.get(conversationId) : clients[0])?.fireEvent(event);
+      (conversationId
+        ? clientsByConversation.get(conversationId)
+        : clients[0]
+      )?.fireEvent(event);
     },
     fireStatus(status: ConnectionStatus, conversationId?: string) {
-      (conversationId ? clientsByConversation.get(conversationId) : clients[0])?.fireStatus(status);
+      (conversationId
+        ? clientsByConversation.get(conversationId)
+        : clients[0]
+      )?.fireStatus(status);
     },
     reset() {
       clients.length = 0;
@@ -180,35 +190,9 @@ function makeWorkspaceAttachment(
   };
 }
 
-function makeConversationSummary(
-  overrides: Partial<ConversationSummary> = {},
-): ConversationSummary {
-  return {
-    id: "conv-1",
-    agent_id: "gateway",
-    created_at: "2026-04-07T12:00:00Z",
-    last_activity: "2026-04-07T12:00:00Z",
-    message_preview: "Earlier message",
-    has_interrupted_turn: false,
-    ...overrides,
-  };
-}
-
-function makeConversationDetail(
-  overrides: Partial<ConversationDetail> = {},
-): ConversationDetail {
-  return {
-    id: "conv-1",
-    agent_id: "gateway",
-    topic_id: "proj-default",
-    created_at: "2026-04-07T12:00:00Z",
-    last_activity: "2026-04-07T12:00:00Z",
-    messages: [],
-    ...overrides,
-  };
-}
-
-function makeSettings(models: SettingsResponse["models"] = {}): SettingsResponse {
+function makeSettings(
+  models: SettingsResponse["models"] = {},
+): SettingsResponse {
   const defaultModel = Object.keys(models)[0] ?? "";
   return {
     providers: defaultModel
@@ -243,14 +227,24 @@ function makeSettings(models: SettingsResponse["models"] = {}): SettingsResponse
       plugin_directory: null,
       search: null,
     },
-    tool_permissions: { allow: ["*"], deny: [], bundles: {}, require_approval: [] },
+    tool_permissions: {
+      allow: ["*"],
+      deny: [],
+      bundles: {},
+      require_approval: [],
+    },
     hitl: { timeout: 300, timeout_policy: "reject" },
     sandbox: { enabled: true, allow_degraded_execution: false },
     context: { assembly: "default", timeout: 5, budget: null },
     pricing: { models: {} },
     observability: { force_on: false },
     communication: {
-      context_transfer: { mode: "none", allowed_fields: [], summary_budget: null, targets: {} },
+      context_transfer: {
+        mode: "none",
+        allowed_fields: [],
+        summary_budget: null,
+        targets: {},
+      },
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
@@ -365,14 +359,19 @@ function setPath(path: string): void {
  * open with the topic in view.
  */
 async function startSessionInTopic(topicId: string | null): Promise<void> {
-  const topicSelect = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]');
-  if (!topicSelect) throw new Error("the session-start control is not on screen");
+  const topicSelect = document.querySelector<HTMLSelectElement>(
+    'select[aria-label="Topic"]',
+  );
+  if (!topicSelect)
+    throw new Error("the session-start control is not on screen");
   flushSync(() => {
     topicSelect.value = topicId ?? "";
     topicSelect.dispatchEvent(new Event("change", { bubbles: true }));
   });
   const start = Array.from(
-    document.querySelectorAll<HTMLButtonElement>('[aria-label="Start a session"] button'),
+    document.querySelectorAll<HTMLButtonElement>(
+      '[aria-label="Start a session"] button',
+    ),
   ).find((button) => button.textContent?.trim() === "Start");
   if (!start) throw new Error("the Start button is not on screen");
   flushSync(() => start.click());
@@ -390,8 +389,12 @@ describe("App", () => {
     localStorage.clear();
     vi.mocked(materialsApi.listTopicMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
-    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOperatorOverview());
+    vi.mocked(
+      agentDefinitionsApi.listEffectiveAgentDefinitions,
+    ).mockResolvedValue([]);
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
+      makeOperatorOverview(),
+    );
     vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
       new Error("settings are not configured in this test"),
     );
@@ -420,7 +423,10 @@ describe("App", () => {
   it("opens to the front door regardless of a previously open topic", async () => {
     const restoredTopic = makeTopic({ id: "proj-restored", name: "Restored" });
     localStorage.setItem("swage:active-topic", restoredTopic.id);
-    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic(), restoredTopic]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([
+      makeTopic(),
+      restoredTopic,
+    ]);
 
     component = mount(App, { target: document.body });
     await settleUi();
@@ -428,7 +434,9 @@ describe("App", () => {
     // Sessions are the front door: no topic's conversations are loaded
     // until a session brings its scope into view.
     expect(conversationsApi.listConversations).not.toHaveBeenCalled();
-    expect(document.querySelector('[aria-label="Recent sessions"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Recent sessions"]'),
+    ).not.toBeNull();
     expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
   });
 
@@ -441,7 +449,9 @@ describe("App", () => {
     };
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(
+      created,
+    );
 
     component = mount(App, { target: document.body });
     await settleUi();
@@ -449,21 +459,34 @@ describe("App", () => {
 
     // The shell opens in the general scope with the composer, and nothing
     // has been created yet.
-    expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain("General");
+    expect(
+      document.querySelector('[aria-label="Session scope"]')?.textContent,
+    ).toContain("General");
     expect(conversationsApi.createConversation).not.toHaveBeenCalled();
-    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(null);
+    expect(
+      agentDefinitionsApi.listEffectiveAgentDefinitions,
+    ).toHaveBeenCalledWith(null);
 
     const textarea = document.querySelector<HTMLTextAreaElement>("textarea");
     flushSync(() => {
       textarea!.value = "Hello, general assistant";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => (document.querySelector<HTMLButtonElement>(".action.send")!).click());
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
     await settleUi();
 
-    expect(conversationsApi.createConversation).toHaveBeenCalledWith(null, null, null, null);
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(
+      null,
+      null,
+      null,
+      null,
+    );
     expect(window.location.pathname).toBe("/conversations/conv-general");
-    expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-general");
+    expect(websocketHarness.client.connect).toHaveBeenCalledWith(
+      "conv-general",
+    );
   });
 
   it("keeps a session created for one scope out of the scope the user moved to meanwhile", async () => {
@@ -487,13 +510,21 @@ describe("App", () => {
       textarea!.value = "Start in the topic";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => (document.querySelector<HTMLButtonElement>(".action.send")!).click());
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
     await settleUi();
-    expect(conversationsApi.createConversation).toHaveBeenCalledWith(topic.id, null, null, null);
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(
+      topic.id,
+      null,
+      null,
+      null,
+    );
 
     // ...and the user leaves for the front door before it settles.
-    const allSessions = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent?.trim() === "All sessions");
+    const allSessions = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.trim() === "All sessions");
     flushSync(() => allSessions!.click());
     await settleUi();
 
@@ -509,7 +540,9 @@ describe("App", () => {
     // The late session is not activated where the user now stands.
     expect(window.location.pathname).toBe("/");
     expect(websocketHarness.clientFor("conv-late")).toBeUndefined();
-    expect(document.querySelector('[aria-label="Recent sessions"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Recent sessions"]'),
+    ).not.toBeNull();
   });
 
   it("opens to the recent-sessions list and resumes a session from it", async () => {
@@ -540,25 +573,36 @@ describe("App", () => {
       makeConversationDetail({ id: "conv-recent", topic_id: defaultTopic.id }),
     );
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
-      makeConversationSummary({ id: "conv-recent", message_preview: "Pick up where we left off" }),
+      makeConversationSummary({
+        id: "conv-recent",
+        message_preview: "Pick up where we left off",
+      }),
     ]);
 
     component = mount(App, { target: document.body });
     await waitForText("Pick up where we left off");
     expect(sessionsApi.listRecentSessions).toHaveBeenCalledWith(null, false);
     // The recent list and the session-start control share the front door.
-    expect(document.querySelector('[aria-label="Start a session"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Start a session"]'),
+    ).not.toBeNull();
 
-    const row = document.querySelector<HTMLButtonElement>(".recent-sessions .row.source");
+    const row = document.querySelector<HTMLButtonElement>(
+      ".recent-sessions .row.source",
+    );
     if (!row) throw new Error("recent session row missing");
     flushSync(() => row.click());
     await settleUi();
 
     expect(window.location.pathname).toBe("/conversations/conv-recent");
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-recent");
-    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultTopic.id);
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(
+      defaultTopic.id,
+    );
     expect(document.querySelector('[aria-label="Start a session"]')).toBeNull();
-    expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain(defaultTopic.name);
+    expect(
+      document.querySelector('[aria-label="Session scope"]')?.textContent,
+    ).toContain(defaultTopic.name);
   });
 
   it("connects exactly once when popstate selects a different conversation", async () => {
@@ -629,8 +673,12 @@ describe("App", () => {
     await settleUi();
 
     expect(topicsApi.listTopics).toHaveBeenCalledTimes(1);
-    expect(conversationsApi.listConversations).toHaveBeenCalledWith(defaultTopic.id);
-    expect(conversationsApi.getConversation).toHaveBeenCalledWith("conv-linked");
+    expect(conversationsApi.listConversations).toHaveBeenCalledWith(
+      defaultTopic.id,
+    );
+    expect(conversationsApi.getConversation).toHaveBeenCalledWith(
+      "conv-linked",
+    );
     expect(websocketHarness.client.connect).toHaveBeenCalledTimes(1);
     expect(websocketHarness.client.connect).toHaveBeenCalledWith("conv-linked");
     expect(window.location.pathname).toBe("/conversations/conv-linked");
@@ -646,28 +694,40 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/");
     expect(window.history.length).toBe(historyLength);
 
-    const activePreview = document.querySelector(".conversation-item.active .preview");
+    const activePreview = document.querySelector(
+      ".conversation-item.active .preview",
+    );
     expect(activePreview?.textContent).toContain("Deep-linked conversation");
-    expect(document.querySelector(".message-display")?.textContent).toContain("Restored from URL");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Restored from URL",
+    );
   });
 
   it("keeps the gateway available when startup agent inventory loading fails", async () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({ id: "conv-linked" });
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linkedConversation]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      linkedConversation,
+    ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValue(
       makeConversationDetail({ id: linkedConversation.id }),
     );
-    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockRejectedValueOnce(
-      new Error("agent inventory unavailable"),
+    vi.mocked(
+      agentDefinitionsApi.listEffectiveAgentDefinitions,
+    ).mockRejectedValueOnce(new Error("agent inventory unavailable"));
+    window.history.replaceState(
+      null,
+      "",
+      `/conversations/${linkedConversation.id}`,
     );
-    window.history.replaceState(null, "", `/conversations/${linkedConversation.id}`);
 
     component = mount(App, { target: document.body });
     await settleUi();
 
-    expect(agentDefinitionsApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith(defaultTopic.id);
+    expect(
+      agentDefinitionsApi.listEffectiveAgentDefinitions,
+    ).toHaveBeenCalledWith(defaultTopic.id);
     expect(document.querySelector(".conversation-list")).not.toBeNull();
     expect(document.querySelector(".error-screen")).toBeNull();
   });
@@ -691,25 +751,33 @@ describe("App", () => {
     expect(websocketHarness.clientFor("stale-id")).toBeUndefined();
     await startSessionInTopic("proj-default");
     expect(
-      document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
+      document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Message"]',
+      ),
     ).not.toBeNull();
   });
 
   it("shows the not-found notice when popstate restores a deleted conversation", async () => {
     let popstateHandler: EventListener | null = null;
     const addEventListener = window.addEventListener.bind(window);
-    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
-      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
-        if (type === "popstate") {
-          popstateHandler =
-            typeof listener === "function"
-              ? listener
-              : (event) => listener.handleEvent(event);
-          return;
-        }
-        addEventListener(type, listener, options);
-      },
-    );
+    const addEventListenerSpy = vi
+      .spyOn(window, "addEventListener")
+      .mockImplementation(
+        (
+          type: string,
+          listener: EventListenerOrEventListenerObject,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          if (type === "popstate") {
+            popstateHandler =
+              typeof listener === "function"
+                ? listener
+                : (event) => listener.handleEvent(event);
+            return;
+          }
+          addEventListener(type, listener, options);
+        },
+      );
 
     const deletedConversation = makeConversationSummary({ id: "deleted-id" });
     const replacementConversation: ConversationResponse = {
@@ -763,13 +831,19 @@ describe("App", () => {
     await settleUi();
 
     expect(conversationsApi.getConversation).toHaveBeenCalledTimes(2);
-    expect(conversationsApi.getConversation).toHaveBeenLastCalledWith("deleted-id");
+    expect(conversationsApi.getConversation).toHaveBeenLastCalledWith(
+      "deleted-id",
+    );
     expect(window.location.pathname).toBe("/");
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       "Conversation not found",
     );
-    expect(websocketHarness.clientFor(deletedConversation.id)?.connect).toHaveBeenCalledTimes(1);
-    expect(websocketHarness.clientFor(deletedConversation.id)?.disconnect).toHaveBeenCalledOnce();
+    expect(
+      websocketHarness.clientFor(deletedConversation.id)?.connect,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      websocketHarness.clientFor(deletedConversation.id)?.disconnect,
+    ).toHaveBeenCalledOnce();
     expect(document.body.textContent).not.toContain(
       "Present before server-side deletion",
     );
@@ -787,7 +861,8 @@ describe("App", () => {
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    const sendButton =
+      document.querySelector<HTMLButtonElement>(".action.send");
     expect(sendButton).not.toBeNull();
     flushSync(() => sendButton!.click());
     await settleUi();
@@ -798,25 +873,32 @@ describe("App", () => {
       null,
       null,
     );
-    expect(websocketHarness.clientFor(replacementConversation.id)?.connect)
-      .toHaveBeenCalledWith(replacementConversation.id);
+    expect(
+      websocketHarness.clientFor(replacementConversation.id)?.connect,
+    ).toHaveBeenCalledWith(replacementConversation.id);
   });
 
   it("shows the not-found notice when popstate restores a stale ID with no active conversation", async () => {
     let popstateHandler: EventListener | null = null;
     const addEventListener = window.addEventListener.bind(window);
-    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
-      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
-        if (type === "popstate") {
-          popstateHandler =
-            typeof listener === "function"
-              ? listener
-              : (event) => listener.handleEvent(event);
-          return;
-        }
-        addEventListener(type, listener, options);
-      },
-    );
+    const addEventListenerSpy = vi
+      .spyOn(window, "addEventListener")
+      .mockImplementation(
+        (
+          type: string,
+          listener: EventListenerOrEventListenerObject,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          if (type === "popstate") {
+            popstateHandler =
+              typeof listener === "function"
+                ? listener
+                : (event) => listener.handleEvent(event);
+            return;
+          }
+          addEventListener(type, listener, options);
+        },
+      );
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     component = mount(App, { target: document.body });
@@ -842,18 +924,24 @@ describe("App", () => {
   it("keeps the active conversation when its route existence check fails transiently", async () => {
     let popstateHandler: EventListener | null = null;
     const addEventListener = window.addEventListener.bind(window);
-    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
-      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
-        if (type === "popstate") {
-          popstateHandler =
-            typeof listener === "function"
-              ? listener
-              : (event) => listener.handleEvent(event);
-          return;
-        }
-        addEventListener(type, listener, options);
-      },
-    );
+    const addEventListenerSpy = vi
+      .spyOn(window, "addEventListener")
+      .mockImplementation(
+        (
+          type: string,
+          listener: EventListenerOrEventListenerObject,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          if (type === "popstate") {
+            popstateHandler =
+              typeof listener === "function"
+                ? listener
+                : (event) => listener.handleEvent(event);
+            return;
+          }
+          addEventListener(type, listener, options);
+        },
+      );
     const activeConversation = makeConversationSummary({ id: "active-id" });
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
@@ -890,7 +978,9 @@ describe("App", () => {
     popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
 
-    expect(window.location.pathname).toBe(`/conversations/${activeConversation.id}`);
+    expect(window.location.pathname).toBe(
+      `/conversations/${activeConversation.id}`,
+    );
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Still active after gateway trouble",
     );
@@ -901,18 +991,24 @@ describe("App", () => {
   it("renders the conversation and removes Settings after browser Back", async () => {
     let popstateHandler: EventListener | null = null;
     const addEventListener = window.addEventListener.bind(window);
-    const addEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(
-      (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
-        if (type === "popstate") {
-          popstateHandler =
-            typeof listener === "function"
-              ? listener
-              : (event) => listener.handleEvent(event);
-          return;
-        }
-        addEventListener(type, listener, options);
-      },
-    );
+    const addEventListenerSpy = vi
+      .spyOn(window, "addEventListener")
+      .mockImplementation(
+        (
+          type: string,
+          listener: EventListenerOrEventListenerObject,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          if (type === "popstate") {
+            popstateHandler =
+              typeof listener === "function"
+                ? listener
+                : (event) => listener.handleEvent(event);
+            return;
+          }
+          addEventListener(type, listener, options);
+        },
+      );
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
       id: "conv-settings-back",
@@ -937,7 +1033,11 @@ describe("App", () => {
       }),
     );
 
-    window.history.pushState(null, "", `/conversations/${linkedConversation.id}`);
+    window.history.pushState(
+      null,
+      "",
+      `/conversations/${linkedConversation.id}`,
+    );
     component = mount(App, { target: document.body });
     await settleUi();
 
@@ -951,17 +1051,22 @@ describe("App", () => {
     expect(window.location.pathname).toBe("/settings/providers");
     expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
 
-    const conversationFetchCount = vi.mocked(conversationsApi.getConversation).mock.calls
-      .length;
-    const websocketConnectCount = websocketHarness.client.connect.mock.calls.length;
+    const conversationFetchCount = vi.mocked(conversationsApi.getConversation)
+      .mock.calls.length;
+    const websocketConnectCount =
+      websocketHarness.client.connect.mock.calls.length;
 
     expect(popstateHandler).not.toBeNull();
     setPath(`/conversations/${linkedConversation.id}`);
     popstateHandler!(new PopStateEvent("popstate"));
     await settleUi();
 
-    expect(window.location.pathname).toBe(`/conversations/${linkedConversation.id}`);
-    expect(document.querySelector('[aria-label="Conversation"]')).not.toBeNull();
+    expect(window.location.pathname).toBe(
+      `/conversations/${linkedConversation.id}`,
+    );
+    expect(
+      document.querySelector('[aria-label="Conversation"]'),
+    ).not.toBeNull();
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Conversation restored after Back",
     );
@@ -983,7 +1088,9 @@ describe("App", () => {
     });
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([selected]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      selected,
+    ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: selected.id }),
     );
@@ -1026,7 +1133,9 @@ describe("App", () => {
     // navigation and its runtime context render.
     await startSessionInTopic("proj-default");
 
-    const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
+    const surfaceNavigation = document.querySelector(
+      'nav[aria-label="Surface"]',
+    );
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
@@ -1042,25 +1151,31 @@ describe("App", () => {
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
-    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(makeSettings({
-      "local:reasoning": {
-        provider_id: "local",
-        model_id: "reasoning",
-        aliases: [],
-        context_window: 128_000,
-        generation_preset: null,
-        default_effort: "low",
-        capabilities: { reasoning_replay: false },
-      },
-    }));
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(
+      created,
+    );
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(
+      makeSettings({
+        "local:reasoning": {
+          provider_id: "local",
+          model_id: "reasoning",
+          aliases: [],
+          context_window: 128_000,
+          generation_preset: null,
+          default_effort: "low",
+          capabilities: { reasoning_replay: false },
+        },
+      }),
+    );
 
     component = mount(App, { target: document.body });
     await settleUi();
     // Start a session in the topic so ConversationList (and its "New" button) renders.
     await startSessionInTopic(defaultTopic.id);
 
-    const newButton = document.querySelector(".new-btn") as HTMLButtonElement | null;
+    const newButton = document.querySelector(
+      ".new-btn",
+    ) as HTMLButtonElement | null;
     expect(newButton).not.toBeNull();
 
     flushSync(() => newButton!.click());
@@ -1097,30 +1212,45 @@ describe("App", () => {
     };
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([existing]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      existing,
+    ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValue(
       makeConversationDetail({ id: existing.id, topic_id: defaultTopic.id }),
     );
     vi.mocked(conversationsApi.createConversation)
       .mockResolvedValueOnce(createdFromChannel)
       .mockResolvedValueOnce(createdFromSidebar);
-    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([
-      makeAgentDefinition({ id: "gateway", display_name: "Swage default", is_builtin: true }),
-      makeAgentDefinition({ id: "picker-witness", display_name: "Picker witness" }),
+    vi.mocked(
+      agentDefinitionsApi.listEffectiveAgentDefinitions,
+    ).mockResolvedValue([
+      makeAgentDefinition({
+        id: "gateway",
+        display_name: "Swage default",
+        is_builtin: true,
+      }),
+      makeAgentDefinition({
+        id: "picker-witness",
+        display_name: "Picker witness",
+      }),
     ]);
     setPath(`/conversations/${existing.id}`);
 
     component = mount(App, { target: document.body });
     await settleUi();
 
-    const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    const picker = document.querySelector<HTMLSelectElement>(
+      'select[aria-label="Agent"]',
+    );
     expect(picker).not.toBeNull();
     flushSync(() => {
       picker!.value = "picker-witness";
       picker!.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
-    flushSync(() => (document.querySelector(".new-session") as HTMLButtonElement).click());
+    flushSync(() =>
+      (document.querySelector(".new-session") as HTMLButtonElement).click(),
+    );
     await settleUi();
 
     expect(conversationsApi.createConversation).toHaveBeenCalledTimes(1);
@@ -1130,10 +1260,14 @@ describe("App", () => {
       "picker-witness",
       undefined,
     );
-    expect(window.location.pathname).toBe(`/conversations/${createdFromChannel.id}`);
+    expect(window.location.pathname).toBe(
+      `/conversations/${createdFromChannel.id}`,
+    );
     expect(document.querySelectorAll(".conversation-item")).toHaveLength(2);
 
-    flushSync(() => (document.querySelector(".new-btn") as HTMLButtonElement).click());
+    flushSync(() =>
+      (document.querySelector(".new-btn") as HTMLButtonElement).click(),
+    );
     await settleUi();
 
     expect(conversationsApi.createConversation).toHaveBeenCalledTimes(2);
@@ -1143,7 +1277,9 @@ describe("App", () => {
       "picker-witness",
       undefined,
     );
-    expect(window.location.pathname).toBe(`/conversations/${createdFromSidebar.id}`);
+    expect(window.location.pathname).toBe(
+      `/conversations/${createdFromSidebar.id}`,
+    );
     expect(document.querySelectorAll(".conversation-item")).toHaveLength(3);
   });
 
@@ -1159,7 +1295,9 @@ describe("App", () => {
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(
+      created,
+    );
 
     component = mount(App, { target: document.body });
     await settleUi();
@@ -1172,7 +1310,8 @@ describe("App", () => {
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    const sendButton =
+      document.querySelector<HTMLButtonElement>(".action.send");
     expect(sendButton).not.toBeNull();
     flushSync(() => sendButton!.click());
     await settleUi();
@@ -1193,8 +1332,12 @@ describe("App", () => {
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
-    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(created);
-    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce(
+      created,
+    );
+    vi.mocked(
+      agentDefinitionsApi.listEffectiveAgentDefinitions,
+    ).mockResolvedValue([
       makeAgentDefinition({
         id: "swage-default",
         display_name: "Swage default",
@@ -1207,9 +1350,14 @@ describe("App", () => {
     await settleUi();
     await startSessionInTopic(defaultTopic.id);
 
-    const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    const picker = document.querySelector<HTMLSelectElement>(
+      'select[aria-label="Agent"]',
+    );
     expect(picker).not.toBeNull();
-    expect(Array.from(picker!.options, (option) => option.value)).toEqual(["", "reviewer"]);
+    expect(Array.from(picker!.options, (option) => option.value)).toEqual([
+      "",
+      "reviewer",
+    ]);
 
     flushSync(() => {
       picker!.value = "reviewer";
@@ -1223,7 +1371,8 @@ describe("App", () => {
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    const sendButton =
+      document.querySelector<HTMLButtonElement>(".action.send");
     expect(sendButton).not.toBeNull();
     flushSync(() => sendButton!.click());
     await settleUi();
@@ -1244,7 +1393,9 @@ describe("App", () => {
     const linked = makeConversationSummary({ id: "conv-surface" });
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      linked,
+    ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: linked.id }),
     );
@@ -1255,7 +1406,9 @@ describe("App", () => {
     websocketHarness.client.connect.mockClear();
 
     const surfaceButtons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+      document.querySelectorAll<HTMLButtonElement>(
+        'nav[aria-label="Surface"] button',
+      ),
     );
     const operator = surfaceButtons.find((button) =>
       button.textContent?.includes("Operator"),
@@ -1265,7 +1418,9 @@ describe("App", () => {
     await settleUi();
 
     const conversation = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+      document.querySelectorAll<HTMLButtonElement>(
+        'nav[aria-label="Surface"] button',
+      ),
     ).find((button) => button.textContent?.includes("Conversation"));
     expect(conversation).toBeDefined();
     flushSync(() => conversation!.click());
@@ -1279,7 +1434,9 @@ describe("App", () => {
     const linked = makeConversationSummary({ id: "conv-retry" });
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
-    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([linked]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
+      linked,
+    ]);
     vi.mocked(conversationsApi.getConversation).mockResolvedValueOnce(
       makeConversationDetail({ id: linked.id }),
     );
@@ -1320,7 +1477,9 @@ describe("App", () => {
 
     websocketHarness.fireStatus("connected");
 
-    const textarea = document.querySelector("textarea") as HTMLTextAreaElement | null;
+    const textarea = document.querySelector(
+      "textarea",
+    ) as HTMLTextAreaElement | null;
     expect(textarea).not.toBeNull();
 
     flushSync(() => {
@@ -1328,7 +1487,9 @@ describe("App", () => {
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    const sendButton = document.querySelector(".action.send") as HTMLButtonElement | null;
+    const sendButton = document.querySelector(
+      ".action.send",
+    ) as HTMLButtonElement | null;
     expect(sendButton).not.toBeNull();
 
     flushSync(() => sendButton!.click());
@@ -1338,14 +1499,18 @@ describe("App", () => {
       type: "send_message",
       content: "Hello from the app",
     });
-    expect(document.querySelector(".message-display")?.textContent).toContain("Hello from the app");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Hello from the app",
+    );
     expect(document.querySelector(".action.stop")).not.toBeNull();
 
     websocketHarness.fireEvent({ type: "token", content: "Streamed " });
     websocketHarness.fireEvent({ type: "token", content: "reply." });
     await settleUi();
 
-    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Streamed reply.",
+    );
 
     websocketHarness.fireEvent({
       type: "turn_complete",
@@ -1354,7 +1519,9 @@ describe("App", () => {
     await settleUi();
 
     expect(document.querySelector(".action.stop")).toBeNull();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Streamed reply.");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Streamed reply.",
+    );
   });
 
   it("keeps a live stream on its conversation when another conversation is selected", async () => {
@@ -1362,22 +1529,32 @@ describe("App", () => {
 
     vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([defaultTopic]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
-      makeConversationSummary({ id: "conv-a", message_preview: "Conversation A" }),
-      makeConversationSummary({ id: "conv-b", message_preview: "Conversation B" }),
+      makeConversationSummary({
+        id: "conv-a",
+        message_preview: "Conversation A",
+      }),
+      makeConversationSummary({
+        id: "conv-b",
+        message_preview: "Conversation B",
+      }),
     ]);
     vi.mocked(conversationsApi.getConversation)
       .mockResolvedValueOnce(makeConversationDetail({ id: "conv-a" }))
       .mockResolvedValueOnce(makeConversationDetail({ id: "conv-b" }))
-      .mockResolvedValueOnce(makeConversationDetail({
-        id: "conv-a",
-        messages: [{
-          role: "assistant",
-          content: "Reply for A while B is selected",
-          timestamp: "2026-04-07T12:04:00Z",
-          turn_state: "completed",
-          turn_id: "turn-a",
-        }],
-      }));
+      .mockResolvedValueOnce(
+        makeConversationDetail({
+          id: "conv-a",
+          messages: [
+            {
+              role: "assistant",
+              content: "Reply for A while B is selected",
+              timestamp: "2026-04-07T12:04:00Z",
+              turn_state: "completed",
+              turn_id: "turn-a",
+            },
+          ],
+        }),
+      );
 
     setPath("/conversations/conv-a");
     component = mount(App, { target: document.body });
@@ -1389,7 +1566,9 @@ describe("App", () => {
       textarea!.value = "Keep this reply with A";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
     websocketHarness.fireEvent({ type: "token", content: "Reply for A" });
     await settleUi();
 
@@ -1406,53 +1585,74 @@ describe("App", () => {
     expect(bClient).toBeDefined();
     expect(bClient.connect).toHaveBeenCalledWith("conv-b");
     expect(aClient.disconnect).not.toHaveBeenCalled();
-    expect(document.querySelector(".message-display")?.textContent).not.toContain("Reply for A");
+    expect(
+      document.querySelector(".message-display")?.textContent,
+    ).not.toContain("Reply for A");
     expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".action.send")).not.toBeNull();
 
     // A's socket remains live after B becomes the visible conversation. Its
     // event must retain that ownership at the App wiring seam rather than be
     // attributed to whichever conversation happens to be selected.
-    websocketHarness.fireEvent({ type: "token", content: " while B is selected" }, "conv-a");
-    await settleUi();
-    expect(document.querySelector(".message-display")?.textContent).not.toContain(
-      "while B is selected",
+    websocketHarness.fireEvent(
+      { type: "token", content: " while B is selected" },
+      "conv-a",
     );
+    await settleUi();
+    expect(
+      document.querySelector(".message-display")?.textContent,
+    ).not.toContain("while B is selected");
 
     const BTextarea = document.querySelector<HTMLTextAreaElement>("textarea");
     flushSync(() => {
       BTextarea!.value = "Message for B";
       BTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
     expect(bClient.send).toHaveBeenLastCalledWith({
       type: "send_message",
       content: "Message for B",
     });
     expect(document.querySelector(".action.stop")).not.toBeNull();
 
-    websocketHarness.fireEvent({ type: "token", content: "Reply for B" }, "conv-b");
+    websocketHarness.fireEvent(
+      { type: "token", content: "Reply for B" },
+      "conv-b",
+    );
     await settleUi();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for B");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Reply for B",
+    );
 
-    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-b" }, "conv-b");
+    websocketHarness.fireEvent(
+      { type: "turn_complete", turn_id: "turn-b" },
+      "conv-b",
+    );
     await settleUi();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for B");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Reply for B",
+    );
     expect(document.querySelector(".action.stop")).toBeNull();
 
     // A completes while B remains selected. The real App wiring must settle
     // A, release its retained socket, and leave B's connection usable.
-    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "turn-a" }, "conv-a");
+    websocketHarness.fireEvent(
+      { type: "turn_complete", turn_id: "turn-a" },
+      "conv-a",
+    );
     await settleUi();
 
     expect(aClient.disconnect).toHaveBeenCalledOnce();
     expect(bClient.disconnect).not.toHaveBeenCalled();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Reply for B");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Reply for B",
+    );
     expect(document.querySelector(".action.send")).not.toBeNull();
 
-    const refreshedConversationButtons = document.querySelectorAll<HTMLButtonElement>(
-      ".conversation-select-btn",
-    );
+    const refreshedConversationButtons =
+      document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn");
     flushSync(() => refreshedConversationButtons[0]!.click());
     await settleUi();
 
@@ -1485,24 +1685,40 @@ describe("App", () => {
       textarea!.value = "Keep streaming";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
-    websocketHarness.fireEvent({ type: "token", content: "First A token" }, "conv-a");
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
+    websocketHarness.fireEvent(
+      { type: "token", content: "First A token" },
+      "conv-a",
+    );
     await settleUi();
 
     const aClient = websocketHarness.clientFor("conv-a")!;
     aClient.connect.mockClear();
-    const buttons = document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn");
+    const buttons = document.querySelectorAll<HTMLButtonElement>(
+      ".conversation-select-btn",
+    );
     flushSync(() => buttons[1]!.click());
     await settleUi();
-    flushSync(() => document.querySelector<HTMLButtonElement>(".new-btn")!.click());
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".new-btn")!.click(),
+    );
     await settleUi();
-    flushSync(() => document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[0]!.click());
+    flushSync(() =>
+      document
+        .querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[0]!
+        .click(),
+    );
     await settleUi();
 
     expect(websocketHarness.clientFor("conv-a")).toBe(aClient);
     expect(aClient.connect).not.toHaveBeenCalled();
     expect(aClient.disconnect).not.toHaveBeenCalled();
-    websocketHarness.fireEvent({ type: "token", content: " Second A token" }, "conv-a");
+    websocketHarness.fireEvent(
+      { type: "token", content: " Second A token" },
+      "conv-a",
+    );
     await settleUi();
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "First A token Second A token",
@@ -1538,11 +1754,20 @@ describe("App", () => {
       textarea!.value = "A needs recovery";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
-    websocketHarness.fireEvent({ type: "token", content: "Partial A" }, "conv-a");
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
+    websocketHarness.fireEvent(
+      { type: "token", content: "Partial A" },
+      "conv-a",
+    );
     await settleUi();
 
-    flushSync(() => document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[1]!.click());
+    flushSync(() =>
+      document
+        .querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[1]!
+        .click(),
+    );
     await settleUi();
     const bClient = websocketHarness.clientFor("conv-b")!;
     bClient.disconnect.mockClear();
@@ -1550,7 +1775,9 @@ describe("App", () => {
     websocketHarness.fireStatus("connected", "conv-a");
     await settleUi();
 
-    expect(document.querySelector(".message-display")?.textContent).not.toContain("Partial A");
+    expect(
+      document.querySelector(".message-display")?.textContent,
+    ).not.toContain("Partial A");
     expect(document.querySelector(".action.stop")).toBeNull();
     expect(document.querySelector(".action.send")).not.toBeNull();
 
@@ -1558,20 +1785,30 @@ describe("App", () => {
 
     // Return to A before its reconnect snapshot resolves. The ordinary
     // selection fetch is older; the recovery must replace it when it lands.
-    flushSync(() => document.querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[0]!.click());
+    flushSync(() =>
+      document
+        .querySelectorAll<HTMLButtonElement>(".conversation-select-btn")[0]!
+        .click(),
+    );
     await settleUi();
-    resolveRecovery(makeConversationDetail({
-      id: "conv-a",
-      messages: [{
-        role: "assistant",
-        content: "Recovered A",
-        timestamp: "2026-04-07T12:04:00Z",
-        turn_state: "completed",
-        turn_id: "turn-a",
-      }],
-    }));
+    resolveRecovery(
+      makeConversationDetail({
+        id: "conv-a",
+        messages: [
+          {
+            role: "assistant",
+            content: "Recovered A",
+            timestamp: "2026-04-07T12:04:00Z",
+            turn_state: "completed",
+            turn_id: "turn-a",
+          },
+        ],
+      }),
+    );
     await settleUi();
-    expect(document.querySelector(".message-display")?.textContent).toContain("Recovered A");
+    expect(document.querySelector(".message-display")?.textContent).toContain(
+      "Recovered A",
+    );
     expect(document.querySelector(".action.stop")).toBeNull();
   });
 
@@ -1596,7 +1833,9 @@ describe("App", () => {
       textarea!.value = "Keep the subscription";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    flushSync(() =>
+      document.querySelector<HTMLButtonElement>(".action.send")!.click(),
+    );
     websocketHarness.fireEvent({ type: "token", content: "Still live" });
     await settleUi();
 
@@ -1604,7 +1843,9 @@ describe("App", () => {
     websocketHarness.client.disconnect.mockClear();
     vi.mocked(operatorApi.fetchOperatorOverview).mockClear();
     const operator = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('nav[aria-label="Surface"] button'),
+      document.querySelectorAll<HTMLButtonElement>(
+        'nav[aria-label="Surface"] button',
+      ),
     ).find((button) => button.textContent?.trim() === "Operator");
     flushSync(() => operator!.click());
     await waitForText("Live control surface for the running gateway");
@@ -1643,14 +1884,20 @@ describe("App", () => {
     flushSync(() =>
       document.querySelector<HTMLButtonElement>(".action.send")!.click(),
     );
-    websocketHarness.fireEvent({ type: "token", content: "Older live content" });
+    websocketHarness.fireEvent({
+      type: "token",
+      content: "Older live content",
+    });
     await settleUi();
 
     websocketHarness.fireStatus("reconnecting");
     websocketHarness.fireStatus("connected");
     expect(conversationsApi.getConversation).toHaveBeenCalledTimes(2);
 
-    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "older-turn" });
+    websocketHarness.fireEvent({
+      type: "turn_complete",
+      turn_id: "older-turn",
+    });
     await settleUi();
     flushSync(() => {
       textarea!.value = "New turn while refresh is pending";
@@ -1732,7 +1979,9 @@ describe("App", () => {
       (button) => button.textContent?.trim().startsWith("local/new-model"),
     );
     flushSync(() => newModelButton!.click());
-    await waitForText("Saved automatically. New turns will use the updated runtime.");
+    await waitForText(
+      "Saved automatically. New turns will use the updated runtime.",
+    );
 
     const closeButton = document.querySelector<HTMLButtonElement>(
       'button[aria-label="Close settings"]',
@@ -1746,7 +1995,8 @@ describe("App", () => {
       textarea!.value = "Send with the newly saved model";
       textarea!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    const sendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    const sendButton =
+      document.querySelector<HTMLButtonElement>(".action.send");
     expect(sendButton?.disabled).toBe(false);
     flushSync(() => sendButton!.click());
     await settleUi();
@@ -1757,17 +2007,26 @@ describe("App", () => {
       content: "Send with the newly saved model",
       selected_model_id: "local/new-model",
     });
-    websocketHarness.fireEvent({ type: "turn_complete", turn_id: "first-model-turn" });
+    websocketHarness.fireEvent({
+      type: "turn_complete",
+      turn_id: "first-model-turn",
+    });
     await settleUi();
 
     flushSync(() => settingsButton!.click());
     await settleUi();
-    const existingModelButton = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim().startsWith("local/existing-model"),
+    const existingModelButton = Array.from(
+      document.querySelectorAll("button"),
+    ).find((button) =>
+      button.textContent?.trim().startsWith("local/existing-model"),
     );
     flushSync(() => existingModelButton!.click());
-    await waitForText("Saved automatically. New turns will use the updated runtime.");
-    expect(document.body.textContent).not.toContain("transient catalogue failure");
+    await waitForText(
+      "Saved automatically. New turns will use the updated runtime.",
+    );
+    expect(document.body.textContent).not.toContain(
+      "transient catalogue failure",
+    );
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
     expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(5);
 
@@ -1778,8 +2037,10 @@ describe("App", () => {
     await settleUi();
     expect(document.body.textContent).toContain("local/new-model");
 
-    const retainedTextarea = document.querySelector<HTMLTextAreaElement>("textarea");
-    const retainedSendButton = document.querySelector<HTMLButtonElement>(".action.send");
+    const retainedTextarea =
+      document.querySelector<HTMLTextAreaElement>("textarea");
+    const retainedSendButton =
+      document.querySelector<HTMLButtonElement>(".action.send");
     flushSync(() => {
       retainedTextarea!.value = "Send after the failed catalogue refresh";
       retainedTextarea!.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1807,12 +2068,13 @@ describe("App", () => {
     await settleUi();
     await startSessionInTopic(defaultTopic.id);
 
-    const surfaceNavigation = document.querySelector('nav[aria-label="Surface"]');
+    const surfaceNavigation = document.querySelector(
+      'nav[aria-label="Surface"]',
+    );
     const operatorButton = Array.from(
       surfaceNavigation?.querySelectorAll("button") ?? [],
     ).find((button) => button.textContent?.trim() === "Operator") as
-      | HTMLButtonElement
-      | undefined;
+      HTMLButtonElement | undefined;
 
     expect(operatorButton).toBeDefined();
 
@@ -1842,7 +2104,9 @@ describe("App", () => {
       .mockResolvedValueOnce([missingWorkspace])
       .mockResolvedValueOnce([relinkedWorkspace]);
     vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValueOnce(undefined);
-    vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(relinkedWorkspace);
+    vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(
+      relinkedWorkspace,
+    );
 
     setPath("/settings/topic/default/workspaces");
     component = mount(App, { target: document.body });
@@ -1868,13 +2132,15 @@ describe("App", () => {
       defaultTopic.id,
       missingWorkspace.id,
     );
-    expect(topicsApi.attachTopicWorkspace).toHaveBeenCalledWith(defaultTopic.id, {
-      path: "/srv/topic",
-      label: "Codebase",
-      permissions: ["read", "write"],
-      is_trusted: true,
-      set_as_default: true,
-    });
+    expect(topicsApi.attachTopicWorkspace).toHaveBeenCalledWith(
+      defaultTopic.id,
+      {
+        path: "/srv/topic",
+        label: "Codebase",
+        permissions: ["read", "write"],
+        is_trusted: true,
+        set_as_default: true,
+      },
+    );
   });
-
 });
