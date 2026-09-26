@@ -89,10 +89,22 @@ pub(super) async fn succeed_over_threshold(
         .flat_map(|element| rendered_content(element.as_ref(), site.variables))
         .collect();
 
+    // Under a message-count threshold the successor is built to fit: what
+    // the first assembly carried besides history, plus the summary, plus the
+    // retained history must not exceed the count — otherwise the runtime's
+    // compactor would run its summarise-everything pass over the successor.
+    let retain_at_most = match site.threshold {
+        CompactionThreshold::MessageCount(max) => {
+            let carried_messages = output.messages.len().saturating_sub(history.len());
+            Some((*max as usize).saturating_sub(carried_messages + 1))
+        }
+        CompactionThreshold::TokenCount(_) => None,
+    };
     let request = SuccessionRequest {
         carried: &carried,
         history: &history,
         focus: site.focus,
+        retain_at_most,
     };
     match succession::succeed(request, site.provider, site.tokeniser).await {
         Ok(succession) => {
