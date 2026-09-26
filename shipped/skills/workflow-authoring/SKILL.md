@@ -132,7 +132,8 @@ return { reply };
 - **Return contract:** without `schema`, the worker's final text (a
   string). With `schema`, the validated JSON value, or `null` when
   `maxAttempts` is exhausted without one. With `identity: true`, a
-  settled call returns `{ label, phase, output, failure }`: a non-null
+  settled call — settled by a result or by failure — returns
+  `{ label, phase, output, failure }`: a non-null
   `failure` names a failed leg, while `output: null` with
   `failure: null` is a genuine null result. A failed leg's work is not
   lost with its result: its journal entry stays, status `failed`, with
@@ -183,8 +184,8 @@ return { reply };
   worker. The first `send()` on a worker is its briefing — record it as a
   re-brief; only a later turn continues. `staleness(worker)` returns a journalled
   `{ stale, idleMs, thresholdMs, route }`: the idle gap since the last
-  settled turn — since the worker was opened, while it has had none —
-  against the `worker_staleness_threshold_ms` of the
+  settled turn (or since the worker was opened, if no turn has settled
+  yet) against the `worker_staleness_threshold_ms` of the
   provider route the worker's model resolves to; `stale` is `null` when
   the route declares no threshold, which is unknown, not fresh. `close()`
   on the success path records intent; a run ending by any path closes
@@ -374,8 +375,9 @@ treat every payload as a worker-reported claim.
   lives.
 - **`deliver({ content, metadata }, { target })`** — send `content` (a
   string) out of the run through a granted delivery capability, with an
-  optional `metadata` value (any JSON — an object, an array, a string, a
-  number) and the grant's `target` name; journalled
+  optional `metadata` value (any JSON value: an object, an array, a
+  string, a number, a boolean, or `null`; omit the key to send none) and
+  the grant's `target` name; journalled
   with an idempotency key so a replay never sends twice. Resolves to
   `{ delivered, target, effect_seq }`. Available only when the workflow
   carries a delivery grant — an agent-authored script never does.
@@ -383,8 +385,8 @@ treat every payload as a worker-reported claim.
   `console.log` is an alias of `log`. A `phase(name)` marker is a journal
   entry of its own and sets nothing on the calls that follow it; the
   per-call `phase` option is a string copied into that call's identified
-  envelope and written nowhere else. To have both agree, pass the same
-  name to each.
+  envelope and appears in no journal marker. To have both agree, pass the
+  same name to each.
 - **`return <value>`** — the script's return value is the run's result;
   plain JSON-serialisable data only.
 
