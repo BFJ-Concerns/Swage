@@ -10,7 +10,11 @@ import type { ConnectionStore } from "../stores/connection";
 import type { TopicStore } from "../stores/topics";
 import type { StreamingStore } from "../stores/streaming";
 import type { SurfacesStore } from "../stores/surfaces";
-import type { ConversationDetail, ConversationSummary, MessageView } from "../types";
+import type { MessageView } from "../types";
+import {
+  makeConversationDetail,
+  makeConversationSummary,
+} from "./fixtures/conversations";
 
 import * as operatorApi from "../api/operator";
 
@@ -31,9 +35,15 @@ type MountedComponent = ReturnType<typeof mount>;
 
 function mockConversationStore(): ConversationStore {
   return {
-    get conversations() { return []; },
-    get activeConversation() { return null; },
-    get isLoading() { return false; },
+    get conversations() {
+      return [];
+    },
+    get activeConversation() {
+      return null;
+    },
+    get isLoading() {
+      return false;
+    },
     loadConversations: async () => {},
     selectConversation: async () => {},
     createConversation: async () => {},
@@ -45,42 +55,40 @@ function mockConversationStore(): ConversationStore {
   };
 }
 
-function mockConversationStoreWithMessages(messages: MessageView[]): ConversationStore {
-  const detail: ConversationDetail = {
-    id: "conv-1",
-    agent_id: "gateway",
-    topic_id: "default",
-    created_at: "2026-08-29T10:00:00Z",
-    last_activity: "2026-08-29T10:00:00Z",
-    messages,
+function mockConversationStoreWithMessages(
+  messages: MessageView[],
+): ConversationStore {
+  const detail = makeConversationDetail({ topic_id: "default", messages });
+  return {
+    ...mockConversationStore(),
+    get activeConversation() {
+      return detail;
+    },
   };
-  return { ...mockConversationStore(), get activeConversation() { return detail; } };
 }
 
 function mockConversationStoreWithSessions(
   previews: string[],
   activeIndex: number,
 ): ConversationStore {
-  const summaries: ConversationSummary[] = previews.map((preview, index) => ({
-    id: `conv-${index + 1}`,
-    agent_id: "gateway",
-    created_at: "2026-08-29T10:00:00Z",
-    last_activity: "2026-08-29T10:00:00Z",
-    message_preview: preview,
-    has_interrupted_turn: false,
-  }));
-  const active: ConversationDetail = {
+  const summaries = previews.map((preview, index) =>
+    makeConversationSummary({
+      id: `conv-${index + 1}`,
+      message_preview: preview,
+    }),
+  );
+  const active = makeConversationDetail({
     id: summaries[activeIndex].id,
-    agent_id: "gateway",
     topic_id: "default",
-    created_at: "2026-08-29T10:00:00Z",
-    last_activity: "2026-08-29T10:00:00Z",
-    messages: [],
-  };
+  });
   return {
     ...mockConversationStore(),
-    get conversations() { return summaries; },
-    get activeConversation() { return active; },
+    get conversations() {
+      return summaries;
+    },
+    get activeConversation() {
+      return active;
+    },
   };
 }
 
@@ -103,9 +111,21 @@ function mockSurfacesStore(): SurfacesStore {
     ],
   };
   return {
-    get surfaces() { return [{ id: surface.id, title: surface.title, updated_at: surface.updated_at }]; },
-    get activeSurface() { return surface; },
-    get library() { return []; },
+    get surfaces() {
+      return [
+        {
+          id: surface.id,
+          title: surface.title,
+          updated_at: surface.updated_at,
+        },
+      ];
+    },
+    get activeSurface() {
+      return surface;
+    },
+    get library() {
+      return [];
+    },
     entryName: () => null,
     saveToLibrary: async () => {},
     loadSurfaces: async () => {},
@@ -123,8 +143,12 @@ function mockSurfacesStore(): SurfacesStore {
 
 function mockConnectionStore(): ConnectionStore {
   return {
-    get status() { return "disconnected" as const; },
-    get errorMessage() { return null; },
+    get status() {
+      return "disconnected" as const;
+    },
+    get errorMessage() {
+      return null;
+    },
     connectTo: () => {},
     disconnect: () => {},
     sendMessage: () => {},
@@ -135,14 +159,30 @@ function mockConnectionStore(): ConnectionStore {
 
 function mockStreamingStore(): StreamingStore {
   return {
-    get isStreaming() { return false; },
-    get activeTurnGeneration() { return 0; },
-    get streamedContent() { return ""; },
-    get turnError() { return null; },
-    get turnStartedAt() { return null; },
-    get activeToolCalls() { return []; },
-    get providerRetry() { return null; },
-    get pendingApproval() { return null; },
+    get isStreaming() {
+      return false;
+    },
+    get activeTurnGeneration() {
+      return 0;
+    },
+    get streamedContent() {
+      return "";
+    },
+    get turnError() {
+      return null;
+    },
+    get turnStartedAt() {
+      return null;
+    },
+    get activeToolCalls() {
+      return [];
+    },
+    get providerRetry() {
+      return null;
+    },
+    get pendingApproval() {
+      return null;
+    },
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
@@ -150,7 +190,10 @@ function mockStreamingStore(): StreamingStore {
   };
 }
 
-function mockTopicStore(hasCurrentTopic = true, topicId = "default"): TopicStore {
+function mockTopicStore(
+  hasCurrentTopic = true,
+  topicId = "default",
+): TopicStore {
   const topic = {
     id: topicId,
     name: topicId,
@@ -160,10 +203,18 @@ function mockTopicStore(hasCurrentTopic = true, topicId = "default"): TopicStore
   };
 
   return {
-    get topics() { return hasCurrentTopic ? [topic] : []; },
-    get currentTopic() { return hasCurrentTopic ? topic : null; },
-    get recentTopics() { return []; },
-    get isLoading() { return false; },
+    get topics() {
+      return hasCurrentTopic ? [topic] : [];
+    },
+    get currentTopic() {
+      return hasCurrentTopic ? topic : null;
+    },
+    get recentTopics() {
+      return [];
+    },
+    get isLoading() {
+      return false;
+    },
     loadTopics: async () => {},
     selectTopic: async () => {},
     closeTopic: () => {},
@@ -199,7 +250,10 @@ function mountLayout(options: MountOptions = {}): MountedComponent {
       topicStore: mockTopicStore(options.hasCurrentTopic ?? true),
       pendingStart:
         options.pendingStart === undefined
-          ? { topicId: (options.hasCurrentTopic ?? true) ? "default" : null, agentId: null }
+          ? {
+              topicId: (options.hasCurrentTopic ?? true) ? "default" : null,
+              agentId: null,
+            }
           : options.pendingStart,
       onRetry: () => {},
       activeSurface: options.activeSurface ?? "conversation",
@@ -259,19 +313,27 @@ describe("AppLayout shell navigation", () => {
   it("shows the recent-sessions front door with the session-start control when nothing is in view", () => {
     component = mountLayout({ hasCurrentTopic: false, pendingStart: null });
 
-    expect(document.querySelector('[aria-label="Recent sessions"]')).not.toBeNull();
-    expect(document.querySelector('[aria-label="Start a session"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Recent sessions"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Start a session"]'),
+    ).not.toBeNull();
     expect(document.querySelector('nav[aria-label="Surface"]')).toBeNull();
     // The start control offers a session with no topic first.
-    const options = Array.from(document.querySelectorAll('select[aria-label="Topic"] option'))
-      .map((option) => option.textContent);
+    const options = Array.from(
+      document.querySelectorAll('select[aria-label="Topic"] option'),
+    ).map((option) => option.textContent);
     expect(options[0]).toContain("No topic");
   });
 
   it("starts a session in the chosen scope without creating a conversation", () => {
     const onStartSession = vi.fn();
     const conversationStore = mockConversationStore();
-    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    const createConversation = vi.spyOn(
+      conversationStore,
+      "createConversation",
+    );
     component = mount(AppLayout, {
       target: document.body,
       props: {
@@ -286,15 +348,23 @@ describe("AppLayout shell navigation", () => {
         onSelectSurface: () => {},
       },
     });
-    const topic = document.querySelector('select[aria-label="Topic"]') as HTMLSelectElement;
+    const topic = document.querySelector(
+      'select[aria-label="Topic"]',
+    ) as HTMLSelectElement;
     topic.value = "research";
     topic.dispatchEvent(new Event("change", { bubbles: true }));
     flushSync();
-    const start = Array.from(document.querySelectorAll('[aria-label="Start a session"] button'))
-      .find((button) => button.textContent?.trim() === "Start") as HTMLButtonElement;
+    const start = Array.from(
+      document.querySelectorAll('[aria-label="Start a session"] button'),
+    ).find(
+      (button) => button.textContent?.trim() === "Start",
+    ) as HTMLButtonElement;
     flushSync(() => start.click());
 
-    expect(onStartSession).toHaveBeenCalledWith({ topicId: "research", agentId: null });
+    expect(onStartSession).toHaveBeenCalledWith({
+      topicId: "research",
+      agentId: null,
+    });
     expect(createConversation).not.toHaveBeenCalled();
   });
 
@@ -304,12 +374,17 @@ describe("AppLayout shell navigation", () => {
 
     const scope = document.querySelector('[aria-label="Session scope"]');
     expect(scope?.textContent).toContain("default");
-    flushSync(() => (scope?.querySelector("button") as HTMLButtonElement).click());
+    flushSync(() =>
+      (scope?.querySelector("button") as HTMLButtonElement).click(),
+    );
     expect(onNavigate).toHaveBeenCalledWith("/settings/topic/default/overview");
   });
 
   it("names the general scope for a session without a topic", () => {
-    component = mountLayout({ hasCurrentTopic: false, pendingStart: { topicId: null, agentId: null } });
+    component = mountLayout({
+      hasCurrentTopic: false,
+      pendingStart: { topicId: null, agentId: null },
+    });
 
     const scope = document.querySelector('[aria-label="Session scope"]');
     expect(scope?.textContent).toContain("General");
@@ -318,20 +393,41 @@ describe("AppLayout shell navigation", () => {
 
   it("opens the shared library from the surface controls and returns from it", () => {
     const onNavigate = vi.fn();
-    component = mountLayout({ onNavigate, routePath: "/library", surfacesStore: mockSurfacesStore() });
+    component = mountLayout({
+      onNavigate,
+      routePath: "/library",
+      surfacesStore: mockSurfacesStore(),
+    });
 
-    expect(document.querySelector('[aria-label="Surface library"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Surface library"]'),
+    ).not.toBeNull();
     expect(surfaceButton("Library").getAttribute("aria-pressed")).toBe("true");
-    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
-    flushSync(() => (document.querySelector('[aria-label="Close library"]') as HTMLButtonElement).click());
+    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe(
+      "false",
+    );
+    flushSync(() =>
+      (
+        document.querySelector(
+          '[aria-label="Close library"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
     expect(onNavigate).toHaveBeenCalledWith("/");
   });
 
   it("offers the library from the front door without a session to add to", () => {
     const onNavigate = vi.fn();
-    component = mountLayout({ hasCurrentTopic: false, pendingStart: null, onNavigate });
-    const library = Array.from(document.querySelectorAll("main.landing button"))
-      .find((button) => button.textContent?.trim() === "Library") as HTMLButtonElement;
+    component = mountLayout({
+      hasCurrentTopic: false,
+      pendingStart: null,
+      onNavigate,
+    });
+    const library = Array.from(
+      document.querySelectorAll("main.landing button"),
+    ).find(
+      (button) => button.textContent?.trim() === "Library",
+    ) as HTMLButtonElement;
     flushSync(() => library.click());
     expect(onNavigate).toHaveBeenCalledWith("/library");
   });
@@ -340,8 +436,12 @@ describe("AppLayout shell navigation", () => {
     component = mountLayout();
 
     expect(document.querySelector(".conversation-list")).not.toBeNull();
-    expect(document.querySelector('[aria-label="Conversation messages"]')).not.toBeNull();
-    expect(document.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Conversation messages"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('textarea[aria-label="Message"]'),
+    ).not.toBeNull();
   });
 
   it("loads one shared record for the workflow run account and journal", async () => {
@@ -355,45 +455,80 @@ describe("AppLayout shell navigation", () => {
     });
     expect(fetchSpy).toHaveBeenCalledWith("/api/workflow-runs/run%201");
     await vi.waitFor(() => {
-      expect(document.querySelectorAll(".workflow-run .notice, .workflow-run .status"))
-        .toHaveLength(2);
+      expect(
+        document.querySelectorAll(
+          ".workflow-run .notice, .workflow-run .status",
+        ),
+      ).toHaveLength(2);
     });
-    expect(document.querySelector(".workflow-run")?.textContent).not.toContain("HTTP 404");
+    expect(document.querySelector(".workflow-run")?.textContent).not.toContain(
+      "HTTP 404",
+    );
   });
 
   it("offers the shipped default and effective definitions when starting a conversation", () => {
     component = mountLayout({
       agentDefinitions: [
         {
-          id: "gateway", display_name: "Built-in assistant", description: "", instructions: "",
-          model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: true, source_scope: "built_in",
+          id: "gateway",
+          display_name: "Built-in assistant",
+          description: "",
+          instructions: "",
+          model_id: null,
+          tool_permissions: null,
+          skills: [],
+          output_schema: null,
+          output_max_retries: null,
+          is_builtin: true,
+          source_scope: "built_in",
         },
         {
-          id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
-          model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: false, source_scope: "global",
+          id: "researcher",
+          display_name: "Researcher",
+          description: "",
+          instructions: "cite",
+          model_id: null,
+          tool_permissions: null,
+          skills: [],
+          output_schema: null,
+          output_max_retries: null,
+          is_builtin: false,
+          source_scope: "global",
         },
       ],
     });
 
-    const options = Array.from(document.querySelectorAll('select[aria-label="Agent"] option'))
-      .map((option) => option.textContent);
+    const options = Array.from(
+      document.querySelectorAll('select[aria-label="Agent"] option'),
+    ).map((option) => option.textContent);
     expect(options).toEqual(["Built-in assistant", "Researcher"]);
   });
 
   it("opens the creation surface without eagerly creating a conversation", () => {
     const conversationStore = mockConversationStore();
-    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    const createConversation = vi.spyOn(
+      conversationStore,
+      "createConversation",
+    );
     const onNewConversation = vi.fn();
     component = mountLayout({
       conversationStore,
       onNewConversation,
-      agentDefinitions: [{
-        id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
-        model_id: null, tool_permissions: null, skills: [], output_schema: null,
-        output_max_retries: null, is_builtin: false, source_scope: "global",
-      }],
+      agentDefinitions: [
+        {
+          id: "researcher",
+          display_name: "Researcher",
+          description: "",
+          instructions: "cite",
+          model_id: null,
+          tool_permissions: null,
+          skills: [],
+          output_schema: null,
+          output_max_retries: null,
+          is_builtin: false,
+          source_scope: "global",
+        },
+      ],
     });
     (document.querySelector("button.new-btn") as HTMLButtonElement).click();
 
@@ -403,7 +538,10 @@ describe("AppLayout shell navigation", () => {
 
   it("does not retain an agent when the selected topic changes", () => {
     const conversationStore = mockConversationStore();
-    const createConversation = vi.spyOn(conversationStore, "createConversation");
+    const createConversation = vi.spyOn(
+      conversationStore,
+      "createConversation",
+    );
     const layout = createClassComponent({
       component: AppLayout,
       target: document.body,
@@ -416,14 +554,26 @@ describe("AppLayout shell navigation", () => {
         onRetry: () => {},
         activeSurface: "conversation",
         onSelectSurface: () => {},
-        agentDefinitions: [{
-          id: "topic-one-agent", display_name: "Topic one agent", description: "", instructions: "",
-          model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: false, source_scope: "topic",
-        }],
+        agentDefinitions: [
+          {
+            id: "topic-one-agent",
+            display_name: "Topic one agent",
+            description: "",
+            instructions: "",
+            model_id: null,
+            tool_permissions: null,
+            skills: [],
+            output_schema: null,
+            output_max_retries: null,
+            is_builtin: false,
+            source_scope: "topic",
+          },
+        ],
       },
     });
-    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    const picker = document.querySelector(
+      'select[aria-label="Agent"]',
+    ) as HTMLSelectElement;
     picker.value = "topic-one-agent";
     picker.dispatchEvent(new Event("change", { bubbles: true }));
     flushSync();
@@ -431,7 +581,9 @@ describe("AppLayout shell navigation", () => {
     layout.$set({ topicStore: mockTopicStore(true, "second-topic") });
     flushSync();
 
-    const cleared = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    const cleared = document.querySelector(
+      'select[aria-label="Agent"]',
+    ) as HTMLSelectElement;
     expect(cleared.value).toBe("");
     (document.querySelector("button.new-btn") as HTMLButtonElement).click();
     expect(createConversation).not.toHaveBeenCalled();
@@ -440,11 +592,20 @@ describe("AppLayout shell navigation", () => {
 
   it("clears a selected agent when refreshed definitions remove it", () => {
     const startTurn = vi.fn();
-    const researcher: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse = {
-      id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
-      model_id: null, tool_permissions: null, skills: [], output_schema: null,
-      output_max_retries: null, is_builtin: false, source_scope: "global",
-    };
+    const researcher: import("../protocol/EffectiveAgentDefinitionResponse").EffectiveAgentDefinitionResponse =
+      {
+        id: "researcher",
+        display_name: "Researcher",
+        description: "",
+        instructions: "cite",
+        model_id: null,
+        tool_permissions: null,
+        skills: [],
+        output_schema: null,
+        output_max_retries: null,
+        is_builtin: false,
+        source_scope: "global",
+      };
     const layout = createClassComponent({
       component: AppLayout,
       target: document.body,
@@ -460,7 +621,9 @@ describe("AppLayout shell navigation", () => {
         agentDefinitions: [researcher],
       },
     });
-    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    const picker = document.querySelector(
+      'select[aria-label="Agent"]',
+    ) as HTMLSelectElement;
     picker.value = researcher.id;
     picker.dispatchEvent(new Event("change", { bubbles: true }));
     flushSync();
@@ -468,13 +631,26 @@ describe("AppLayout shell navigation", () => {
     layout.$set({ agentDefinitions: [] });
     flushSync();
 
-    expect((document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement).value).toBe("");
-    const message = document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement;
+    expect(
+      (
+        document.querySelector(
+          'select[aria-label="Agent"]',
+        ) as HTMLSelectElement
+      ).value,
+    ).toBe("");
+    const message = document.querySelector(
+      'textarea[aria-label="Message"]',
+    ) as HTMLTextAreaElement;
     message.value = "Use the refreshed definitions";
     message.dispatchEvent(new Event("input", { bubbles: true }));
     flushSync();
     (document.querySelector("button.send") as HTMLButtonElement).click();
-    expect(startTurn).toHaveBeenCalledWith("Use the refreshed definitions", null, null, null);
+    expect(startTurn).toHaveBeenCalledWith(
+      "Use the refreshed definitions",
+      null,
+      null,
+      null,
+    );
     layout.$destroy();
   });
 
@@ -482,16 +658,30 @@ describe("AppLayout shell navigation", () => {
     const startTurn = vi.fn();
     component = mountLayout({
       streamingStore: { ...mockStreamingStore(), startTurn },
-      agentDefinitions: [{
-        id: "researcher", display_name: "Researcher", description: "", instructions: "cite",
-        model_id: null, tool_permissions: null, skills: [], output_schema: null,
-        output_max_retries: null, is_builtin: false, source_scope: "global",
-      }],
+      agentDefinitions: [
+        {
+          id: "researcher",
+          display_name: "Researcher",
+          description: "",
+          instructions: "cite",
+          model_id: null,
+          tool_permissions: null,
+          skills: [],
+          output_schema: null,
+          output_max_retries: null,
+          is_builtin: false,
+          source_scope: "global",
+        },
+      ],
     });
-    const picker = document.querySelector('select[aria-label="Agent"]') as HTMLSelectElement;
+    const picker = document.querySelector(
+      'select[aria-label="Agent"]',
+    ) as HTMLSelectElement;
     picker.value = "researcher";
     picker.dispatchEvent(new Event("change", { bubbles: true }));
-    const message = document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement;
+    const message = document.querySelector(
+      'textarea[aria-label="Message"]',
+    ) as HTMLTextAreaElement;
     message.value = "Hello";
     message.dispatchEvent(new Event("input", { bubbles: true }));
     flushSync();
@@ -503,14 +693,23 @@ describe("AppLayout shell navigation", () => {
   it("clears effort after the active conversation changes before the next new conversation", () => {
     const startTurn = vi.fn();
     const firstConversation = {
-      id: "first-conversation", topic_id: "default", selected_model_id: null,
+      id: "first-conversation",
+      topic_id: "default",
+      selected_model_id: null,
       agent_id: "gateway",
-      created_at: "", last_activity: "", messages: [],
+      created_at: "",
+      last_activity: "",
+      messages: [],
     };
-    const secondConversation = { ...firstConversation, id: "second-conversation" };
+    const secondConversation = {
+      ...firstConversation,
+      id: "second-conversation",
+    };
     const conversationStore = {
       ...mockConversationStore(),
-      get activeConversation() { return null; },
+      get activeConversation() {
+        return null;
+      },
     };
     const layout = createClassComponent({
       component: AppLayout,
@@ -525,33 +724,64 @@ describe("AppLayout shell navigation", () => {
         activeSurface: "conversation",
         onSelectSurface: () => {},
         modelOptions: ["e2e-model"],
-        agentDefinitions: [{
-          id: "researcher", display_name: "Researcher", description: "", instructions: "",
-          model_id: null, tool_permissions: null, skills: [], output_schema: null,
-          output_max_retries: null, is_builtin: false, source_scope: "global",
-        }],
+        agentDefinitions: [
+          {
+            id: "researcher",
+            display_name: "Researcher",
+            description: "",
+            instructions: "",
+            model_id: null,
+            tool_permissions: null,
+            skills: [],
+            output_schema: null,
+            output_max_retries: null,
+            is_builtin: false,
+            source_scope: "global",
+          },
+        ],
       },
     });
-    const effort = document.querySelector('[aria-label="Effort"]') as HTMLSelectElement;
+    const effort = document.querySelector(
+      '[aria-label="Effort"]',
+    ) as HTMLSelectElement;
     effort.value = "high";
     effort.dispatchEvent(new Event("change", { bubbles: true }));
     flushSync();
 
-    layout.$set({ conversationStore: { ...conversationStore, get activeConversation() { return firstConversation; } } });
+    layout.$set({
+      conversationStore: {
+        ...conversationStore,
+        get activeConversation() {
+          return firstConversation;
+        },
+      },
+    });
     flushSync();
-    layout.$set({ conversationStore: { ...conversationStore, get activeConversation() { return secondConversation; } } });
+    layout.$set({
+      conversationStore: {
+        ...conversationStore,
+        get activeConversation() {
+          return secondConversation;
+        },
+      },
+    });
     flushSync();
     layout.$set({ conversationStore });
     flushSync();
 
-    const message = document.querySelector('textarea[aria-label="Message"]') as HTMLTextAreaElement;
+    const message = document.querySelector(
+      'textarea[aria-label="Message"]',
+    ) as HTMLTextAreaElement;
     message.value = "Use the new conversation default";
     message.dispatchEvent(new Event("input", { bubbles: true }));
     flushSync();
     (document.querySelector("button.send") as HTMLButtonElement).click();
 
     expect(startTurn).toHaveBeenCalledWith(
-      "Use the new conversation default", "e2e-model", null, null,
+      "Use the new conversation default",
+      "e2e-model",
+      null,
+      null,
     );
     layout.$destroy();
   });
@@ -559,8 +789,12 @@ describe("AppLayout shell navigation", () => {
   it("marks conversation as the selected surface", () => {
     component = mountLayout();
 
-    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("true");
-    expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
+    expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+    expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe(
+      "false",
+    );
   });
 
   it("requests the operator surface from its labelled control", () => {
@@ -601,14 +835,28 @@ describe("AppLayout shell navigation", () => {
       });
 
       expect(document.querySelector('[aria-label="Settings"]')).not.toBeNull();
-      expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe("false");
-      expect(surfaceButton("Conversation").classList.contains("active")).toBe(false);
-      expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
-      expect(surfaceButton("Operator").classList.contains("active")).toBe(false);
-      expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe("true");
+      expect(surfaceButton("Conversation").getAttribute("aria-pressed")).toBe(
+        "false",
+      );
+      expect(surfaceButton("Conversation").classList.contains("active")).toBe(
+        false,
+      );
+      expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe(
+        "false",
+      );
+      expect(surfaceButton("Operator").classList.contains("active")).toBe(
+        false,
+      );
+      expect(surfaceButton("Settings").getAttribute("aria-pressed")).toBe(
+        "true",
+      );
       expect(surfaceButton("Settings").classList.contains("active")).toBe(true);
       flushSync(() =>
-        (document.querySelector('[aria-label="Close settings"]') as HTMLButtonElement).click(),
+        (
+          document.querySelector(
+            '[aria-label="Close settings"]',
+          ) as HTMLButtonElement
+        ).click(),
       );
 
       expect(onNavigate).toHaveBeenCalledWith("/");
@@ -618,10 +866,12 @@ describe("AppLayout shell navigation", () => {
   it("navigates to the agent definitions settings tab", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
-    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
-    const agents = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
-      (button) => button.textContent?.trim() === "Agents",
+    const settingsNavigation = document.querySelector(
+      'nav[aria-label="Settings sections"]',
     );
+    const agents = Array.from(
+      settingsNavigation?.querySelectorAll("button") ?? [],
+    ).find((button) => button.textContent?.trim() === "Agents");
 
     flushSync(() => agents?.click());
 
@@ -631,13 +881,15 @@ describe("AppLayout shell navigation", () => {
   it("navigates to command and skill settings tabs", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
-    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
-    const command = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
-      (button) => button.textContent?.trim() === "Commands",
+    const settingsNavigation = document.querySelector(
+      'nav[aria-label="Settings sections"]',
     );
-    const skill = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
-      (button) => button.textContent?.trim() === "Skills",
-    );
+    const command = Array.from(
+      settingsNavigation?.querySelectorAll("button") ?? [],
+    ).find((button) => button.textContent?.trim() === "Commands");
+    const skill = Array.from(
+      settingsNavigation?.querySelectorAll("button") ?? [],
+    ).find((button) => button.textContent?.trim() === "Skills");
 
     flushSync(() => command?.click());
     flushSync(() => skill?.click());
@@ -649,10 +901,12 @@ describe("AppLayout shell navigation", () => {
   it("lists every topic in the settings sections and opens its page", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
-    const settingsNavigation = document.querySelector('nav[aria-label="Settings sections"]');
-    const topic = Array.from(settingsNavigation?.querySelectorAll("button") ?? []).find(
-      (button) => button.textContent?.trim() === "default",
+    const settingsNavigation = document.querySelector(
+      'nav[aria-label="Settings sections"]',
     );
+    const topic = Array.from(
+      settingsNavigation?.querySelectorAll("button") ?? [],
+    ).find((button) => button.textContent?.trim() === "default");
 
     flushSync(() => topic?.click());
 
@@ -661,15 +915,22 @@ describe("AppLayout shell navigation", () => {
 
   it("navigates to a topic's workspaces from its settings page tabs", () => {
     const onNavigate = vi.fn();
-    component = mountLayout({ onNavigate, routePath: "/settings/topic/default/overview" });
-    const tabs = document.querySelector('nav[aria-label="Topic settings sections"]');
+    component = mountLayout({
+      onNavigate,
+      routePath: "/settings/topic/default/overview",
+    });
+    const tabs = document.querySelector(
+      'nav[aria-label="Topic settings sections"]',
+    );
     const workspaces = Array.from(tabs?.querySelectorAll("button") ?? []).find(
       (button) => button.textContent?.trim() === "Workspaces",
     );
 
     flushSync(() => workspaces?.click());
 
-    expect(onNavigate).toHaveBeenCalledWith("/settings/topic/default/workspaces");
+    expect(onNavigate).toHaveBeenCalledWith(
+      "/settings/topic/default/workspaces",
+    );
   });
 
   it("opens global settings from the front door", () => {
@@ -718,18 +979,29 @@ describe("ambient conversation channel", () => {
       activeSurface: "surfaces",
       surfacesStore: mockSurfacesStore(),
       conversationStore: mockConversationStoreWithMessages([
-        { role: "user", content: "Draft the checklist", timestamp: "2026-08-29T10:00:01Z", turn_state: "completed" },
+        {
+          role: "user",
+          content: "Draft the checklist",
+          timestamp: "2026-08-29T10:00:01Z",
+          turn_state: "completed",
+        },
       ]),
     });
 
     // The work surface is genuinely on screen...
-    expect(document.querySelector('main.surfaces-surface [aria-label="Surface"] h2')?.textContent)
-      .toBe("Release checklist");
+    expect(
+      document.querySelector('main.surfaces-surface [aria-label="Surface"] h2')
+        ?.textContent,
+    ).toBe("Release checklist");
     // ...and so is the control channel, with the ongoing conversation in it.
-    const channel = document.querySelector('main.surfaces-surface [aria-label="Conversation"]');
+    const channel = document.querySelector(
+      'main.surfaces-surface [aria-label="Conversation"]',
+    );
     expect(channel).not.toBeNull();
     expect(channel?.textContent).toContain("Draft the checklist");
-    expect(channel?.querySelector('textarea[aria-label="Message"]')).not.toBeNull();
+    expect(
+      channel?.querySelector('textarea[aria-label="Message"]'),
+    ).not.toBeNull();
   });
 
   it("sends from the channel while standing on a surface", () => {
@@ -748,16 +1020,32 @@ describe("ambient conversation channel", () => {
     flushSync();
     (document.querySelector("button.send") as HTMLButtonElement).click();
 
-    expect(startTurn).toHaveBeenCalledWith("Add a rollback step", null, null, null);
+    expect(startTurn).toHaveBeenCalledWith(
+      "Add a rollback step",
+      null,
+      null,
+      null,
+    );
   });
 
   it("keeps the conversation and its history across a move to the work surface", () => {
     const conversationStore = mockConversationStoreWithMessages([
-      { role: "user", content: "What is left to ship?", timestamp: "2026-08-29T10:00:01Z", turn_state: "completed" },
+      {
+        role: "user",
+        content: "What is left to ship?",
+        timestamp: "2026-08-29T10:00:01Z",
+        turn_state: "completed",
+      },
     ]);
-    const selectConversation = vi.spyOn(conversationStore, "selectConversation");
+    const selectConversation = vi.spyOn(
+      conversationStore,
+      "selectConversation",
+    );
     const loadConversations = vi.spyOn(conversationStore, "loadConversations");
-    const refreshActiveConversation = vi.spyOn(conversationStore, "refreshActiveConversation");
+    const refreshActiveConversation = vi.spyOn(
+      conversationStore,
+      "refreshActiveConversation",
+    );
     const layout = createClassComponent({
       component: AppLayout,
       target: document.body,
@@ -773,14 +1061,19 @@ describe("ambient conversation channel", () => {
         onSelectSurface: () => {},
       },
     });
-    expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent)
-      .toContain("What is left to ship?");
+    expect(
+      document.querySelector('main.conversation [aria-label="Conversation"]')
+        ?.textContent,
+    ).toContain("What is left to ship?");
 
     layout.$set({ activeSurface: "surfaces" });
     flushSync();
 
-    expect(document.querySelector('main.surfaces-surface [aria-label="Conversation"]')?.textContent)
-      .toContain("What is left to ship?");
+    expect(
+      document.querySelector(
+        'main.surfaces-surface [aria-label="Conversation"]',
+      )?.textContent,
+    ).toContain("What is left to ship?");
     expect(selectConversation).not.toHaveBeenCalled();
     expect(loadConversations).not.toHaveBeenCalled();
     expect(refreshActiveConversation).not.toHaveBeenCalled();
@@ -788,8 +1081,10 @@ describe("ambient conversation channel", () => {
     layout.$set({ activeSurface: "conversation" });
     flushSync();
 
-    expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent)
-      .toContain("What is left to ship?");
+    expect(
+      document.querySelector('main.conversation [aria-label="Conversation"]')
+        ?.textContent,
+    ).toContain("What is left to ship?");
     expect(selectConversation).not.toHaveBeenCalled();
     layout.$destroy();
   });
@@ -799,7 +1094,10 @@ describe("ambient conversation channel", () => {
       ["Release checklist review", "Ledger migration"],
       0,
     );
-    const selectConversation = vi.spyOn(conversationStore, "selectConversation");
+    const selectConversation = vi.spyOn(
+      conversationStore,
+      "selectConversation",
+    );
     component = mountLayout({
       activeSurface: "surfaces",
       surfacesStore: mockSurfacesStore(),
@@ -808,10 +1106,9 @@ describe("ambient conversation channel", () => {
     const selector = document.querySelector(
       'main.surfaces-surface [aria-label="Conversation"] select[aria-label="Active conversation"]',
     ) as HTMLSelectElement;
-    expect(Array.from(selector.options).map((option) => option.textContent?.trim())).toEqual([
-      "Release checklist review",
-      "Ledger migration",
-    ]);
+    expect(
+      Array.from(selector.options).map((option) => option.textContent?.trim()),
+    ).toEqual(["Release checklist review", "Ledger migration"]);
     expect(selector.value).toBe("conv-1");
 
     selector.value = "conv-2";
@@ -821,8 +1118,10 @@ describe("ambient conversation channel", () => {
     // Reached from where the user was standing: the work surface is still on
     // screen, so cycling cost no surface.
     expect(selectConversation).toHaveBeenCalledWith("conv-2");
-    expect(document.querySelector('main.surfaces-surface [aria-label="Surface"] h2')?.textContent)
-      .toBe("Release checklist");
+    expect(
+      document.querySelector('main.surfaces-surface [aria-label="Surface"] h2')
+        ?.textContent,
+    ).toBe("Release checklist");
   });
 
   it("opens the surface the URL names and keeps the address in step with the one opened", () => {
@@ -845,7 +1144,9 @@ describe("ambient conversation channel", () => {
       'main.surfaces-surface aside[aria-label="Surfaces"] li button',
     ) as HTMLButtonElement;
     flushSync(() => entry.click());
-    expect(onNavigate).toHaveBeenCalledWith("/conversations/conv-1/surfaces/surface-1");
+    expect(onNavigate).toHaveBeenCalledWith(
+      "/conversations/conv-1/surfaces/surface-1",
+    );
   });
 
   it("reaches the library from the work surface", () => {
@@ -856,7 +1157,9 @@ describe("ambient conversation channel", () => {
       onNavigate,
       conversationStore: mockConversationStoreWithMessages([]),
     });
-    const link = document.querySelector("main.surfaces-surface .library-link") as HTMLButtonElement;
+    const link = document.querySelector(
+      "main.surfaces-surface .library-link",
+    ) as HTMLButtonElement;
     flushSync(() => link.click());
     expect(onNavigate).toHaveBeenCalledWith("/library");
   });
@@ -866,14 +1169,19 @@ describe("ambient conversation channel", () => {
     component = mountLayout({
       activeSurface: "surfaces",
       surfacesStore: mockSurfacesStore(),
-      conversationStore: mockConversationStoreWithSessions(["Release checklist review"], 0),
+      conversationStore: mockConversationStoreWithSessions(
+        ["Release checklist review"],
+        0,
+      ),
       onNewConversation,
     });
 
     flushSync(() =>
-      (document.querySelector(
-        'main.surfaces-surface [aria-label="Conversation"] button.new-session',
-      ) as HTMLButtonElement).click(),
+      (
+        document.querySelector(
+          'main.surfaces-surface [aria-label="Conversation"] button.new-session',
+        ) as HTMLButtonElement
+      ).click(),
     );
 
     expect(onNewConversation).toHaveBeenCalledOnce();

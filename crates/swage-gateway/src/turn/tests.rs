@@ -22,6 +22,7 @@ use swage_hook::{Hook, HookOutcome, HookRegistration, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
 use swage_provider::LlmProvider;
 use swage_storage::{
+    fixtures::new_session,
     model::{
         ActiveSkillRecord, AgentMessage, AppendMessage, ApprovalRequest, ApprovalState, Attachment,
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
@@ -4727,13 +4728,7 @@ async fn active_skill_loading_keeps_agent_skills_out_of_reserved_workflow_contex
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create normal-agent session");
     let session_id = session.id;
@@ -4835,11 +4830,8 @@ async fn process_turn_loads_agent_skills_and_excludes_reserved_workflow_skills()
     for agent_id in ["gateway", swage_config::RESERVED_WORKFLOW_AGENT_ID] {
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: agent_id.to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..new_session(topic.id)
             })
             .await
             .expect("create skill fixture session");
@@ -4938,13 +4930,7 @@ async fn make_state_with_storage_and_root(
 
     // Create a session.
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -5007,13 +4993,7 @@ async fn make_state_with_config_and_storage(
     let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -5374,13 +5354,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -5478,13 +5452,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     let storage = Arc::new(MockStorage::new());
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -6779,13 +6747,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
     let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -6825,13 +6787,7 @@ pub(crate) async fn make_state_with_capturing_tools(
     let topic = storage.general_scope().await.expect("create default topic");
 
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -7086,13 +7042,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let storage = Arc::new(MockStorage::new());
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -7557,13 +7507,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -7730,13 +7674,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -7889,13 +7827,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -8078,14 +8010,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -8758,11 +8683,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
             metadata: dispatch_bound_metadata(&["upstream".to_string()]),
-            active_workspace_attachment_id: None,
+            ..new_session(topic.id)
         })
         .await
         .expect("create session");
@@ -9491,11 +9413,8 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
     // resolves to its shipped definition and intentionally ignores stored rows.
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "agent-a".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..new_session(topic.id)
         })
         .await
         .expect("create session");
@@ -9704,13 +9623,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -9920,13 +9833,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let root_thread = ThreadStore::create(
@@ -10082,11 +9989,8 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "agent-a".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..new_session(topic.id)
         })
         .await
         .expect("create parent session");
@@ -10433,13 +10337,11 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "agent-a".into(),
-            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(serde_json::json!({
                 WORKFLOW_CALL_TOOLS_METADATA_KEY: ["delegate"],
             })),
-            active_workspace_attachment_id: None,
+            ..new_session(topic.id)
         })
         .await
         .expect("create workflow worker session");
@@ -10599,13 +10501,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("parent session");
     let thread = ThreadStore::create(
@@ -10716,13 +10612,7 @@ async fn task_scoped_delegate_keeps_its_permission_bound_when_delegating_again()
         .await
         .expect("store task permission overlay");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let root_thread = ThreadStore::create(
@@ -10895,11 +10785,8 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         .expect("grant read-only placement");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
             active_workspace_attachment_id: Some(default_attachment.id),
+            ..new_session(topic.id)
         })
         .await
         .expect("create session");
@@ -11057,11 +10944,8 @@ async fn delegate_worktree_provisions_isolated_cwd_and_records_resolved_placemen
         .expect("grant worktree source");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
             active_workspace_attachment_id: Some(repo_attachment.id),
+            ..new_session(topic.id)
         })
         .await
         .expect("create session");
@@ -11382,13 +11266,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let root_thread = ThreadStore::create(
@@ -12144,13 +12022,7 @@ async fn process_turn_resolves_config_per_topic_and_completes_turn() {
     .await
     .expect("create test topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("session");
     let session_id = session.id;
@@ -13166,13 +13038,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
     .expect("create topic");
 
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("create session");
     let session_id = session.id;
@@ -14329,11 +14195,8 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     .expect("write unrequested briefing");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "delegate".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..new_session(topic.id)
         })
         .await
         .expect("create delegated session");
@@ -16353,13 +16216,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
     ]]);
     let topic = storage.general_scope().await.expect("topic");
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(new_session(topic.id))
         .await
         .expect("session");
     ThreadStore::create(
