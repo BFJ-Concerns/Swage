@@ -10,7 +10,10 @@ import { mount, unmount, flushSync } from "svelte";
 import ConversationList from "../components/ConversationList.svelte";
 import type { ConversationStore } from "../stores/conversations";
 import type { ConversationSummary, ConversationDetail } from "../types";
-import { makeConversationSummary } from "./fixtures/conversations";
+import {
+  makeConversationDetail,
+  makeConversationSummary,
+} from "./fixtures/conversations";
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -167,14 +170,12 @@ describe("ConversationList", () => {
 
   it("applies an active style to the selected conversation", () => {
     const conv = makeConversationSummary({ id: "active-one" });
-    const activeDetail: ConversationDetail = {
+    const activeDetail = makeConversationDetail({
       id: "active-one",
-      agent_id: "gateway",
       topic_id: "proj-1",
       created_at: conv.created_at,
       last_activity: conv.last_activity,
-      messages: [],
-    };
+    });
     const store = makeStore([conv], activeDetail);
     component = mount(ConversationList, {
       target: document.body,
@@ -190,14 +191,12 @@ describe("ConversationList", () => {
       makeConversationSummary({ id: "a" }),
       makeConversationSummary({ id: "b" }),
     ];
-    const activeDetail: ConversationDetail = {
+    const activeDetail = makeConversationDetail({
       id: "a",
-      agent_id: "gateway",
       topic_id: "proj-1",
       created_at: conversations[0].created_at,
       last_activity: conversations[0].last_activity,
-      messages: [],
-    };
+    });
     const store = makeStore(conversations, activeDetail);
     component = mount(ConversationList, {
       target: document.body,

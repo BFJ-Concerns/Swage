@@ -60,6 +60,8 @@ pub enum SuccessionError {
     TooShort(usize),
     #[error("the summarising provider failed: {0}")]
     Provider(#[from] ProviderError),
+    #[error("the summarising provider returned an empty summary")]
+    EmptySummary,
 }
 
 /// The summary of the conversation's earlier part, as an element.
@@ -140,6 +142,9 @@ pub async fn succeed(
         .complete(summary_request(request.carried, older, request.focus))
         .await?;
 
+    if response.content.trim().is_empty() {
+        return Err(SuccessionError::EmptySummary);
+    }
     let element = SuccessionElement::new(response.content, summarised, newer.len());
     let retained_history = newer.to_vec();
     let tokens_after = element.token_count(tokeniser) + tokeniser.count_messages(&retained_history);
@@ -437,6 +442,24 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("summariser down"))
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_summary_is_a_failure_not_a_successor() {
+        let provider = RecordingProvider::answering("   \n");
+        let history = history(4);
+        let error = succeed(
+            SuccessionRequest {
+                carried: &[],
+                history: &history,
+                focus: None,
+            },
+            &provider,
+            &CharTokeniser,
+        )
+        .await
+        .expect_err("a blank summary would discard the older half for nothing");
+        assert!(matches!(error, SuccessionError::EmptySummary));
     }
 
     #[tokio::test]

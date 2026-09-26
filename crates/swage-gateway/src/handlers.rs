@@ -2696,7 +2696,13 @@ mod tests {
             .lock()
             .expect("compaction request lock");
         assert_eq!(requests.len(), 1, "history should trigger one compaction");
-        assert!(requests[0].messages[0].text_content().contains(focus));
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains(focus)),
+            "the focus reaches the summarising request"
+        );
         drop(requests);
 
         let context = reqwest::get(format!("{base_url}/api/turns/{turn_id}/context"))

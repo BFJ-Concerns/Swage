@@ -86,15 +86,20 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             display_summary,
         };
         if let Err(error) = self.storage.create_tool_call(new_call).await {
+            // No row was written, so there is nothing to settle; the call is
+            // still finished for the client's sake (its ToolEnd), and the
+            // refused dispatch is the loud response the contract asks of a
+            // constitutive write (record_durability.rs, class 1).
             let failure = error.to_string();
-            self.finish_tool_call(
-                &call_id,
-                tool_name,
-                &Value::String(failure.clone()),
-                "error",
-                0,
-            )
-            .await;
+            let _ = self
+                .finish_tool_call(
+                    &call_id,
+                    tool_name,
+                    &Value::String(failure.clone()),
+                    "error",
+                    0,
+                )
+                .await;
             return Err(WorkerToolError {
                 message: failure,
                 result: None,
@@ -114,18 +119,38 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             .await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        // The settlement is the second half of a constitutive record
+        // (record_durability.rs, class 1): a call whose outcome could not be
+        // written did not auditably happen, so the caller is told so rather
+        // than handed a result the trail will never show.
         match dispatched {
             Ok(output) => {
-                self.finish_tool_call(&call_id, tool_name, &output.result, "success", duration_ms)
-                    .await;
+                if let Err(error) = self
+                    .finish_tool_call(&call_id, tool_name, &output.result, "success", duration_ms)
+                    .await
+                {
+                    return Err(WorkerToolError {
+                        message: format!(
+                            "tool '{tool_name}' ran but its record could not be settled: {error}"
+                        ),
+                        result: None,
+                    });
+                }
                 Ok(output.result)
             }
             Err(error) => {
                 let failure = Value::String(error.to_string());
-                self.finish_tool_call(&call_id, tool_name, &failure, "error", duration_ms)
-                    .await;
+                let message = match self
+                    .finish_tool_call(&call_id, tool_name, &failure, "error", duration_ms)
+                    .await
+                {
+                    Ok(()) => error.to_string(),
+                    Err(settlement) => {
+                        format!("{error}; and the call's record could not be settled: {settlement}")
+                    }
+                };
                 Err(WorkerToolError {
-                    message: error.to_string(),
+                    message,
                     result: None,
                 })
             }
@@ -134,6 +159,9 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
 }
 
 impl NestedToolRuntime {
+    /// Settle the call's row and tell the client it ended. The settlement's
+    /// failure is returned, never dropped: the caller decides what a call
+    /// with no recorded outcome means to the model.
     async fn finish_tool_call(
         &self,
         call_id: &str,
@@ -141,13 +169,13 @@ impl NestedToolRuntime {
         result: &Value,
         status: &str,
         duration_ms: u64,
-    ) {
+    ) -> Result<(), swage_core::StorageError> {
         let result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
         let metadata = extract_tool_result_metadata(result);
         let event_total_bytes = metadata
             .total_bytes
             .and_then(|total| u64::try_from(total).ok());
-        let _ = self
+        let settled = self
             .storage
             .update_tool_call_result(
                 call_id,
@@ -170,6 +198,7 @@ impl NestedToolRuntime {
             total_bytes: event_total_bytes,
             parent_call_id: Some(self.parent_call_id.clone()),
         });
+        settled
     }
 }
 
@@ -179,10 +208,12 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
+    use crate::websocket::ServerEvent;
     use async_trait::async_trait;
     use serde_json::{Value, json};
     use swage_core::ToolError;
     use swage_python::NestedToolHost;
+    use swage_storage::fixtures::new_session;
     use swage_storage::model::{NewSession, NewThread, NewTurn, TurnState};
     use swage_storage::sqlite::SqliteStorage;
     use swage_storage::store::{
@@ -245,11 +276,8 @@ mod tests {
         let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-a".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..new_session(topic.id)
             })
             .await
             .unwrap();
@@ -275,18 +303,8 @@ mod tests {
             .id
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn nested_dispatch_inherits_parent_context_and_stamps_child_call() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let storage_dyn: Arc<dyn Storage> = storage.clone();
-        let turn_id = create_turn(storage.as_ref()).await;
-        let observed = Arc::new(Mutex::new(None));
-        let tool: Arc<dyn Tool> = Arc::new(ObservingTool {
-            observed: Arc::clone(&observed),
-        });
-        let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(vec![tool]));
-        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
-        let parent_context = MockToolContext {
+    fn parent_context(turn_id: uuid::Uuid) -> MockToolContext {
+        MockToolContext {
             agent_id: "agent-a".into(),
             session_id: "session-123".into(),
             working_directory: PathBuf::from("/workspace/project"),
@@ -298,7 +316,85 @@ mod tests {
             }),
             call_id: Some("python_parent".into()),
             turn_id: Some(turn_id),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_whose_settlement_fails_is_reported_as_unrecorded() {
+        let storage = Arc::new(crate::turn::tests::MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage.create_session(new_session(topic.id)).await.unwrap();
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_id = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".into(),
+                state: TurnState::Processing,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        storage.fail_tool_call_settlement();
+        let tool: Arc<dyn Tool> = Arc::new(ObservingTool {
+            observed: Arc::new(Mutex::new(None)),
+        });
+        let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(vec![tool]));
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = NestedToolRuntime::new(
+            dispatcher,
+            ws_tx,
+            storage.clone() as Arc<dyn Storage>,
+            turn_id,
+            "python_parent".into(),
+            serialise_tool_context(&parent_context(turn_id)),
+        );
+
+        let error = runtime
+            .dispatch_tool("observe_context", json!({}))
+            .await
+            .expect_err(
+                "the tool ran, but a call with no recorded outcome did not auditably happen",
+            );
+        assert!(
+            error.message.contains("could not be settled"),
+            "{}",
+            error.message
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = ws_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ServerEvent::ToolEnd { .. })),
+            "the client is still told the call ended"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_dispatch_inherits_parent_context_and_stamps_child_call() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let storage_dyn: Arc<dyn Storage> = storage.clone();
+        let turn_id = create_turn(storage.as_ref()).await;
+        let observed = Arc::new(Mutex::new(None));
+        let tool: Arc<dyn Tool> = Arc::new(ObservingTool {
+            observed: Arc::clone(&observed),
+        });
+        let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(vec![tool]));
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let parent_context = parent_context(turn_id);
         let runtime = NestedToolRuntime::new(
             dispatcher,
             ws_tx,
