@@ -4686,7 +4686,11 @@ mod tests {
             .unwrap();
         assert_eq!(branches_resp.status(), StatusCode::OK);
         let branches_body = body_json(branches_resp).await;
-        assert_eq!(branches_body.as_array().unwrap().len(), 1);
+        let branches = branches_body["branches"].as_array().unwrap();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0]["child_thread_id"], child_thread_id.to_string());
+        assert_eq!(branches[0]["state"], "idle");
+        assert_eq!(branches[0]["branched_from_preview"], "hello");
     }
 
     #[tokio::test]
