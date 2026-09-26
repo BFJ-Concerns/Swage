@@ -1219,15 +1219,18 @@ mod tests {
     #[test]
     fn conversation_detail_deserialises_with_messages() {
         let id = Uuid::new_v4();
+        let root_thread_id = Uuid::new_v4();
         let json = serde_json::json!({
             "id": id,
             "topic_id": Uuid::new_v4(),
             "agent_id": "gateway",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
+            "root_thread_id": root_thread_id,
             "messages": [
                 {
-                    "thread_id": Uuid::new_v4(),
+                    "id": Uuid::new_v4(),
+                    "thread_id": root_thread_id,
                     "turn_id": Uuid::new_v4(),
                     "role": "user",
                     "content": "Hello",
@@ -1240,8 +1243,10 @@ mod tests {
 
         let detail: ConversationDetail = serde_json::from_value(json).unwrap();
         assert_eq!(detail.id, id);
+        assert_eq!(detail.root_thread_id, root_thread_id);
         assert_eq!(detail.messages.len(), 1);
         assert_eq!(detail.messages[0].role, "user");
+        assert_eq!(detail.messages[0].thread_id, root_thread_id);
     }
 
     #[test]
