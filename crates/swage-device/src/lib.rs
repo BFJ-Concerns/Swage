@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -268,17 +268,29 @@ impl DeviceConnection {
                     ),
                 }
             } else {
-                match dispatcher
-                    .dispatch(&tool_name, params, &*context, context.agent_id())
-                    .await
-                {
-                    Ok(output) => DeviceFrame::Result {
+                // A tool that panics still answers: an operation with no
+                // settling frame would leave the gateway's caller waiting
+                // until the link itself closed.
+                let dispatched = std::panic::AssertUnwindSafe(dispatcher.dispatch(
+                    &tool_name,
+                    params,
+                    &*context,
+                    context.agent_id(),
+                ))
+                .catch_unwind()
+                .await;
+                match dispatched {
+                    Ok(Ok(output)) => DeviceFrame::Result {
                         correlation_id,
                         output: output.result,
                     },
-                    Err(error) => DeviceFrame::Failure {
+                    Ok(Err(error)) => DeviceFrame::Failure {
                         correlation_id,
                         message: error.to_string(),
+                    },
+                    Err(_) => DeviceFrame::Failure {
+                        correlation_id,
+                        message: format!("tool '{tool_name}' panicked on device '{device_id}'"),
                     },
                 }
             };
@@ -375,6 +387,28 @@ mod tests {
         }
     }
 
+    struct PanickingTool;
+
+    #[async_trait]
+    impl Tool for PanickingTool {
+        fn name(&self) -> &str {
+            "explode"
+        }
+        fn description(&self) -> &str {
+            "Panics."
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(
+            &self,
+            _params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            panic!("boom");
+        }
+    }
+
     struct SlowTool;
 
     #[async_trait]
@@ -407,6 +441,7 @@ mod tests {
             dispatcher: Arc::new(ToolDispatcher::allow_all(vec![
                 Arc::new(EchoTool) as Arc<dyn Tool>,
                 Arc::new(SlowTool) as Arc<dyn Tool>,
+                Arc::new(PanickingTool) as Arc<dyn Tool>,
             ])),
             workspace_roots: vec![workspace.to_path_buf()],
             reconnect_delay: Duration::from_millis(10),
@@ -476,7 +511,7 @@ mod tests {
                 device_id: "device-a".into(),
                 shared_token: "token-a".into(),
                 label: Some("Device A".into()),
-                capabilities: vec!["echo".into(), "slow".into()],
+                capabilities: vec!["echo".into(), "explode".into(), "slow".into()],
             }
         );
         gateway_send(
@@ -570,6 +605,30 @@ mod tests {
             answer,
             DeviceFrame::Failure { correlation_id, ref message }
                 if correlation_id == outside_id && message.contains("escapes")
+        ));
+
+        // A tool that panics still settles its operation, as a failure.
+        let explode_id = Uuid::new_v4();
+        gateway_send(
+            &mut socket,
+            &GatewayFrame::Operation {
+                correlation_id: explode_id,
+                tool_name: "explode".into(),
+                params: json!({}),
+                context: Box::new(context_in(&workspace)),
+            },
+        )
+        .await;
+        let answer = loop {
+            let frame = gateway_recv(&mut socket).await;
+            if frame != (DeviceFrame::Heartbeat {}) {
+                break frame;
+            }
+        };
+        assert!(matches!(
+            answer,
+            DeviceFrame::Failure { correlation_id, ref message }
+                if correlation_id == explode_id && message.contains("panicked")
         ));
 
         // Heartbeats keep arriving while the connection lives.

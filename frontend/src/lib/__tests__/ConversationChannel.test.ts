@@ -152,6 +152,23 @@ describe("ConversationChannel thread controls", () => {
     expect(onBranch.selectThread).toHaveBeenCalledWith(null);
   });
 
+  it("returns the switcher to the thread in view when switching fails", async () => {
+    const store = makeConversationStore([makeBranch()], null);
+    store.selectThread.mockRejectedValueOnce(new Error("conversation is gone"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    component = mountChannel(store);
+
+    const switcher = document.querySelector<HTMLSelectElement>('select[aria-label="Active thread"]')!;
+    switcher.value = "branch-1";
+    switcher.dispatchEvent(new Event("change", { bubbles: true }));
+    flushSync();
+    expect(store.selectThread).toHaveBeenCalledWith("branch-1");
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalled());
+    flushSync();
+    expect(switcher.value).toBe("");
+    consoleError.mockRestore();
+  });
+
   it("offers to abandon the active branch and calls the store when asked", () => {
     const store = makeConversationStore([makeBranch()], "branch-1");
     component = mountChannel(store);
@@ -161,6 +178,27 @@ describe("ConversationChannel thread controls", () => {
     abandon!.click();
     expect(store.abandonActiveBranch).toHaveBeenCalledOnce();
     expect(document.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("withholds the abandon control while a turn is running on the branch", () => {
+    const store = makeConversationStore([makeBranch()], "branch-1");
+    const streamingStore = createStreamingStore({ conversationStore: store });
+    component = mount(ConversationChannel, {
+      target: document.body,
+      props: {
+        conversationStore: store,
+        connectionStore: makeConnectionStore(),
+        streamingStore,
+        onRetry: () => {},
+        selectedAgentId: "",
+      },
+    });
+    flushSync();
+    expect(document.querySelector('button[aria-label="Abandon branch"]')).not.toBeNull();
+
+    streamingStore.startTurn("still thinking");
+    flushSync();
+    expect(document.querySelector('button[aria-label="Abandon branch"]')).toBeNull();
   });
 
   it("replaces the composer with a notice on an abandoned branch", () => {

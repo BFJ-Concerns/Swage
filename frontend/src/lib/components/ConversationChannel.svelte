@@ -103,9 +103,22 @@
     return branch.state === "abandoned" ? `${from} · ${when} · abandoned` : `${from} · ${when}`;
   }
 
+  // A thread action that fails (the conversation gone, the branch mid-turn,
+  // the gateway away) is reported, and the switcher returns to the thread
+  // the store still shows rather than naming one it could not open.
   function switchThread(id: string): void {
     const next = id === "" ? null : id;
-    if (next !== activeThreadId) void conversationStore.selectThread?.(next);
+    if (next === activeThreadId) return;
+    conversationStore.selectThread?.(next).catch((error: unknown) => {
+      console.error("Failed to switch thread:", error);
+      selectedThreadId = activeThreadId ?? "";
+    });
+  }
+
+  function abandonBranch(): void {
+    conversationStore.abandonActiveBranch?.().catch((error: unknown) => {
+      console.error("Failed to abandon branch:", error);
+    });
   }
 </script>
 
@@ -147,11 +160,13 @@
           <option value={branch.child_thread_id}>{branchLabel(branch)}</option>
         {/each}
       </select>
-      {#if activeBranch && !activeBranchAbandoned}
+      {#if activeBranch && !activeBranchAbandoned && !(activeStream?.isStreaming ?? false)}
+        <!-- A branch mid-turn cannot be abandoned (the route refuses it);
+             the control waits for the turn to settle or be cancelled. -->
         <button
           class="abandon-branch"
           aria-label="Abandon branch"
-          onclick={() => conversationStore.abandonActiveBranch?.()}
+          onclick={abandonBranch}
         >Abandon</button>
       {/if}
     </div>

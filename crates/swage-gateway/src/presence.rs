@@ -42,6 +42,9 @@ pub struct DevicePresenceRecord {
     pub last_seen_at: DateTime<Utc>,
     pub disconnected_at: Option<DateTime<Utc>>,
     pub stale_after_secs: u64,
+    /// The device connection the record reflects, so a connection that
+    /// ends after a newer one took over cannot mark the newer one gone.
+    pub connection_id: Uuid,
 }
 
 #[derive(Debug, Default)]
@@ -166,6 +169,7 @@ pub async fn upsert_device_heartbeat(
     device_id: &str,
     label: Option<String>,
     stale_after_secs: u64,
+    connection_id: Uuid,
 ) {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
@@ -177,14 +181,26 @@ pub async fn upsert_device_heartbeat(
         last_seen_at: now,
         disconnected_at: None,
         stale_after_secs,
+        connection_id,
     };
     presence.devices.insert(device_id.to_owned(), record);
 }
 
-pub async fn disconnect_device(state: &AppState, device_id: &str) -> bool {
+/// Mark a device disconnected. With a `connection_id`, only the record
+/// that connection wrote is stamped — a newer connection's record stands;
+/// without one (an operator's disconnect) the record is stamped whatever
+/// connection it reflects.
+pub async fn disconnect_device(
+    state: &AppState,
+    device_id: &str,
+    connection_id: Option<Uuid>,
+) -> bool {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
     if let Some(device) = presence.devices.get_mut(device_id) {
+        if connection_id.is_some_and(|id| id != device.connection_id) {
+            return false;
+        }
         device.disconnected_at = Some(now);
         return true;
     }
@@ -221,6 +237,7 @@ mod tests {
             last_seen_at,
             disconnected_at,
             stale_after_secs: 30,
+            connection_id: Uuid::from_u128(1),
         }
     }
 

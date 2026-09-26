@@ -100,6 +100,7 @@ export interface StreamingStoreOptions {
         MessageView["turn_state"],
         "completed" | "failed" | "interrupted"
       >;
+      thread_id?: string;
       turn_id?: string;
       tool_calls?: ToolCallView[];
     }, conversationId?: string | null): void;
@@ -141,6 +142,8 @@ export function createStreamingStore(
     providerRetryState: { current: ProviderRetryState | null };
     pendingApprovalState: { current: PendingApproval | null };
     activeTurnGeneration: number;
+    /** The thread the running turn was sent on; null is the root thread. */
+    threadId: string | null;
   }
 
   const streams = new Map<string | null, InternalStreamState>();
@@ -179,6 +182,7 @@ export function createStreamingStore(
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
       activeTurnGeneration: 0,
+      threadId: null,
     };
   }
 
@@ -229,10 +233,14 @@ export function createStreamingStore(
     turn_id?: string,
     tool_calls?: ToolCallView[],
   ): void {
+    // The reply belongs to the thread the turn was sent on, whatever the
+    // person is looking at when it completes.
+    const threadId = streams.get(conversationId)?.threadId ?? null;
     options?.conversationStore?.appendAssistantMessage({
       content,
       timestamp: new Date().toISOString(),
       turn_state,
+      ...(threadId === null ? {} : { thread_id: threadId }),
       ...(turn_id === undefined ? {} : { turn_id }),
       ...(tool_calls === undefined ? {} : { tool_calls }),
     }, conversationId);
@@ -581,6 +589,7 @@ export function createStreamingStore(
       // Dispatch the outgoing message over the WebSocket, on the thread the
       // person is standing on — a branch, or the root when none is selected.
       const threadId = options?.conversationStore?.activeThreadId ?? null;
+      stream.threadId = threadId;
       if (conversationId) {
         options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId);
       }
