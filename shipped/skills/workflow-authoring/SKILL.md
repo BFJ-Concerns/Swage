@@ -102,7 +102,8 @@ return { reply };
   - `maxAttempts` — schema retries before giving up (default 3).
   - `label` — names the worker in the run record.
   - `identity: true` — return an identified result envelope for this call.
-  - `phase` — caller-supplied phase copied into an identified result envelope.
+  - `phase` — caller-supplied phase copied into an identified result
+    envelope; independent of `phase(name)` markers (below).
   - `tools` — call-scoped allow-list; it can only narrow the worker's
     effective grants, never widen them.
   - `skills` — named skills to activate for this worker.
@@ -133,7 +134,12 @@ return { reply };
   `maxAttempts` is exhausted without one. With `identity: true`, a
   settled call returns `{ label, phase, output, failure }`: a non-null
   `failure` names a failed leg, while `output: null` with
-  `failure: null` is a genuine null result. Other failures throw an
+  `failure: null` is a genuine null result. A failed leg's work is not
+  lost with its result: its journal entry stays, status `failed`, with
+  the request it was sent and the error that ended it, and a worktree it
+  was given stays on disk when the run itself ends without returning (a
+  run that returns reclaims every worker directory, the failed leg's
+  included — copy out what you need before returning). Other failures throw an
   `Error` whose `name` classifies it (`AgentCallError`,
   `AgentCallTimeoutError`, `BudgetExceededError`, …). Extraction reads a
   reply as the whole text parsed as JSON, or else the FIRST fenced code
@@ -177,7 +183,8 @@ return { reply };
   worker. The first `send()` on a worker is its briefing — record it as a
   re-brief; only a later turn continues. `staleness(worker)` returns a journalled
   `{ stale, idleMs, thresholdMs, route }`: the idle gap since the last
-  settled turn against the `worker_staleness_threshold_ms` of the
+  settled turn — since the worker was opened, while it has had none —
+  against the `worker_staleness_threshold_ms` of the
   provider route the worker's model resolves to; `stale` is `null` when
   the route declares no threshold, which is unknown, not fresh. `close()`
   on the success path records intent; a run ending by any path closes
@@ -262,9 +269,12 @@ while (pending.length > 0) {
   and the other items proceed. An author error — an unknown option, an
   invalid option value, a schema that does not compile, an unknown composed
   workflow, non-JSON workflow arguments — does not: it is rejected at the
-  call itself, before any worker starts, and fails the run with the error
-  naming the call. A whole fan-out coming back `null` therefore means the
-  workers failed; check the run journal for their errors.
+  call that carries it, before that call's own worker spawns (siblings
+  already dispatched keep running), and fails the run with the error
+  naming the call. A whole fan-out coming back `null` therefore means
+  every leg failed, or every leg returned a schema-valid `null` — the two
+  read the same from outside, which is what `identity: true` is for; the
+  run journal names each leg's error.
 
 ### Composing saved workflows
 
@@ -364,12 +374,17 @@ treat every payload as a worker-reported claim.
   lives.
 - **`deliver({ content, metadata }, { target })`** — send `content` (a
   string) out of the run through a granted delivery capability, with an
-  optional `metadata` object and the grant's `target` name; journalled
+  optional `metadata` value (any JSON — an object, an array, a string, a
+  number) and the grant's `target` name; journalled
   with an idempotency key so a replay never sends twice. Resolves to
   `{ delivered, target, effect_seq }`. Available only when the workflow
   carries a delivery grant — an agent-authored script never does.
 - **`phase(name)` / `log(message)`** — journalled progress markers;
-  `console.log` is an alias of `log`.
+  `console.log` is an alias of `log`. A `phase(name)` marker is a journal
+  entry of its own and sets nothing on the calls that follow it; the
+  per-call `phase` option is a string copied into that call's identified
+  envelope and written nowhere else. To have both agree, pass the same
+  name to each.
 - **`return <value>`** — the script's return value is the run's result;
   plain JSON-serialisable data only.
 

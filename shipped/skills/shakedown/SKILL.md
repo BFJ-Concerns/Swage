@@ -1,6 +1,6 @@
 ---
 name: Shakedown
-description: Run a commissioned project's detection-only pre-merge QA campaign after its build ledger is discharged — drive the assembled product black-box as its first real users, judge function, experience, and output quality, package findings as build work, and close with a report and merge recommendation. Deliberately heavyweight — a campaign spans sessions and multiple quota pools — so invoke it only on the user's explicit instruction to start, resume, operate, or close a campaign. Not for per-unit build verification (assembly), spine design (maestro), ordinary code review (review-panel), or one-off browser QA (playwright); fixing what it finds is assembly's work.
+description: Run a commissioned project's detection-only pre-merge QA campaign after its build ledger is discharged — drive the assembled product black-box as its first real users, judge function, experience, and output quality, package findings as build work, and close with a report and merge recommendation. Deliberately heavyweight — a campaign spans sessions and multiple quota pools — so invoke it only on the user's explicit instruction to start, resume, operate, or close a campaign, or as the campaign hand-off the assembly skill's run close dispatches (a delegated child briefed with the annexe path and the frozen sha). Not for per-unit build verification (assembly), spine design (maestro), ordinary code review (review-panel), or one-off browser QA (playwright); fixing what it finds is assembly's work.
 ---
 
 # Shakedown
