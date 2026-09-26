@@ -698,6 +698,28 @@ describe("threads and branches", () => {
     });
   });
 
+  it("a reply for a branch the person has left updates the summary but not the view", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    vi.mocked(api.listConversations).mockResolvedValue([makeSummary("conv-1")]);
+    const store = createConversationStore();
+    await store.loadConversations("default");
+    await store.selectConversation("conv-1");
+
+    store.appendAssistantMessage(
+      { content: "branch reply", timestamp: "2026-01-01T00:00:09Z", turn_state: "completed", thread_id: "branch-1" },
+      "conv-1",
+    );
+
+    expect(store.activeConversation?.messages.map((m) => m.content)).toEqual(["first"]);
+    expect(store.conversations[0].message_preview).toBe("branch reply");
+
+    store.appendAssistantMessage(
+      { content: "root reply", timestamp: "2026-01-01T00:00:10Z", turn_state: "completed", thread_id: "root-1" },
+      "conv-1",
+    );
+    expect(store.activeConversation?.messages.at(-1)).toMatchObject({ content: "root reply", thread_id: "root-1" });
+  });
+
   it("abandoning the active branch marks it and returns to the root thread", async () => {
     vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
     vi.mocked(api.listBranches).mockResolvedValue([makeBranch("branch-1")]);

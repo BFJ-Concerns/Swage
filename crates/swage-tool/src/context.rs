@@ -56,13 +56,40 @@ pub fn context_within_workspaces(ctx: &dyn ToolContext, workspace_roots: &[PathB
             .all(|path| path_within_any_workspace(path, &canonical_roots))
 }
 
-/// Whether `path` lies under one of `workspace_roots`, resolving symlinks
-/// where the path exists.
+/// Whether `path` lies under one of `workspace_roots`: symlinks resolved
+/// where the path exists, `.` and `..` resolved lexically where it does
+/// not, so a path that has yet to be created cannot name its way out of
+/// the workspace through a parent component.
 pub fn path_within_any_workspace(path: &Path, workspace_roots: &[PathBuf]) -> bool {
-    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let candidate = path
+        .canonicalize()
+        .unwrap_or_else(|_| normalise_lexically(path));
     workspace_roots
         .iter()
         .any(|root| candidate.starts_with(root))
+}
+
+/// Resolve `.` and `..` components without touching the filesystem. A
+/// `..` at the root stays at the root.
+fn normalise_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalised = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !matches!(
+                    normalised.components().next_back(),
+                    None | Some(Component::RootDir) | Some(Component::Prefix(_))
+                ) {
+                    normalised.pop();
+                }
+            }
+            other => normalised.push(other.as_os_str()),
+        }
+    }
+    normalised
 }
 
 /// Snapshot an opaque context into the serialisable wire representation.

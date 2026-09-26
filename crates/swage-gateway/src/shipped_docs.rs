@@ -58,12 +58,7 @@ pub(crate) fn document_names() -> impl Iterator<Item = &'static str> {
 /// stored beside the file, so the listing cannot drift from the content.
 pub(crate) fn summary(document: &ShippedDocument) -> DocumentSummary {
     let (front_matter, body) = split_front_matter(document.contents);
-    let description = front_matter
-        .lines()
-        .find_map(|line| line.strip_prefix("description:"))
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_owned();
+    let description = front_matter_description(front_matter);
     let title = body
         .lines()
         .find_map(|line| line.strip_prefix("# "))
@@ -95,6 +90,26 @@ pub(crate) fn list() -> DocumentListResponse {
     DocumentListResponse {
         documents: SHIPPED_DOCUMENTS.iter().map(summary).collect(),
     }
+}
+
+/// The `description` value of a front matter block: a plain one-line
+/// scalar, or a folded (`>`) or literal (`|`) block whose text follows on
+/// indented lines, joined on one line.
+fn front_matter_description(front_matter: &str) -> String {
+    let mut lines = front_matter.lines();
+    let Some(first) = lines.find_map(|line| line.strip_prefix("description:")) else {
+        return String::new();
+    };
+    let first = first.trim();
+    if !matches!(first, ">" | "|" | ">-" | "|-") {
+        return first.to_owned();
+    }
+    lines
+        .take_while(|line| line.starts_with(' ') || line.starts_with('\t'))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Split a `---`-fenced YAML front matter block from the body. A document
@@ -192,6 +207,23 @@ mod tests {
                 description: "What the example covers".into(),
             }
         );
+    }
+
+    #[test]
+    fn a_folded_or_literal_description_block_lists_on_one_line() {
+        let folded = ShippedDocument {
+            name: "folded",
+            contents: "---\ndescription: >\n  A long description\n  across two lines\nunpaired: true\n---\n\n# Folded\n",
+        };
+        assert_eq!(
+            summary(&folded).description,
+            "A long description across two lines"
+        );
+        let literal = ShippedDocument {
+            name: "literal",
+            contents: "---\ndescription: |-\n  One\n  Two\n---\n# Literal\n",
+        };
+        assert_eq!(summary(&literal).description, "One Two");
     }
 
     #[test]

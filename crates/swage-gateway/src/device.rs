@@ -139,11 +139,16 @@ impl DeviceLink {
         }
     }
 
-    fn fail_all(&self, outcome: OperationOutcome) {
+    /// Settle every pending operation with `outcome`, returning their ids
+    /// so the caller can record each settlement.
+    fn fail_all(&self, outcome: OperationOutcome) -> Vec<Uuid> {
         let waiters = std::mem::take(&mut *self.pending.lock().expect("pending operations lock"));
-        for (_, waiter) in waiters {
+        let mut settled = Vec::with_capacity(waiters.len());
+        for (correlation_id, waiter) in waiters {
             let _ = waiter.send(outcome.clone());
+            settled.push(correlation_id);
         }
+        settled
     }
 }
 
@@ -402,6 +407,16 @@ pub async fn execute_on_remote_device(
         .lock()
         .expect("pending operations lock")
         .insert(correlation_id, settle_tx);
+    // Cancellation is the drop of this future, from this point on: the
+    // guard is installed before any await so no window exists in which the
+    // operation is pending but nothing would send `Cancel` and record it.
+    let mut in_flight = InFlightOperation {
+        link: link.clone(),
+        correlation_id,
+        device_id: device.device_id.clone(),
+        storage: Arc::clone(&state.storage),
+        settled: false,
+    };
     record_device_event(
         state,
         &device.device_id,
@@ -426,41 +441,27 @@ pub async fn execute_on_remote_device(
         context: Box::new(serialise_tool_context(ctx)),
     });
     if sent.is_err() {
+        in_flight.settled = true;
         link.settle(correlation_id, OperationOutcome::Disconnected);
+        record_settlement(
+            &state.storage,
+            &device.device_id,
+            correlation_id,
+            &OperationOutcome::Disconnected,
+        )
+        .await;
         return Err(failed(format!(
             "device '{}' disconnected before the operation was sent",
             device.device_id
         )));
     }
 
-    // Cancellation is the drop of this future: the guard sends `Cancel`
-    // and records the settlement if nothing settled the operation first.
-    let mut in_flight = InFlightOperation {
-        link: link.clone(),
-        correlation_id,
-        device_id: device.device_id.clone(),
-        storage: Arc::clone(&state.storage),
-        settled: false,
-    };
+    // The settlement is recorded where the device's answer is received
+    // (the link loop), not here: a future dropped after the device answered
+    // but before this await resumed would otherwise leave the answer
+    // unrecorded.
     let outcome = settle_rx.await.unwrap_or(OperationOutcome::Disconnected);
     in_flight.settled = true;
-
-    record_device_event(
-        state,
-        &device.device_id,
-        "device_operation_settled",
-        format!(
-            "Operation {correlation_id} on device '{}' settled: {}",
-            device.device_id,
-            outcome.audit_name()
-        ),
-        serde_json::json!({
-            "correlation_id": correlation_id,
-            "tool_name": tool_name,
-            "outcome": outcome.audit_name(),
-        }),
-    )
-    .await;
 
     match outcome {
         OperationOutcome::Result(output) => Ok(output),
@@ -508,21 +509,11 @@ impl Drop for InFlightOperation {
             correlation_id: self.correlation_id,
         });
         let storage = Arc::clone(&self.storage);
-        let event = NewAuditEvent {
-            id: Uuid::new_v4().to_string(),
-            session_id: None,
-            entity_kind: "device".to_owned(),
-            entity_id: self.device_id.clone(),
-            event_kind: "device_operation_settled".to_owned(),
-            summary: format!(
-                "Operation {} on device '{}' settled: cancelled",
-                self.correlation_id, self.device_id
-            ),
-            metadata: serde_json::json!({
-                "correlation_id": self.correlation_id,
-                "outcome": "cancelled",
-            }),
-        };
+        let event = settlement_event(
+            &self.device_id,
+            self.correlation_id,
+            &OperationOutcome::Cancelled,
+        );
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(error) = storage.create_audit_event(event).await {
@@ -530,6 +521,45 @@ impl Drop for InFlightOperation {
                 }
             });
         }
+    }
+}
+
+/// The one record of how an operation ended, written by whoever settles
+/// it: the link loop for a device's answer, the guard for a cancellation,
+/// the link's end for a disconnection.
+async fn record_settlement(
+    storage: &Arc<dyn swage_storage::store::Storage>,
+    device_id: &str,
+    correlation_id: Uuid,
+    outcome: &OperationOutcome,
+) {
+    if let Err(error) = storage
+        .create_audit_event(settlement_event(device_id, correlation_id, outcome))
+        .await
+    {
+        tracing::warn!(%device_id, %correlation_id, %error, "failed to record a device operation's settlement");
+    }
+}
+
+fn settlement_event(
+    device_id: &str,
+    correlation_id: Uuid,
+    outcome: &OperationOutcome,
+) -> NewAuditEvent {
+    NewAuditEvent {
+        id: Uuid::new_v4().to_string(),
+        session_id: None,
+        entity_kind: "device".to_owned(),
+        entity_id: device_id.to_owned(),
+        event_kind: "device_operation_settled".to_owned(),
+        summary: format!(
+            "Operation {correlation_id} on device '{device_id}' settled: {}",
+            outcome.audit_name()
+        ),
+        metadata: serde_json::json!({
+            "correlation_id": correlation_id,
+            "outcome": outcome.audit_name(),
+        }),
     }
 }
 
@@ -658,6 +688,7 @@ async fn serve_device_link(socket: WebSocket, state: AppState) {
         &device_id,
         label.clone().or(device.label.clone()),
         STALE_AFTER_SECS,
+        link.link_id,
     )
     .await;
     record_device_event(
@@ -717,23 +748,42 @@ async fn serve_device_link(socket: WebSocket, state: AppState) {
                     &device_id,
                     None,
                     STALE_AFTER_SECS,
+                    link.link_id,
                 )
                 .await;
             }
+            // A settlement is recorded only where a waiter took it: an
+            // answer to an operation the gateway already gave up on
+            // (cancelled and recorded by its guard) is not a second
+            // settlement.
             DeviceFrame::Result {
                 correlation_id,
                 output,
             } => {
-                link.settle(correlation_id, OperationOutcome::Result(output));
+                let outcome = OperationOutcome::Result(output);
+                if link.settle(correlation_id, outcome.clone()) {
+                    record_settlement(&state.storage, &device_id, correlation_id, &outcome).await;
+                }
             }
             DeviceFrame::Failure {
                 correlation_id,
                 message,
             } => {
-                link.settle(correlation_id, OperationOutcome::Failure(message));
+                let outcome = OperationOutcome::Failure(message);
+                if link.settle(correlation_id, outcome.clone()) {
+                    record_settlement(&state.storage, &device_id, correlation_id, &outcome).await;
+                }
             }
             DeviceFrame::Cancelled { correlation_id } => {
-                link.settle(correlation_id, OperationOutcome::Cancelled);
+                if link.settle(correlation_id, OperationOutcome::Cancelled) {
+                    record_settlement(
+                        &state.storage,
+                        &device_id,
+                        correlation_id,
+                        &OperationOutcome::Cancelled,
+                    )
+                    .await;
+                }
             }
             DeviceFrame::Hello { .. } => {
                 tracing::warn!(%device_id, "ignoring a second hello on an open device connection");
@@ -754,9 +804,17 @@ async fn serve_device_link(socket: WebSocket, state: AppState) {
             _ => false,
         }
     };
-    link.fail_all(OperationOutcome::Disconnected);
+    for correlation_id in link.fail_all(OperationOutcome::Disconnected) {
+        record_settlement(
+            &state.storage,
+            &device_id,
+            correlation_id,
+            &OperationOutcome::Disconnected,
+        )
+        .await;
+    }
     if still_ours {
-        crate::presence::disconnect_device(&state, &device_id).await;
+        crate::presence::disconnect_device(&state, &device_id, Some(link.link_id)).await;
     }
     record_device_event(
         &state,
@@ -780,9 +838,17 @@ pub async fn disconnect_device(state: &AppState, device_id: &str) -> bool {
     };
     if let Some(link) = link {
         link.closed.cancel();
-        link.fail_all(OperationOutcome::Disconnected);
+        for correlation_id in link.fail_all(OperationOutcome::Disconnected) {
+            record_settlement(
+                &state.storage,
+                device_id,
+                correlation_id,
+                &OperationOutcome::Disconnected,
+            )
+            .await;
+        }
     }
-    crate::presence::disconnect_device(state, device_id).await;
+    crate::presence::disconnect_device(state, device_id, None).await;
     true
 }
 
@@ -1021,12 +1087,22 @@ mod tests {
         assert_eq!(params, serde_json::json!({ "n": 1 }));
         assert_eq!(context.session_id, ctx.session_id());
 
-        assert!(link.settle(
+        // The device's answer settles the waiter and is recorded where it
+        // is received, as the link loop does.
+        let outcome = OperationOutcome::Result(serde_json::json!({ "device": "docker-a" }));
+        assert!(link.settle(correlation_id, outcome.clone()));
+        record_settlement(
+            &(Arc::clone(&storage) as Arc<dyn Storage>),
+            "docker-a",
             correlation_id,
-            OperationOutcome::Result(serde_json::json!({ "device": "docker-a" }))
-        ));
+            &outcome,
+        )
+        .await;
         let output = invocation.await.expect("join").expect("result");
         assert_eq!(output["device"], "docker-a");
+        // A second answer for the same operation has no waiter and is not
+        // a settlement.
+        assert!(!link.settle(correlation_id, outcome));
 
         // The listing is newest-first; read it in the order things happened.
         let mut events = storage.list_audit_events().await.expect("audit");
@@ -1044,6 +1120,60 @@ mod tests {
                 && event.metadata["correlation_id"] == serde_json::json!(correlation_id)
         }));
         assert_eq!(events[1].metadata["outcome"], "result");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_future_dropped_before_its_operation_frame_is_sent_still_cancels_and_records() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let state = state(Arc::clone(&storage));
+        let device = registered_device("docker-a", DeviceKind::Docker);
+        let (link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
+        let ctx = MockToolContext::new("gateway", "session");
+        let params = serde_json::json!({});
+
+        // Poll the invocation exactly once: it registers as pending and
+        // parks on the audit write, then is dropped before the operation
+        // frame goes out.
+        let mut invocation = Box::pin(execute_on_remote_device(
+            &state,
+            &device,
+            "device_identity",
+            &params,
+            &ctx,
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(invocation.as_mut(), &mut cx).is_pending());
+        assert_eq!(link.pending.lock().expect("lock").len(), 1);
+        drop(invocation);
+
+        assert!(link.pending.lock().expect("lock").is_empty());
+        // Whether or not the operation frame had already left (an in-memory
+        // store may not yield during the audit write), the drop sends the
+        // cancel as its last word.
+        let mut frames = Vec::new();
+        while let Ok(frame) = inbound.try_recv() {
+            frames.push(frame);
+        }
+        assert!(
+            matches!(frames.last(), Some(GatewayFrame::Cancel { .. })),
+            "expected a cancel frame last, got {frames:?}"
+        );
+        let settled = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = storage.list_audit_events().await.expect("audit");
+                if let Some(event) = events
+                    .iter()
+                    .find(|event| event.event_kind == "device_operation_settled")
+                {
+                    return event.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the cancellation is recorded");
+        assert_eq!(settled.metadata["outcome"], "cancelled");
     }
 
     #[tokio::test(flavor = "multi_thread")]

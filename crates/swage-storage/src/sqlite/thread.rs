@@ -277,15 +277,29 @@ impl ThreadStore for SqliteStorage {
             )));
         }
 
-        self.with_conn(|conn| {
-            let now_str = Utc::now().to_rfc3339();
-            conn.execute(
-                "UPDATE threads SET state = ?1, updated_at = ?2 WHERE id = ?3",
-                params![state.to_string(), &now_str, id.to_string()],
-            )?;
-            Ok(())
-        })
-        .await
+        // The write is conditional on the state the transition was judged
+        // from: two writers that both read `idle` cannot both land, so a
+        // terminal state a racing turn did not see stays terminal.
+        let expected = current.state.to_string();
+        let target = state.to_string();
+        let written = target.clone();
+        let affected = self
+            .with_conn(move |conn| {
+                let now_str = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE threads SET state = ?1, updated_at = ?2 WHERE id = ?3 AND state = ?4",
+                    params![written, &now_str, id.to_string(), expected],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            let now = self.get(id).await?.map(|thread| thread.state.to_string());
+            return Err(StorageError::ConstraintViolation(format!(
+                "thread state changed under the transition to {target}: now {}",
+                now.unwrap_or_else(|| "missing".to_owned())
+            )));
+        }
+        Ok(())
     }
 
     async fn get_codex_thread_id(&self, id: Uuid) -> Result<Option<String>, StorageError> {

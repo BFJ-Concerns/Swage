@@ -48,6 +48,8 @@ export interface ConversationStore {
       MessageView["turn_state"],
       "completed" | "failed" | "interrupted"
     >;
+    /** The thread the reply belongs to; absent means the thread in view. */
+    thread_id?: string;
     turn_id?: string;
     tool_calls?: MessageView["tool_calls"];
   }, conversationId?: string | null): void;
@@ -115,12 +117,18 @@ export function createConversationStore(): ConversationStore {
     const activeConversation = get(activeConversationStore);
     if (!activeConversation) return;
     if (threadId === null) {
-      activeConversationStore.set(await api.getConversation(activeConversation.id));
+      const root = await api.getConversation(activeConversation.id);
+      // The person may have moved to another conversation while the read
+      // was in flight; a snapshot of the one they left is not installed.
+      if (get(activeConversationStore)?.id !== activeConversation.id) return;
+      activeConversationStore.set(root);
       activeThreadIdStore.set(null);
       return;
     }
     const thread = await api.getThread(threadId);
-    activeConversationStore.set({ ...activeConversation, messages: thread.messages });
+    const current = get(activeConversationStore);
+    if (current?.id !== activeConversation.id) return;
+    activeConversationStore.set({ ...current, messages: thread.messages });
     activeThreadIdStore.set(threadId);
   }
 
@@ -165,6 +173,7 @@ export function createConversationStore(): ConversationStore {
       content: string;
       timestamp: string;
       turn_state: MessageView["turn_state"];
+      thread_id?: string;
       turn_id?: string;
       tool_calls?: MessageView["tool_calls"];
     },
@@ -174,8 +183,14 @@ export function createConversationStore(): ConversationStore {
     const ownerId = conversationId ?? activeConversation?.id;
     if (!ownerId) return;
 
-    // A message appended while a branch is active belongs to that branch.
-    const threadId = get(activeThreadIdStore) ?? activeConversation?.root_thread_id;
+    // A message belongs to the thread it names, else to the thread in view.
+    // It joins the visible list only when that is the thread in view: a
+    // reply to a turn sent on a branch the person has since left updates
+    // the summary and waits on its own thread.
+    const threadInView = get(activeThreadIdStore) ?? activeConversation?.root_thread_id;
+    const threadId = message.thread_id ?? threadInView;
+    const belongsToView =
+      message.thread_id === undefined || threadInView === undefined || message.thread_id === threadInView;
     const appendedMessage: MessageView = {
       role: message.role,
       content: message.content,
@@ -186,7 +201,7 @@ export function createConversationStore(): ConversationStore {
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
     };
 
-    if (activeConversation?.id !== ownerId) {
+    if (activeConversation?.id !== ownerId || !belongsToView) {
       updateConversationSummary(ownerId, message);
       return;
     }
@@ -331,6 +346,7 @@ export function createConversationStore(): ConversationStore {
         content: message.content,
         timestamp: message.timestamp,
         turn_state: message.turn_state,
+        ...(message.thread_id === undefined ? {} : { thread_id: message.thread_id }),
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
       }, conversationId);

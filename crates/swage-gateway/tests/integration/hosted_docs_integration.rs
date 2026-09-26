@@ -27,19 +27,22 @@ fn router() -> Router {
     build_router(state)
 }
 
+/// The document names the repository holds: every entry of `agent-docs/`
+/// must be a Markdown file — the set is flat by design — so a stray
+/// subdirectory or backup file fails here by name rather than as an
+/// unexplained list mismatch.
 fn repository_document_names() -> Vec<String> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../agent-docs");
     let mut names = std::fs::read_dir(root)
         .unwrap()
         .map(|entry| {
-            entry
-                .unwrap()
-                .path()
-                .file_stem()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned()
+            let path = entry.unwrap().path();
+            assert!(
+                path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md"),
+                "agent-docs holds Markdown documents only; found {}",
+                path.display()
+            );
+            path.file_stem().unwrap().to_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
     names.sort();

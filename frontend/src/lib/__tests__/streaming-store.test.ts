@@ -206,6 +206,23 @@ describe("startTurn", () => {
     );
   });
 
+  it("delivers a reply to the thread its turn was sent on, not the thread now in view", () => {
+    const conv = { ...createMockConversationStore(), activeThreadId: "branch-1" as string | null };
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+
+    store.startTurn("On the branch");
+    // The person switches back to the root while the turn runs.
+    conv.activeThreadId = null;
+    store.handleServerEvent({ type: "token", content: "reply" });
+    store.handleServerEvent({ type: "turn_complete", turn_id: "turn-b" });
+
+    expect(conv.appendAssistantMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "reply", thread_id: "branch-1" }),
+      "test-conversation",
+    );
+  });
+
   it("sends the turn on the active branch when the conversation store names one", () => {
     const conv = createMockConversationStore();
     const conn = createMockConnectionStore();
