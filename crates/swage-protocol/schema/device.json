@@ -3,11 +3,11 @@
   "title": "DeviceSurface",
   "type": "object",
   "properties": {
-    "execute": {
-      "$ref": "#/$defs/RemoteToolExecutionRequest"
+    "device_frame": {
+      "$ref": "#/$defs/DeviceFrame"
     },
-    "execute_response": {
-      "$ref": "#/$defs/RemoteToolExecutionResponse"
+    "gateway_frame": {
+      "$ref": "#/$defs/GatewayFrame"
     },
     "list": {
       "$ref": "#/$defs/DeviceListResponse"
@@ -19,10 +19,122 @@
   "required": [
     "register",
     "list",
-    "execute",
-    "execute_response"
+    "device_frame",
+    "gateway_frame"
   ],
   "$defs": {
+    "DeviceFrame": {
+      "description": "Frames a device sends over the connection it dialled.",
+      "oneOf": [
+        {
+          "description": "The first frame after connecting: who the device is, its credential,\nand what it can run. The gateway answers with `GatewayFrame::Welcome`\nor `GatewayFrame::Rejected` and closes.",
+          "type": "object",
+          "properties": {
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "device_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "hello"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "shared_token": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "device_id",
+            "shared_token",
+            "capabilities"
+          ]
+        },
+        {
+          "description": "Sent every `heartbeat_interval_secs` from the welcome; the gateway\nmarks a device stale when they stop and disconnected when the\nconnection closes.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "heartbeat"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "The operation `correlation_id` finished with `output`.",
+          "type": "object",
+          "properties": {
+            "correlation_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "result"
+            },
+            "output": true
+          },
+          "required": [
+            "kind",
+            "correlation_id",
+            "output"
+          ]
+        },
+        {
+          "description": "The operation `correlation_id` failed on the device.",
+          "type": "object",
+          "properties": {
+            "correlation_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failure"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "correlation_id",
+            "message"
+          ]
+        },
+        {
+          "description": "The operation `correlation_id` was stopped at the gateway's request.",
+          "type": "object",
+          "properties": {
+            "correlation_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cancelled"
+            }
+          },
+          "required": [
+            "kind",
+            "correlation_id"
+          ]
+        }
+      ]
+    },
     "DeviceListResponse": {
       "type": "object",
       "properties": {
@@ -38,14 +150,9 @@
       ]
     },
     "DeviceResponse": {
+      "description": "A registered device as the gateway lists it. `capabilities` are what the\ndevice last advertised on connecting; empty until it first dials in.",
       "type": "object",
       "properties": {
-        "base_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "capabilities": {
           "type": "array",
           "items": {
@@ -87,19 +194,101 @@
         "registered_at"
       ]
     },
+    "GatewayFrame": {
+      "description": "Frames the gateway sends to a connected device.",
+      "oneOf": [
+        {
+          "description": "The hello was accepted; the device is connected.",
+          "type": "object",
+          "properties": {
+            "device_id": {
+              "type": "string"
+            },
+            "heartbeat_interval_secs": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "welcome"
+            }
+          },
+          "required": [
+            "kind",
+            "device_id",
+            "heartbeat_interval_secs"
+          ]
+        },
+        {
+          "description": "The hello was refused; the gateway closes after this frame.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ]
+        },
+        {
+          "description": "Run `tool_name` with `params` in `context`, answering with a\n`Result`, `Failure`, or `Cancelled` frame carrying `correlation_id`.",
+          "type": "object",
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/SerializableToolContext"
+            },
+            "correlation_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "operation"
+            },
+            "params": true,
+            "tool_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "correlation_id",
+            "tool_name",
+            "params",
+            "context"
+          ]
+        },
+        {
+          "description": "Stop the operation `correlation_id` if it is still running; the\ndevice answers `Cancelled`, or `Result`/`Failure` if it had already\nfinished.",
+          "type": "object",
+          "properties": {
+            "correlation_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "cancel"
+            }
+          },
+          "required": [
+            "kind",
+            "correlation_id"
+          ]
+        }
+      ]
+    },
     "RegisterDeviceRequest": {
+      "description": "Register a device: its identity, the secret its connection credential\nresolves against, and the workspace it may operate in. What it can run\nis not registered — the device advertises that each time it connects.",
       "type": "object",
       "properties": {
-        "base_url": {
-          "type": "string"
-        },
-        "capabilities": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
         "device_id": {
           "type": "string"
         },
@@ -114,6 +303,7 @@
           ]
         },
         "shared_token_secret_ref": {
+          "description": "The gateway secret whose value the device presents as its shared\ntoken when it connects.",
           "type": "string"
         },
         "workspace_root": {
@@ -129,39 +319,8 @@
       },
       "required": [
         "device_id",
-        "base_url",
         "shared_token_secret_ref",
         "workspace_root"
-      ]
-    },
-    "RemoteToolExecutionRequest": {
-      "type": "object",
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/SerializableToolContext"
-        },
-        "params": true,
-        "shared_token": {
-          "type": "string"
-        },
-        "tool_name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "shared_token",
-        "tool_name",
-        "params",
-        "context"
-      ]
-    },
-    "RemoteToolExecutionResponse": {
-      "type": "object",
-      "properties": {
-        "output": true
-      },
-      "required": [
-        "output"
       ]
     },
     "SerializableToolContext": {

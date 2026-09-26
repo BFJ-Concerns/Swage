@@ -673,6 +673,34 @@ fn storage_open_error(path: &std::path::Path, error: &swage_core::StorageError) 
     }
 }
 
+/// The tools that act on a workspace — shell and files — with the
+/// configured limits. The gateway's own dispatcher starts from them, and a
+/// device process runs exactly this set over its dialled connection.
+pub fn workspace_tools(config: &swage_config::ResolvedConfig) -> Vec<Arc<dyn crate::tool::Tool>> {
+    use crate::tool::{
+        file_edit::FileEditTool, file_list::FileListTool, file_read::FileReadTool,
+        file_search::FileSearchTool, file_write::FileWriteTool, shell::ShellTool,
+    };
+    use std::time::Duration;
+
+    let max_output = config.tools.max_output_bytes;
+    vec![
+        Arc::new(ShellTool {
+            timeout: Duration::from_secs(config.tools.shell_timeout_secs),
+            max_output_bytes: max_output,
+        }),
+        Arc::new(FileReadTool {
+            max_output_bytes: max_output,
+        }),
+        Arc::new(FileEditTool),
+        Arc::new(FileWriteTool),
+        Arc::new(FileSearchTool {
+            max_output_bytes: max_output,
+        }),
+        Arc::new(FileListTool),
+    ]
+}
+
 /// Build the tool dispatch pipeline with all built-in tools from configuration.
 pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
@@ -693,36 +721,22 @@ pub(crate) fn build_tool_dispatcher_with_browser(
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
         Tool, agent_memory::AgentMemoryTool, browser::browser_tools, docs_read::DocsReadTool,
-        file_edit::FileEditTool, file_list::FileListTool, file_read::FileReadTool,
-        file_search::FileSearchTool, file_write::FileWriteTool, hold::WorkflowHoldTool,
-        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
-        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryTool,
-        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        session_variable::SessionVariableTool, shell::ShellTool, surface::SurfaceLibraryTool,
-        surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
-        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
+        schedule::WakeMeLaterTool, session_variable::SessionVariableTool,
+        surface::SurfaceLibraryTool, surface::SurfaceReadTool, surface::SurfaceWriteTool,
+        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
-    use std::time::Duration;
 
     let max_output = config.tools.max_output_bytes;
-    let shell_timeout = Duration::from_secs(config.tools.shell_timeout_secs);
+    let shell_timeout = std::time::Duration::from_secs(config.tools.shell_timeout_secs);
 
-    let base_tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(ShellTool {
-            timeout: shell_timeout,
-            max_output_bytes: max_output,
-        }),
-        Arc::new(FileReadTool {
-            max_output_bytes: max_output,
-        }),
-        Arc::new(FileEditTool),
-        Arc::new(FileWriteTool),
-        Arc::new(FileSearchTool {
-            max_output_bytes: max_output,
-        }),
-        Arc::new(FileListTool),
+    let mut base_tools: Vec<Arc<dyn Tool>> = workspace_tools(config);
+    base_tools.extend::<Vec<Arc<dyn Tool>>>(vec![
         Arc::new(WebSearchTool {
             provider_config: config.tools.search.clone(),
         }),
@@ -764,7 +778,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(KnowledgeCiteTool),
         Arc::new(KnowledgeOrientTool),
         Arc::new(KnowledgeCurateOrientationTool),
-    ];
+    ]);
 
     let base_tools = if let Some(browser_host) = browser_host {
         let mut tools = base_tools;

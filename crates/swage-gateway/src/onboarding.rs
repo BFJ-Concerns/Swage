@@ -64,11 +64,8 @@ pub struct RedeemDevicePairingRequest {
     pub label: Option<String>,
     #[serde(default = "default_attached_device_kind")]
     pub kind: String,
-    pub base_url: String,
     pub shared_token_secret_ref: String,
     pub workspace_root: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,12 +152,10 @@ pub struct RecoveryDeviceRecord {
     pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
-    pub base_url: String,
     pub shared_token_secret_ref: String,
     pub workspace_root: String,
     #[serde(default)]
     pub workspace_roots: Vec<String>,
-    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,23 +189,6 @@ fn map_channel_link_response(link: ChannelLink) -> ChannelLinkResponse {
         home_target: link.home_target,
         linked_at: link.linked_at,
         updated_at: link.updated_at,
-    }
-}
-
-fn map_device_response(device: crate::device::RegisteredDevice) -> DeviceResponse {
-    DeviceResponse {
-        device_id: device.device_id,
-        label: device.label,
-        kind: device.kind.to_string(),
-        base_url: device.base_url,
-        workspace_root: device.workspace_root.to_string_lossy().into_owned(),
-        workspace_roots: device
-            .workspace_roots
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect(),
-        capabilities: device.capabilities,
-        registered_at: device.registered_at,
     }
 }
 
@@ -365,15 +343,13 @@ pub async fn redeem_device_pairing_code(
             device_id: request.device_id,
             label: request.label,
             kind: request.kind,
-            base_url: request.base_url,
             shared_token_secret_ref: request.shared_token_secret_ref,
             workspace_root: request.workspace_root,
             workspace_roots: vec![],
-            capabilities: request.capabilities,
         },
     )
     .await?;
-    Ok(map_device_response(device))
+    Ok(crate::device::device_response(device))
 }
 
 pub async fn export_gateway_recovery_bundle(
@@ -471,11 +447,9 @@ pub async fn export_gateway_recovery_bundle(
                 device_id: device.device_id,
                 label: device.label,
                 kind: device.kind,
-                base_url: device.base_url,
                 shared_token_secret_ref: device.shared_token,
                 workspace_root: device.workspace_root,
                 workspace_roots: device.workspace_roots,
-                capabilities: device.capabilities,
             })
             .collect(),
         schedules: schedules
@@ -665,11 +639,9 @@ pub async fn import_gateway_recovery_bundle(
                 device_id: device.device_id,
                 label: device.label,
                 kind: device.kind,
-                base_url: device.base_url,
                 shared_token_secret_ref: device.shared_token_secret_ref,
                 workspace_root: device.workspace_root,
                 workspace_roots: device.workspace_roots,
-                capabilities: device.capabilities,
             },
         )
         .await?;

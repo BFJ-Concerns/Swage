@@ -12,7 +12,8 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::{
-    assets, handlers, knowledge_mirror, shipped_docs, state::AppState, surface, websocket, workflow,
+    assets, device, handlers, knowledge_mirror, shipped_docs, state::AppState, surface, websocket,
+    workflow,
 };
 
 // ---------------------------------------------------------------------------
@@ -364,16 +365,15 @@ pub fn build_router(state: AppState) -> Router {
         // Runtime presence and liveness.
         .route("/api/presence", get(handlers::presence_snapshot))
         .route(
-            "/api/presence/devices/heartbeat",
-            post(handlers::device_heartbeat),
-        )
-        .route(
             "/api/presence/devices/{id}",
             axum::routing::delete(handlers::disconnect_device),
         )
         // Devices and attached devices.
         .route("/api/devices", get(handlers::list_devices))
         .route("/api/devices/register", post(handlers::register_device))
+        // The connection a paired device dials; the gateway invokes
+        // operations back over it.
+        .route("/api/devices/connect", get(device::connect_handler))
         .route("/api/voice/capabilities", get(handlers::voice_capabilities))
         .route("/api/settings", get(handlers::get_settings))
         .route("/api/settings", put(handlers::save_settings))

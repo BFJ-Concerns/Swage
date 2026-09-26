@@ -29,16 +29,15 @@ fn parse_workspace_roots(json: &str) -> rusqlite::Result<Vec<String>> {
 }
 
 fn row_to_device(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRegistration> {
-    let registered_at: String = row.get(8)?;
-    let capabilities_json: String = row.get(7)?;
-    let workspace_roots_json: String = row.get(6)?;
+    let registered_at: String = row.get(7)?;
+    let capabilities_json: String = row.get(6)?;
+    let workspace_roots_json: String = row.get(5)?;
     Ok(DeviceRegistration {
         device_id: row.get(0)?,
         label: row.get(1)?,
         kind: row.get(2)?,
-        base_url: row.get(3)?,
-        shared_token: row.get(4)?,
-        workspace_root: row.get(5)?,
+        shared_token: row.get(3)?,
+        workspace_root: row.get(4)?,
         workspace_roots: parse_workspace_roots(&workspace_roots_json)?,
         capabilities: parse_capabilities(&capabilities_json)?,
         registered_at: parse_dt(&registered_at)?,
@@ -61,12 +60,11 @@ impl DeviceStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO devices
-                 (device_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 (device_id, label, kind, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(device_id) DO UPDATE SET
                      label = excluded.label,
                      kind = excluded.kind,
-                     base_url = excluded.base_url,
                      shared_token = excluded.shared_token,
                      workspace_root = excluded.workspace_root,
                      workspace_roots_json = excluded.workspace_roots_json,
@@ -76,7 +74,6 @@ impl DeviceStore for SqliteStorage {
                     &device.device_id,
                     &device.label,
                     &device.kind,
-                    &device.base_url,
                     &device.shared_token,
                     &device.workspace_root,
                     &workspace_roots_json,
@@ -89,7 +86,6 @@ impl DeviceStore for SqliteStorage {
                 device_id: device.device_id,
                 label: device.label,
                 kind: device.kind,
-                base_url: device.base_url,
                 shared_token: device.shared_token,
                 workspace_root: device.workspace_root,
                 workspace_roots: device.workspace_roots,
@@ -103,11 +99,29 @@ impl DeviceStore for SqliteStorage {
     async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT device_id, label, kind, base_url, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at
+                "SELECT device_id, label, kind, shared_token, workspace_root, workspace_roots_json, capabilities_json, registered_at
                  FROM devices ORDER BY registered_at ASC, device_id ASC",
             )?;
             let rows = stmt.query_map([], row_to_device)?;
             rows.collect()
+        })
+        .await
+    }
+
+    async fn set_device_capabilities(
+        &self,
+        device_id: &str,
+        capabilities: Vec<String>,
+    ) -> Result<bool, StorageError> {
+        let device_id = device_id.to_string();
+        self.with_conn(move |conn| {
+            let capabilities_json = serde_json::to_string(&capabilities)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            let affected = conn.execute(
+                "UPDATE devices SET capabilities_json = ?1 WHERE device_id = ?2",
+                params![capabilities_json, device_id],
+            )?;
+            Ok(affected > 0)
         })
         .await
     }
@@ -141,7 +155,6 @@ mod tests {
                 device_id: "device-a".into(),
                 label: Some("Device A".into()),
                 kind: "attached_device".into(),
-                base_url: "http://127.0.0.1:4000".into(),
                 shared_token: "secret-a".into(),
                 workspace_root: "/tmp/a".into(),
                 workspace_roots: vec!["/tmp/a".into(), "/mnt/shared".into()],
@@ -156,7 +169,6 @@ mod tests {
                 device_id: "device-a".into(),
                 label: Some("Device A2".into()),
                 kind: "docker".into(),
-                base_url: "http://127.0.0.1:5000".into(),
                 shared_token: "secret-b".into(),
                 workspace_root: "/tmp/b".into(),
                 workspace_roots: vec!["/tmp/b".into()],
@@ -172,6 +184,25 @@ mod tests {
         assert_eq!(devices[0].workspace_root, "/tmp/b");
         assert_eq!(devices[0].workspace_roots, vec!["/tmp/b"]);
         assert_eq!(devices[0].capabilities, vec!["device_identity"]);
+
+        // What a device advertises on connecting replaces the recorded set;
+        // an unknown device is reported, not invented.
+        assert!(
+            storage
+                .set_device_capabilities("device-a", vec!["shell".into(), "file_read".into()])
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            storage.list_devices().await.unwrap()[0].capabilities,
+            vec!["shell", "file_read"]
+        );
+        assert!(
+            !storage
+                .set_device_capabilities("device-z", vec![])
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

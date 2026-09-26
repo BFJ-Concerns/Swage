@@ -16,19 +16,15 @@ use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse, ToolError,
 };
+use swage_device::{DeviceConnection, DeviceError, RegisterDeviceRequest};
 use swage_gateway::{
-    device::{
-        DeviceKind, RegisterDeviceRequest, register_attached_device_with_gateway,
-        spawn_attached_device, spawn_transport_backed_device,
-    },
-    secret::CreateSecretRequest,
-    server::build_router,
-    state::AppState,
+    device::DeviceKind, secret::CreateSecretRequest, server::build_router, state::AppState,
 };
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
 use swage_tool::context::{MockToolContext, ToolContext};
 use swage_tool::tool::Tool;
+use tokio_util::sync::CancellationToken;
 
 use crate::support::{ProcessEnvGuard, start_live_server};
 
@@ -129,32 +125,6 @@ async fn start_test_server(
     (addr, state)
 }
 
-async fn start_file_backed_test_server(
-    db_path: &std::path::Path,
-    provider: impl LlmProvider + 'static,
-    dispatcher: swage_gateway::tool::ToolDispatcher,
-    restore_devices: bool,
-) -> (SocketAddr, AppState) {
-    let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    let config = swage_config::ResolvedConfig::default();
-    let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
-        Arc::new(provider),
-        config,
-        dispatcher,
-        None,
-    );
-    if restore_devices {
-        swage_gateway::device::restore_registered_devices(&state)
-            .await
-            .unwrap();
-    }
-    let router: Router = build_router(state.clone());
-    let (addr, _server) = start_live_server(router).await;
-    (addr, state)
-}
-
 async fn create_secret_ref(state: &AppState, name: &str, value: &str) -> String {
     state
         .secret_manager
@@ -172,6 +142,59 @@ async fn create_secret_ref(state: &AppState, name: &str, value: &str) -> String 
         .await
         .unwrap()
         .reference
+}
+
+/// Start a device process in this test: it dials `addr`, and its run loop
+/// redials whenever the connection drops until the returned token fires.
+fn dial_device(
+    addr: SocketAddr,
+    device_id: &str,
+    shared_token: &str,
+    tools: Vec<Arc<dyn Tool>>,
+    workspace: &std::path::Path,
+) -> (
+    CancellationToken,
+    tokio::task::JoinHandle<Result<(), DeviceError>>,
+) {
+    let connection = Arc::new(DeviceConnection {
+        gateway_url: format!("http://{addr}"),
+        device_id: device_id.to_string(),
+        shared_token: shared_token.to_string(),
+        label: Some(format!("{device_id} label")),
+        dispatcher: Arc::new(swage_gateway::tool::ToolDispatcher::allow_all(tools)),
+        workspace_roots: vec![workspace.to_path_buf()],
+        reconnect_delay: Duration::from_millis(100),
+    });
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(connection.run(shutdown.clone()));
+    (shutdown, task)
+}
+
+/// Wait until the gateway's presence reads the device in `expected` state.
+async fn wait_for_device_state(addr: SocketAddr, device_id: &str, expected: &str) {
+    let client = GatewayClient::new(&format!("http://{addr}"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let presence = client.presence().await.unwrap();
+        let state = presence
+            .devices
+            .iter()
+            .find(|device| device.device_id == device_id)
+            .map(|device| device.state.clone());
+        if state.as_deref() == Some(expected) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "device {device_id} never read {expected}; presence: {:?}",
+            presence.devices
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn identity_tools(marker: &'static str) -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(DeviceIdentityTool { marker }) as Arc<dyn Tool>]
 }
 
 type WsSink = futures::stream::SplitSink<
@@ -357,7 +380,7 @@ async fn same_machine_gateway_executes_turns_without_a_registered_local_device()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn attached_device_registers_with_remote_gateway_and_executes_work() {
+async fn a_paired_device_dials_in_advertises_and_serves_operations_over_its_connection() {
     let _guard = with_secret_env();
     let device_workspace = tempfile::TempDir::new().unwrap();
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
@@ -366,36 +389,48 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
     let (tx4, rx4) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2, rx3, rx4]);
     let gateway_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "gateway-unused",
-        }) as Arc<dyn Tool>]);
+        swage_gateway::tool::ToolDispatcher::allow_all(identity_tools("gateway-unused"));
     let (addr, state) = start_test_server(provider, gateway_dispatcher).await;
     let shared_token_secret_ref =
         create_secret_ref(&state, "Remote device token", "device-secret").await;
 
-    let device_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "remote-device",
-        }) as Arc<dyn Tool>]);
-    let device = spawn_attached_device(
-        device_dispatcher,
-        device_workspace.path().to_path_buf(),
-        "device-secret".to_string(),
+    // Registration names the credential and the workspace, nothing about
+    // what the device can run — that is advertised when it connects.
+    let registered = DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: "remote-device-a".to_string(),
+            label: Some("Remote Device A".to_string()),
+            kind: "attached_device".to_string(),
+            shared_token_secret_ref,
+            workspace_root: device_workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
     )
-    .await;
-    let registration = RegisterDeviceRequest {
-        device_id: "remote-device-a".to_string(),
-        label: Some("Remote Device A".to_string()),
-        kind: "attached_device".to_string(),
-        base_url: device.base_url.clone(),
-        shared_token_secret_ref,
-        workspace_root: device_workspace.path().to_string_lossy().into_owned(),
-        workspace_roots: vec![],
-        capabilities: vec!["device_identity".to_string()],
-    };
-    register_attached_device_with_gateway(&format!("http://{addr}"), &registration)
+    .await
+    .unwrap();
+    assert!(registered.capabilities.is_empty());
+
+    let (device_shutdown, device_task) = dial_device(
+        addr,
+        "remote-device-a",
+        "device-secret",
+        identity_tools("remote-device"),
+        device_workspace.path(),
+    );
+    wait_for_device_state(addr, "remote-device-a", "connected").await;
+
+    let devices: serde_json::Value = reqwest::get(format!("http://{addr}/api/devices"))
+        .await
+        .unwrap()
+        .json()
         .await
         .unwrap();
+    assert_eq!(
+        devices["devices"][0]["capabilities"],
+        json!(["device_identity"])
+    );
+    assert!(devices["devices"][0].get("base_url").is_none());
 
     let result = run_turn_and_collect_tool_result(
         addr,
@@ -411,13 +446,89 @@ async fn attached_device_registers_with_remote_gateway_and_executes_work() {
         "remote tool result: {result:?}"
     );
 
+    // The gateway's own record shows the connection and the operation,
+    // invoked and settled under one correlation id.
+    let mut events = swage_storage::store::AuditStore::list_audit_events(state.storage.as_ref())
+        .await
+        .unwrap();
+    events.sort_by_key(|event| event.created_at);
+    let device_events = events
+        .iter()
+        .filter(|event| event.entity_kind == "device" && event.entity_id == "remote-device-a")
+        .collect::<Vec<_>>();
+    let kinds = device_events
+        .iter()
+        .map(|event| event.event_kind.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "device_connected",
+            "device_operation_invoked",
+            "device_operation_settled"
+        ],
+        "{device_events:?}"
+    );
+    assert_eq!(
+        device_events[1].metadata["correlation_id"],
+        device_events[2].metadata["correlation_id"]
+    );
+    assert_eq!(device_events[2].metadata["outcome"], "result");
+
     let local_result = run_turn_and_collect_tool_result(addr, &state, tx3, tx4, None, None).await;
     assert_eq!(
         local_result["device"], "gateway-unused",
-        "an unannotated turn must execute locally even with an attached device: {local_result:?}"
+        "an unannotated turn must execute locally even with a connected device: {local_result:?}"
     );
 
-    device.join_handle.abort();
+    device_shutdown.cancel();
+    device_task.await.unwrap().unwrap();
+    wait_for_device_state(addr, "remote-device-a", "disconnected").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_with_the_wrong_token_is_rejected_and_never_listed_as_connected() {
+    let _guard = with_secret_env();
+    let workspace = tempfile::TempDir::new().unwrap();
+    let provider = ChannelProvider::new(vec![]);
+    let (addr, state) = start_test_server(
+        provider,
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+    )
+    .await;
+    let shared_token_secret_ref = create_secret_ref(&state, "Right token", "right").await;
+    DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: "impostor".to_string(),
+            label: None,
+            kind: "attached_device".to_string(),
+            shared_token_secret_ref,
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    let (_shutdown, task) = dial_device(addr, "impostor", "wrong", vec![], workspace.path());
+    let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("a rejected device stops dialling")
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(DeviceError::Rejected(message)) if message == "invalid shared token")
+    );
+    let presence = GatewayClient::new(&format!("http://{addr}"))
+        .presence()
+        .await
+        .unwrap();
+    assert!(
+        presence
+            .devices
+            .iter()
+            .all(|device| device.device_id != "impostor")
+    );
 }
 
 async fn run_transport_backend_round_trip(
@@ -431,37 +542,33 @@ async fn run_transport_backend_round_trip(
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
     let gateway_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "gateway-unused",
-        }) as Arc<dyn Tool>]);
+        swage_gateway::tool::ToolDispatcher::allow_all(identity_tools("gateway-unused"));
     let (addr, state) = start_test_server(provider, gateway_dispatcher).await;
     let shared_token_secret_ref =
         create_secret_ref(&state, &format!("{backend_label} token"), "backend-secret").await;
+    let device_id = format!("{backend_label}-device");
 
-    let backend_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(DeviceIdentityTool { marker }) as Arc<dyn Tool>,
-        ]);
-    let backend = spawn_transport_backed_device(
-        backend_kind.clone(),
-        backend_dispatcher,
-        workspace.path().to_path_buf(),
-        "backend-secret".to_string(),
+    DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: device_id.clone(),
+            label: Some(format!("{backend_label} Device")),
+            kind: backend_kind.to_string(),
+            shared_token_secret_ref,
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
     )
-    .await;
-    let registration = RegisterDeviceRequest {
-        device_id: format!("{backend_label}-device"),
-        label: Some(format!("{backend_label} Device")),
-        kind: backend_kind.to_string(),
-        base_url: backend.base_url.clone(),
-        shared_token_secret_ref,
-        workspace_root: workspace.path().to_string_lossy().into_owned(),
-        workspace_roots: vec![],
-        capabilities: vec!["device_identity".to_string()],
-    };
-    register_attached_device_with_gateway(&format!("http://{addr}"), &registration)
-        .await
-        .unwrap();
+    .await
+    .unwrap();
+    let (device_shutdown, _task) = dial_device(
+        addr,
+        &device_id,
+        "backend-secret",
+        identity_tools(marker),
+        workspace.path(),
+    );
+    wait_for_device_state(addr, &device_id, "connected").await;
 
     let result = run_turn_and_collect_tool_result(
         addr,
@@ -476,8 +583,7 @@ async fn run_transport_backend_round_trip(
         result["device"], marker,
         "{backend_label} result: {result:?}"
     );
-
-    backend.join_handle.abort();
+    device_shutdown.cancel();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -490,73 +596,100 @@ async fn ssh_execution_backend_runs_through_shared_execution_interface() {
     run_transport_backend_round_trip(DeviceKind::Ssh, "ssh", "ssh-device").await;
 }
 
+/// A gateway whose listener address is chosen by the test and which the
+/// test can bring down, so a restarted gateway can take the same address.
+async fn start_restartable_server(
+    router: Router,
+    addr: Option<SocketAddr>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener =
+        tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (addr, task)
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn registered_remote_device_survives_restart() {
+async fn a_registered_device_reconnects_to_a_restarted_gateway_and_serves_it() {
     let _guard = with_secret_env();
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("devices.db");
     let workspace = tempfile::TempDir::new().unwrap();
 
-    let (_tx1, rx1) = tokio::sync::mpsc::channel(10);
-    let (_tx2, rx2) = tokio::sync::mpsc::channel(10);
-    let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let gateway_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "gateway-unused",
-        }) as Arc<dyn Tool>]);
-    let (addr, state) =
-        start_file_backed_test_server(&db_path, provider, gateway_dispatcher, false).await;
+    // First life of the gateway: register, dial in, connected.
+    let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(ChannelProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(identity_tools("gateway-unused")),
+        None,
+    );
+    let (addr, server) = start_restartable_server(build_router(state.clone()), None).await;
     let shared_token_secret_ref =
         create_secret_ref(&state, "Persisted backend token", "backend-secret").await;
-
-    let backend_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "persisted-device",
-        }) as Arc<dyn Tool>]);
-    let backend = spawn_transport_backed_device(
-        DeviceKind::Docker,
-        backend_dispatcher,
-        workspace.path().to_path_buf(),
-        "backend-secret".to_string(),
-    )
-    .await;
-    register_attached_device_with_gateway(
+    DeviceConnection::register(
         &format!("http://{addr}"),
         &RegisterDeviceRequest {
             device_id: "docker-persisted".to_string(),
             label: Some("Docker Persisted".to_string()),
             kind: "docker".to_string(),
-            base_url: backend.base_url.clone(),
             shared_token_secret_ref,
             workspace_root: workspace.path().to_string_lossy().into_owned(),
             workspace_roots: vec![],
-            capabilities: vec!["device_identity".to_string()],
         },
     )
     .await
     .unwrap();
-
-    let restarted_provider = ChannelProvider::new(vec![]);
-    let restarted_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "gateway-unused",
-        }) as Arc<dyn Tool>]);
-    let (_restarted_addr, restarted_state) =
-        start_file_backed_test_server(&db_path, restarted_provider, restarted_dispatcher, true)
-            .await;
-
-    let devices = swage_gateway::device::list_devices(&restarted_state).await;
-    assert!(
-        devices
-            .devices
-            .iter()
-            .any(|device| device.device_id == "docker-persisted"),
-        "persisted remote device should be restored: {:?}",
-        devices.devices
+    let (device_shutdown, _device_task) = dial_device(
+        addr,
+        "docker-persisted",
+        "backend-secret",
+        identity_tools("persisted-device"),
+        workspace.path(),
     );
+    wait_for_device_state(addr, "docker-persisted", "connected").await;
 
-    let device = swage_gateway::device::resolve_device(
-        &restarted_state,
+    // The gateway goes down: its links close, its listener is gone.
+    state.shutdown_signal.cancel();
+    server.abort();
+    drop(state);
+    drop(storage);
+
+    // Second life on the same address, from the same store: the device's
+    // redial finds it, advertises again, and serves it.
+    let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
+    let restarted = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(ChannelProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(identity_tools("gateway-unused")),
+        None,
+    );
+    swage_gateway::device::restore_registered_devices(&restarted)
+        .await
+        .unwrap();
+    let (restarted_addr, _server) =
+        start_restartable_server(build_router(restarted.clone()), Some(addr)).await;
+    assert_eq!(restarted_addr, addr);
+    wait_for_device_state(addr, "docker-persisted", "connected").await;
+
+    let devices = swage_gateway::device::list_devices(&restarted).await;
+    let device = devices
+        .devices
+        .iter()
+        .find(|device| device.device_id == "docker-persisted")
+        .expect("persisted remote device should be restored");
+    assert_eq!(device.capabilities, vec!["device_identity"]);
+
+    let resolved = swage_gateway::device::resolve_device(
+        &restarted,
         Some(&json!({"execution_backend": "docker"})),
     )
     .await
@@ -564,8 +697,8 @@ async fn registered_remote_device_survives_restart() {
     let mut ctx = MockToolContext::new("agent-test", "sess-test");
     ctx.working_directory = workspace.path().to_path_buf();
     let result = swage_gateway::device::execute_on_remote_device(
-        &restarted_state.secret_manager,
-        &device,
+        &restarted,
+        &resolved,
         "device_identity",
         &json!({}),
         &ctx,
@@ -574,5 +707,5 @@ async fn registered_remote_device_survives_restart() {
     .unwrap();
     assert_eq!(result["device"], "persisted-device");
 
-    backend.join_handle.abort();
+    device_shutdown.cancel();
 }

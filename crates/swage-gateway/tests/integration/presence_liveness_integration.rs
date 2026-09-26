@@ -12,7 +12,9 @@ use futures::Stream;
 use tokio::time::Duration;
 use tower::ServiceExt;
 
-use crate::support::start_live_server;
+use crate::support::{ProcessEnvGuard, start_live_server};
+use swage_device::{DeviceConnection, RegisterDeviceRequest};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use swage_client::http::GatewayClient;
@@ -155,60 +157,137 @@ async fn presence_snapshot_tracks_client_disconnect_and_reconnect() {
     ws.close(None).await.unwrap();
 }
 
+/// A gateway whose state the test keeps, so it can register a device.
+async fn start_device_test_server() -> (SocketAddr, AppState) {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(MockProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (addr, _server) = start_live_server(build_router(state.clone())).await;
+    (addr, state)
+}
+
+async fn device_state(client: &GatewayClient, device_id: &str) -> Option<String> {
+    client
+        .presence()
+        .await
+        .unwrap()
+        .devices
+        .into_iter()
+        .find(|device| device.device_id == device_id)
+        .map(|device| device.state)
+}
+
+async fn wait_for_device_state(client: &GatewayClient, device_id: &str, expected: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while device_state(client, device_id).await.as_deref() != Some(expected) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "device {device_id} never read {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn presence_snapshot_marks_device_stale_after_missed_heartbeat() {
-    let (_router, addr) = start_test_server().await;
+async fn presence_reads_a_device_from_its_dialled_connection_and_nothing_else() {
+    let mut env = ProcessEnvGuard::new();
+    env.set_managed_secret_key(15);
+    let (addr, state) = start_device_test_server().await;
     let http = reqwest::Client::new();
     let client = GatewayClient::new(&format!("http://{addr}"));
+    let workspace = tempfile::TempDir::new().unwrap();
 
-    let response = http
+    let secret_ref = state
+        .secret_manager
+        .create_secret(swage_gateway::secret::CreateSecretRequest {
+            name: "Device A token".into(),
+            material_kind: "device_credential".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "gateway".into(),
+            scope_id: None,
+            metadata: None,
+            value: Some("device-a-token".into()),
+            external_reference: None,
+        })
+        .await
+        .unwrap()
+        .reference;
+    DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: "device-a".into(),
+            label: Some("Device A".into()),
+            kind: "attached_device".into(),
+            shared_token_secret_ref: secret_ref,
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
+    )
+    .await
+    .unwrap();
+
+    // Registered but not dialled in: no presence record yet.
+    assert_eq!(device_state(&client, "device-a").await, None);
+
+    // There is no HTTP heartbeat: a device is present through its
+    // connection or not at all.
+    let no_http_heartbeat = http
         .post(format!("http://{addr}/api/presence/devices/heartbeat"))
-        .json(&serde_json::json!({
-            "device_id": "device-a",
-            "label": "Device A",
-            "stale_after_secs": 1
-        }))
+        .json(&serde_json::json!({ "device_id": "device-a" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(
+        no_http_heartbeat.status().is_client_error(),
+        "an HTTP heartbeat is refused: {}",
+        no_http_heartbeat.status()
+    );
+    assert_eq!(device_state(&client, "device-a").await, None);
 
-    let obsolete_heartbeat = http
-        .post(format!("http://{addr}/api/presence/machines/heartbeat"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(obsolete_heartbeat.status(), StatusCode::NOT_FOUND);
+    let connection = Arc::new(DeviceConnection {
+        gateway_url: format!("http://{addr}"),
+        device_id: "device-a".into(),
+        shared_token: "device-a-token".into(),
+        label: Some("Device A".into()),
+        dispatcher: Arc::new(swage_gateway::tool::ToolDispatcher::allow_all(vec![])),
+        workspace_roots: vec![workspace.path().to_path_buf()],
+        reconnect_delay: Duration::from_millis(100),
+    });
+    let shutdown = CancellationToken::new();
+    let device_task = tokio::spawn(Arc::clone(&connection).run(shutdown.clone()));
+    wait_for_device_state(&client, "device-a", "connected").await;
 
-    let connected = client.presence().await.unwrap();
-    let device = connected
-        .devices
-        .iter()
-        .find(|device| device.device_id == "device-a")
-        .expect("device presence record");
-    assert_eq!(device.state, "connected");
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let stale = client.presence().await.unwrap();
-    let device = stale
-        .devices
-        .iter()
-        .find(|device| device.device_id == "device-a")
-        .expect("stale device presence record");
-    assert_eq!(device.state, "stale");
-
+    // The operator can cut the connection from the gateway's side.
     let disconnected = http
         .delete(format!("http://{addr}/api/presence/devices/device-a"))
         .send()
         .await
         .unwrap();
     assert_eq!(disconnected.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        device_state(&client, "device-a").await.as_deref(),
+        Some("disconnected")
+    );
 
-    let obsolete_disconnect = http
-        .delete(format!("http://{addr}/api/presence/machines/device-a"))
+    // The device's redial loop brings it back on its own.
+    wait_for_device_state(&client, "device-a", "connected").await;
+
+    // And the device going away reads as disconnected.
+    shutdown.cancel();
+    device_task.await.unwrap().unwrap();
+    wait_for_device_state(&client, "device-a", "disconnected").await;
+
+    let unknown = http
+        .delete(format!("http://{addr}/api/presence/devices/nobody"))
         .send()
         .await
         .unwrap();
-    assert_eq!(obsolete_disconnect.status(), StatusCode::NOT_FOUND);
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }

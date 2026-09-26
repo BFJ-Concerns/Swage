@@ -359,13 +359,13 @@ pub struct SessionListing {
     pub archived: bool,
 }
 
-/// A persisted non-local device registration.
+/// A persisted non-local device registration. `capabilities` are what the
+/// device last advertised when it connected.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceRegistration {
     pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
-    pub base_url: String,
     pub shared_token: String,
     pub workspace_root: String,
     pub workspace_roots: Vec<String>,
@@ -1985,7 +1985,6 @@ pub struct NewDeviceRegistration {
     pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
-    pub base_url: String,
     pub shared_token: String,
     pub workspace_root: String,
     pub workspace_roots: Vec<String>,

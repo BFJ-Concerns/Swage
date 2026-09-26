@@ -6,6 +6,7 @@
 //! groups (e.g. `swage topic ...`, `swage config ...`).
 
 pub mod completions;
+pub mod device;
 pub mod install;
 pub mod recovery;
 pub mod restart;
@@ -64,6 +65,8 @@ pub enum Command {
     Gateway(GatewayArgs),
     /// Chat with the gateway in your terminal.
     Chat(TuiArgs),
+    /// Run this machine as a device: dial a gateway and serve its operations.
+    Device(device::DeviceArgs),
     /// Generate a shell completion script.
     GenerateCompletion(CompletionsArgs),
 }

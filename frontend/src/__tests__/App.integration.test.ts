@@ -300,7 +300,6 @@ function makeOperatorOverview(
         device_id: "local",
         label: "Local device",
         kind: "local",
-        base_url: null,
         workspace_root: "/tmp/swage",
         capabilities: [],
         registered_at: "2026-04-07T12:00:00Z",

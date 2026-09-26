@@ -382,7 +382,6 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
             device_id: "docker-a".into(),
             label: Some("Docker A".into()),
             kind: "docker".into(),
-            base_url: "http://127.0.0.1:4100".into(),
             shared_token_secret_ref: state
                 .secret_manager
                 .create_secret(CreateSecretRequest {
@@ -401,12 +400,11 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
                 .reference,
             workspace_root: "/srv/docker".into(),
             workspace_roots: vec![],
-            capabilities: vec!["shell".into()],
         },
     )
     .await
     .unwrap();
-    swage_gateway::presence::disconnect_device(&state, "docker-a").await;
+    swage_gateway::device::disconnect_device(&state, "docker-a").await;
 
     state.channel_routes.lock().await.insert(
         ChannelOrigin {
