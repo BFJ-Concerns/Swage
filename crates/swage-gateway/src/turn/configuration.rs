@@ -273,6 +273,17 @@ pub(crate) async fn apply_dispatch_task_bounds(
     Ok(config)
 }
 
+/// The threshold at which a turn's context is succeeded before the model
+/// call (turn/succession.rs) and, failing that, compacted by the agent
+/// runtime. One reader for both, so the two can never disagree about when a
+/// context is too large. Configuration does not yet expose it; this is the
+/// runtime's default.
+pub(crate) fn compaction_threshold(
+    _config: &swage_config::ResolvedConfig,
+) -> swage_agent::config::CompactionThreshold {
+    swage_agent::config::CompactionThreshold::MessageCount(100)
+}
+
 pub(crate) fn build_agent_config_with_workspace(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
@@ -281,6 +292,7 @@ pub(crate) fn build_agent_config_with_workspace(
     allowed_paths: Vec<PathBuf>,
 ) -> AgentConfig {
     let mut agent_config = AgentConfig::new(agent_id).with_workspace(workspace_root, allowed_paths);
+    agent_config.compaction_threshold = compaction_threshold(config);
     agent_config.skip_permissions = config.dangerously_skip_permissions;
     if !config.default_model_id().is_empty() {
         agent_config.model_id = Some(config.default_model_id().to_string());
