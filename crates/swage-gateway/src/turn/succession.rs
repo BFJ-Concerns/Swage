@@ -70,10 +70,21 @@ pub(super) async fn succeed_over_threshold(
     else {
         return output;
     };
+    // What the first assembly actually carried, by the report's own element
+    // list — so an element a named assembly declared omitted is never shown
+    // to the summariser as "already in place".
+    let carried_names: std::collections::BTreeSet<&str> = output
+        .report
+        .elements
+        .iter()
+        .map(|report| report.name.as_str())
+        .collect();
     let carried: Vec<ChatMessage> = elements
         .iter()
         .filter(|element| {
-            element.name() != HISTORY_ELEMENT && default_assembly_carries(element.name())
+            element.name() != HISTORY_ELEMENT
+                && default_assembly_carries(element.name())
+                && carried_names.contains(element.name())
         })
         .flat_map(|element| rendered_content(element.as_ref(), site.variables))
         .collect();

@@ -546,6 +546,69 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
 }
 
 #[tokio::test]
+async fn a_failed_summariser_leaves_the_runtime_record_beside_the_attempt() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(MockProvider::with_failing_completions(
+            provider_witness_chunks(),
+        )),
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    seed_history_over_threshold(&storage, session_id).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on the runtime's compaction");
+
+    let db = storage.db.lock().await;
+    let (report_json, _) = db
+        .snapshots
+        .values()
+        .next()
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    let records = report["compaction_applied"]
+        .as_array()
+        .expect("compaction records");
+    let strategies: Vec<(&str, &str)> = records
+        .iter()
+        .map(|record| {
+            (
+                record["element"].as_str().expect("element"),
+                record["actual_strategy"].as_str().expect("strategy"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        strategies.first(),
+        Some(&("history", "none")),
+        "the failed attempt is recorded first: {strategies:?}"
+    );
+    assert!(
+        records[0]["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("completions are down")),
+        "{records:?}"
+    );
+    assert_eq!(
+        strategies.get(1).map(|(element, _)| *element),
+        Some("agent_history"),
+        "the runtime's own pass follows: {strategies:?}"
+    );
+}
+
+#[tokio::test]
 async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loop() {
     // With the summariser down, succession cannot run and the agent
     // runtime's own compactor takes the turn — the seam this test watches.
@@ -1254,6 +1317,7 @@ pub(crate) struct MockStorage {
     fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
+    fail_tool_call_settlement: AtomicBool,
     fail_provider_round_writes: AtomicBool,
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
@@ -1741,6 +1805,7 @@ impl MockStorage {
             fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
+            fail_tool_call_settlement: AtomicBool::new(false),
             fail_provider_round_writes: AtomicBool::new(false),
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
@@ -1804,6 +1869,11 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse every tool-call settlement from now on.
+    pub(crate) fn fail_tool_call_settlement(&self) {
+        self.fail_tool_call_settlement.store(true, Ordering::SeqCst);
     }
 
     fn pause_structured_output_writes(&self) {
@@ -3877,6 +3947,11 @@ impl ToolCallStore for MockStorage {
         truncated: bool,
         total_bytes: Option<i64>,
     ) -> Result<(), StorageError> {
+        if self.fail_tool_call_settlement.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "tool-call settlement refused by the test".into(),
+            ));
+        }
         let mut db = self.db.lock().await;
         if let Some(tc) = db
             .tool_calls
