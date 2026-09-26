@@ -317,7 +317,7 @@ fn baseline_floor(
 
 /// An element's content with session-value slots filled, matching what the
 /// default assembly would have placed in the context.
-fn rendered_content(
+pub fn rendered_content(
     element: &dyn ContextElement,
     variables: &BTreeMap<String, String>,
 ) -> Vec<ChatMessage> {

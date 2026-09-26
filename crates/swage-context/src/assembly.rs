@@ -230,7 +230,7 @@ fn default_assembly_inner(
 /// assemblies can opt in by adding it themselves. This is the single
 /// statement of the default assembly's disposition — the baseline floor a
 /// named assembly is held to reads it rather than restating the list.
-pub(crate) fn default_assembly_carries(name: &str) -> bool {
+pub fn default_assembly_carries(name: &str) -> bool {
     name != "memory"
 }
 

@@ -456,12 +456,8 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
     }));
 }
 
-#[tokio::test]
-async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loop() {
-    let storage = Arc::new(MockStorage::new());
-    storage.fail_snapshot_writes();
-    let (state, session_id) =
-        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+/// Seed enough history to cross the compaction threshold on the next turn.
+async fn seed_history_over_threshold(storage: &MockStorage, session_id: Uuid) -> Uuid {
     let thread_id = storage
         .list_by_session(session_id)
         .await
@@ -470,7 +466,6 @@ async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loo
         .next()
         .expect("default thread")
         .id;
-
     for index in 0..101 {
         storage
             .append_message(AppendMessage {
@@ -486,8 +481,85 @@ async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loo
                 agent_id: "gateway".to_string(),
             })
             .await
-            .expect("seed history for compaction");
+            .expect("seed history over the compaction threshold");
     }
+    thread_id
+}
+
+#[tokio::test]
+async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elements() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    seed_history_over_threshold(&storage, session_id).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let db = storage.db.lock().await;
+    let (report_json, _) = db
+        .snapshots
+        .values()
+        .next()
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    let records = report["compaction_applied"]
+        .as_array()
+        .expect("compaction records");
+    assert_eq!(
+        records.len(),
+        1,
+        "succession ran once and the agent runtime's compactor stayed idle: {records:?}"
+    );
+    assert_eq!(records[0]["element"], "history");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    // 101 seeded messages plus the turn's own: the older half of 102.
+    assert_eq!(records[0]["messages_removed"], 51);
+    let names: Vec<&str> = report["elements"]
+        .as_array()
+        .expect("element reports")
+        .iter()
+        .map(|element| element["name"].as_str().expect("element name"))
+        .collect();
+    assert!(
+        names.contains(&"orientation")
+            && names.contains(&"succession")
+            && names.contains(&"history"),
+        "the successor carries the elements afresh, the summary, and the retained history: {names:?}"
+    );
+    let succession_position = names.iter().position(|name| *name == "succession");
+    let history_position = names.iter().position(|name| *name == "history");
+    assert!(
+        succession_position < history_position,
+        "the summary opens the conversation: {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loop() {
+    // With the summariser down, succession cannot run and the agent
+    // runtime's own compactor takes the turn — the seam this test watches.
+    let storage = Arc::new(MockStorage::new());
+    storage.fail_snapshot_writes();
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(MockProvider::with_failing_completions(
+            provider_witness_chunks(),
+        )),
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    seed_history_over_threshold(&storage, session_id).await;
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -578,12 +650,23 @@ async fn sandbox_guard_retries_shutdown_after_failure() {
 /// A mock provider that streams a fixed sequence of chunks.
 pub(crate) struct MockProvider {
     chunks: std::sync::Mutex<Vec<StreamChunk>>,
+    /// When set, plain completions (the summarising calls compaction and
+    /// succession make) fail; streaming turns are unaffected.
+    completion_fails: bool,
 }
 
 impl MockProvider {
     pub(crate) fn new(chunks: Vec<StreamChunk>) -> Self {
         Self {
             chunks: std::sync::Mutex::new(chunks),
+            completion_fails: false,
+        }
+    }
+
+    pub(crate) fn with_failing_completions(chunks: Vec<StreamChunk>) -> Self {
+        Self {
+            chunks: std::sync::Mutex::new(chunks),
+            completion_fails: true,
         }
     }
 }
@@ -598,6 +681,12 @@ impl LlmProvider for MockProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
+        if self.completion_fails {
+            return Err(ProviderError::Network {
+                provider: "mock".to_string(),
+                message: "completions are down".to_string(),
+            });
+        }
         Ok(CompletionResponse {
             content: "Compacted history".to_string(),
             input_tokens: 1,
@@ -4925,6 +5014,19 @@ async fn make_state_with_storage_and_root(
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,
 ) -> (AppState, Uuid) {
+    make_state_with_provider_and_root(
+        Arc::new(MockProvider::new(provider_chunks)),
+        storage,
+        config_root,
+    )
+    .await
+}
+
+async fn make_state_with_provider_and_root(
+    provider: Arc<dyn LlmProvider>,
+    storage: Arc<MockStorage>,
+    config_root: Option<std::path::PathBuf>,
+) -> (AppState, Uuid) {
     // The general scope is the seeded scope every topicless session uses.
     let topic = storage.general_scope().await.expect("create default topic");
 
@@ -4946,10 +5048,8 @@ async fn make_state_with_storage_and_root(
     .await
     .expect("create default thread");
 
-    let provider = Arc::new(MockProvider::new(provider_chunks));
     let storage_backend = Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
     let topic_store = Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>;
-    let provider = provider as Arc<dyn LlmProvider>;
     let config = swage_config::ResolvedConfig::default();
     let tool_dispatcher = crate::tool::ToolDispatcher::allow_all(vec![]);
     let state = match config_root {

@@ -62,6 +62,7 @@ mod operator_guidance;
 mod projection;
 mod provider_record;
 mod sandbox_approval;
+mod succession;
 mod workspace;
 
 pub(crate) use configuration::*;
@@ -1152,16 +1153,36 @@ async fn process_turn_with_composition_and_focus(
     // assembly from the config hierarchy; "default" (or empty) runs the
     // built-in implementation. JS assemblies fail open to the default with
     // the error recorded in the report.
-    let output = execute_context_assembly(
-        &assembly_name,
-        &config,
-        &elements,
-        &tokeniser,
-        Some(swage_root),
-        &scope,
-        &session.agent_id,
-        &session_variables,
-    );
+    let assemble = |elements: &[Box<dyn ContextElement>]| {
+        execute_context_assembly(
+            &assembly_name,
+            &config,
+            elements,
+            &tokeniser,
+            Some(swage_root),
+            &scope,
+            &session.agent_id,
+            &session_variables,
+        )
+    };
+    let output = assemble(&elements);
+    // Over the compaction threshold the turn runs on a successor: the same
+    // elements rendered afresh, the older history summarised against them
+    // (turn/succession.rs). Within it, the first assembly stands.
+    let output = succession::succeed_over_threshold(
+        succession::SuccessionSite {
+            provider: state.provider.as_ref(),
+            threshold: &compaction_threshold(&config),
+            model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
+            focus: compaction_focus.as_deref(),
+            variables: &session_variables,
+            tokeniser: &tokeniser,
+        },
+        elements,
+        output,
+        assemble,
+    )
+    .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": workspace_root,
