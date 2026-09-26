@@ -7,7 +7,7 @@ export type WorkflowScript = { id: string, topic_id: string, name: string, descr
  * not an authored row of the topic. A carried workflow is immutable in
  * place; a same-named authored row shadows it.
  */
-carrying_skill?: string, has_delivery_grant: boolean,
+carrying_skill?: string | null, has_delivery_grant: boolean,
 /**
  * Whether this script may read the observations captured by this run.
  */

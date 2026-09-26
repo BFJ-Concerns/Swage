@@ -10,7 +10,7 @@ export type ClientEvent = { "type": "send_message", content: string,
  * Content parts submitted beside the text, in order; absent means
  * text only. The same contract as `SubmitTurnRequest.attachments`.
  */
-attachments?: Array<MessageAttachment>, thread_id?: string, selected_model_id?: string, } | { "type": "approval_decision",
+attachments?: Array<MessageAttachment>, thread_id?: string | null, selected_model_id?: string | null, } | { "type": "approval_decision",
 /**
  * Identifies the approval request being resolved.
  */
@@ -26,4 +26,4 @@ scope?: ApprovalDecisionScope,
 /**
  * Optional explanation from the human reviewer.
  */
-reason: string | null, } | { "type": "cancel", } | { "type": "subscribe", channels: Array<string>, } | { "type": "unsubscribe", channels: Array<string>, } | { "type": "activate_skill", name: string, } | { "type": "deactivate_skill", name: string, };
+reason?: string | null, } | { "type": "cancel", } | { "type": "subscribe", channels: Array<string>, } | { "type": "unsubscribe", channels: Array<string>, } | { "type": "activate_skill", name: string, } | { "type": "deactivate_skill", name: string, };

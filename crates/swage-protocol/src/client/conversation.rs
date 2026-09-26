@@ -29,6 +29,7 @@ pub enum TurnState {
 /// target topic; the gateway rejects anything else with a validation error.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct CreateConversationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, as = "Option<_>")]
@@ -42,29 +43,28 @@ pub struct CreateConversationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConversationResponse {
     pub id: Uuid,
     /// The topic the session runs under; absent for a session started
     /// without one, which runs in the general scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub topic_id: Option<Uuid>,
     /// The agent definition the session runs under.
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConversationSummary {
     pub id: Uuid,
     /// The agent definition the session runs under.
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
@@ -73,17 +73,16 @@ pub struct ConversationSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConversationDetail {
     pub id: Uuid,
     /// The topic the session runs under; absent for a session in the
     /// general scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub topic_id: Option<Uuid>,
     /// The agent definition the session runs under.
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
@@ -91,6 +90,7 @@ pub struct ConversationDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConversationBranchResponse {
     pub child_thread_id: Uuid,
     pub parent_thread_id: Uuid,
@@ -99,12 +99,14 @@ pub struct ConversationBranchResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateConversationBranchRequest {
     pub thread_id: Uuid,
     pub from_message_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConversationThreadDetail {
     pub id: Uuid,
     pub session_id: Uuid,
@@ -116,6 +118,7 @@ pub struct ConversationThreadDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ToolCallView {
     pub call_id: String,
     pub tool: String,
@@ -124,23 +127,22 @@ pub struct ToolCallView {
     #[ts(type = "string | Record<string, unknown> | null")]
     pub result: Option<Value>,
     pub status: Option<String>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub duration_ms: Option<u64>,
     pub truncated: bool,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub total_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub parent_call_id: Option<String>,
     /// One-line headline for the call, derived from the tool's declared
     /// display hints. Omitted when the tool declares none — renderers then
     /// use their generic fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct MessageView {
     pub thread_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,6 +160,7 @@ pub struct MessageView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConversationListResponse {
     pub conversations: Vec<ConversationSummary>,
 }
@@ -167,6 +170,7 @@ pub struct ConversationListResponse {
 /// beneath their source instead of listing them at the top level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum SessionOrigin {
     Direct,
     ScheduleRun { schedule_id: Uuid },
@@ -176,11 +180,11 @@ pub enum SessionOrigin {
 
 /// One session as the recent-sessions list shows it.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RecentSession {
     pub id: Uuid,
     /// Absent for a session in the general scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub topic_id: Option<Uuid>,
     /// The topic's name, or "General" for a session without one.
     pub topic_name: String,
@@ -196,7 +200,6 @@ pub struct RecentSession {
     /// Set while the inactivity sweep has the session hidden from the
     /// recent list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub archived_at: Option<DateTime<Utc>>,
 }
 
@@ -204,6 +207,7 @@ pub struct RecentSession {
 /// beneath.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum RecentSessionsSource {
     /// A conversation a person opened.
     Conversation { session: RecentSession },
@@ -215,7 +219,6 @@ pub enum RecentSessionsSource {
     WorkflowRun {
         id: Uuid,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         label: Option<String>,
     },
 }
@@ -223,6 +226,7 @@ pub enum RecentSessionsSource {
 /// One entry in the recent-sessions list: a source and the automated
 /// sessions beneath it, newest first.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RecentSessionsEntry {
     pub source: RecentSessionsSource,
     /// The latest activity across the source and everything beneath it —
@@ -232,6 +236,7 @@ pub struct RecentSessionsEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RecentSessionsResponse {
     pub entries: Vec<RecentSessionsEntry>,
 }

@@ -3,4 +3,4 @@
 /**
  * Whole replacement supplied when updating a durable agent definition.
  */
-export type UpdateAgentDefinitionRequest = { topic_id: string | null, display_name: string, description: string, instructions: string, model_id: string | null, tool_permissions: unknown, skills?: Array<string>, output_schema: unknown, output_max_retries: number | null, };
+export type UpdateAgentDefinitionRequest = { topic_id?: string | null, display_name: string, description: string, instructions: string, model_id?: string | null, tool_permissions: unknown, skills?: Array<string>, output_schema: unknown, output_max_retries?: number | null, };

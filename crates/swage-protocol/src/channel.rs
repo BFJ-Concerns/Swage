@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::client::delivery::{DeliveryRoutingRequest, DeliveryTarget};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RecordedDelivery {
     pub session_id: Uuid,
     pub run_id: Option<Uuid>,
@@ -19,6 +20,7 @@ pub struct RecordedDelivery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ChannelInboundResponse {
     pub session_id: Uuid,
     pub delivered_to: Vec<DeliveryTarget>,
@@ -26,6 +28,7 @@ pub struct ChannelInboundResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DevDmInboundRequest {
     pub account: String,
     pub user_id: String,
@@ -36,6 +39,7 @@ pub struct DevDmInboundRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DevThreadInboundRequest {
     pub account: String,
     pub channel_id: String,
@@ -47,16 +51,19 @@ pub struct DevThreadInboundRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeliveryLogQuery {
     pub session_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeliveryLogResponse {
     pub deliveries: Vec<RecordedDelivery>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ChannelStatusResponse {
     pub integration: String,
     pub status: String,
@@ -66,6 +73,7 @@ pub struct ChannelStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ChannelStatusListResponse {
     pub channels: Vec<ChannelStatusResponse>,
 }

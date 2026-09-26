@@ -4,7 +4,7 @@ import type { CompactionRecord } from "./CompactionRecord";
 import type { DeclaredOmission } from "./DeclaredOmission";
 import type { ElementReport } from "./ElementReport";
 
-export type AssemblyReport = { assembly_name: string, elements: Array<ElementReport>, total_tokens: number, budget: number | null, budget_remaining: number | null, compaction_applied: Array<CompactionRecord>, warnings: Array<string>, errors: Array<AssemblyError>,
+export type AssemblyReport = { assembly_name: string, elements: Array<ElementReport>, total_tokens: number, budget?: number | null, budget_remaining?: number | null, compaction_applied: Array<CompactionRecord>, warnings: Array<string>, errors: Array<AssemblyError>,
 /**
  * Baseline elements the assembly script renounced by name, with the
  * reason it gave. An element absent from the assembled context and

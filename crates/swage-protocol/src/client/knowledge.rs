@@ -6,6 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct KnowledgeSearchResult {
     pub observation_id: Uuid,
     pub version: u32,
@@ -13,18 +14,19 @@ pub struct KnowledgeSearchResult {
     pub retrieved_at: String,
     pub passage: String,
     /// Byte offset of `passage` when it can be located in the derivation.
-    #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct KnowledgeSearchResponse {
     pub results: Vec<KnowledgeSearchResult>,
     pub guidance: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OrientationCardResult {
     pub card_id: Uuid,
     pub title: String,
@@ -35,6 +37,7 @@ pub struct OrientationCardResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OrientationFindResponse {
     pub cards: Vec<OrientationCardResult>,
     pub guidance: String,

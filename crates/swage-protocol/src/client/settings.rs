@@ -64,6 +64,7 @@ impl std::fmt::Display for Effort {
 /// collapse levels the control distinguishes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "control", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum EffortCapability {
     /// The control takes a named level from a fixed set. `can_disable`
     /// says whether the model can switch reasoning off entirely.
@@ -137,6 +138,7 @@ pub enum ProviderProtocol {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ProviderSettings {
     pub protocol: ProviderProtocol,
     #[serde(default)]
@@ -151,6 +153,7 @@ pub struct ProviderSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct SaveProviderSettings {
     pub protocol: ProviderProtocol,
     #[serde(default)]
@@ -172,6 +175,7 @@ pub struct SaveProviderSettings {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct ModelCapabilitiesConfig {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -189,6 +193,7 @@ impl ModelCapabilitiesConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ModelSettings {
     pub provider_id: String,
     pub model_id: String,
@@ -205,10 +210,9 @@ pub struct ModelSettings {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct GenerationPresetConfig {
-    #[ts(optional)]
     pub max_tokens: Option<u32>,
-    #[ts(optional)]
     pub temperature: Option<f64>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -233,6 +237,7 @@ pub enum PythonRuntimePolicy {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct PythonExecuteToolConfig {
     pub enabled: bool,
     #[ts(type = "number")]
@@ -252,6 +257,7 @@ pub struct PythonExecuteToolConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct SearchProviderConfig {
     pub provider_type: String,
     pub base_url: String,
@@ -259,6 +265,7 @@ pub struct SearchProviderConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ToolRuntimeSettings {
     #[ts(type = "number")]
     pub shell_timeout_secs: u64,
@@ -278,15 +285,17 @@ pub enum ApprovalTimeoutPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct RequireApprovalOptions {
     pub tool: String,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub timeout: Option<u64>,
     pub timeout_policy: Option<ApprovalTimeoutPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(untagged)]
+#[ts(optional_fields = nullable)]
 pub enum RequireApprovalEntry {
     Simple(String),
     WithOptions(#[ts(inline)] RequireApprovalOptions),
@@ -302,6 +311,7 @@ impl RequireApprovalEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct ToolPermissionConfig {
     pub allow: Vec<String>,
     pub deny: Vec<String>,
@@ -310,6 +320,7 @@ pub struct ToolPermissionConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct HitlConfig {
     #[ts(type = "number")]
     pub timeout: u64,
@@ -317,6 +328,7 @@ pub struct HitlConfig {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct SandboxConfig {
     pub enabled: bool,
     pub allow_degraded_execution: bool,
@@ -331,6 +343,7 @@ impl Default for SandboxConfig {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct ContextConfig {
     pub assembly: String,
     /// Named context assemblies registered as hidden alternatives to the
@@ -340,7 +353,7 @@ pub struct ContextConfig {
     pub alternatives: Vec<String>,
     #[ts(type = "number")]
     pub timeout: u64,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub budget: Option<usize>,
 }
 impl Default for ContextConfig {
@@ -354,6 +367,7 @@ impl Default for ContextConfig {
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ModelPricing {
     #[ts(type = "number")]
     pub input_price_per_mtok: i64,
@@ -362,6 +376,7 @@ pub struct ModelPricing {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct PricingConfig {
     pub models: HashMap<String, ModelPricing>,
 }
@@ -376,6 +391,7 @@ impl PricingConfig {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct ObservabilityConfig {
     pub force_on: bool,
 }
@@ -396,6 +412,7 @@ pub enum ContextTransferField {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct ContextTransferTargetConfig {
     pub mode: ContextTransferMode,
     pub allowed_fields: Vec<ContextTransferField>,
@@ -403,6 +420,7 @@ pub struct ContextTransferTargetConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct ContextTransferConfig {
     pub mode: ContextTransferMode,
     pub allowed_fields: Vec<ContextTransferField>,
@@ -411,6 +429,7 @@ pub struct ContextTransferConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct CommunicationConfig {
     pub context_transfer: ContextTransferConfig,
     #[ts(type = "number")]
@@ -422,6 +441,7 @@ pub struct CommunicationConfig {
 /// Session list housekeeping.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct SessionsConfig {
     /// Days without a user or assistant message after which a session leaves
     /// the recent list. Only a session with a turn executing is exempt, and
@@ -431,6 +451,7 @@ pub struct SessionsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct SettingsResponse {
     pub providers: HashMap<String, ProviderSettings>,
     pub default_provider: String,
@@ -451,6 +472,7 @@ pub struct SettingsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct SaveSettingsRequest {
     pub default_provider: String,
     pub providers: HashMap<String, SaveProviderSettings>,
@@ -489,17 +511,20 @@ pub struct SaveSettingsRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct DiscoveredModel {
     pub id: String,
     pub name: String,
     pub context_window: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ModelDiscoveryResponse {
     pub provider_id: String,
     pub models: Vec<DiscoveredModel>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct RestartStatusResponse {
     pub restart_required: bool,
     pub can_restart: bool,

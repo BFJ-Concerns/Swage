@@ -6,4 +6,4 @@
  * records it as its origin. The seeded modules are the surface's own from
  * birth; the entry is never projected into it afterwards.
  */
-export type CreateSurfaceRequest = { title: string, library_entry_id?: string, };
+export type CreateSurfaceRequest = { title: string, library_entry_id?: string | null, };

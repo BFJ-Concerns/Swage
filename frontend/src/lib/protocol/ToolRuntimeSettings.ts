@@ -2,4 +2,4 @@
 import type { PythonExecuteToolConfig } from "./PythonExecuteToolConfig";
 import type { SearchProviderConfig } from "./SearchProviderConfig";
 
-export type ToolRuntimeSettings = { shell_timeout_secs: number, python_execute: PythonExecuteToolConfig, max_output_bytes: number, plugin_directory: string | null, search: SearchProviderConfig | null, };
+export type ToolRuntimeSettings = { shell_timeout_secs: number, python_execute: PythonExecuteToolConfig, max_output_bytes: number, plugin_directory?: string | null, search?: SearchProviderConfig | null, };

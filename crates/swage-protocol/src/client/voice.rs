@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct VoiceCapabilitiesResponse {
     pub transcription: bool,
     pub synthesis: bool,
@@ -15,17 +16,20 @@ pub struct VoiceCapabilitiesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct TranscribeAudioRequest {
     pub audio_bytes: Vec<u8>,
     pub mime_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct TranscribeAudioResponse {
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SynthesiseSpeechRequest {
     pub text: String,
     #[serde(default)]
@@ -37,6 +41,7 @@ pub struct SynthesiseSpeechRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SynthesiseSpeechResponse {
     pub audio_bytes: Vec<u8>,
     pub mime_type: String,

@@ -3,4 +3,4 @@
 /**
  * Attribution is derived by the gateway, never accepted from a poster.
  */
-export type WorkflowRunEventSource = { surface: string, agent_id: string | null, session_id: string | null, turn_id: string | null, };
+export type WorkflowRunEventSource = { surface: string, agent_id?: string | null, session_id?: string | null, turn_id?: string | null, };

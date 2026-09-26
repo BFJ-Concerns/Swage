@@ -6,8 +6,8 @@ export type ConversationDetail = { id: string,
  * The topic the session runs under; absent for a session in the
  * general scope.
  */
-topic_id?: string,
+topic_id?: string | null,
 /**
  * The agent definition the session runs under.
  */
-agent_id: string, selected_model_id?: string, created_at: string, last_activity: string, messages: Array<MessageView>, };
+agent_id: string, selected_model_id?: string | null, created_at: string, last_activity: string, messages: Array<MessageView>, };

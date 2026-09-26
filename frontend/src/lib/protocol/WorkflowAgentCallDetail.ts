@@ -6,11 +6,11 @@ import type { WorkflowWorkerLiveness } from "./WorkflowWorkerLiveness";
 import type { WorkflowWorkerTermination } from "./WorkflowWorkerTermination";
 import type { WorkflowWorktreeCompletion } from "./WorkflowWorktreeCompletion";
 
-export type WorkflowAgentCallDetail = { agent_definition_id: string | null, session_id: string | null, thread_id: string | null, turn_id: string | null, liveness: WorkflowWorkerLiveness | null,
+export type WorkflowAgentCallDetail = { agent_definition_id?: string | null, session_id?: string | null, thread_id?: string | null, turn_id?: string | null, liveness?: WorkflowWorkerLiveness | null,
 /**
  * The resolved state of the isolated worktree after the worker settled.
  */
-worktree: WorkflowWorktreeCompletion | null, served_model: string | null, provider_route: string | null,
+worktree?: WorkflowWorktreeCompletion | null, served_model?: string | null, provider_route?: string | null,
 /**
  * What the call spent, or why that is not known. A call the provider
  * reported no usage for reads as unavailable with a reason, so budget
@@ -21,7 +21,7 @@ usage: WorkflowCallUsage, termination: WorkflowWorkerTermination,
  * What the call was dispatched with. Absent only for calls journalled
  * before the dispatch record existed.
  */
-dispatch: WorkflowAgentCallDispatch | null,
+dispatch?: WorkflowAgentCallDispatch | null,
 /**
  * The provider rounds this call's turn ran, oldest first. `None` where
  * the projection does not carry them — the live entry event, which is
@@ -29,4 +29,4 @@ dispatch: WorkflowAgentCallDispatch | null,
  * as a call that made no provider request. The run detail always
  * carries them.
  */
-provider_rounds: Array<WorkflowProviderRound> | null, };
+provider_rounds?: Array<WorkflowProviderRound> | null, };

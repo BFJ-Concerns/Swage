@@ -11,6 +11,7 @@ use uuid::Uuid;
 /// gateway refuses the turn otherwise rather than dropping the part.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum MessageAttachment {
     /// An image the model reads, addressed by URL — `https://` or a
     /// `data:` URL carrying the bytes inline.
@@ -19,6 +20,7 @@ pub enum MessageAttachment {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
 pub struct SubmitTurnRequest {
     pub conversation_id: Uuid,
     pub thread_id: Option<Uuid>,
@@ -39,33 +41,36 @@ pub struct SubmitTurnRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct SubmitTurnResponse {
     pub turn_id: Uuid,
     pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct TurnPollResponse {
     pub turn_id: Uuid,
     pub state: String,
     pub assistant_response: Option<String>,
     #[ts(type = "unknown")]
     pub structured_output: Option<serde_json::Value>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub input_tokens: Option<i64>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub output_tokens: Option<i64>,
     /// Tokens spent by this turn's delegated children (transitively) — a
     /// billing figure separate from the turn's own tokens, which alone
     /// measure its context window. Null when no delegation has completed.
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub delegated_input_tokens: Option<i64>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub delegated_output_tokens: Option<i64>,
     pub parent_turn_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct SendMessageRequest {
     pub sender_agent_id: String,
     pub recipient_agent_id: String,
@@ -78,6 +83,7 @@ pub struct SendMessageRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct MessageResponse {
     pub id: Uuid,
     pub status: String,

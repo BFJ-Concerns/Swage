@@ -10,4 +10,4 @@ export type LibraryEntrySummary = { id: string, name: string, description: strin
  * A session in this scope receives the saved content when it adds the
  * entry; any other scope receives the shape.
  */
-origin_topic_id?: string, updated_at: string, };
+origin_topic_id?: string | null, updated_at: string, };

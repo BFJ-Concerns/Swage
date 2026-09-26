@@ -4,7 +4,7 @@ export type SkillItem = {
 /**
  * Stable synthetic identifier for a shipped skill in this topic.
  */
-id: string | null, name: string, display_name: string | null, description: string,
+id?: string | null, name: string, display_name?: string | null, description: string,
 /**
  * Resolved hierarchy level: `agent`, `topic`, or `global`.
  */

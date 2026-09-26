@@ -4,4 +4,4 @@ import type { Effort } from "./Effort";
 /**
  * The options a dispatched worker's turn resolved for itself.
  */
-export type WorkflowAgentCallResolution = { model: string | null, effort: Effort | null, session_id: string | null, thread_id: string | null, turn_id: string | null, };
+export type WorkflowAgentCallResolution = { model?: string | null, effort?: Effort | null, session_id?: string | null, thread_id?: string | null, turn_id?: string | null, };

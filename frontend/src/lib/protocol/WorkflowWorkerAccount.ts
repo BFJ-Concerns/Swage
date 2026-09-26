@@ -5,17 +5,17 @@ import type { WorkflowWorktreeCompletion } from "./WorkflowWorktreeCompletion";
 /**
  * One worker's standing in the run's terminal account.
  */
-export type WorkflowWorkerAccount = { journal_entry_id: string, seq: number, label: string | null, agent_definition_id: string | null,
+export type WorkflowWorkerAccount = { journal_entry_id: string, seq: number, label?: string | null, agent_definition_id?: string | null,
 /**
  * The directory the worker ran in — the worktree kept rather than torn
  * down when the run did not return, so its work is still on disk.
  */
-placement: string | null,
+placement?: string | null,
 /**
  * The final Git state recorded when an isolated worker settled.
  */
-worktree: WorkflowWorktreeCompletion | null,
+worktree?: WorkflowWorktreeCompletion | null,
 /**
  * Absent for a worker that settled on its own account.
  */
-termination: WorkflowWorkerTermination | null, };
+termination?: WorkflowWorkerTermination | null, };

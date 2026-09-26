@@ -18,4 +18,4 @@ export type WorkflowProviderRound = {
  * run's end interrupted and replay re-dispatched runs its rounds again
  * under a later attempt; the number is what keeps the two apart.
  */
-attempt: number, round: number, started_at: string, completed_at: string | null, outcome: WorkflowProviderRoundOutcome, };
+attempt: number, round: number, started_at: string, completed_at?: string | null, outcome: WorkflowProviderRoundOutcome, };

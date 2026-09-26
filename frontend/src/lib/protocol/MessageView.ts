@@ -3,9 +3,9 @@ import type { MessageAttachment } from "./MessageAttachment";
 import type { ToolCallView } from "./ToolCallView";
 import type { TurnState } from "./TurnState";
 
-export type MessageView = { thread_id: string, turn_id: string | null, role: string, content: string,
+export type MessageView = { thread_id: string, turn_id?: string | null, role: string, content: string,
 /**
  * Content parts recorded beside the text when the message was
  * submitted; absent for text-only messages.
  */
-attachments?: Array<MessageAttachment>, timestamp: string, turn_state: TurnState | null, tool_calls: Array<ToolCallView>, };
+attachments?: Array<MessageAttachment>, timestamp: string, turn_state?: TurnState | null, tool_calls: Array<ToolCallView>, };

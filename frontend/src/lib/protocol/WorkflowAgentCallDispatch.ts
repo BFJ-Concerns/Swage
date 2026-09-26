@@ -9,24 +9,24 @@ import type { WorkflowWorkerPlacementRecord } from "./WorkflowWorkerPlacementRec
  * Written before any provider work begins, so a worker that dies mid-run
  * still leaves evidence of the call it was serving.
  */
-export type WorkflowAgentCallDispatch = { prompt: string, agent_definition_id: string | null,
+export type WorkflowAgentCallDispatch = { prompt: string, agent_definition_id?: string | null,
 /**
  * The model the call named, before the turn resolved it.
  */
-requested_model: string | null,
+requested_model?: string | null,
 /**
  * The effort the call named, before the turn resolved it.
  */
-requested_effort: Effort | null,
+requested_effort?: Effort | null,
 /**
  * Where the worker runs, once the placement was provisioned.
  */
-placement: WorkflowWorkerPlacementRecord | null,
+placement?: WorkflowWorkerPlacementRecord | null,
 /**
  * The call-scoped tool grants after intersection with the dispatching
  * context's own authority. `None` means the call narrowed nothing.
  */
-grants: Array<string> | null,
+grants?: Array<string> | null,
 /**
  * Every attempt the call ran, oldest first, each stamped once its turn
  * resolved the options it actually ran with. A call interrupted and

@@ -3,4 +3,4 @@
 /**
  * One recorded experiment selection, exposed only in operator history.
  */
-export type VariantSelectionHistoryEvent = { id: string, location_id: string, variant: string, reason: string, turn_id: string | null, session_id: string | null, recorded_at: string, };
+export type VariantSelectionHistoryEvent = { id: string, location_id: string, variant: string, reason: string, turn_id?: string | null, session_id?: string | null, recorded_at: string, };

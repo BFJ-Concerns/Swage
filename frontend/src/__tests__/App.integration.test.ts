@@ -32,7 +32,6 @@ import type {
   ConnectionStatus,
   ConversationDetail,
   ConversationResponse,
-  ConversationSummary,
   OperatorOverview,
   Topic,
   ServerEvent,

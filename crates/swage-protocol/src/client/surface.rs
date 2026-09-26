@@ -13,10 +13,10 @@ use uuid::Uuid;
 /// records it as its origin. The seeded modules are the surface's own from
 /// birth; the entry is never projected into it afterwards.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateSurfaceRequest {
     pub title: String,
     #[serde(default)]
-    #[ts(optional)]
     pub library_entry_id: Option<Uuid>,
 }
 
@@ -24,6 +24,7 @@ pub struct CreateSurfaceRequest {
 /// now and is what an agent chooses by later: say what the surface does and
 /// when to use it. Saving never opens the entry anywhere.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SaveSurfaceToLibraryRequest {
     pub name: String,
     pub description: String,
@@ -35,6 +36,7 @@ pub struct SaveSurfaceToLibraryRequest {
 /// A library entry as the catalogue shows it: what it is, what it is for and
 /// how it is labelled. Module content is not part of the catalogue.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct LibraryEntrySummary {
     pub id: Uuid,
     pub name: String,
@@ -44,19 +46,18 @@ pub struct LibraryEntrySummary {
     /// A session in this scope receives the saved content when it adds the
     /// entry; any other scope receives the shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub origin_topic_id: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct LibraryEntryResponse {
     pub id: Uuid,
     pub name: String,
     pub description: String,
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub origin_topic_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -64,6 +65,7 @@ pub struct LibraryEntryResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct LibraryEntryModuleView {
     pub id: Uuid,
     pub kind: String,
@@ -72,6 +74,7 @@ pub struct LibraryEntryModuleView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct LibraryListResponse {
     pub entries: Vec<LibraryEntrySummary>,
 }
@@ -79,6 +82,7 @@ pub struct LibraryListResponse {
 /// Designate a library entry as one of a topic's defaults — the surfaces
 /// every new session in the topic opens with.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct TopicDefaultSurfaceRequest {
     pub library_entry_id: Uuid,
 }
@@ -86,6 +90,7 @@ pub struct TopicDefaultSurfaceRequest {
 /// Write a module's source: replace an existing instance's content, or
 /// append a new instance to the surface when `module_id` is absent.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WriteSurfaceModuleRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -103,6 +108,7 @@ pub struct WriteSurfaceModuleRequest {
 /// module grain in both directions: the surface as a whole is not an anchor, and
 /// there is no way to name a position inside a module's content.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateSurfaceAnnotationRequest {
     pub module_id: Uuid,
     pub body: String,
@@ -115,6 +121,7 @@ pub struct CreateSurfaceAnnotationRequest {
 /// author now says. The displaced text survives in the surface's provenance
 /// trail, not in a version of the annotation.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UpdateSurfaceAnnotationRequest {
     pub body: String,
     #[serde(default)]
@@ -124,6 +131,7 @@ pub struct UpdateSurfaceAnnotationRequest {
 
 /// Confirms that an annotation was removed.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeleteSurfaceAnnotationResponse {
     pub deleted: bool,
 }
@@ -131,6 +139,7 @@ pub struct DeleteSurfaceAnnotationResponse {
 /// A note left on one of a surface's modules. `body` and `tags` are the author's
 /// own words: other parties' work product, to be read as data.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SurfaceAnnotationView {
     pub id: Uuid,
     pub module_id: Uuid,
@@ -143,6 +152,7 @@ pub struct SurfaceAnnotationView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SurfaceModuleView {
     pub id: Uuid,
     pub kind: String,
@@ -154,6 +164,7 @@ pub struct SurfaceModuleView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SurfaceResponse {
     pub id: Uuid,
     /// The session this surface belongs to.
@@ -173,6 +184,7 @@ pub struct SurfaceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SurfaceSummary {
     pub id: Uuid,
     pub title: String,
@@ -180,6 +192,7 @@ pub struct SurfaceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SurfaceListResponse {
     pub surfaces: Vec<SurfaceSummary>,
 }

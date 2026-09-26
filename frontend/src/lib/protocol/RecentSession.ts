@@ -8,7 +8,7 @@ export type RecentSession = { id: string,
 /**
  * Absent for a session in the general scope.
  */
-topic_id?: string,
+topic_id?: string | null,
 /**
  * The topic's name, or "General" for a session without one.
  */
@@ -16,7 +16,7 @@ topic_name: string, agent_id: string, origin: SessionOrigin, created_at: string,
 /**
  * When the latest user or assistant message landed — the list's order.
  */
-last_activity: string, message_preview: string | null, has_interrupted_turn: boolean,
+last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean,
 /**
  * A turn is executing on the session right now.
  */
@@ -25,4 +25,4 @@ has_running_turn: boolean,
  * Set while the inactivity sweep has the session hidden from the
  * recent list.
  */
-archived_at?: string, };
+archived_at?: string | null, };

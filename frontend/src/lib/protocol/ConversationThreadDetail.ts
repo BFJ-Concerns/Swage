@@ -2,4 +2,4 @@
 import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { MessageView } from "./MessageView";
 
-export type ConversationThreadDetail = { id: string, session_id: string, agent_id: string, state: string, messages: Array<MessageView>, branch: ConversationBranchResponse | null, };
+export type ConversationThreadDetail = { id: string, session_id: string, agent_id: string, state: string, messages: Array<MessageView>, branch?: ConversationBranchResponse | null, };

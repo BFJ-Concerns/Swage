@@ -12,4 +12,4 @@ export type WorkflowRunTerminalAccount = { ending: WorkflowRunEnding, workers: W
 /**
  * Present exactly when the run ended without its script returning.
  */
-partial_results?: WorkflowPartialResults, settled_at: string, };
+partial_results?: WorkflowPartialResults | null, settled_at: string, };

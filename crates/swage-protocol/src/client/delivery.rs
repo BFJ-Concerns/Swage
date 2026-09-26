@@ -45,6 +45,7 @@ impl std::str::FromStr for ExternalChannelIntegration {
 /// A destination for a run's output.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum DeliveryTarget {
     Channel {
         integration: ExternalChannelIntegration,
@@ -66,6 +67,7 @@ pub enum DeliveryTarget {
 /// an origin always exists. Callers without an origin (schedules, manual
 /// API calls) must set it false or target resolution errors.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeliveryRoutingRequest {
     #[serde(default = "default_true")]
     #[ts(optional, as = "Option<_>")]

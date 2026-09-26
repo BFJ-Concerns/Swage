@@ -3,8 +3,8 @@
 /**
  * A completed worker's output recovered from a run that never returned.
  */
-export type WorkflowPartialResult = { journal_entry_id: string, seq: number, label: string | null, output: unknown,
+export type WorkflowPartialResult = { journal_entry_id: string, seq: number, label?: string | null, output: unknown,
 /**
  * Where the work was done, still on disk.
  */
-placement: string | null, };
+placement?: string | null, };

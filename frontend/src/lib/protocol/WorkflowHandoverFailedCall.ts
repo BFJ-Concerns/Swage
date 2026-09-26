@@ -4,4 +4,4 @@ import type { WorkflowJournalEntryKind } from "./WorkflowJournalEntryKind";
 /**
  * The failed call as the journal recorded it.
  */
-export type WorkflowHandoverFailedCall = { journal_entry_id: string, seq: number, kind: WorkflowJournalEntryKind, label: string | null, error: string, };
+export type WorkflowHandoverFailedCall = { journal_entry_id: string, seq: number, kind: WorkflowJournalEntryKind, label?: string | null, error: string, };
