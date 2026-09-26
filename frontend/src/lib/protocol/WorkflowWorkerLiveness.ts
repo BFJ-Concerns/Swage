@@ -3,4 +3,4 @@
 /**
  * Earliest liveness evidence for one workflow worker.
  */
-export type WorkflowWorkerLiveness = { started_at: string, first_evidence_at: string | null, };
+export type WorkflowWorkerLiveness = { started_at: string, first_evidence_at?: string | null, };

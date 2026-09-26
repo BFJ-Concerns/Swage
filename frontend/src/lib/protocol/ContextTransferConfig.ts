@@ -3,4 +3,4 @@ import type { ContextTransferField } from "./ContextTransferField";
 import type { ContextTransferMode } from "./ContextTransferMode";
 import type { ContextTransferTargetConfig } from "./ContextTransferTargetConfig";
 
-export type ContextTransferConfig = { mode: ContextTransferMode, allowed_fields: Array<ContextTransferField>, summary_budget: number | null, targets: { [key in string]: ContextTransferTargetConfig }, };
+export type ContextTransferConfig = { mode: ContextTransferMode, allowed_fields: Array<ContextTransferField>, summary_budget?: number | null, targets: { [key in string]: ContextTransferTargetConfig }, };

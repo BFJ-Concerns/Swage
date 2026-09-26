@@ -21,6 +21,7 @@ use super::delivery::DeliveryRoutingRequest;
 ///   `cron` crate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum ScheduleSpec {
     OneShot { at: String },
     Interval { every: String },
@@ -36,6 +37,7 @@ pub enum ScheduleSpec {
 ///   whatever agent that session has at run time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "policy", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum SessionPolicy {
     Fresh { topic_id: Uuid, agent_id: String },
     Continuation { session_id: Uuid },
@@ -50,6 +52,7 @@ pub enum SessionPolicy {
 /// from" wherever schedules are listed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum ScheduleCreator {
     /// A person, through the settings automation panel or the HTTP surface.
     User,
@@ -64,6 +67,7 @@ pub enum ScheduleCreator {
 /// and the previous run's outcome, then verdicts `run` or `skip`. Its
 /// decision and reasoning are recorded on the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct GateConfig {
     /// Model id or alias from the configured model catalogue.
     pub model: String,
@@ -82,6 +86,7 @@ pub struct GateConfig {
 /// a present value is one of these two actions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum ScheduleGateUpdate {
     /// Install this gate, replacing any existing one.
     Set(GateConfig),
@@ -145,6 +150,7 @@ pub enum GateVerdict {
 
 /// A gate decision as recorded on a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct GateDecision {
     pub model: String,
     pub verdict: GateVerdict,
@@ -213,6 +219,7 @@ string_round_trip!(GateVerdict {
 
 /// Create a schedule.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateScheduleRequest {
     /// What each run asks the agent to do.
     pub message: String,
@@ -232,6 +239,7 @@ pub struct CreateScheduleRequest {
 /// The session policy is fixed at creation — delete and recreate to change
 /// where runs execute.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UpdateScheduleRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -250,6 +258,7 @@ pub struct UpdateScheduleRequest {
 
 /// A schedule as returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct Schedule {
     pub id: Uuid,
     pub message: String,
@@ -268,6 +277,7 @@ pub struct Schedule {
 
 /// A recorded run: everything needed to reconstruct what happened.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ScheduleRun {
     pub id: Uuid,
     pub schedule_id: Uuid,
@@ -289,16 +299,19 @@ pub struct ScheduleRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ScheduleListResponse {
     pub schedules: Vec<Schedule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ScheduleRunListResponse {
     pub runs: Vec<ScheduleRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct TriggerScheduleResponse {
     pub run: ScheduleRun,
 }

@@ -342,7 +342,7 @@ export function createStreamingStore(
                               status: event.status,
                               duration_ms: event.duration_ms,
                               truncated: event.truncated,
-                              total_bytes: event.total_bytes,
+                              total_bytes: event.total_bytes ?? null,
                             }
                           : sub,
                       ),
@@ -361,7 +361,7 @@ export function createStreamingStore(
                       status: event.status,
                       duration_ms: event.duration_ms,
                       truncated: event.truncated,
-                      total_bytes: event.total_bytes,
+                      total_bytes: event.total_bytes ?? null,
                     }
                   : call,
               ),

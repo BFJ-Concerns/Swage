@@ -4,9 +4,9 @@ export type WorkflowRouteBudget = {
 /**
  * The token ceiling for calls resolved to this provider entry.
  */
-max_total_tokens: bigint | null,
+max_total_tokens?: bigint | null,
 /**
  * Tokens retained for closing calls on this provider entry after the
  * workflow has entered wind-down for that route.
  */
-reserved_closing_tokens: bigint | null, };
+reserved_closing_tokens?: bigint | null, };

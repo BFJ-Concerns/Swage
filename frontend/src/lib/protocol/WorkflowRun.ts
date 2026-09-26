@@ -4,21 +4,21 @@ import type { WorkflowRunHandover } from "./WorkflowRunHandover";
 import type { WorkflowRunState } from "./WorkflowRunState";
 import type { WorkflowRunTerminalAccount } from "./WorkflowRunTerminalAccount";
 
-export type WorkflowRun = { id: string, topic_id: string, script_id: string | null, script_name: string | null, script_version: number | null, carrying_skill: string | null,
+export type WorkflowRun = { id: string, topic_id: string, script_id?: string | null, script_name?: string | null, script_version?: number | null, carrying_skill?: string | null,
 /**
  * Opaque identity declared by the workflow script for grouping its runs.
  */
-task: string | null,
+task?: string | null,
 /**
  * Source retained for runs whose workflow was not a saved script version.
  */
-source: string | null,
+source?: string | null,
 /**
  * SHA-256 of the exact source executed by this run.
  */
-source_hash: string, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, handover: WorkflowRunHandover | null,
+source_hash: string, state: WorkflowRunState, args: unknown, budget: WorkflowBudget, final_output: unknown, handover?: WorkflowRunHandover | null,
 /**
  * The run's terminal account: how it ended and where its workers stood.
  * Absent only while the run is still going.
  */
-terminal_account: WorkflowRunTerminalAccount | null, error_message: string | null, created_at: string, completed_at: string | null, };
+terminal_account?: WorkflowRunTerminalAccount | null, error_message?: string | null, created_at: string, completed_at?: string | null, };

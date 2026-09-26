@@ -5,4 +5,4 @@ import type { RecentSession } from "./RecentSession";
  * What a recent-sessions entry is: the thing its automated sessions hang
  * beneath.
  */
-export type RecentSessionsSource = { "kind": "conversation", session: RecentSession, } | { "kind": "schedule", id: string, message: string, } | { "kind": "workflow_run", id: string, label?: string, };
+export type RecentSessionsSource = { "kind": "conversation", session: RecentSession, } | { "kind": "schedule", id: string, message: string, } | { "kind": "workflow_run", id: string, label?: string | null, };

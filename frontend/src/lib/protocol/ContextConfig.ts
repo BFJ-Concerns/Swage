@@ -5,4 +5,4 @@ export type ContextConfig = { assembly: string,
  * Named context assemblies registered as hidden alternatives to the
  * configured default. Selection records the chosen name locally.
  */
-alternatives?: Array<string>, timeout: number, budget: number | null, };
+alternatives?: Array<string>, timeout: number, budget?: number | null, };

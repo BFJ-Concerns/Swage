@@ -3,4 +3,4 @@
 /**
  * Scope filter for durable agent-definition reads and deletes.
  */
-export type AgentDefinitionScopeQuery = { topic_id: string | null, };
+export type AgentDefinitionScopeQuery = { topic_id?: string | null, };

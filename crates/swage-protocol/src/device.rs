@@ -10,6 +10,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UserInfo {
     pub id: String,
     pub name: String,
@@ -18,6 +19,7 @@ pub struct UserInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SerializableToolContext {
     pub agent_id: String,
     pub session_id: String,
@@ -29,6 +31,7 @@ pub struct SerializableToolContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeviceResponse {
     pub device_id: String,
     pub label: Option<String>,
@@ -41,11 +44,13 @@ pub struct DeviceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeviceListResponse {
     pub devices: Vec<DeviceResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RegisterDeviceRequest {
     pub device_id: String,
     pub label: Option<String>,
@@ -64,6 +69,7 @@ pub struct RegisterDeviceRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RemoteToolExecutionRequest {
     pub shared_token: String,
     pub tool_name: String,
@@ -73,6 +79,7 @@ pub struct RemoteToolExecutionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct RemoteToolExecutionResponse {
     #[ts(type = "unknown")]
     pub output: Value,

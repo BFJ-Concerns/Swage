@@ -13,4 +13,4 @@ export type Schedule = { id: string, message: string, status: ScheduleStatus, sp
 /**
  * Where this schedule came from — a person or an agent.
  */
-creator: ScheduleCreator, routing: DeliveryRoutingRequest, gate: GateConfig | null, next_run_at: string | null, last_run_at: string | null, created_at: string, updated_at: string, };
+creator: ScheduleCreator, routing: DeliveryRoutingRequest, gate?: GateConfig | null, next_run_at?: string | null, last_run_at?: string | null, created_at: string, updated_at: string, };

@@ -13,6 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct PresenceGatewayResponse {
     pub status: String,
     pub shutdown_requested: bool,
@@ -23,6 +24,7 @@ pub struct PresenceGatewayResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ClientPresenceResponse {
     pub session_id: Uuid,
     pub state: String,
@@ -32,6 +34,7 @@ pub struct ClientPresenceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DevicePresenceResponse {
     pub device_id: String,
     pub label: Option<String>,
@@ -44,6 +47,7 @@ pub struct DevicePresenceResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct PresenceSnapshotResponse {
     pub gateway: PresenceGatewayResponse,
     pub clients: Vec<ClientPresenceResponse>,
@@ -51,6 +55,7 @@ pub struct PresenceSnapshotResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct DeviceHeartbeatRequest {
     pub device_id: String,
     pub label: Option<String>,
@@ -60,6 +65,7 @@ pub struct DeviceHeartbeatRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ApprovalSummary {
     pub id: Uuid,
     pub turn_id: Uuid,
@@ -71,16 +77,19 @@ pub struct ApprovalSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ApprovalListResponse {
     pub approvals: Vec<ApprovalSummary>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ApprovalListQuery {
     pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ApprovalDecisionRequest {
     pub decision: approval::ApprovalDecisionValue,
     #[serde(default)]
@@ -90,6 +99,7 @@ pub struct ApprovalDecisionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorGatewaySummary {
     pub status: String,
     pub health: String,
@@ -101,11 +111,11 @@ pub struct OperatorGatewaySummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorSessionSummary {
     pub id: Uuid,
     /// Absent for a session in the general scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub topic_id: Option<Uuid>,
     /// The topic's name, or "General" for a session without one.
     pub topic_name: String,
@@ -118,6 +128,7 @@ pub struct OperatorSessionSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorDeviceSummary {
     pub device_id: String,
     pub label: Option<String>,
@@ -132,6 +143,7 @@ pub struct OperatorDeviceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorOverviewResponse {
     pub gateway: OperatorGatewaySummary,
     pub sessions: Vec<OperatorSessionSummary>,
@@ -143,6 +155,7 @@ pub struct OperatorOverviewResponse {
 
 /// One durable configuration change as recorded at the mutation boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ConfigurationHistoryEvent {
     pub id: String,
     pub resource_kind: String,
@@ -159,6 +172,7 @@ pub struct ConfigurationHistoryEvent {
 
 /// One recorded experiment selection, exposed only in operator history.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct VariantSelectionHistoryEvent {
     pub id: String,
     pub location_id: String,
@@ -171,6 +185,7 @@ pub struct VariantSelectionHistoryEvent {
 
 /// One turn whose persisted assembly report can be opened in the context inspector.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AssemblyHistoryEntry {
     pub turn_id: Uuid,
     pub session_id: Uuid,
@@ -181,6 +196,7 @@ pub struct AssemblyHistoryEntry {
 
 /// Read-only history reconstructed from the local audit and context records.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorHistoryResponse {
     pub configuration_changes: Vec<ConfigurationHistoryEvent>,
     pub variant_selections: Vec<VariantSelectionHistoryEvent>,
@@ -189,12 +205,14 @@ pub struct OperatorHistoryResponse {
 
 /// Scope filter for durable agent-definition reads and deletes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AgentDefinitionScopeQuery {
     pub topic_id: Option<Uuid>,
 }
 
 /// Whole definition supplied when creating a durable agent.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateAgentDefinitionRequest {
     pub id: String,
     pub topic_id: Option<Uuid>,
@@ -209,12 +227,13 @@ pub struct CreateAgentDefinitionRequest {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub output_max_retries: Option<u32>,
 }
 
 /// Whole replacement supplied when updating a durable agent definition.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UpdateAgentDefinitionRequest {
     pub topic_id: Option<Uuid>,
     pub display_name: String,
@@ -228,11 +247,12 @@ pub struct UpdateAgentDefinitionRequest {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub output_max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AgentDefinitionResponse {
     pub id: String,
     pub topic_id: Option<Uuid>,
@@ -245,13 +265,14 @@ pub struct AgentDefinitionResponse {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub output_max_retries: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AgentDefinitionListResponse {
     pub definitions: Vec<AgentDefinitionResponse>,
 }
@@ -268,6 +289,7 @@ pub enum EffectiveAgentDefinitionSourceScope {
 
 /// An agent definition available when creating a session in one topic.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct EffectiveAgentDefinitionResponse {
     pub id: String,
     pub display_name: String,
@@ -279,13 +301,14 @@ pub struct EffectiveAgentDefinitionResponse {
     pub skills: Vec<String>,
     #[ts(type = "unknown")]
     pub output_schema: Option<serde_json::Value>,
-    #[ts(type = "number | null")]
+    #[ts(optional, type = "number | null")]
     pub output_max_retries: Option<u32>,
     pub is_builtin: bool,
     pub source_scope: EffectiveAgentDefinitionSourceScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct EffectiveAgentDefinitionListResponse {
     pub definitions: Vec<EffectiveAgentDefinitionResponse>,
 }
@@ -294,6 +317,7 @@ pub struct EffectiveAgentDefinitionListResponse {
 /// change — prior and new state under a named action — lives in the audit
 /// trail.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AgentDefinitionMutationResponse {
     pub agent_id: String,
     pub topic_id: Option<Uuid>,
@@ -307,6 +331,7 @@ fn default_device_stale_after_secs() -> u64 {
 /// Result of regenerating a topic's knowledge-base browse mirror — a
 /// disposable markdown projection of the database-authoritative store.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct KnowledgeMirrorRegenerateResponse {
     /// Absolute path of the regenerated mirror directory.
     pub mirror_root: String,

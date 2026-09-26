@@ -2,4 +2,4 @@
 import type { ProviderAccount } from "./ProviderAccount";
 import type { ProviderSignInStatus } from "./ProviderSignInStatus";
 
-export type ProviderSignInState = { status: ProviderSignInStatus, account: ProviderAccount | null, };
+export type ProviderSignInState = { status: ProviderSignInStatus, account?: ProviderAccount | null, };

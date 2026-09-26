@@ -7,6 +7,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateTopicRequest {
     pub name: String,
     #[serde(default)]
@@ -15,19 +16,18 @@ pub struct CreateTopicRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UpdateTopicRequest {
-    #[ts(optional)]
     pub name: Option<String>,
-    #[ts(optional)]
     pub description: Option<String>,
     /// Replace the topic's tags — the labels that narrow the surface
     /// library's catalogue for the topic's sessions. Absent leaves them as
     /// they are; an empty list clears them.
-    #[ts(optional)]
     pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 /// A topic the user can choose. The general scope — the scope of a session
 /// started without a topic — is never listed here: it is not a topic, and a
 /// session in it carries no `topic_id` on the wire.
@@ -45,14 +45,15 @@ pub struct TopicResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct TopicListResponse {
     pub topics: Vec<TopicResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateWorkspaceAttachmentRequest {
     pub path: String,
-    #[ts(optional)]
     pub label: Option<String>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -69,11 +70,13 @@ pub struct CreateWorkspaceAttachmentRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UpdateWorkspaceTrustRequest {
     pub is_trusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkspaceAttachmentResponse {
     pub id: Uuid,
     pub topic_id: Uuid,
@@ -88,6 +91,7 @@ pub struct WorkspaceAttachmentResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkspaceAttachmentListResponse {
     pub workspaces: Vec<WorkspaceAttachmentResponse>,
 }

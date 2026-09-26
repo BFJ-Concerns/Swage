@@ -4,8 +4,8 @@ export type OperatorSessionSummary = { id: string,
 /**
  * Absent for a session in the general scope.
  */
-topic_id?: string,
+topic_id?: string | null,
 /**
  * The topic's name, or "General" for a session without one.
  */
-topic_name: string, created_at: string, last_activity: string, message_preview: string | null, has_interrupted_turn: boolean, has_active_connection: boolean, has_running_turn: boolean, };
+topic_name: string, created_at: string, last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean, has_active_connection: boolean, has_running_turn: boolean, };

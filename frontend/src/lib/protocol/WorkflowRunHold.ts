@@ -23,11 +23,11 @@ verdicts: Array<string>, state: WorkflowRunHoldState,
 /**
  * The accepted verdict, once one has been given.
  */
-verdict: string | null,
+verdict?: string | null,
 /**
  * Who answered. Derived from the answering session, never a parameter.
  */
-answered_by: WorkflowRunEventSource | null, raised_at: string, answered_at: string | null,
+answered_by?: WorkflowRunEventSource | null, raised_at: string, answered_at?: string | null,
 /**
  * Answers refused for falling outside the accepted set, oldest first.
  * They hang on this hold rather than taking journal entries of their

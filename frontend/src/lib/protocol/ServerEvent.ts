@@ -15,26 +15,26 @@ export type ServerEvent = { "type": "token", content: string, } | { "type": "too
  * Omitted from the serialised JSON when None so existing clients that
  * do not handle sub-tools remain unaffected.
  */
-parent_call_id?: string,
+parent_call_id?: string | null,
 /**
  * One-line headline for the call, from the tool's declared display
  * hints. Omitted when the tool declares none.
  */
-summary?: string, } | { "type": "tool_end", call_id: string, tool: string, result: string | Record<string, unknown>,
+summary?: string | null, } | { "type": "tool_end", call_id: string, tool: string, result: string | Record<string, unknown>,
 /**
  * "success" or "error".
  */
-status: string, duration_ms: number, truncated: boolean, total_bytes: number | null,
+status: string, duration_ms: number, truncated: boolean, total_bytes?: number | null,
 /**
  * call_id of the enclosing tool if this is a sub-tool invocation.
  *
  * Omitted from the serialised JSON when None.
  */
-parent_call_id?: string, } | { "type": "lagged", dropped: number, } | { "type": "surface_updated", surface_id: string,
+parent_call_id?: string | null, } | { "type": "lagged", dropped: number, } | { "type": "surface_updated", surface_id: string,
 /**
  * The module written; absent for surface-level changes (creation).
  */
-module_id?: string, } | { "type": "library_updated", entry_id: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number, output_tokens?: number, cost_microcents?: number,
+module_id?: string | null, } | { "type": "library_updated", entry_id: string, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number | null, output_tokens?: number | null, cost_microcents?: number,
 /**
  * Validated, parsed JSON output when an output schema was configured and
  * validation passed. Absent (serialised as omitted) when no schema is
@@ -60,7 +60,7 @@ attempts: number,
 /**
  * Validation errors from the final attempt.
  */
-errors: Array<SchemaValidationError>, } | { "type": "delegation_started", parent_turn_id: string, child_turn_id: string | null, target_agent_id: string, } | { "type": "delegation_completed", parent_turn_id: string, child_turn_id: string | null, target_agent_id: string, success: boolean, } | { "type": "workflow_run_started", event: WorkflowRunStartedEvent, } | { "type": "workflow_entry_started", event: WorkflowEntryEvent, } | { "type": "workflow_entry_completed", event: WorkflowEntryEvent, } | { "type": "workflow_run_completed", event: WorkflowRunCompletedEvent, } | { "type": "error", code: string, message: string, } | { "type": "cancelled", } | { "type": "shutdown", reason: string, } | { "type": "skill_activated", name: string, display_name: string, description: string,
+errors: Array<SchemaValidationError>, } | { "type": "delegation_started", parent_turn_id: string, child_turn_id?: string | null, target_agent_id: string, } | { "type": "delegation_completed", parent_turn_id: string, child_turn_id?: string | null, target_agent_id: string, success: boolean, } | { "type": "workflow_run_started", event: WorkflowRunStartedEvent, } | { "type": "workflow_entry_started", event: WorkflowEntryEvent, } | { "type": "workflow_entry_completed", event: WorkflowEntryEvent, } | { "type": "workflow_run_completed", event: WorkflowRunCompletedEvent, } | { "type": "error", code: string, message: string, } | { "type": "cancelled", } | { "type": "shutdown", reason: string, } | { "type": "skill_activated", name: string, display_name: string, description: string,
 /**
  * Token budget consumed by this skill's instructions in the context window.
  */
@@ -84,7 +84,7 @@ kind: string,
 /**
  * Name of the tool involved, if the approval is for a tool call.
  */
-tool_name?: string,
+tool_name?: string | null,
 /**
  * Parsed arguments of the tool call, for display in the approval UI.
  */
@@ -116,7 +116,7 @@ decision: string,
 /**
  * Optional explanation provided by the human reviewer.
  */
-reason?: string, } | { "type": "approval_expired",
+reason?: string | null, } | { "type": "approval_expired",
 /**
  * Identifier of the expired approval request.
  */
@@ -140,4 +140,4 @@ message: string,
 /**
  * Current state of the request, if known (e.g. `"approved"`, `"expired"`).
  */
-current_state?: string, } | { "type": "unknown", event_type: string, payload: unknown, };
+current_state?: string | null, } | { "type": "unknown", event_type: string, payload: unknown, };

@@ -12,4 +12,4 @@ export type WorkflowRunHandover = { "classification": "interrupted", failure: st
 /**
  * Highest journal seq at interruption — where replay would resume.
  */
-last_journal_seq: number, events_delivered_to_failed_call: number, events_pending: number, events: Array<WorkflowHandoverEvent>, } | { "classification": "interrupted_unattributed", failure: string, terminal_error: string | null, } | { "classification": "reconstruction_failed", failure: string, failed_call: WorkflowHandoverFailedCallRef, terminal_error: string | null, };
+last_journal_seq: number, events_delivered_to_failed_call: number, events_pending: number, events: Array<WorkflowHandoverEvent>, } | { "classification": "interrupted_unattributed", failure: string, terminal_error?: string | null, } | { "classification": "reconstruction_failed", failure: string, failed_call: WorkflowHandoverFailedCallRef, terminal_error?: string | null, };

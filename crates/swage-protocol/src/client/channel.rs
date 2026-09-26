@@ -10,6 +10,7 @@ use super::delivery::{DeliveryTarget, ExternalChannelIntegration};
 
 /// Request a short-lived code that links a channel conversation to a topic.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateChannelLinkCodeRequest {
     pub integration: ExternalChannelIntegration,
     #[serde(default)]
@@ -25,6 +26,7 @@ pub struct CreateChannelLinkCodeRequest {
 
 /// A short-lived, single-use channel link code.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ChannelLinkCodeResponse {
     pub link_code: String,
     pub expires_at: DateTime<Utc>,

@@ -68,6 +68,7 @@ impl ErrorCode {
 
 /// The body of every failed client-surface HTTP response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ApiErrorBody {
     pub code: ErrorCode,
     pub message: String,

@@ -6,6 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct AssemblyReport {
     pub assembly_name: String,
     pub elements: Vec<ElementReport>,
@@ -62,6 +63,7 @@ impl Default for AssemblyReport {
 
 /// One baseline element the assembly deliberately left out of the context.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct DeclaredOmission {
     /// The omitted element's name, as it appears in the elements projection.
     pub element: String,
@@ -70,6 +72,7 @@ pub struct DeclaredOmission {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct ElementReport {
     pub name: String,
     pub source: String,
@@ -81,6 +84,7 @@ pub struct ElementReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct NamedAssemblyReport {
     pub assembly_name: String,
     pub resolved_level: String,
@@ -88,6 +92,7 @@ pub struct NamedAssemblyReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct CompactionRecord {
     pub element: String,
     pub requested_strategy: String,
@@ -104,6 +109,7 @@ pub struct CompactionRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct AssemblyError {
     pub assembly_name: String,
     pub error_kind: String,
@@ -112,6 +118,7 @@ pub struct AssemblyError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct TurnContextResponse {
     pub turn_id: Uuid,
     pub report: AssemblyReport,

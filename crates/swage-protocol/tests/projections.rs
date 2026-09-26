@@ -188,6 +188,10 @@ fn typescript_bindings_are_regenerated() {
     }
 
     assert_defaulted_fields_reach_typescript_as_optional();
+
+    assert_option_fields_project_as_optional_nullable(
+        &repo_root().join("frontend/src/lib/protocol"),
+    );
 }
 
 /// A field the wire contract fills in for itself when the sender omits it.
@@ -413,4 +417,54 @@ fn write_schema<T: schemars::JsonSchema>(name: &str) {
         .join(name);
     std::fs::create_dir_all(schema_path.parent().expect("schema dir")).expect("create schema dir");
     std::fs::write(schema_path, rendered).expect("write schema document");
+}
+
+/// The one projection rule for `Option<T>` fields: the JSON Schema leaves
+/// them out of `required` and admits null, so the TypeScript member is
+/// `name?: T | null` — never the required-nullable `name: T | null`, which
+/// would make the two projections disagree about whether a producer may
+/// omit the key. Every struct in the crate carries
+/// `#[ts(optional_fields = nullable)]`; this reads the generated bindings
+/// back so a struct that forgets it fails here rather than in a client.
+fn assert_option_fields_project_as_optional_nullable(bindings: &Path) {
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(bindings).expect("generated bindings directory") {
+        let path = entry.expect("binding entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("ts") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read binding");
+        let declaration: String = text
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("/**")
+                    || trimmed.starts_with('*')
+                    || trimmed.starts_with("//"))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        for member in declaration.split(", ") {
+            let Some((name, ty)) = member.split_once(": ") else {
+                continue;
+            };
+            let name = name.trim().trim_start_matches('{').trim();
+            let is_identifier =
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if is_identifier
+                && ty
+                    .trim_end_matches(&[',', ' ', '}', ';'][..])
+                    .ends_with("| null")
+            {
+                offenders.push(format!("{}: {name}", path.display()));
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "{} required-nullable member(s) in the generated bindings; every struct deriving TS carries #[ts(optional_fields = nullable)]:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
 }

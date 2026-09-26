@@ -3,4 +3,4 @@
 /**
  * One durable configuration change as recorded at the mutation boundary.
  */
-export type ConfigurationHistoryEvent = { id: string, resource_kind: string, resource_id: string, action: string, source: string, session_id: string | null, prior_state: unknown, new_state: unknown, recorded_at: string, };
+export type ConfigurationHistoryEvent = { id: string, resource_kind: string, resource_id: string, action: string, source: string, session_id?: string | null, prior_state: unknown, new_state: unknown, recorded_at: string, };

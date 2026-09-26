@@ -14,6 +14,7 @@ use super::approval::ApprovalDecisionScope;
 /// Events sent by the client over the WebSocket connection.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum ClientEvent {
     /// Send a message to the conversation, triggering a provider turn.
     SendMessage {
@@ -24,10 +25,8 @@ pub enum ClientEvent {
         #[ts(optional, as = "Option<_>")]
         attachments: Vec<super::turn::MessageAttachment>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         thread_id: Option<Uuid>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         selected_model_id: Option<String>,
     },
     /// Human responds to a pending approval request.
@@ -71,6 +70,7 @@ pub enum ClientEvent {
 /// A single JSON Schema validation error from output schema checking.
 ///
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SchemaValidationError {
     /// JSON pointer to the failing location (e.g. `"/properties/name"`).
     pub path: String,
@@ -81,6 +81,7 @@ pub struct SchemaValidationError {
 /// Events sent by the server to the client over the WebSocket connection.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum ServerEvent {
     /// A token streamed from the provider.
     Token { content: String },
@@ -95,12 +96,10 @@ pub enum ServerEvent {
         /// Omitted from the serialised JSON when None so existing clients that
         /// do not handle sub-tools remain unaffected.
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         parent_call_id: Option<String>,
         /// One-line headline for the call, from the tool's declared display
         /// hints. Omitted when the tool declares none.
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         summary: Option<String>,
     },
     /// A tool call has finished. Contains the result and execution metadata.
@@ -114,13 +113,12 @@ pub enum ServerEvent {
         #[ts(type = "number")]
         duration_ms: u64,
         truncated: bool,
-        #[ts(type = "number | null")]
+        #[ts(optional, type = "number | null")]
         total_bytes: Option<u64>,
         /// call_id of the enclosing tool if this is a sub-tool invocation.
         ///
         /// Omitted from the serialised JSON when None.
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         parent_call_id: Option<String>,
     },
     /// The server dropped `dropped` signals to this client because it fell
@@ -137,7 +135,6 @@ pub enum ServerEvent {
         surface_id: Uuid,
         /// The module written; absent for surface-level changes (creation).
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         module_id: Option<Uuid>,
     },
     /// The shared surface library changed: an entry was saved or removed.
@@ -163,10 +160,8 @@ pub enum ServerEvent {
     TurnComplete {
         turn_id: Uuid,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         input_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         output_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
@@ -294,7 +289,6 @@ pub enum ServerEvent {
         kind: String,
         /// Name of the tool involved, if the approval is for a tool call.
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         tool_name: Option<String>,
         /// Parsed arguments of the tool call, for display in the approval UI.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,7 +316,6 @@ pub enum ServerEvent {
         decision: String,
         /// Optional explanation provided by the human reviewer.
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         reason: Option<String>,
     },
     /// An approval request timed out before a decision was submitted.
@@ -349,7 +342,6 @@ pub enum ServerEvent {
         message: String,
         /// Current state of the request, if known (e.g. `"approved"`, `"expired"`).
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
         current_state: Option<String>,
     },
     /// A gateway event this client version does not understand.

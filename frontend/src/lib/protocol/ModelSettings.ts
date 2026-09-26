@@ -2,4 +2,4 @@
 import type { Effort } from "./Effort";
 import type { ModelCapabilitiesConfig } from "./ModelCapabilitiesConfig";
 
-export type ModelSettings = { provider_id: string, model_id: string, aliases: Array<string>, context_window: number | null, generation_preset: string | null, default_effort?: Effort | null, capabilities?: ModelCapabilitiesConfig, };
+export type ModelSettings = { provider_id: string, model_id: string, aliases: Array<string>, context_window?: number | null, generation_preset?: string | null, default_effort?: Effort | null, capabilities?: ModelCapabilitiesConfig, };

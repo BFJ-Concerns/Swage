@@ -7,6 +7,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct CreateAttachmentRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
@@ -16,6 +17,7 @@ pub struct CreateAttachmentRequest {
     pub content_base64: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct AttachmentResponse {
     pub id: Uuid,
     pub scope_kind: String,
@@ -32,10 +34,12 @@ pub struct AttachmentResponse {
     pub updated_at: DateTime<Utc>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct AttachmentListResponse {
     pub attachments: Vec<AttachmentResponse>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct BackgroundJobResponse {
     pub id: Uuid,
     pub kind: String,
@@ -52,12 +56,14 @@ pub struct BackgroundJobResponse {
     pub completed_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct QueuedAttachmentResponse {
     pub attachment: AttachmentResponse,
     pub job: BackgroundJobResponse,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct CreateMaterialRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
@@ -68,6 +74,7 @@ pub struct CreateMaterialRequest {
     pub content_text: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct PromoteMaterialRequest {
     pub scope_kind: String,
     pub session_id: Option<Uuid>,
@@ -75,6 +82,7 @@ pub struct PromoteMaterialRequest {
     pub relative_path: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct MaterialResponse {
     pub id: Uuid,
     pub scope_kind: String,
@@ -93,6 +101,7 @@ pub struct MaterialResponse {
     pub archived_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct MaterialListResponse {
     pub materials: Vec<MaterialResponse>,
 }

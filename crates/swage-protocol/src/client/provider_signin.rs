@@ -13,6 +13,7 @@ pub enum SignInMethod {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct StartProviderSignInRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -21,6 +22,7 @@ pub struct StartProviderSignInRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "method", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum StartProviderSignInResponse {
     Browser {
         auth_url: String,
@@ -43,12 +45,14 @@ pub enum ProviderSignInStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ProviderAccount {
     pub email: Option<String>,
     pub plan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ProviderSignInState {
     pub status: ProviderSignInStatus,
     pub account: Option<ProviderAccount>,

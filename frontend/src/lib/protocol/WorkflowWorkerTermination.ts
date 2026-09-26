@@ -13,4 +13,4 @@ export type WorkflowWorkerTermination = { "termination": "outstanding" } | { "te
  * The settling error written over the worker, where the terminal
  * account has one to preserve.
  */
-detail: string | null, } | { "termination": "unsettled" };
+detail?: string | null, } | { "termination": "unsettled" };

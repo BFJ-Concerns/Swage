@@ -7,6 +7,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct RecoveryExportSummary {
     pub id: Uuid,
     pub created_at: DateTime<Utc>,
@@ -29,6 +30,7 @@ pub struct RecoveryExportSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
 pub struct RecoveryExportListResponse {
     pub exports: Vec<RecoveryExportSummary>,
 }

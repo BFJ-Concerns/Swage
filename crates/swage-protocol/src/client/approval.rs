@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 /// The outcome and scope of a human approval decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ApprovalDecision {
     pub decision: ApprovalDecisionValue,
     pub scope: ApprovalDecisionScope,

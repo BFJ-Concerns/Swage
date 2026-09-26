@@ -131,7 +131,7 @@
               {/if}
               <dt>Granted</dt>
               <dd>
-                {call.dispatch.grants === null
+                {call.dispatch.grants == null
                   ? "narrowed nothing"
                   : call.dispatch.grants.join(", ") || "no tools"}
               </dd>
@@ -150,7 +150,7 @@
             <dd class="termination">{terminationLabel(call.termination)}</dd>
           </dl>
 
-          {#if call.provider_rounds === null}
+          {#if call.provider_rounds == null}
             <p class="status">Provider rounds are not carried here.</p>
           {:else if call.provider_rounds.length === 0}
             <p class="status">No provider request was made.</p>

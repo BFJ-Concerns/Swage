@@ -9,6 +9,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowScript {
     pub id: Uuid,
     pub topic_id: Uuid,
@@ -19,7 +20,6 @@ pub struct WorkflowScript {
     /// not an authored row of the topic. A carried workflow is immutable in
     /// place; a same-named authored row shadows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
     pub carrying_skill: Option<String>,
     pub has_delivery_grant: bool,
     /// Whether this script may read the observations captured by this run.
@@ -36,6 +36,7 @@ pub struct WorkflowScript {
 /// listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowArgumentContract {
     Declared {
         #[ts(type = "unknown")]
@@ -45,6 +46,7 @@ pub enum WorkflowArgumentContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct CreateWorkflowScriptRequest {
     pub name: String,
     pub description: String,
@@ -52,32 +54,31 @@ pub struct CreateWorkflowScriptRequest {
     /// Server-side delivery targets granted to this script. Responses expose
     /// only whether a grant exists, never its URLs or secret references.
     #[serde(default)]
-    #[ts(optional)]
-    #[ts(type = "unknown")]
+    #[ts(optional, type = "unknown | null")]
     pub delivery_grant: Option<Value>,
     #[serde(default)]
-    #[ts(optional)]
     pub captured_sources_grant: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct UpdateWorkflowScriptRequest {
     pub description: Option<String>,
     pub source: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
-    #[ts(type = "unknown")]
+    #[ts(optional, type = "unknown | null")]
     pub delivery_grant: Option<Value>,
-    #[ts(optional)]
     pub captured_sources_grant: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowScriptListResponse {
     pub scripts: Vec<WorkflowScript>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRouteBudget {
     /// The token ceiling for calls resolved to this provider entry.
     pub max_total_tokens: Option<u64>,
@@ -87,6 +88,7 @@ pub struct WorkflowRouteBudget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRouteBudgetReading {
     pub spent: u64,
     pub remaining: Option<u64>,
@@ -95,6 +97,7 @@ pub struct WorkflowRouteBudgetReading {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowBudget {
     pub max_agent_calls: Option<u32>,
     /// Per-provider-entry token ledgers. A model resolves to the provider
@@ -114,6 +117,7 @@ pub struct WorkflowBudget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct StartWorkflowRunRequest {
     #[ts(type = "unknown")]
     pub args: Value,
@@ -121,6 +125,7 @@ pub struct StartWorkflowRunRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct StartInlineWorkflowRunRequest {
     pub source: String,
     #[ts(type = "unknown")]
@@ -129,6 +134,7 @@ pub struct StartInlineWorkflowRunRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunEvent {
     #[ts(type = "number")]
     pub seq: u64,
@@ -140,6 +146,7 @@ pub struct WorkflowRunEvent {
 
 /// Attribution is derived by the gateway, never accepted from a poster.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunEventSource {
     pub surface: String,
     pub agent_id: Option<String>,
@@ -148,6 +155,7 @@ pub struct WorkflowRunEventSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct PostWorkflowRunEventRequest {
     pub kind: String,
     #[ts(type = "unknown")]
@@ -155,6 +163,7 @@ pub struct PostWorkflowRunEventRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct PostWorkflowRunEventResponse {
     pub event: WorkflowRunEvent,
     pub wake_provisioned: bool,
@@ -165,6 +174,7 @@ pub struct PostWorkflowRunEventResponse {
 /// answered by an agent through a granted tool, and is the validated shape
 /// over the run's event queue rather than a second queue.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunHold {
     pub id: Uuid,
     pub run_id: Uuid,
@@ -199,6 +209,7 @@ pub enum WorkflowRunHoldState {
 
 /// One refused answer, kept so the run record shows what was tried.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunHoldRejection {
     pub id: Uuid,
     pub attempted_verdict: String,
@@ -208,12 +219,14 @@ pub struct WorkflowRunHoldRejection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AnswerWorkflowRunHoldRequest {
     pub hold_id: Uuid,
     pub verdict: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct AnswerWorkflowRunHoldResponse {
     pub hold: WorkflowRunHold,
     /// Whether answering made a parked run due again. False when the run was
@@ -222,6 +235,7 @@ pub struct AnswerWorkflowRunHoldResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowDecisionEventPayload {
     pub nonce: String,
     pub verdict: String,
@@ -251,6 +265,7 @@ pub enum WorkflowRunState {
 /// the work up starts from the record instead of a re-run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "classification", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowRunHandover {
     /// An attributed agent-call failure stopped the run.
     Interrupted {
@@ -281,6 +296,7 @@ pub enum WorkflowRunHandover {
 
 /// The failed call as the journal recorded it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowHandoverFailedCall {
     pub journal_entry_id: Uuid,
     #[ts(type = "number")]
@@ -293,6 +309,7 @@ pub struct WorkflowHandoverFailedCall {
 /// The failed call's bare identity, for when the journal could not be read
 /// back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowHandoverFailedCallRef {
     pub journal_entry_id: Uuid,
     #[ts(type = "number")]
@@ -309,6 +326,7 @@ pub enum WorkflowHandoverEventDelivery {
 
 /// One pending-queue event carried in the handover.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowHandoverEvent {
     pub id: Uuid,
     #[ts(type = "number")]
@@ -322,6 +340,7 @@ pub struct WorkflowHandoverEvent {
 /// infer a run's end from silence or from the absence of a result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "ending", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowRunEnding {
     /// The script returned its result.
     Returned,
@@ -339,6 +358,7 @@ pub enum WorkflowRunEnding {
 
 /// One worker's standing in the run's terminal account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowWorkerAccount {
     pub journal_entry_id: Uuid,
     #[ts(type = "number")]
@@ -357,6 +377,7 @@ pub struct WorkflowWorkerAccount {
 /// Every worker the run dispatched, sorted by how it stood when the run
 /// ended. A worker appears in exactly one list.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowWorkerPartition {
     pub done: Vec<WorkflowWorkerAccount>,
     pub failed: Vec<WorkflowWorkerAccount>,
@@ -366,6 +387,7 @@ pub struct WorkflowWorkerPartition {
 
 /// A completed worker's output recovered from a run that never returned.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowPartialResult {
     pub journal_entry_id: Uuid,
     #[ts(type = "number")]
@@ -381,6 +403,7 @@ pub struct WorkflowPartialResult {
 /// partial marking: these outputs are the run's recoverable work, never its
 /// result, and `reason` says what stopped the run from producing one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowPartialResults {
     pub reason: String,
     pub results: Vec<WorkflowPartialResult>,
@@ -390,17 +413,18 @@ pub struct WorkflowPartialResults {
 /// and — when the script never returned — the completed work still recoverable
 /// from it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunTerminalAccount {
     pub ending: WorkflowRunEnding,
     pub workers: WorkflowWorkerPartition,
     /// Present exactly when the run ended without its script returning.
-    #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_results: Option<WorkflowPartialResults>,
     pub settled_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRun {
     pub id: Uuid,
     pub topic_id: Uuid,
@@ -492,6 +516,7 @@ pub enum WorkflowJournalEntryStatus {
 /// always the `unavailable` variant carrying its reason, never zero counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "availability", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowCallUsage {
     Known {
         input_tokens: u64,
@@ -532,6 +557,7 @@ pub enum WorkflowUsageUnavailableReason {
 /// partitions on the same cause — this is where that cause is named.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "termination", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowWorkerTermination {
     /// The worker is still working; nothing has terminated it.
     Outstanding,
@@ -575,6 +601,7 @@ pub enum WorkflowCutShortCause {
 /// interruption caught also ends — at the moment the request became
 /// unanswerable rather than at a response — and its outcome says so.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowProviderRound {
     /// Which attempt of the call ran this round, counting from 1. A call the
     /// run's end interrupted and replay re-dispatched runs its rounds again
@@ -588,6 +615,7 @@ pub struct WorkflowProviderRound {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowProviderRoundOutcome {
     /// The request is outstanding — no response has arrived.
     Outstanding,
@@ -613,6 +641,7 @@ pub enum WorkflowProviderRoundOutcome {
 /// Written before any provider work begins, so a worker that dies mid-run
 /// still leaves evidence of the call it was serving.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowAgentCallDispatch {
     pub prompt: String,
     pub agent_definition_id: Option<String>,
@@ -635,6 +664,7 @@ pub struct WorkflowAgentCallDispatch {
 
 /// Where a dispatched worker was placed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowWorkerPlacementRecord {
     pub path: String,
     pub can_write: bool,
@@ -642,6 +672,7 @@ pub struct WorkflowWorkerPlacementRecord {
 
 /// The options a dispatched worker's turn resolved for itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowAgentCallResolution {
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -651,6 +682,7 @@ pub struct WorkflowAgentCallResolution {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowAgentCallDetail {
     pub agent_definition_id: Option<String>,
     pub session_id: Option<Uuid>,
@@ -679,6 +711,7 @@ pub struct WorkflowAgentCallDetail {
 
 /// Earliest liveness evidence for one workflow worker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowWorkerLiveness {
     pub started_at: DateTime<Utc>,
     pub first_evidence_at: Option<DateTime<Utc>>,
@@ -686,6 +719,7 @@ pub struct WorkflowWorkerLiveness {
 
 /// The final Git state of an isolated worker worktree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowWorktreeCompletion {
     pub base_commit: String,
     pub tip_commit: String,
@@ -694,6 +728,7 @@ pub struct WorkflowWorktreeCompletion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowEffectDetail {
     pub effect_kind: String,
     pub target_kind: String,
@@ -705,6 +740,7 @@ pub struct WorkflowEffectDetail {
 /// kind-specific shapes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
 pub enum WorkflowJournalResult {
     AgentCall {
         #[ts(type = "unknown")]
@@ -823,6 +859,7 @@ pub enum WorkflowJournalResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowJournalEntry {
     pub id: Uuid,
     pub seq: u64,
@@ -841,6 +878,7 @@ pub struct WorkflowJournalEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunDetailResponse {
     pub run: WorkflowRun,
     pub journal: Vec<WorkflowJournalEntry>,
@@ -861,6 +899,7 @@ pub struct WorkflowRunDetailResponse {
 /// the hold rows and their rejection rows already hold the history, so the
 /// counters cannot drift from it.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowHoldMetrics {
     pub holds_open: u32,
     pub holds_answered: u32,
@@ -870,6 +909,7 @@ pub struct WorkflowHoldMetrics {
 /// Derived counters over a run's wake machinery. `events_pending` counts
 /// undelivered queue entries now; the rest count journalled history.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowWakeMetrics {
     pub gate_evaluations: u32,
     pub gate_wakes: u32,
@@ -879,22 +919,26 @@ pub struct WorkflowWakeMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunListResponse {
     pub runs: Vec<WorkflowRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunStartedEvent {
     pub run: WorkflowRun,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowEntryEvent {
     pub run_id: Uuid,
     pub entry: WorkflowJournalEntry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct WorkflowRunCompletedEvent {
     pub run: WorkflowRun,
 }

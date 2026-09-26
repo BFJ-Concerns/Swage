@@ -6,6 +6,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SkillItem {
     /// Stable synthetic identifier for a shipped skill in this topic.
     pub id: Option<Uuid>,
@@ -21,6 +22,7 @@ pub struct SkillItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct SkillListResponse {
     pub skills: Vec<SkillItem>,
 }
