@@ -6,6 +6,7 @@
 
 pub mod agent_memory;
 pub mod browser;
+pub mod docs_read;
 pub mod file_edit;
 pub mod file_list;
 pub mod file_read;

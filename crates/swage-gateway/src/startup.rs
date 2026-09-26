@@ -692,17 +692,17 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, agent_memory::AgentMemoryTool, browser::browser_tools, file_edit::FileEditTool,
-        file_list::FileListTool, file_read::FileReadTool, file_search::FileSearchTool,
-        file_write::FileWriteTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
-        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
-        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
-        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
-        schedule::WakeMeLaterTool, session_variable::SessionVariableTool, shell::ShellTool,
-        surface::SurfaceLibraryTool, surface::SurfaceReadTool, surface::SurfaceWriteTool,
-        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
-        url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        Tool, agent_memory::AgentMemoryTool, browser::browser_tools, docs_read::DocsReadTool,
+        file_edit::FileEditTool, file_list::FileListTool, file_read::FileReadTool,
+        file_search::FileSearchTool, file_write::FileWriteTool, hold::WorkflowHoldTool,
+        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
+        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
+        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryTool,
+        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
+        session_variable::SessionVariableTool, shell::ShellTool, surface::SurfaceLibraryTool,
+        surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
+        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
     use std::time::Duration;
 
@@ -728,6 +728,11 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         }),
         Arc::new(UrlFetchTool::default()),
         Arc::new(ToolResultReadTool {
+            max_output_bytes: max_output,
+        }),
+        // The platform's own documentation, read from the gateway's
+        // compiled-in set; host-only, it touches no workspace.
+        Arc::new(DocsReadTool {
             max_output_bytes: max_output,
         }),
         Arc::new(swage_tool::delegate::DelegateTool),

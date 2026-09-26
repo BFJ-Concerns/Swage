@@ -19,6 +19,8 @@ mod external_channel_gateway_integration;
 mod gateway_cli_integration;
 #[path = "integration/gateway_observability_integration.rs"]
 mod gateway_observability_integration;
+#[path = "integration/hosted_docs_integration.rs"]
+mod hosted_docs_integration;
 #[path = "integration/integration.rs"]
 mod integration;
 #[path = "integration/inter_agent_messaging_integration.rs"]

@@ -11,7 +11,9 @@ use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::{assets, handlers, knowledge_mirror, state::AppState, surface, websocket, workflow};
+use crate::{
+    assets, handlers, knowledge_mirror, shipped_docs, state::AppState, surface, websocket, workflow,
+};
 
 // ---------------------------------------------------------------------------
 // Request ID correlation middleware
@@ -134,6 +136,9 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
         )
         .route("/api/threads/{id}", get(handlers::get_thread_detail))
+        // The platform's own documentation, compiled in and read-only.
+        .route("/api/docs", get(shipped_docs::list_documents))
+        .route("/api/docs/{name}", get(shipped_docs::get_document))
         // Conversation CRUD
         .route("/api/conversations", post(handlers::create_conversation))
         .route("/api/conversations", get(handlers::list_conversations))
