@@ -15,7 +15,12 @@ const CREATE_MIGRATIONS_TABLE: &str = "
 
 /// The ordered set of migrations to apply. Each entry is (name, sql).
 ///
-/// Order is significant — migrations are applied in array order and never re-run.
+/// Order is significant — migrations are applied in array order and never
+/// re-run. A landed entry is never renumbered, renamed, or removed: the name
+/// is what an existing store records as applied, and a store whose recorded
+/// names are not a prefix of this list is refused at open
+/// ([`check_recorded_migrations`]). Change a landed migration's effect by
+/// appending a new entry.
 fn migrations() -> Vec<(&'static str, &'static str)> {
     vec![
         ("001_complete_schema", COMPLETE_SCHEMA),
@@ -442,7 +447,9 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
         UNIQUE (run_id, seq),
         UNIQUE (run_id, completed_order)
     );
-    INSERT INTO workflow_journal_events_new SELECT * FROM workflow_journal;
+    INSERT INTO workflow_journal_events_new (id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at)
+        SELECT id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at
+        FROM workflow_journal;
     DROP TABLE workflow_journal;
     ALTER TABLE workflow_journal_events_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
@@ -515,7 +522,9 @@ const CREATE_WORKFLOW_RUN_HOLDS: &str = "
         UNIQUE (run_id, seq),
         UNIQUE (run_id, completed_order)
     );
-    INSERT INTO workflow_journal_holds_new SELECT * FROM workflow_journal;
+    INSERT INTO workflow_journal_holds_new (id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at)
+        SELECT id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at
+        FROM workflow_journal;
     DROP TABLE workflow_journal;
     ALTER TABLE workflow_journal_holds_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
@@ -557,7 +566,9 @@ const ADD_WORKFLOW_RUN_PARENTAGE: &str = "
         UNIQUE (run_id, seq),
         UNIQUE (run_id, completed_order)
     );
-    INSERT INTO workflow_journal_new SELECT * FROM workflow_journal;
+    INSERT INTO workflow_journal_new (id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at)
+        SELECT id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at
+        FROM workflow_journal;
     DROP TABLE workflow_journal;
     ALTER TABLE workflow_journal_new RENAME TO workflow_journal;
     CREATE INDEX IF NOT EXISTS idx_workflow_journal_run_seq
@@ -1787,6 +1798,9 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(CREATE_MIGRATIONS_TABLE)
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
+    let known = migrations();
+    check_recorded_migrations(conn, &known)?;
+
     // SQLite's table-rebuild recipe: run the migration pass with foreign-key
     // enforcement OFF. With it on, dropping a rebuilt table performs an
     // implicit DELETE whose ON DELETE actions fire — a parent-table rebuild
@@ -1798,7 +1812,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch("PRAGMA foreign_keys=OFF;")
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
 
-    for (name, sql) in migrations() {
+    for (name, sql) in known {
         // Check whether this migration has already been applied.
         let already_applied: bool = conn
             .query_row(
@@ -1849,6 +1863,60 @@ pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
 
     // Seed the general scope if it does not already exist.
     seed_general_scope(conn)
+}
+
+/// Refuse a store whose recorded migration history this build did not
+/// produce, before any migration runs.
+///
+/// The recorded names must be a prefix of `known`, in order. A recorded name
+/// this build does not know means the store was written by a newer build; a
+/// known name missing before a later one the store records means the store's
+/// history is not one this runner could have produced. Either way the schema
+/// is another build's to alter, so opening it is refused rather than applying
+/// this build's migrations over it — which is what left a development
+/// gateway's migrations on an operator store when nothing checked.
+fn check_recorded_migrations(
+    conn: &Connection,
+    known: &[(&'static str, &'static str)],
+) -> Result<(), StorageError> {
+    let mut statement = conn
+        .prepare("SELECT name FROM _swage_migrations")
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    let recorded = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?
+        .collect::<Result<std::collections::BTreeSet<String>, _>>()
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+
+    let unknown: Vec<&str> = recorded
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !known.iter().any(|(known_name, _)| known_name == name))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(StorageError::UnknownSchema {
+            message: format!(
+                "the store records migration(s) {} that this build does not know; it was written by a newer build — run that build, or rebuild this data root",
+                unknown.join(", ")
+            ),
+        });
+    }
+
+    let mut first_unapplied: Option<&str> = None;
+    for (name, _) in known {
+        if recorded.contains(*name) {
+            if let Some(missing) = first_unapplied {
+                return Err(StorageError::UnknownSchema {
+                    message: format!(
+                        "the store records '{name}' as applied but not the earlier '{missing}'; its migration history is not one this build produced — rebuild this data root"
+                    ),
+                });
+            }
+        } else if first_unapplied.is_none() {
+            first_unapplied = Some(name);
+        }
+    }
+    Ok(())
 }
 
 fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
@@ -1931,6 +1999,7 @@ fn seed_general_scope(conn: &Connection) -> Result<(), StorageError> {
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+    use swage_core::StorageError;
 
     fn open_migrated() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory DB");
@@ -2027,6 +2096,66 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tool_calls", [], |r| r.get(0))
             .expect("tool_calls table should exist after migration");
         assert_eq!(count, 0, "fresh DB should have no rows");
+    }
+
+    #[test]
+    fn store_recording_a_migration_this_build_does_not_know_is_refused() {
+        let conn = open_migrated();
+        conn.execute(
+            "INSERT INTO _swage_migrations (name, applied_at) VALUES ('999_from_a_newer_build', datetime('now'))",
+            [],
+        )
+        .expect("record a migration this build does not have");
+
+        let error = super::run_migrations(&conn).expect_err("the store is another build's");
+        match error {
+            StorageError::UnknownSchema { message } => {
+                assert!(message.contains("999_from_a_newer_build"), "{message}");
+                assert!(message.contains("newer build"), "{message}");
+            }
+            other => panic!("expected UnknownSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_with_a_gap_in_its_recorded_migrations_is_refused() {
+        let conn = open_migrated();
+        conn.execute(
+            "DELETE FROM _swage_migrations WHERE name = '046_workflow_run_parentage'",
+            [],
+        )
+        .expect("strip one applied migration from the record");
+
+        let error = super::run_migrations(&conn).expect_err("the history is not this build's");
+        match error {
+            StorageError::UnknownSchema { message } => {
+                assert!(message.contains("046_workflow_run_parentage"), "{message}");
+                assert!(message.contains("047_knowledge_citations"), "{message}");
+            }
+            other => panic!("expected UnknownSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_older_store_upgrades_through_the_prefix() {
+        let conn = open_migrated_until_exclusive("060_workflow_run_holds");
+        super::run_migrations(&conn).expect("a strict prefix is an older store, not a foreign one");
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM _swage_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("count recorded migrations");
+        assert_eq!(recorded as usize, super::migrations().len());
+    }
+
+    #[test]
+    fn table_rebuilds_name_the_columns_they_copy() {
+        for (name, sql) in super::migrations() {
+            assert!(
+                !sql.contains("SELECT *"),
+                "migration {name} copies rows with SELECT *; name the columns so a later column change cannot silently misalign the copy"
+            );
+        }
     }
 
     #[test]

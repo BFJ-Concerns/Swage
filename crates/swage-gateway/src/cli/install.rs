@@ -14,6 +14,8 @@ use crate::cli::{InstallArgs, UninstallArgs};
 pub struct ServiceInstallConfig {
     pub port: Option<u16>,
     pub host: Option<String>,
+    /// Topic whose configuration layer the service runs under (see
+    /// `StartArgs::config`).
     pub config: Option<String>,
 }
 

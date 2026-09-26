@@ -72,6 +72,14 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
             }
         }
     };
+    // Name the root before anything opens under it: a gateway launched
+    // without SWAGE_HOME silently resolves to the operator's own root, and
+    // the log line is what makes that visible.
+    tracing::info!(
+        root = %root.display(),
+        from_environment = std::env::var_os("SWAGE_HOME").is_some(),
+        "Swage data root resolved"
+    );
     if let Err(problem) = ensure_managed_secret_key(&root) {
         eprintln!("{problem}");
         std::process::exit(1);
@@ -649,6 +657,12 @@ fn open_storage(path: &std::path::Path) -> Arc<swage_storage::SqliteStorage> {
 
 fn storage_open_error(path: &std::path::Path, error: &swage_core::StorageError) -> String {
     let detail = error.to_string();
+    if let swage_core::StorageError::UnknownSchema { message } = error {
+        return format!(
+            "The database at {} was not produced by this build ({message}). Rebuild this data root, or run the build that owns it; data migration is not supported during the private alpha.",
+            path.display()
+        );
+    }
     if detail.contains("no such table: workflow_runs") {
         format!(
             "The data root at {} uses an obsolete private-alpha database. Rebuild this data root before starting Swage; data migration is not supported during the private alpha.",
@@ -1391,7 +1405,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn obsolete_workflow_schema_reports_rebuild_instruction() {
+    async fn store_with_a_foreign_migration_history_reports_rebuild_instruction() {
         let directory = tempfile::tempdir().expect("obsolete data root");
         let path = directory.path().join("swage.db");
         let storage = swage_storage::SqliteStorage::open(&path).expect("seed current database");
@@ -1409,18 +1423,19 @@ mod tests {
 
         let error = swage_storage::SqliteStorage::open(&path)
             .err()
-            .expect("opening the stripped database should fail through migrations");
+            .expect("a store with a gap in its recorded migrations is refused at open");
         assert!(matches!(
             error,
-            swage_core::StorageError::MigrationFailed(_)
+            swage_core::StorageError::UnknownSchema { .. }
         ));
 
         let message = storage_open_error(&path, &error);
 
-        assert!(message.contains(&directory.path().display().to_string()));
+        assert!(message.contains(&path.display().to_string()));
+        assert!(message.contains("not produced by this build"));
+        assert!(message.contains("046_workflow_run_parentage"));
         assert!(message.contains("Rebuild this data root"));
         assert!(message.contains("data migration is not supported"));
-        assert!(!message.contains("no such table"));
     }
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedEvents {

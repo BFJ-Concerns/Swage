@@ -191,6 +191,14 @@ pub enum StorageError {
     #[error("migration failed: {0}")]
     MigrationFailed(String),
 
+    /// The store's recorded schema history is not one this build produced
+    /// (permanent for this binary): it names a migration this build does not
+    /// know, or skips one this build applies before a later one it records.
+    /// The store belongs to another build and is refused before any migration
+    /// runs, so nothing is half-applied.
+    #[error("store schema is not one this build knows: {message}")]
+    UnknownSchema { message: String },
+
     /// Unique constraint or foreign key violation (permanent).
     #[error("constraint violation: {0}")]
     ConstraintViolation(String),

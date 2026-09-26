@@ -153,7 +153,9 @@ pub struct StartArgs {
     #[arg(long)]
     pub host: Option<String>,
 
-    /// Path to a configuration file (overrides the default search path).
+    /// Topic whose configuration layer the gateway runs under; the general
+    /// scope when absent. The data root itself comes from SWAGE_HOME, or
+    /// ~/.swage when that is unset.
     #[arg(long)]
     pub config: Option<String>,
 
