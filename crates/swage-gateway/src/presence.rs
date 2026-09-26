@@ -51,8 +51,8 @@ pub struct PresenceRuntime {
 }
 
 pub use swage_protocol::hosting::{
-    ClientPresenceResponse, DeviceHeartbeatRequest, DevicePresenceResponse,
-    PresenceGatewayResponse, PresenceSnapshotResponse,
+    ClientPresenceResponse, DevicePresenceResponse, PresenceGatewayResponse,
+    PresenceSnapshotResponse,
 };
 
 pub async fn snapshot_presence(state: &AppState) -> PresenceSnapshotResponse {
@@ -158,21 +158,27 @@ pub async fn record_client_disconnected(state: &AppState, session_id: Uuid) {
     entry.disconnected_at = Some(now);
 }
 
-pub async fn upsert_device_heartbeat(state: &AppState, request: DeviceHeartbeatRequest) {
+/// A device was heard from — on connecting, and on every heartbeat it sends
+/// over its connection. The record reads connected until `stale_after_secs`
+/// pass in silence, and disconnected once its connection ends.
+pub async fn upsert_device_heartbeat(
+    state: &AppState,
+    device_id: &str,
+    label: Option<String>,
+    stale_after_secs: u64,
+) {
     let now = Utc::now();
     let mut presence = state.presence.lock().await;
-    let existing = presence.devices.get(&request.device_id).cloned();
+    let existing = presence.devices.get(device_id).cloned();
     let record = DevicePresenceRecord {
-        device_id: request.device_id.clone(),
-        label: request
-            .label
-            .or_else(|| existing.as_ref().and_then(|value| value.label.clone())),
+        device_id: device_id.to_owned(),
+        label: label.or_else(|| existing.as_ref().and_then(|value| value.label.clone())),
         registered_at: existing.as_ref().map_or(now, |value| value.registered_at),
         last_seen_at: now,
         disconnected_at: None,
-        stale_after_secs: request.stale_after_secs,
+        stale_after_secs,
     };
-    presence.devices.insert(request.device_id, record);
+    presence.devices.insert(device_id.to_owned(), record);
 }
 
 pub async fn disconnect_device(state: &AppState, device_id: &str) -> bool {
@@ -197,5 +203,45 @@ fn device_state_at(record: &DevicePresenceRecord, now: DateTime<Utc>) -> Presenc
         PresenceState::Stale
     } else {
         PresenceState::Connected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(
+        last_seen_at: DateTime<Utc>,
+        disconnected_at: Option<DateTime<Utc>>,
+    ) -> DevicePresenceRecord {
+        DevicePresenceRecord {
+            device_id: "device-a".into(),
+            label: None,
+            registered_at: last_seen_at,
+            last_seen_at,
+            disconnected_at,
+            stale_after_secs: 30,
+        }
+    }
+
+    #[test]
+    fn a_device_reads_connected_then_stale_in_silence_and_disconnected_once_closed() {
+        let now = Utc::now();
+        assert_eq!(
+            device_state_at(&record(now, None), now),
+            PresenceState::Connected
+        );
+        assert_eq!(
+            device_state_at(&record(now, None), now + chrono::Duration::seconds(29)),
+            PresenceState::Connected
+        );
+        assert_eq!(
+            device_state_at(&record(now, None), now + chrono::Duration::seconds(31)),
+            PresenceState::Stale
+        );
+        assert_eq!(
+            device_state_at(&record(now, Some(now)), now),
+            PresenceState::Disconnected
+        );
     }
 }

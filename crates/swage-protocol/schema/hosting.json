@@ -30,9 +30,6 @@
     "effective_agent_definition_list": {
       "$ref": "#/$defs/EffectiveAgentDefinitionListResponse"
     },
-    "heartbeat": {
-      "$ref": "#/$defs/DeviceHeartbeatRequest"
-    },
     "knowledge_mirror": {
       "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
     },
@@ -48,7 +45,6 @@
   },
   "required": [
     "presence",
-    "heartbeat",
     "approvals",
     "approval_decision",
     "operator_overview",
@@ -591,29 +587,6 @@
         }
       ]
     },
-    "DeviceHeartbeatRequest": {
-      "type": "object",
-      "properties": {
-        "device_id": {
-          "type": "string"
-        },
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "stale_after_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
-        }
-      },
-      "required": [
-        "device_id"
-      ]
-    },
     "DeviceListResponse": {
       "type": "object",
       "properties": {
@@ -673,14 +646,9 @@
       ]
     },
     "DeviceResponse": {
+      "description": "A registered device as the gateway lists it. `capabilities` are what the\ndevice last advertised on connecting; empty until it first dials in.",
       "type": "object",
       "properties": {
-        "base_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "capabilities": {
           "type": "array",
           "items": {
@@ -851,12 +819,6 @@
     "OperatorDeviceSummary": {
       "type": "object",
       "properties": {
-        "base_url": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "capabilities": {
           "type": "array",
           "items": {

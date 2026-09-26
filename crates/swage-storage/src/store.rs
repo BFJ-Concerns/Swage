@@ -170,6 +170,13 @@ pub trait DeviceStore: Send + Sync {
         device: NewDeviceRegistration,
     ) -> Result<DeviceRegistration, StorageError>;
     async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError>;
+    /// Record what a device advertised on connecting. `false` when no such
+    /// device is registered.
+    async fn set_device_capabilities(
+        &self,
+        device_id: &str,
+        capabilities: Vec<String>,
+    ) -> Result<bool, StorageError>;
     async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError>;
 }
 
@@ -1668,6 +1675,13 @@ mod tests {
             unimplemented!()
         }
         async fn list_devices(&self) -> Result<Vec<DeviceRegistration>, StorageError> {
+            unimplemented!()
+        }
+        async fn set_device_capabilities(
+            &self,
+            _: &str,
+            _: Vec<String>,
+        ) -> Result<bool, StorageError> {
             unimplemented!()
         }
         async fn delete_device(&self, _: &str) -> Result<bool, StorageError> {

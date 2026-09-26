@@ -39,6 +39,32 @@ pub trait ToolContext: Send + Sync {
     }
 }
 
+/// Whether a context's working directory and every allowed path lie under
+/// one of `workspace_roots`. Both sides of a device connection apply it —
+/// the gateway before it invokes, the device before it runs — so a context
+/// that escapes the device's workspace is refused wherever it is seen.
+pub fn context_within_workspaces(ctx: &dyn ToolContext, workspace_roots: &[PathBuf]) -> bool {
+    let canonical_roots = workspace_roots
+        .iter()
+        .map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
+        .collect::<Vec<_>>();
+
+    path_within_any_workspace(ctx.working_directory(), &canonical_roots)
+        && ctx
+            .allowed_paths()
+            .iter()
+            .all(|path| path_within_any_workspace(path, &canonical_roots))
+}
+
+/// Whether `path` lies under one of `workspace_roots`, resolving symlinks
+/// where the path exists.
+pub fn path_within_any_workspace(path: &Path, workspace_roots: &[PathBuf]) -> bool {
+    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    workspace_roots
+        .iter()
+        .any(|root| candidate.starts_with(root))
+}
+
 /// Snapshot an opaque context into the serialisable wire representation.
 pub fn serialise_tool_context(ctx: &dyn ToolContext) -> SerializableToolContext {
     SerializableToolContext {

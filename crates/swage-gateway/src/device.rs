@@ -1,28 +1,49 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::Arc;
+//! Remote execution devices: registration, the connection each device
+//! dials in on, and the operations the gateway invokes over it.
+//!
+//! A device pairs (or registers) once, naming the gateway secret its
+//! credential resolves against and the workspace it operates in. It then
+//! dials `GET /api/devices/connect`, opens with a `Hello` carrying that
+//! credential and the tools it can run, and the gateway serves operations
+//! back over the same socket: each `Operation` carries a correlation id, is
+//! settled by the device's `Result`, `Failure`, or `Cancelled` frame, and is
+//! cancelled by dropping the awaiting future, which sends `Cancel`. The
+//! device heartbeats over the socket; presence reads those. Every connect,
+//! disconnect, invocation, and settlement lands in the audit trail under the
+//! device's id, so an operation's outcome is reconstructable afterwards
+//! from the gateway's own record.
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::{extract::State, response::Response};
 use chrono::{DateTime, Utc};
-use reqwest::Client;
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 use swage_core::ToolError;
-use swage_storage::model::NewDeviceRegistration;
-use swage_tool::context::{ToolContext, serialise_tool_context};
-use swage_tool::dispatch::ToolDispatcher;
+use swage_storage::model::{NewAuditEvent, NewDeviceRegistration};
+use swage_tool::context::{ToolContext, context_within_workspaces, serialise_tool_context};
 
-use crate::secret::SecretManager;
 use crate::state::AppState;
+
+pub use swage_protocol::device::{
+    DeviceFrame, DeviceListResponse, DeviceResponse, GatewayFrame, RegisterDeviceRequest,
+};
+
+/// How often a connected device heartbeats, as the welcome tells it.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+/// How long presence tolerates silence before reading the device as stale.
+pub const STALE_AFTER_SECS: u64 = 3 * HEARTBEAT_INTERVAL_SECS;
+/// How long a fresh connection has to say hello.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -64,32 +85,86 @@ pub struct RegisteredDevice {
     pub device_id: String,
     pub label: Option<String>,
     pub kind: DeviceKind,
-    pub base_url: Option<String>,
     pub shared_token_secret_ref: Option<String>,
     pub workspace_root: PathBuf,
     pub workspace_roots: Vec<PathBuf>,
+    /// What the device advertised when it last connected.
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
+}
+
+/// How an invoked operation ended, as the device reported it or as the
+/// link's end forced it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OperationOutcome {
+    Result(Value),
+    Failure(String),
+    Cancelled,
+    Disconnected,
+}
+
+impl OperationOutcome {
+    fn audit_name(&self) -> &'static str {
+        match self {
+            OperationOutcome::Result(_) => "result",
+            OperationOutcome::Failure(_) => "failure",
+            OperationOutcome::Cancelled => "cancelled",
+            OperationOutcome::Disconnected => "disconnected",
+        }
+    }
+}
+
+/// One device's live connection: the frames the gateway may send it and
+/// the operations awaiting its answer.
+#[derive(Clone)]
+pub struct DeviceLink {
+    link_id: Uuid,
+    outbound: mpsc::UnboundedSender<GatewayFrame>,
+    pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<OperationOutcome>>>>,
+    /// Fired to close the connection from the gateway's side — an
+    /// operator's disconnect, or a newer dial from the same device.
+    closed: tokio_util::sync::CancellationToken,
+}
+
+impl DeviceLink {
+    fn settle(&self, correlation_id: Uuid, outcome: OperationOutcome) -> bool {
+        let waiter = self
+            .pending
+            .lock()
+            .expect("pending operations lock")
+            .remove(&correlation_id);
+        match waiter {
+            Some(waiter) => waiter.send(outcome).is_ok(),
+            None => false,
+        }
+    }
+
+    fn fail_all(&self, outcome: OperationOutcome) {
+        let waiters = std::mem::take(&mut *self.pending.lock().expect("pending operations lock"));
+        for (_, waiter) in waiters {
+            let _ = waiter.send(outcome.clone());
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct DeviceRuntime {
     pub devices: HashMap<String, RegisteredDevice>,
+    /// The connection each device currently holds open, by device id.
+    pub links: HashMap<String, DeviceLink>,
 }
 
-pub use swage_protocol::device::{
-    DeviceListResponse, DeviceResponse, RegisterDeviceRequest, RemoteToolExecutionRequest,
-    RemoteToolExecutionResponse,
-};
-
-#[derive(Clone)]
-struct TransportBackedDeviceState {
-    kind: DeviceKind,
-    shared_token: String,
-    dispatcher: Arc<ToolDispatcher>,
-    capabilities: Vec<String>,
-    workspace_roots: Vec<PathBuf>,
+impl std::fmt::Debug for DeviceLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceLink")
+            .field("link_id", &self.link_id)
+            .finish_non_exhaustive()
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
 
 pub async fn register_remote_device(
     state: &AppState,
@@ -99,15 +174,24 @@ pub async fn register_remote_device(
     let workspace_root = PathBuf::from(&request.workspace_root);
     let workspace_roots =
         normalise_workspace_roots(workspace_root.clone(), request.workspace_roots);
+    // A re-registration keeps what the device last advertised; a new
+    // device has advertised nothing yet.
+    let previously_advertised = state
+        .devices
+        .lock()
+        .await
+        .devices
+        .get(&request.device_id)
+        .map(|device| device.capabilities.clone())
+        .unwrap_or_default();
     let device = RegisteredDevice {
         device_id: request.device_id,
         label: request.label.clone(),
         kind,
-        base_url: Some(request.base_url),
         shared_token_secret_ref: Some(request.shared_token_secret_ref),
         workspace_root,
         workspace_roots,
-        capabilities: request.capabilities,
+        capabilities: previously_advertised,
         registered_at: Utc::now(),
     };
 
@@ -117,7 +201,6 @@ pub async fn register_remote_device(
             device_id: device.device_id.clone(),
             label: device.label.clone(),
             kind: device.kind.to_string(),
-            base_url: device.base_url.clone().unwrap_or_default(),
             shared_token: device.shared_token_secret_ref.clone().unwrap_or_default(),
             workspace_root: device.workspace_root.to_string_lossy().into_owned(),
             workspace_roots: device
@@ -130,21 +213,12 @@ pub async fn register_remote_device(
         .await
         .map_err(swage_core::GatewayError::Storage)?;
 
-    let mut runtime = state.devices.lock().await;
-    runtime
+    state
+        .devices
+        .lock()
+        .await
         .devices
         .insert(device.device_id.clone(), device.clone());
-    drop(runtime);
-
-    crate::presence::upsert_device_heartbeat(
-        state,
-        crate::presence::DeviceHeartbeatRequest {
-            device_id: device.device_id.clone(),
-            label: device.label.clone(),
-            stale_after_secs: 30,
-        },
-    )
-    .await;
 
     Ok(device)
 }
@@ -176,7 +250,6 @@ pub async fn restore_registered_devices(state: &AppState) -> Result<(), swage_co
                 device_id: device.device_id,
                 label: device.label,
                 kind: DeviceKind::from_str(&device.kind).unwrap_or(DeviceKind::AttachedDevice),
-                base_url: Some(device.base_url),
                 shared_token_secret_ref: Some(device.shared_token),
                 workspace_root: PathBuf::from(&device.workspace_root),
                 workspace_roots: normalise_workspace_roots(
@@ -192,26 +265,29 @@ pub async fn restore_registered_devices(state: &AppState) -> Result<(), swage_co
     Ok(())
 }
 
+pub fn device_response(device: RegisteredDevice) -> DeviceResponse {
+    DeviceResponse {
+        device_id: device.device_id,
+        label: device.label,
+        kind: device.kind.to_string(),
+        workspace_root: device.workspace_root.to_string_lossy().into_owned(),
+        workspace_roots: device
+            .workspace_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        capabilities: device.capabilities,
+        registered_at: device.registered_at,
+    }
+}
+
 pub async fn list_devices(state: &AppState) -> DeviceListResponse {
     let runtime = state.devices.lock().await;
     let mut devices = runtime
         .devices
         .values()
         .cloned()
-        .map(|device| DeviceResponse {
-            device_id: device.device_id,
-            label: device.label,
-            kind: device.kind.to_string(),
-            base_url: device.base_url,
-            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: device
-                .workspace_roots
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            capabilities: device.capabilities,
-            registered_at: device.registered_at,
-        })
+        .map(device_response)
         .collect::<Vec<_>>();
     devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
     DeviceListResponse { devices }
@@ -256,139 +332,6 @@ fn select_device(
     None
 }
 
-pub async fn execute_on_remote_device(
-    secret_manager: &SecretManager,
-    device: &RegisteredDevice,
-    tool_name: &str,
-    params: &Value,
-    ctx: &dyn ToolContext,
-) -> Result<Value, ToolError> {
-    if device.kind == DeviceKind::Local {
-        return Err(ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: format!(
-                "device '{}' uses the local backend and cannot be called through transport",
-                device.device_id
-            ),
-        });
-    }
-
-    if !device
-        .capabilities
-        .iter()
-        .any(|capability| capability == tool_name)
-    {
-        return Err(ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: format!(
-                "device '{}' does not expose tool '{}'",
-                device.device_id, tool_name
-            ),
-        });
-    }
-
-    if !context_within_workspaces(ctx, &device.workspace_roots) {
-        return Err(ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: format!(
-                "gateway context for '{}' escapes device workspace",
-                device.device_id
-            ),
-        });
-    }
-
-    let url = format!(
-        "{}/api/device/execute-tool",
-        device
-            .base_url
-            .as_deref()
-            .unwrap_or_default()
-            .trim_end_matches('/')
-    );
-    let shared_token = match device.shared_token_secret_ref.as_deref() {
-        Some(reference) => {
-            secret_manager
-                .resolve(reference)
-                .await
-                .map_err(|error| ToolError::ExecutionFailed {
-                    name: tool_name.to_string(),
-                    message: error.to_string(),
-                })?
-                .value
-        }
-        None => {
-            return Err(ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                message: format!(
-                    "device '{}' is missing its shared token secret reference",
-                    device.device_id
-                ),
-            });
-        }
-    };
-    let request = RemoteToolExecutionRequest {
-        shared_token,
-        tool_name: tool_name.to_string(),
-        params: params.clone(),
-        context: serialise_tool_context(ctx),
-    };
-
-    let response = Client::new()
-        .post(&url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|error| ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: format!("failed to contact device '{}': {error}", device.device_id),
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: format!(
-                "device '{}' rejected tool call with status {}: {}",
-                device.device_id, status, body
-            ),
-        });
-    }
-
-    let payload: RemoteToolExecutionResponse =
-        response
-            .json()
-            .await
-            .map_err(|error| ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                message: format!(
-                    "device '{}' returned invalid JSON: {error}",
-                    device.device_id
-                ),
-            })?;
-    Ok(payload.output)
-}
-
-fn context_within_workspaces(ctx: &dyn ToolContext, workspace_roots: &[PathBuf]) -> bool {
-    let canonical_roots = workspace_roots
-        .iter()
-        .map(|root| root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
-        .collect::<Vec<_>>();
-
-    path_within_any_workspace(ctx.working_directory(), &canonical_roots)
-        && ctx
-            .allowed_paths()
-            .iter()
-            .all(|path| path_within_any_workspace(path, &canonical_roots))
-}
-
-fn path_within_any_workspace(path: &Path, workspace_roots: &[PathBuf]) -> bool {
-    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    workspace_roots
-        .iter()
-        .any(|root| candidate.starts_with(root))
-}
-
 fn normalise_workspace_roots(primary: PathBuf, roots: Vec<String>) -> Vec<PathBuf> {
     let mut normalised = vec![primary];
     for root in roots {
@@ -400,503 +343,799 @@ fn normalise_workspace_roots(primary: PathBuf, roots: Vec<String>) -> Vec<PathBu
     normalised
 }
 
-async fn remote_device_execute_tool(
-    State(state): State<TransportBackedDeviceState>,
-    Json(request): Json<RemoteToolExecutionRequest>,
-) -> Result<Json<RemoteToolExecutionResponse>, (StatusCode, String)> {
-    if request.shared_token != state.shared_token {
-        return Err((StatusCode::UNAUTHORIZED, "invalid shared token".to_string()));
-    }
+// ---------------------------------------------------------------------------
+// Invoking an operation over the device's connection
+// ---------------------------------------------------------------------------
 
-    if !state
+/// Run `tool_name` on `device` over the connection it holds open.
+///
+/// Refuses, before touching the link, a tool the device did not advertise
+/// and a context outside its workspace; refuses a device that is not
+/// connected. Dropping the returned future before it settles cancels the
+/// operation on the device.
+pub async fn execute_on_remote_device(
+    state: &AppState,
+    device: &RegisteredDevice,
+    tool_name: &str,
+    params: &Value,
+    ctx: &dyn ToolContext,
+) -> Result<Value, ToolError> {
+    let failed = |message: String| ToolError::ExecutionFailed {
+        name: tool_name.to_string(),
+        message,
+    };
+    if device.kind == DeviceKind::Local {
+        return Err(failed(format!(
+            "device '{}' uses the local backend and cannot be called through transport",
+            device.device_id
+        )));
+    }
+    if !device
         .capabilities
         .iter()
-        .any(|capability| capability == &request.tool_name)
+        .any(|capability| capability == tool_name)
     {
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!("tool '{}' is not exposed by this device", request.tool_name),
-        ));
+        return Err(failed(format!(
+            "device '{}' does not expose tool '{}'",
+            device.device_id, tool_name
+        )));
+    }
+    if !context_within_workspaces(ctx, &device.workspace_roots) {
+        return Err(failed(format!(
+            "gateway context for '{}' escapes device workspace",
+            device.device_id
+        )));
     }
 
-    if !context_within_workspaces(&request.context, &state.workspace_roots) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            format!("gateway context escapes {} device workspace", state.kind),
-        ));
-    }
-
-    let output = state
-        .dispatcher
-        .dispatch(
-            &request.tool_name,
-            request.params,
-            &request.context,
-            request.context.agent_id(),
-        )
+    let link = state
+        .devices
+        .lock()
         .await
-        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+        .links
+        .get(&device.device_id)
+        .cloned()
+        .ok_or_else(|| failed(format!("device '{}' is not connected", device.device_id)))?;
 
-    Ok(Json(RemoteToolExecutionResponse {
-        output: output.result,
-    }))
-}
-
-pub struct TransportBackedDeviceHandle {
-    pub base_url: String,
-    pub join_handle: JoinHandle<()>,
-}
-
-pub async fn spawn_transport_backed_device(
-    kind: DeviceKind,
-    dispatcher: ToolDispatcher,
-    workspace_root: PathBuf,
-    shared_token: String,
-) -> TransportBackedDeviceHandle {
-    let capabilities = dispatcher
-        .registry()
-        .list()
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    let state = TransportBackedDeviceState {
-        kind,
-        shared_token,
-        dispatcher: Arc::new(dispatcher),
-        capabilities,
-        workspace_roots: vec![workspace_root],
-    };
-    let router = Router::new()
-        .route("/api/device/execute-tool", post(remote_device_execute_tool))
-        .route(
-            "/api/health",
-            get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
-        )
-        .with_state(state);
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test server should bind to an ephemeral port");
-    let addr = listener
-        .local_addr()
-        .expect("test server should expose its local address");
-    let join_handle = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .await
-            .expect("test server should run");
-    });
-
-    TransportBackedDeviceHandle {
-        base_url: format!("http://{addr}"),
-        join_handle,
-    }
-}
-
-pub async fn spawn_attached_device(
-    dispatcher: ToolDispatcher,
-    workspace_root: PathBuf,
-    shared_token: String,
-) -> TransportBackedDeviceHandle {
-    spawn_transport_backed_device(
-        DeviceKind::AttachedDevice,
-        dispatcher,
-        workspace_root,
-        shared_token,
+    let correlation_id = Uuid::new_v4();
+    let (settle_tx, settle_rx) = oneshot::channel();
+    link.pending
+        .lock()
+        .expect("pending operations lock")
+        .insert(correlation_id, settle_tx);
+    record_device_event(
+        state,
+        &device.device_id,
+        "device_operation_invoked",
+        format!(
+            "Invoked '{tool_name}' on device '{}' (operation {correlation_id})",
+            device.device_id
+        ),
+        serde_json::json!({
+            "correlation_id": correlation_id,
+            "tool_name": tool_name,
+            "session_id": ctx.session_id(),
+            "call_id": ctx.call_id(),
+        }),
     )
-    .await
+    .await;
+
+    let sent = link.outbound.send(GatewayFrame::Operation {
+        correlation_id,
+        tool_name: tool_name.to_string(),
+        params: params.clone(),
+        context: Box::new(serialise_tool_context(ctx)),
+    });
+    if sent.is_err() {
+        link.settle(correlation_id, OperationOutcome::Disconnected);
+        return Err(failed(format!(
+            "device '{}' disconnected before the operation was sent",
+            device.device_id
+        )));
+    }
+
+    // Cancellation is the drop of this future: the guard sends `Cancel`
+    // and records the settlement if nothing settled the operation first.
+    let mut in_flight = InFlightOperation {
+        link: link.clone(),
+        correlation_id,
+        device_id: device.device_id.clone(),
+        storage: Arc::clone(&state.storage),
+        settled: false,
+    };
+    let outcome = settle_rx.await.unwrap_or(OperationOutcome::Disconnected);
+    in_flight.settled = true;
+
+    record_device_event(
+        state,
+        &device.device_id,
+        "device_operation_settled",
+        format!(
+            "Operation {correlation_id} on device '{}' settled: {}",
+            device.device_id,
+            outcome.audit_name()
+        ),
+        serde_json::json!({
+            "correlation_id": correlation_id,
+            "tool_name": tool_name,
+            "outcome": outcome.audit_name(),
+        }),
+    )
+    .await;
+
+    match outcome {
+        OperationOutcome::Result(output) => Ok(output),
+        OperationOutcome::Failure(message) => Err(failed(format!(
+            "device '{}' failed the operation: {message}",
+            device.device_id
+        ))),
+        OperationOutcome::Cancelled => Err(failed(format!(
+            "operation on device '{}' was cancelled",
+            device.device_id
+        ))),
+        OperationOutcome::Disconnected => Err(failed(format!(
+            "device '{}' disconnected before the operation settled",
+            device.device_id
+        ))),
+    }
 }
 
-pub async fn register_attached_device_with_gateway(
-    gateway_url: &str,
-    request: &RegisterDeviceRequest,
-) -> reqwest::Result<()> {
-    Client::new()
-        .post(format!(
-            "{}/api/devices/register",
-            gateway_url.trim_end_matches('/')
-        ))
-        .json(request)
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
+/// An operation awaiting its device. Dropped unsettled — the awaiting turn
+/// was cancelled — it tells the device to stop and records the cancellation.
+struct InFlightOperation {
+    link: DeviceLink,
+    correlation_id: Uuid,
+    device_id: String,
+    storage: Arc<dyn swage_storage::store::Storage>,
+    settled: bool,
+}
+
+impl Drop for InFlightOperation {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let was_pending = self
+            .link
+            .pending
+            .lock()
+            .expect("pending operations lock")
+            .remove(&self.correlation_id)
+            .is_some();
+        if !was_pending {
+            return;
+        }
+        let _ = self.link.outbound.send(GatewayFrame::Cancel {
+            correlation_id: self.correlation_id,
+        });
+        let storage = Arc::clone(&self.storage);
+        let event = NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "device".to_owned(),
+            entity_id: self.device_id.clone(),
+            event_kind: "device_operation_settled".to_owned(),
+            summary: format!(
+                "Operation {} on device '{}' settled: cancelled",
+                self.correlation_id, self.device_id
+            ),
+            metadata: serde_json::json!({
+                "correlation_id": self.correlation_id,
+                "outcome": "cancelled",
+            }),
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) = storage.create_audit_event(event).await {
+                    tracing::warn!(%error, "failed to record a device operation's cancellation");
+                }
+            });
+        }
+    }
+}
+
+async fn record_device_event(
+    state: &AppState,
+    device_id: &str,
+    event_kind: &str,
+    summary: String,
+    metadata: Value,
+) {
+    if let Err(error) = state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "device".to_owned(),
+            entity_id: device_id.to_owned(),
+            event_kind: event_kind.to_owned(),
+            summary,
+            metadata,
+        })
+        .await
+    {
+        tracing::warn!(%device_id, %event_kind, %error, "failed to record a device audit event");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The connection a device dials
+// ---------------------------------------------------------------------------
+
+/// `GET /api/devices/connect` — the socket a device dials. Authentication
+/// is the first frame: a `Hello` whose shared token matches the
+/// registration's secret.
+pub async fn connect_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| serve_device_link(socket, state))
+}
+
+async fn serve_device_link(socket: WebSocket, state: AppState) {
+    let (mut sink, mut stream) = socket.split();
+
+    let hello = match tokio::time::timeout(HELLO_TIMEOUT, next_device_frame(&mut stream)).await {
+        Ok(Some(DeviceFrame::Hello {
+            device_id,
+            shared_token,
+            label,
+            capabilities,
+        })) => (device_id, shared_token, label, capabilities),
+        Ok(Some(_)) => {
+            reject(&mut sink, "the first frame must be a hello").await;
+            return;
+        }
+        Ok(None) => return,
+        Err(_) => {
+            reject(&mut sink, "no hello within the handshake window").await;
+            return;
+        }
+    };
+    let (device_id, shared_token, label, mut capabilities) = hello;
+
+    let device = state.devices.lock().await.devices.get(&device_id).cloned();
+    let Some(device) = device else {
+        reject(
+            &mut sink,
+            &format!("device '{device_id}' is not registered"),
+        )
+        .await;
+        return;
+    };
+    let Some(secret_ref) = device.shared_token_secret_ref.as_deref() else {
+        reject(
+            &mut sink,
+            &format!("device '{device_id}' has no credential"),
+        )
+        .await;
+        return;
+    };
+    let expected = match state.secret_manager.resolve(secret_ref).await {
+        Ok(secret) => secret.value,
+        Err(error) => {
+            tracing::warn!(%device_id, %error, "device credential could not be resolved");
+            reject(&mut sink, "the device's credential could not be resolved").await;
+            return;
+        }
+    };
+    if shared_token != expected {
+        tracing::warn!(%device_id, "device presented an invalid shared token");
+        reject(&mut sink, "invalid shared token").await;
+        return;
+    }
+
+    // Accepted: record what it can run, hold its link, mark it present.
+    capabilities.sort();
+    capabilities.dedup();
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<GatewayFrame>();
+    let link = DeviceLink {
+        link_id: Uuid::new_v4(),
+        outbound: outbound_tx,
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        closed: tokio_util::sync::CancellationToken::new(),
+    };
+    {
+        let mut runtime = state.devices.lock().await;
+        if let Some(registered) = runtime.devices.get_mut(&device_id) {
+            registered.capabilities = capabilities.clone();
+            if label.is_some() {
+                registered.label = label.clone();
+            }
+        }
+        // A device that dials again replaces its earlier link: the old
+        // connection is closed, and its pending operations settle as
+        // disconnected when it unwinds.
+        if let Some(previous) = runtime.links.insert(device_id.clone(), link.clone()) {
+            previous.closed.cancel();
+        }
+    }
+    if let Err(error) = state
+        .storage
+        .set_device_capabilities(&device_id, capabilities.clone())
+        .await
+    {
+        tracing::warn!(%device_id, %error, "failed to record the device's advertised capabilities");
+    }
+    crate::presence::upsert_device_heartbeat(
+        &state,
+        &device_id,
+        label.clone().or(device.label.clone()),
+        STALE_AFTER_SECS,
+    )
+    .await;
+    record_device_event(
+        &state,
+        &device_id,
+        "device_connected",
+        format!(
+            "Device '{device_id}' connected, advertising {} tool(s)",
+            capabilities.len()
+        ),
+        serde_json::json!({ "capabilities": capabilities, "link_id": link.link_id }),
+    )
+    .await;
+
+    let forward = tokio::spawn(async move {
+        while let Some(frame) = outbound_rx.recv().await {
+            let text = match serde_json::to_string(&frame) {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::error!(%error, "failed to serialise a gateway frame");
+                    continue;
+                }
+            };
+            if sink.send(Message::Text(text.into())).await.is_err() {
+                break;
+            }
+        }
+        let _ = sink.send(Message::Close(None)).await;
+    });
+    if link
+        .outbound
+        .send(GatewayFrame::Welcome {
+            device_id: device_id.clone(),
+            heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+        })
+        .is_err()
+    {
+        forward.abort();
+        return;
+    }
+
+    // The gateway going down closes the link: the device's redial loop
+    // finds the restarted gateway and heartbeats resume there.
+    loop {
+        let frame = tokio::select! {
+            _ = state.shutdown_signal.cancelled() => break,
+            _ = link.closed.cancelled() => break,
+            frame = next_device_frame(&mut stream) => match frame {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
+        match frame {
+            DeviceFrame::Heartbeat {} => {
+                crate::presence::upsert_device_heartbeat(
+                    &state,
+                    &device_id,
+                    None,
+                    STALE_AFTER_SECS,
+                )
+                .await;
+            }
+            DeviceFrame::Result {
+                correlation_id,
+                output,
+            } => {
+                link.settle(correlation_id, OperationOutcome::Result(output));
+            }
+            DeviceFrame::Failure {
+                correlation_id,
+                message,
+            } => {
+                link.settle(correlation_id, OperationOutcome::Failure(message));
+            }
+            DeviceFrame::Cancelled { correlation_id } => {
+                link.settle(correlation_id, OperationOutcome::Cancelled);
+            }
+            DeviceFrame::Hello { .. } => {
+                tracing::warn!(%device_id, "ignoring a second hello on an open device connection");
+            }
+        }
+    }
+
+    // The connection ended. Only this link's own entry is removed — a
+    // newer dial from the same device has already replaced it.
+    forward.abort();
+    let still_ours = {
+        let mut runtime = state.devices.lock().await;
+        match runtime.links.get(&device_id) {
+            Some(current) if current.link_id == link.link_id => {
+                runtime.links.remove(&device_id);
+                true
+            }
+            _ => false,
+        }
+    };
+    link.fail_all(OperationOutcome::Disconnected);
+    if still_ours {
+        crate::presence::disconnect_device(&state, &device_id).await;
+    }
+    record_device_event(
+        &state,
+        &device_id,
+        "device_disconnected",
+        format!("Device '{device_id}' disconnected"),
+        serde_json::json!({ "link_id": link.link_id }),
+    )
+    .await;
+}
+
+/// Close a device's connection from the gateway's side and mark it
+/// disconnected. `false` when no such device is registered.
+pub async fn disconnect_device(state: &AppState, device_id: &str) -> bool {
+    let link = {
+        let mut runtime = state.devices.lock().await;
+        if !runtime.devices.contains_key(device_id) {
+            return false;
+        }
+        runtime.links.remove(device_id)
+    };
+    if let Some(link) = link {
+        link.closed.cancel();
+        link.fail_all(OperationOutcome::Disconnected);
+    }
+    crate::presence::disconnect_device(state, device_id).await;
+    true
+}
+
+async fn reject(sink: &mut futures::stream::SplitSink<WebSocket, Message>, message: &str) {
+    if let Ok(text) = serde_json::to_string(&GatewayFrame::Rejected {
+        message: message.to_owned(),
+    }) {
+        let _ = sink.send(Message::Text(text.into())).await;
+    }
+    let _ = sink.send(Message::Close(None)).await;
+}
+
+async fn next_device_frame(
+    stream: &mut futures::stream::SplitStream<WebSocket>,
+) -> Option<DeviceFrame> {
+    loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<DeviceFrame>(&text) {
+                Ok(frame) => return Some(frame),
+                Err(error) => {
+                    tracing::warn!(%error, "ignoring a device frame outside the contract");
+                }
+            },
+            Some(Ok(Message::Close(_))) | None => return None,
+            Some(Ok(_)) => {}
+            Some(Err(error)) => {
+                tracing::warn!(%error, "device connection receive error");
+                return None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use serde_json::json;
-    use std::sync::Arc;
-    use swage_core::ToolError;
+    use crate::state::AppState;
+    use crate::turn::tests::MockProvider;
     use swage_storage::SqliteStorage;
-    use swage_storage::store::DeviceStore;
-    use swage_tool::context::{MockToolContext, UserInfo};
-    use swage_tool::tool::Tool;
-    use uuid::Uuid;
-
-    fn test_secret_manager() -> crate::secret::SecretManager {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        crate::secret::SecretManager::new(storage)
-    }
+    use swage_storage::store::{AuditStore, Storage, TopicStore};
+    use swage_tool::context::MockToolContext;
 
     fn registered_device(device_id: &str, kind: DeviceKind) -> RegisteredDevice {
         RegisteredDevice {
             device_id: device_id.to_string(),
             label: None,
             kind,
-            base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token_secret_ref: Some(
-                "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
-            ),
-            workspace_root: PathBuf::from("/tmp/workspace"),
-            workspace_roots: vec![PathBuf::from("/tmp/workspace")],
-            capabilities: vec!["device_identity".to_string()],
+            shared_token_secret_ref: Some("secret://device".into()),
+            workspace_root: PathBuf::from("/tmp"),
+            workspace_roots: vec![PathBuf::from("/tmp")],
+            capabilities: vec!["device_identity".into()],
             registered_at: Utc::now(),
         }
+    }
+
+    fn state(storage: Arc<SqliteStorage>) -> AppState {
+        AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            storage as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+    }
+
+    /// A link with no socket behind it: the test reads what the gateway
+    /// would send and settles operations as a device would.
+    fn open_link(
+        runtime: &mut DeviceRuntime,
+        device_id: &str,
+    ) -> (DeviceLink, mpsc::UnboundedReceiver<GatewayFrame>) {
+        let (outbound, inbound) = mpsc::unbounded_channel();
+        let link = DeviceLink {
+            link_id: Uuid::new_v4(),
+            outbound,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            closed: tokio_util::sync::CancellationToken::new(),
+        };
+        runtime.links.insert(device_id.to_owned(), link.clone());
+        (link, inbound)
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn remote_registration_rejects_a_local_kind_without_a_producer() {
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
-            Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let state = state(storage);
         let error = register_remote_device(
             &state,
             RegisterDeviceRequest {
-                device_id: "unbacked-local".into(),
+                device_id: "local-a".into(),
                 label: None,
                 kind: "local".into(),
-                base_url: "http://127.0.0.1:1".into(),
-                shared_token_secret_ref: "secret://managed/test".into(),
-                workspace_root: "/workspace".into(),
+                shared_token_secret_ref: "secret://x".into(),
+                workspace_root: "/tmp".into(),
                 workspace_roots: vec![],
-                capabilities: vec![],
             },
         )
         .await
-        .expect_err("remote registration must not create an unbacked local device");
-        assert!(
-            error
-                .to_string()
-                .contains("a local device has no remote producer to register")
-        );
-        assert!(
-            storage.list_devices().await.unwrap().is_empty(),
-            "the shared registration owner must refuse before persistence"
-        );
-    }
-
-    struct ObservingTool;
-
-    #[async_trait]
-    impl Tool for ObservingTool {
-        fn name(&self) -> &str {
-            "observe_context"
-        }
-
-        fn description(&self) -> &str {
-            "Return the tool context observed by the device."
-        }
-
-        fn parameters(&self) -> Value {
-            json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
-        }
-
-        async fn execute(&self, _params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-            Ok(json!({
-                "agent_id": ctx.agent_id(),
-                "session_id": ctx.session_id(),
-                "working_directory": ctx.working_directory(),
-                "allowed_paths": ctx.allowed_paths(),
-                "user_name": ctx.user_info().map(|user| user.name.clone()),
-                "call_id": ctx.call_id(),
-                "turn_id": ctx.turn_id(),
-            }))
-        }
-    }
-
-    #[test]
-    fn context_within_workspace_rejects_outside_allowed_path() {
-        let ctx = MockToolContext {
-            agent_id: "gateway".to_string(),
-            session_id: "session".to_string(),
-            working_directory: PathBuf::from("/tmp/workspace"),
-            allowed_paths: vec![PathBuf::from("/etc")],
-            user_info: None,
-            call_id: None,
-            turn_id: None,
-        };
-        assert!(!context_within_workspaces(
-            &ctx,
-            &[PathBuf::from("/tmp/workspace")]
-        ));
-    }
-
-    #[test]
-    fn context_within_workspaces_accepts_advertised_attachment_root() {
-        let ctx = MockToolContext {
-            agent_id: "gateway".to_string(),
-            session_id: "session".to_string(),
-            working_directory: PathBuf::from("/tmp/workspace"),
-            allowed_paths: vec![PathBuf::from("/mnt/shared")],
-            user_info: None,
-            call_id: None,
-            turn_id: None,
-        };
-        assert!(context_within_workspaces(
-            &ctx,
-            &[
-                PathBuf::from("/tmp/workspace"),
-                PathBuf::from("/mnt/shared")
-            ]
-        ));
+        .expect_err("local kind is refused");
+        assert!(error.to_string().contains("no remote producer"));
+        assert!(list_devices(&state).await.devices.is_empty());
     }
 
     #[test]
     fn select_device_prefers_metadata_backend_kind() {
-        let devices = HashMap::from([
-            (
-                "local".to_string(),
-                registered_device("local", DeviceKind::Local),
-            ),
-            (
-                "docker-a".to_string(),
-                registered_device("docker-a", DeviceKind::Docker),
-            ),
-            (
-                "ssh-a".to_string(),
-                registered_device("ssh-a", DeviceKind::Ssh),
-            ),
-        ]);
-
-        let selected = select_device(
-            &devices,
-            Some(&serde_json::json!({"execution_backend": "ssh"})),
-        )
-        .expect("device should resolve");
-
-        assert_eq!(selected.device_id, "ssh-a");
-    }
-
-    #[test]
-    fn select_device_prefers_explicit_device_id_over_backend_kind() {
-        let devices = HashMap::from([
-            (
-                "local".to_string(),
-                registered_device("local", DeviceKind::Local),
-            ),
-            (
-                "docker-a".to_string(),
-                registered_device("docker-a", DeviceKind::Docker),
-            ),
-            (
-                "ssh-a".to_string(),
-                registered_device("ssh-a", DeviceKind::Ssh),
-            ),
-        ]);
-
-        let selected = select_device(
-            &devices,
-            Some(&serde_json::json!({
-                "device_id": "docker-a",
-                "execution_backend": "ssh"
-            })),
-        )
-        .expect("device should resolve");
-
+        let mut devices = HashMap::new();
+        devices.insert(
+            "ssh-b".to_string(),
+            registered_device("ssh-b", DeviceKind::Ssh),
+        );
+        devices.insert(
+            "docker-a".to_string(),
+            registered_device("docker-a", DeviceKind::Docker),
+        );
+        let metadata = serde_json::json!({ "execution_backend": "docker" });
+        let selected = select_device(&devices, Some(&metadata)).expect("device");
         assert_eq!(selected.device_id, "docker-a");
     }
 
     #[test]
+    fn select_device_prefers_explicit_device_id_over_backend_kind() {
+        let mut devices = HashMap::new();
+        devices.insert(
+            "ssh-b".to_string(),
+            registered_device("ssh-b", DeviceKind::Ssh),
+        );
+        devices.insert(
+            "docker-a".to_string(),
+            registered_device("docker-a", DeviceKind::Docker),
+        );
+        let metadata = serde_json::json!({ "device_id": "ssh-b", "execution_backend": "docker" });
+        assert_eq!(
+            select_device(&devices, Some(&metadata))
+                .expect("device")
+                .device_id,
+            "ssh-b"
+        );
+    }
+
+    #[test]
     fn select_device_leaves_local_turns_unrouted_when_only_remote_devices_exist() {
-        let devices = HashMap::from([(
-            "ssh-a".to_string(),
-            registered_device("ssh-a", DeviceKind::Ssh),
-        )]);
-
+        let mut devices = HashMap::new();
+        devices.insert(
+            "docker-a".to_string(),
+            registered_device("docker-a", DeviceKind::Docker),
+        );
         assert!(select_device(&devices, None).is_none());
-        assert!(
-            select_device(
-                &devices,
-                Some(&serde_json::json!({"execution_backend": "local"})),
-            )
-            .is_none()
-        );
-        assert!(
-            select_device(&devices, Some(&serde_json::json!({"device_id": "local"})),).is_none()
-        );
+        assert!(select_device(&devices, Some(&serde_json::json!({}))).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn execute_on_remote_device_rejects_unadvertised_tool_before_network_call() {
-        let device = RegisteredDevice {
-            device_id: "remote-a".to_string(),
-            label: None,
-            kind: DeviceKind::AttachedDevice,
-            base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token_secret_ref: Some(
-                "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
-            ),
-            workspace_root: PathBuf::from("/tmp/workspace"),
-            workspace_roots: vec![PathBuf::from("/tmp/workspace")],
-            capabilities: vec!["echo".to_string()],
-            registered_at: Utc::now(),
-        };
-        let ctx = MockToolContext {
-            agent_id: "gateway".to_string(),
-            session_id: "session".to_string(),
-            working_directory: PathBuf::from("/tmp/workspace"),
-            allowed_paths: vec![PathBuf::from("/tmp/workspace")],
-            user_info: None,
-            call_id: None,
-            turn_id: None,
-        };
+    async fn execution_refuses_before_the_link_what_the_device_did_not_advertise_or_cannot_reach() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let state = state(Arc::clone(&storage));
+        let device = registered_device("docker-a", DeviceKind::Docker);
+        let (_link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
+        let ctx = MockToolContext::new("gateway", "session");
 
-        let secret_manager = test_secret_manager();
-        let error = execute_on_remote_device(
-            &secret_manager,
+        let unadvertised =
+            execute_on_remote_device(&state, &device, "shell", &serde_json::json!({}), &ctx)
+                .await
+                .expect_err("unadvertised tool");
+        assert!(
+            unadvertised
+                .to_string()
+                .contains("does not expose tool 'shell'")
+        );
+
+        let mut outside = MockToolContext::new("gateway", "session");
+        outside.working_directory = PathBuf::from("/");
+        let escaped = execute_on_remote_device(
+            &state,
             &device,
-            "shell",
+            "device_identity",
+            &serde_json::json!({}),
+            &outside,
+        )
+        .await
+        .expect_err("context outside the workspace");
+        assert!(escaped.to_string().contains("escapes device workspace"));
+
+        assert!(inbound.try_recv().is_err(), "nothing reached the link");
+        assert!(
+            storage.list_audit_events().await.expect("audit").is_empty(),
+            "a refused operation is not an invocation"
+        );
+
+        let unconnected = registered_device("docker-b", DeviceKind::Docker);
+        let not_connected = execute_on_remote_device(
+            &state,
+            &unconnected,
+            "device_identity",
             &serde_json::json!({}),
             &ctx,
         )
         .await
-        .expect_err("unadvertised tool should be rejected");
-        assert!(error.to_string().contains("does not expose tool 'shell'"));
+        .expect_err("device without a link");
+        assert!(not_connected.to_string().contains("is not connected"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn execute_on_remote_device_rejects_context_outside_workspace_before_network_call() {
-        let device = RegisteredDevice {
-            device_id: "remote-a".to_string(),
-            label: None,
-            kind: DeviceKind::AttachedDevice,
-            base_url: Some("http://127.0.0.1:1".to_string()),
-            shared_token_secret_ref: Some(
-                "secret://managed/00000000-0000-0000-0000-000000000001".to_string(),
-            ),
-            workspace_root: PathBuf::from("/tmp/workspace"),
-            workspace_roots: vec![PathBuf::from("/tmp/workspace")],
-            capabilities: vec!["shell".to_string()],
-            registered_at: Utc::now(),
+    async fn an_operation_travels_the_link_with_one_correlation_id_and_settles_into_the_audit_trail()
+     {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let state = state(Arc::clone(&storage));
+        let device = registered_device("docker-a", DeviceKind::Docker);
+        let (link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
+        let ctx = MockToolContext::new("gateway", "session");
+
+        let invocation = tokio::spawn({
+            let state = state.clone();
+            let device = device.clone();
+            async move {
+                execute_on_remote_device(
+                    &state,
+                    &device,
+                    "device_identity",
+                    &serde_json::json!({ "n": 1 }),
+                    &MockToolContext::new("gateway", "session"),
+                )
+                .await
+            }
+        });
+        let frame = inbound.recv().await.expect("operation frame");
+        let GatewayFrame::Operation {
+            correlation_id,
+            tool_name,
+            params,
+            context,
+        } = frame
+        else {
+            panic!("expected an operation frame");
         };
-        let ctx = MockToolContext {
-            agent_id: "gateway".to_string(),
-            session_id: "session".to_string(),
-            working_directory: PathBuf::from("/tmp/workspace"),
-            allowed_paths: vec![PathBuf::from("/etc")],
-            user_info: None,
-            call_id: None,
-            turn_id: None,
-        };
+        assert_eq!(tool_name, "device_identity");
+        assert_eq!(params, serde_json::json!({ "n": 1 }));
+        assert_eq!(context.session_id, ctx.session_id());
 
-        let secret_manager = test_secret_manager();
-        let error = execute_on_remote_device(
-            &secret_manager,
-            &device,
-            "shell",
-            &serde_json::json!({}),
-            &ctx,
-        )
-        .await
-        .expect_err("out-of-root context should be rejected");
-        assert!(error.to_string().contains("escapes device workspace"));
-    }
+        assert!(link.settle(
+            correlation_id,
+            OperationOutcome::Result(serde_json::json!({ "device": "docker-a" }))
+        ));
+        let output = invocation.await.expect("join").expect("result");
+        assert_eq!(output["device"], "docker-a");
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn execute_on_remote_device_preserves_tool_context_across_transport() {
-        let workspace = tempfile::TempDir::new().expect("workspace root");
-        let workspace_root = workspace.path().to_path_buf();
-        let handle = spawn_attached_device(
-            ToolDispatcher::allow_all(vec![Arc::new(ObservingTool) as Arc<dyn Tool>]),
-            workspace_root.clone(),
-            "shared-token".to_string(),
-        )
-        .await;
-
-        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let secret_manager = crate::secret::SecretManager::new(
-            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        // The listing is newest-first; read it in the order things happened.
+        let mut events = storage.list_audit_events().await.expect("audit");
+        events.sort_by_key(|event| event.created_at);
+        let kinds = events
+            .iter()
+            .map(|event| event.event_kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            ["device_operation_invoked", "device_operation_settled"]
         );
-        let token_variable = format!("SWAGE_TEST_DEVICE_TOKEN_{}", Uuid::new_v4().simple());
-        unsafe { std::env::set_var(&token_variable, "shared-token") };
-        let secret = secret_manager
-            .create_secret(crate::secret::CreateSecretRequest {
-                name: "Device token".into(),
-                material_kind: "plugin_secret".into(),
-                owner_kind: "service".into(),
-                backend_kind: "env".into(),
-                scope_kind: "plugin".into(),
-                scope_id: Some("device".into()),
-                metadata: None,
-                value: None,
-                external_reference: Some(token_variable.clone()),
-            })
+        assert!(events.iter().all(|event| {
+            event.entity_id == "docker-a"
+                && event.metadata["correlation_id"] == serde_json::json!(correlation_id)
+        }));
+        assert_eq!(events[1].metadata["outcome"], "result");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_an_unsettled_operation_cancels_it_on_the_device_and_records_it() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let state = state(Arc::clone(&storage));
+        let device = registered_device("docker-a", DeviceKind::Docker);
+        let (link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
+
+        let invocation = tokio::spawn({
+            let state = state.clone();
+            let device = device.clone();
+            async move {
+                execute_on_remote_device(
+                    &state,
+                    &device,
+                    "device_identity",
+                    &serde_json::json!({}),
+                    &MockToolContext::new("gateway", "session"),
+                )
+                .await
+            }
+        });
+        let Some(GatewayFrame::Operation { correlation_id, .. }) = inbound.recv().await else {
+            panic!("expected an operation frame");
+        };
+
+        // The turn is cancelled: its future is dropped mid-await.
+        invocation.abort();
+        let cancel = tokio::time::timeout(Duration::from_secs(2), inbound.recv())
             .await
-            .unwrap();
+            .expect("a cancel frame in time")
+            .expect("frame");
+        assert_eq!(cancel, GatewayFrame::Cancel { correlation_id });
+        assert!(
+            link.pending.lock().expect("lock").is_empty(),
+            "the cancelled operation no longer waits"
+        );
 
-        let turn_id = Uuid::new_v4();
-        let device = RegisteredDevice {
-            device_id: "attached-a".to_string(),
-            label: None,
-            kind: DeviceKind::AttachedDevice,
-            base_url: Some(handle.base_url.clone()),
-            shared_token_secret_ref: Some(secret.reference),
-            workspace_root: workspace_root.clone(),
-            workspace_roots: vec![workspace_root.clone()],
-            capabilities: vec!["observe_context".to_string()],
-            registered_at: Utc::now(),
-        };
-        let ctx = MockToolContext {
-            agent_id: "agent-a".to_string(),
-            session_id: "session-1".to_string(),
-            working_directory: workspace_root.clone(),
-            allowed_paths: vec![workspace_root.clone()],
-            user_info: Some(UserInfo {
-                id: "user-1".into(),
-                name: "Taylor".into(),
-                metadata: HashMap::new(),
-            }),
-            call_id: Some("call-1".to_string()),
-            turn_id: Some(turn_id),
-        };
-
-        let output = execute_on_remote_device(
-            &secret_manager,
-            &device,
-            "observe_context",
-            &json!({}),
-            &ctx,
-        )
+        let settled = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = storage.list_audit_events().await.expect("audit");
+                if let Some(event) = events
+                    .iter()
+                    .find(|event| event.event_kind == "device_operation_settled")
+                {
+                    return event.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
         .await
-        .expect("remote device should execute advertised tool");
-
-        assert_eq!(output["agent_id"], "agent-a");
-        assert_eq!(output["session_id"], "session-1");
+        .expect("the cancellation is recorded");
+        assert_eq!(settled.metadata["outcome"], "cancelled");
         assert_eq!(
-            output["working_directory"],
-            workspace_root.to_string_lossy().to_string()
+            settled.metadata["correlation_id"],
+            serde_json::json!(correlation_id)
         );
-        assert_eq!(
-            output["allowed_paths"][0],
-            workspace_root.to_string_lossy().to_string()
-        );
-        assert_eq!(output["user_name"], "Taylor");
-        assert_eq!(output["call_id"], "call-1");
-        assert_eq!(output["turn_id"], turn_id.to_string());
+    }
 
-        handle.join_handle.abort();
-        unsafe { std::env::remove_var(token_variable) };
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disconnecting_a_device_fails_its_pending_operations_as_disconnected() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let state = state(storage);
+        let device = registered_device("docker-a", DeviceKind::Docker);
+        let (_link, mut inbound) = {
+            let mut runtime = state.devices.lock().await;
+            runtime
+                .devices
+                .insert(device.device_id.clone(), device.clone());
+            open_link(&mut runtime, "docker-a")
+        };
+
+        let invocation = tokio::spawn({
+            let state = state.clone();
+            let device = device.clone();
+            async move {
+                execute_on_remote_device(
+                    &state,
+                    &device,
+                    "device_identity",
+                    &serde_json::json!({}),
+                    &MockToolContext::new("gateway", "session"),
+                )
+                .await
+            }
+        });
+        let _ = inbound.recv().await.expect("operation frame");
+        assert!(disconnect_device(&state, "docker-a").await);
+        assert!(state.devices.lock().await.links.is_empty());
+        let error = invocation.await.expect("join").expect_err("disconnected");
+        assert!(error.to_string().contains("disconnected"));
+        assert!(!disconnect_device(&state, "unknown").await);
     }
 }

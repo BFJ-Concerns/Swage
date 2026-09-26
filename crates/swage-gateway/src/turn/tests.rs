@@ -2475,7 +2475,6 @@ impl DeviceStore for MockStorage {
             device_id: device.device_id,
             label: device.label,
             kind: device.kind,
-            base_url: device.base_url,
             shared_token: device.shared_token,
             workspace_root: device.workspace_root,
             workspace_roots: device.workspace_roots,
@@ -2499,6 +2498,10 @@ impl DeviceStore for MockStorage {
                 .then_with(|| left.device_id.cmp(&right.device_id))
         });
         Ok(devices)
+    }
+
+    async fn set_device_capabilities(&self, _: &str, _: Vec<String>) -> Result<bool, StorageError> {
+        Ok(false)
     }
 
     async fn delete_device(&self, device_id: &str) -> Result<bool, StorageError> {
@@ -13202,7 +13205,6 @@ fn registered_remote_host(
         device_id: "device-a".into(),
         label: None,
         kind: crate::device::DeviceKind::AttachedDevice,
-        base_url: Some("http://127.0.0.1:32001".into()),
         shared_token_secret_ref: Some("secret://device/device-a".into()),
         workspace_root: workspace_roots
             .first()

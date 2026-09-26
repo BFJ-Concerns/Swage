@@ -56,16 +56,6 @@ pub struct PresenceSnapshotResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
-pub struct DeviceHeartbeatRequest {
-    pub device_id: String,
-    pub label: Option<String>,
-    #[serde(default = "default_device_stale_after_secs")]
-    #[ts(optional, as = "Option<f64>")]
-    pub stale_after_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(optional_fields = nullable)]
 pub struct ApprovalSummary {
     pub id: Uuid,
     pub turn_id: Uuid,
@@ -133,7 +123,6 @@ pub struct OperatorDeviceSummary {
     pub device_id: String,
     pub label: Option<String>,
     pub kind: String,
-    pub base_url: Option<String>,
     pub workspace_root: String,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
@@ -324,10 +313,6 @@ pub struct AgentDefinitionMutationResponse {
     pub summary: String,
 }
 
-fn default_device_stale_after_secs() -> u64 {
-    30
-}
-
 /// Result of regenerating a topic's knowledge-base browse mirror — a
 /// disposable markdown projection of the database-authoritative store.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -342,7 +327,6 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[allow(dead_code)]
 pub struct HostingSurface {
     presence: PresenceSnapshotResponse,
-    heartbeat: DeviceHeartbeatRequest,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
     operator_overview: OperatorOverviewResponse,

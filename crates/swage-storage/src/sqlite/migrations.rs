@@ -970,12 +970,12 @@ const COMPLETE_SCHEMA: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_topics_single_general
         ON topics(is_general) WHERE is_general = 1;
 
-    -- Devices: local or paired devices available for tool execution.
+    -- Devices: paired devices that dial in to run tool operations. The
+    -- capabilities are what the device last advertised on connecting.
     CREATE TABLE IF NOT EXISTS devices (
         device_id              TEXT NOT NULL PRIMARY KEY,
         label                TEXT,
         kind                 TEXT NOT NULL,
-        base_url             TEXT NOT NULL,
         shared_token         TEXT NOT NULL,
         workspace_root       TEXT NOT NULL,
         workspace_roots_json TEXT NOT NULL DEFAULT '[]',

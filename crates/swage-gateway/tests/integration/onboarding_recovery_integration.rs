@@ -14,10 +14,8 @@ use swage_core::{
     CompletionRequest, CompletionResponse, ProviderError, StreamChunk, ToolCompletionRequest,
     ToolCompletionResponse, ToolError,
 };
-use swage_gateway::{
-    device::spawn_attached_device, secret::CreateSecretRequest, server::build_router,
-    state::AppState,
-};
+use swage_device::DeviceConnection;
+use swage_gateway::{secret::CreateSecretRequest, server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
@@ -25,6 +23,7 @@ use swage_storage::{
 };
 use swage_tool::context::MockToolContext;
 use swage_tool::tool::Tool;
+use tokio_util::sync::CancellationToken;
 
 use crate::support::{ProcessEnvGuard, start_live_server};
 
@@ -218,17 +217,6 @@ async fn channel_onboarding_pairs_device_and_delivers_first_message() {
     let (addr, state) = start_test_server(None, provider, dispatcher).await;
     let shared_token_secret_ref = create_secret_ref(&state, "Pair token", "pair-secret").await;
 
-    let device_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "paired-device",
-        }) as Arc<dyn Tool>]);
-    let device = spawn_attached_device(
-        device_dispatcher,
-        workspace.path().to_path_buf(),
-        "pair-secret".to_string(),
-    )
-    .await;
-
     let (pair_status, pair_body) =
         post_json(addr, "/api/onboarding/devices/pairing-codes", json!({})).await;
     assert_eq!(pair_status, StatusCode::CREATED);
@@ -241,10 +229,8 @@ async fn channel_onboarding_pairs_device_and_delivers_first_message() {
             "device_id": "paired-device-a",
             "label": "Paired Device A",
             "kind": "attached_device",
-            "base_url": device.base_url,
             "shared_token_secret_ref": shared_token_secret_ref,
-            "workspace_root": workspace.path().to_string_lossy(),
-            "capabilities": ["device_identity"]
+            "workspace_root": workspace.path().to_string_lossy()
         }),
     )
     .await;
@@ -300,8 +286,6 @@ async fn channel_onboarding_pairs_device_and_delivers_first_message() {
             .any(|device| device["device_id"] == "paired-device-a"),
         "paired device should be present after redeeming a pairing code: {devices_body:?}"
     );
-
-    device.join_handle.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -323,17 +307,6 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     let recovery_secret_ref =
         create_secret_ref(&origin_state, "Recovery token", "recovery-secret").await;
 
-    let device_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "recovery-device",
-        }) as Arc<dyn Tool>]);
-    let device = spawn_attached_device(
-        device_dispatcher,
-        device_workspace.path().to_path_buf(),
-        "recovery-secret".to_string(),
-    )
-    .await;
-
     let (_, pair_body) = post_json(
         origin_addr,
         "/api/onboarding/devices/pairing-codes",
@@ -348,10 +321,8 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
             "device_id": "recovery-device-a",
             "label": "Recovery Device A",
             "kind": "attached_device",
-            "base_url": device.base_url,
             "shared_token_secret_ref": recovery_secret_ref,
-            "workspace_root": device_workspace.path().to_string_lossy(),
-            "capabilities": ["device_identity"]
+            "workspace_root": device_workspace.path().to_string_lossy()
         }),
     )
     .await;
@@ -427,8 +398,6 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         schedules_body["schedules"][0]["session"]["policy"],
         "continuation"
     );
-
-    device.join_handle.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -449,17 +418,6 @@ async fn recovery_bundle_restores_service_after_installation_move() {
         start_test_server(Some(&origin_db), origin_provider, origin_dispatcher).await;
     let moved_secret_ref = create_secret_ref(&origin_state, "Moved token", "moved-secret").await;
 
-    let device_dispatcher =
-        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(DeviceIdentityTool {
-            marker: "moved-device",
-        }) as Arc<dyn Tool>]);
-    let device = spawn_attached_device(
-        device_dispatcher,
-        device_workspace.path().to_path_buf(),
-        "moved-secret".to_string(),
-    )
-    .await;
-
     let (_, pair_body) = post_json(
         origin_addr,
         "/api/onboarding/devices/pairing-codes",
@@ -474,10 +432,8 @@ async fn recovery_bundle_restores_service_after_installation_move() {
             "device_id": "moved-device-a",
             "label": "Moved Device A",
             "kind": "attached_device",
-            "base_url": device.base_url,
             "shared_token_secret_ref": moved_secret_ref,
-            "workspace_root": device_workspace.path().to_string_lossy(),
-            "capabilities": ["device_identity"]
+            "workspace_root": device_workspace.path().to_string_lossy()
         }),
     )
     .await;
@@ -541,6 +497,41 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     assert_eq!(inbound_status, StatusCode::ACCEPTED);
     assert_eq!(inbound_body["response"], "restored channel reply");
 
+    // The moved device dials the restored gateway with the credential the
+    // import carried across, and serves it.
+    let device = Arc::new(DeviceConnection {
+        gateway_url: format!("http://{destination_addr}"),
+        device_id: "moved-device-a".into(),
+        shared_token: "moved-secret".into(),
+        label: None,
+        dispatcher: Arc::new(swage_gateway::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(DeviceIdentityTool {
+                marker: "moved-device",
+            }) as Arc<dyn Tool>,
+        ])),
+        workspace_roots: vec![device_workspace.path().to_path_buf()],
+        reconnect_delay: std::time::Duration::from_millis(100),
+    });
+    let device_shutdown = CancellationToken::new();
+    let _device_task = tokio::spawn(Arc::clone(&device).run(device_shutdown.clone()));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let (_, presence) = get_json(destination_addr, "/api/presence").await;
+        let connected = presence["devices"].as_array().is_some_and(|devices| {
+            devices.iter().any(|device| {
+                device["device_id"] == "moved-device-a" && device["state"] == "connected"
+            })
+        });
+        if connected {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "moved device never connected: {presence:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
     let resolved_device = swage_gateway::device::resolve_device(
         &destination_state,
         Some(&json!({ "device_id": "moved-device-a" })),
@@ -550,7 +541,7 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     let mut ctx = MockToolContext::new("gateway", "recovery-session");
     ctx.working_directory = device_workspace.path().to_path_buf();
     let tool_result = swage_gateway::device::execute_on_remote_device(
-        &destination_state.secret_manager,
+        &destination_state,
         &resolved_device,
         "device_identity",
         &json!({}),
@@ -560,5 +551,5 @@ async fn recovery_bundle_restores_service_after_installation_move() {
     .unwrap();
     assert_eq!(tool_result["device"], "moved-device");
 
-    device.join_handle.abort();
+    device_shutdown.cancel();
 }

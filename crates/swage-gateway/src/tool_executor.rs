@@ -218,14 +218,21 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
                 .with_app_state(self.app_state.clone());
 
-        if self
+        if let Some(device) = self
             .device
             .as_ref()
-            .is_some_and(|host| host.kind != crate::device::DeviceKind::Local)
+            .filter(|host| host.kind != crate::device::DeviceKind::Local)
         {
+            let state = self
+                .app_state
+                .as_ref()
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    name: tool_name.to_string(),
+                    message: "device execution needs the live gateway state".to_string(),
+                })?;
             return crate::device::execute_on_remote_device(
-                &self.secret_manager,
-                self.device.as_ref().expect("checked device"),
+                state,
+                device,
                 tool_name,
                 &resolved_params,
                 ctx,

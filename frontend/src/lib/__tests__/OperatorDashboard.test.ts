@@ -83,7 +83,6 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
         device_id: "docker-a",
         label: "Build device",
         kind: "docker",
-        base_url: "http://127.0.0.1:4100",
         workspace_root: "/srv/work",
         capabilities: ["shell"],
         registered_at: "2026-04-07T12:00:00Z",

@@ -142,7 +142,6 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkerIsolation::export_all(&cfg).expect("export worker isolation");
     client::skill::SkillListResponse::export_all(&cfg).expect("export skill catalogue");
     hosting::PresenceSnapshotResponse::export_all(&cfg).expect("export hosting presence");
-    hosting::DeviceHeartbeatRequest::export_all(&cfg).expect("export hosting heartbeat");
     hosting::ApprovalListResponse::export_all(&cfg).expect("export hosting approvals");
     hosting::ApprovalDecisionRequest::export_all(&cfg).expect("export hosting approval decision");
     hosting::OperatorOverviewResponse::export_all(&cfg).expect("export operator overview");
@@ -161,9 +160,8 @@ fn typescript_bindings_are_regenerated() {
         .expect("export knowledge mirror regenerate");
     device::RegisterDeviceRequest::export_all(&cfg).expect("export device registration");
     device::DeviceListResponse::export_all(&cfg).expect("export device list");
-    device::RemoteToolExecutionRequest::export_all(&cfg).expect("export device execution");
-    device::RemoteToolExecutionResponse::export_all(&cfg)
-        .expect("export device execution response");
+    device::DeviceFrame::export_all(&cfg).expect("export device frames");
+    device::GatewayFrame::export_all(&cfg).expect("export gateway frames");
     channel::DevDmInboundRequest::export_all(&cfg).expect("export direct-message inbound");
     channel::DevThreadInboundRequest::export_all(&cfg).expect("export thread inbound");
     channel::ChannelInboundResponse::export_all(&cfg).expect("export channel response");

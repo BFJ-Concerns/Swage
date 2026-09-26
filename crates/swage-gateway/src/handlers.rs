@@ -50,7 +50,7 @@ use crate::{
         RecoveryExportListResponse, RedeemDevicePairingRequest,
     },
     operator::OperatorOverviewResponse,
-    presence::{DeviceHeartbeatRequest, PresenceSnapshotResponse},
+    presence::PresenceSnapshotResponse,
     secret::{
         CreateSecretRequest, GenerateSecretRequest, RotateSecretRequest, SecretListResponse,
         SecretResponse, SecretValidationResponse,
@@ -858,21 +858,13 @@ pub async fn presence_snapshot(State(state): State<AppState>) -> Json<PresenceSn
     Json(crate::presence::snapshot_presence(&state).await)
 }
 
-/// `POST /api/presence/devices/heartbeat` — register or refresh a device heartbeat.
-pub async fn device_heartbeat(
-    State(state): State<AppState>,
-    Json(req): Json<DeviceHeartbeatRequest>,
-) -> StatusCode {
-    crate::presence::upsert_device_heartbeat(&state, req).await;
-    StatusCode::ACCEPTED
-}
-
-/// `DELETE /api/presence/devices/:id` — mark a device disconnected.
+/// `DELETE /api/presence/devices/:id` — close a device's connection from
+/// the gateway's side and mark it disconnected.
 pub async fn disconnect_device(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    if crate::presence::disconnect_device(&state, &id).await {
+    if crate::device::disconnect_device(&state, &id).await {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found_str("device", &id))
@@ -894,11 +886,6 @@ pub async fn register_device(
             "device id must not be empty".to_string(),
         ));
     }
-    if request.base_url.trim().is_empty() {
-        return Err(ApiError::validation(
-            "device base_url must not be empty".to_string(),
-        ));
-    }
     if request.shared_token_secret_ref.trim().is_empty() {
         return Err(ApiError::validation(
             "device shared_token_secret_ref must not be empty".to_string(),
@@ -908,20 +895,7 @@ pub async fn register_device(
     let device = crate::device::register_remote_device(&state, request).await?;
     Ok((
         StatusCode::CREATED,
-        Json(DeviceResponse {
-            device_id: device.device_id,
-            label: device.label,
-            kind: device.kind.to_string(),
-            base_url: device.base_url,
-            workspace_root: device.workspace_root.to_string_lossy().into_owned(),
-            workspace_roots: device
-                .workspace_roots
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            capabilities: device.capabilities,
-            registered_at: device.registered_at,
-        }),
+        Json(crate::device::device_response(device)),
     ))
 }
 

@@ -24,16 +24,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
     let devices = list_devices(state).await;
     let sessions = list_operator_sessions(state).await?;
 
-    let gateway = OperatorGatewaySummary {
-        status: presence.gateway.status.clone(),
-        health: classify_gateway_health(&presence, &channels).to_string(),
-        shutdown_requested: presence.gateway.shutdown_requested,
-        seconds_since_activity: presence.gateway.seconds_since_activity,
-        active_turn_count: presence.gateway.active_turn_count,
-        active_connection_count: presence.gateway.active_connection_count,
-    };
-
-    let devices = devices
+    let devices: Vec<OperatorDeviceSummary> = devices
         .devices
         .into_iter()
         .map(|device| {
@@ -47,18 +38,28 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
                     .label
                     .or_else(|| device_presence.and_then(|record| record.label.clone())),
                 kind: device.kind,
-                base_url: device.base_url,
                 workspace_root: device.workspace_root,
                 capabilities: device.capabilities,
                 registered_at: device.registered_at,
+                // A registered device with no presence record has never
+                // dialled in since the gateway started.
                 state: device_presence
                     .map(|record| record.state.clone())
-                    .unwrap_or_else(|| "connected".to_string()),
+                    .unwrap_or_else(|| "disconnected".to_string()),
                 last_seen_at: device_presence.map(|record| record.last_seen_at),
                 disconnected_at: device_presence.and_then(|record| record.disconnected_at),
             }
         })
         .collect();
+
+    let gateway = OperatorGatewaySummary {
+        status: presence.gateway.status.clone(),
+        health: classify_gateway_health(&presence, &channels, &devices).to_string(),
+        shutdown_requested: presence.gateway.shutdown_requested,
+        seconds_since_activity: presence.gateway.seconds_since_activity,
+        active_turn_count: presence.gateway.active_turn_count,
+        active_connection_count: presence.gateway.active_connection_count,
+    };
 
     Ok(OperatorOverviewResponse {
         gateway,
@@ -70,15 +71,15 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
     })
 }
 
+/// A registered device that is not connected — never dialled in, stale, or
+/// disconnected — degrades the gateway, as does a degraded channel.
 fn classify_gateway_health(
     presence: &crate::presence::PresenceSnapshotResponse,
     channels: &ChannelStatusListResponse,
+    devices: &[OperatorDeviceSummary],
 ) -> &'static str {
     if presence.gateway.shutdown_requested
-        || presence
-            .devices
-            .iter()
-            .any(|device| device.state != "connected")
+        || devices.iter().any(|device| device.state != "connected")
         || channels
             .channels
             .iter()

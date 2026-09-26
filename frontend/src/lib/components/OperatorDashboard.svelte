@@ -414,7 +414,7 @@
                   />
                 </div>
                 <div class="secondary-line">
-                  {device.kind} · {device.base_url ?? device.workspace_root}
+                  {device.kind} · {device.workspace_root}
                 </div>
               </div>
               <span class="timestamp">

@@ -1,0 +1,26 @@
+[package]
+name = "swage-device"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+swage-protocol = { path = "../swage-protocol" }
+swage-tool = { path = "../swage-tool" }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+futures = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.13", features = ["json"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+async-trait = { workspace = true }
+swage-core = { path = "../swage-core" }
