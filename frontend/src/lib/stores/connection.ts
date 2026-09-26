@@ -20,11 +20,16 @@ export interface ConnectionStore {
   /** Release the selected client if it is not retained by an active stream. */
   deselect?(): void;
   disconnect(): void;
+  /**
+   * Send a message on the conversation's socket. `threadId` names the thread
+   * the turn runs on; absent, the gateway runs it on the root thread.
+   */
   sendMessage(
     conversationId: string,
     content: string,
     selectedModelId?: string | null,
     attachments?: MessageAttachment[],
+    threadId?: string | null,
   ): void;
   cancelTurn(conversationId: string): void;
   onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void;
@@ -152,11 +157,13 @@ export function createConnectionStore(
       content: string,
       selectedModelId?: string | null,
       attachments?: MessageAttachment[],
+      threadId?: string | null,
     ): void {
       clientFor(conversationId).send({
         type: "send_message",
         content,
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(threadId ? { thread_id: threadId } : {}),
         ...(selectedModelId ? { selected_model_id: selectedModelId } : {}),
       });
     },

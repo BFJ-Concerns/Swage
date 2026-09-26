@@ -224,6 +224,12 @@
     get isLoading() {
       return conversationStore.isLoading;
     },
+    get activeThreadId() {
+      return conversationStore.activeThreadId;
+    },
+    get branches() {
+      return conversationStore.branches;
+    },
     loadConversations: (topicId) =>
       conversationStore.loadConversations(topicId),
     selectConversation: selectAndNavigate,
@@ -240,6 +246,9 @@
       conversationStore.appendAssistantMessage(msg, conversationId),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
+    selectThread: (threadId) => conversationStore.selectThread!(threadId),
+    branchFrom: (messageId) => conversationStore.branchFrom!(messageId),
+    abandonActiveBranch: () => conversationStore.abandonActiveBranch!(),
   };
 
   // The streaming store handed to the layout: identical to the base store,

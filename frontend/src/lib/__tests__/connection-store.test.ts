@@ -213,6 +213,21 @@ describe("sendMessage", () => {
     expect(e.disconnect).toHaveBeenCalledOnce();
   });
 
+  it("names the thread on the send_message frame when one is given", () => {
+    const mock = createMockWsClient();
+    const store = createConnectionStore({ wsClientFactory: () => mock });
+
+    store.connectTo("conv-abc");
+    store.sendMessage("conv-abc", "On the branch", null, undefined, "branch-1");
+
+    const events = mock.sentEvents().map((s) => JSON.parse(s));
+    expect(events).toContainEqual({
+      type: "send_message",
+      content: "On the branch",
+      thread_id: "branch-1",
+    });
+  });
+
   it("sends a send_message ClientEvent via the WS client", () => {
     const mock = createMockWsClient();
     const store = createConnectionStore({ wsClientFactory: () => mock });

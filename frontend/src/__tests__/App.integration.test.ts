@@ -124,6 +124,10 @@ vi.mock("../lib/api/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
+  listBranches: vi.fn(),
+  createBranch: vi.fn(),
+  getThread: vi.fn(),
+  abandonThread: vi.fn(),
 }));
 
 vi.mock("../lib/api/agent-definitions", () => ({
@@ -388,6 +392,9 @@ describe("App", () => {
     localStorage.clear();
     vi.mocked(materialsApi.listTopicMaterials).mockResolvedValue([]);
     vi.mocked(materialsApi.listSessionMaterials).mockResolvedValue([]);
+    // Selecting a conversation lists its branches beside its detail; these
+    // journeys run on conversations that have none.
+    vi.mocked(conversationsApi.listBranches).mockResolvedValue([]);
     vi.mocked(
       agentDefinitionsApi.listEffectiveAgentDefinitions,
     ).mockResolvedValue([]);

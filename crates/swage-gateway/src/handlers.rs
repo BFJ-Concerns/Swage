@@ -56,11 +56,12 @@ use crate::{
         SecretResponse, SecretValidationResponse,
     },
     service::{
-        ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationService,
-        ConversationSummary, ConversationThreadDetail, CreateConversationBranchRequest,
-        CreateTopicRequest, CreateWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
-        TopicService, UpdateTopicRequest, UpdateWorkspaceTrustRequest,
-        WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse, WorkspaceAttachmentService,
+        ConversationBranchListResponse, ConversationDetail, ConversationResponse,
+        ConversationService, ConversationSummary, ConversationThreadDetail,
+        CreateConversationBranchRequest, CreateTopicRequest, CreateWorkspaceAttachmentRequest,
+        TopicListResponse, TopicResponse, TopicService, UpdateTopicRequest,
+        UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
+        WorkspaceAttachmentService,
     },
     settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
     state::AppState,
@@ -1174,9 +1175,20 @@ pub async fn create_conversation_branch(
 pub async fn list_conversation_branches(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
-) -> Result<Json<Vec<ConversationBranchResponse>>, ApiError> {
+) -> Result<Json<ConversationBranchListResponse>, ApiError> {
     let svc = ConversationService::new(state.storage, state.topic_store);
     let resp = svc.list_branches(session_id).await?;
+    Ok(Json(resp))
+}
+
+/// `POST /api/threads/:id/abandon` — set a branch aside; it takes no further
+/// turns and keeps its history and lineage.
+pub async fn abandon_thread(
+    State(state): State<AppState>,
+    Path(thread_id): Path<Uuid>,
+) -> Result<Json<ConversationThreadDetail>, ApiError> {
+    let svc = ConversationService::new(state.storage, state.topic_store);
+    let resp = svc.abandon_thread(thread_id).await?;
     Ok(Json(resp))
 }
 

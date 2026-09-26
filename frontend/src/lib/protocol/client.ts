@@ -2,9 +2,13 @@
 // manifest (crates/swage-protocol/src/client/routes.rs). Do not edit:
 // change the manifest and regenerate.
 
+import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
+import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { ConversationDetail } from "./ConversationDetail";
 import type { ConversationListResponse } from "./ConversationListResponse";
 import type { ConversationResponse } from "./ConversationResponse";
+import type { ConversationThreadDetail } from "./ConversationThreadDetail";
+import type { CreateConversationBranchRequest } from "./CreateConversationBranchRequest";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
 import type { CreateSurfaceRequest } from "./CreateSurfaceRequest";
@@ -121,6 +125,26 @@ export async function createTopicSession(topicId: string, body?: CreateConversat
 /** Read a conversation. */
 export async function getConversation(id: string): Promise<ConversationDetail> {
   return request<ConversationDetail>("GET", `/api/conversations/${encodeURIComponent(id)}`);
+}
+
+/** List a conversation's branches: the sibling threads taken from earlier messages. */
+export async function listConversationBranches(id: string): Promise<ConversationBranchListResponse> {
+  return request<ConversationBranchListResponse>("GET", `/api/conversations/${encodeURIComponent(id)}/branches`);
+}
+
+/** Branch a conversation at an earlier message into a sibling thread. */
+export async function createConversationBranch(id: string, body: CreateConversationBranchRequest): Promise<ConversationBranchResponse> {
+  return request<ConversationBranchResponse>("POST", `/api/conversations/${encodeURIComponent(id)}/branches`, body);
+}
+
+/** Read one thread with its messages and, for a branch, its lineage. */
+export async function getThread(id: string): Promise<ConversationThreadDetail> {
+  return request<ConversationThreadDetail>("GET", `/api/threads/${encodeURIComponent(id)}`);
+}
+
+/** Abandon a branch: it keeps its history and lineage but takes no further turns. */
+export async function abandonThread(id: string): Promise<ConversationThreadDetail> {
+  return request<ConversationThreadDetail>("POST", `/api/threads/${encodeURIComponent(id)}/abandon`);
 }
 
 /** Delete a conversation. */

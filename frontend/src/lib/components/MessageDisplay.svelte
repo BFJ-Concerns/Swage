@@ -293,6 +293,16 @@
             {inspectorTarget}
           />
         {/if}
+        {#if message.id !== undefined && store?.branchFrom}
+          <!-- Any recorded message is a point to branch from: the branch
+               carries the history up to here and diverges after it, so
+               exploring an alternative never overwrites this thread. -->
+          <button
+            class="branch-link"
+            aria-label="Branch from this message"
+            onclick={() => store?.branchFrom?.(message.id!)}
+          >Branch from here</button>
+        {/if}
       </div>
     {/each}
 
@@ -358,6 +368,23 @@
 
 
 <style>
+  /* The branch action reads like the context link beside it: a dotted
+     underline in soft ink, no button chrome, so it never competes with the
+     message. */
+  .branch-link {
+    border: none;
+    background: none;
+    padding: 0;
+    margin-top: 4px;
+    align-self: flex-start;
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    cursor: pointer;
+    text-decoration: underline dotted;
+  }
+  .branch-link:hover { color: var(--ink); }
+  .message.user .branch-link { align-self: flex-end; }
+
   /*
     Riso conversation surface. Messages are not bubbles in the design — they
     are short ink-coloured passages prefixed by an uppercased "WHO" label,

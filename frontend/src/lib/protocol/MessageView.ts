@@ -3,7 +3,11 @@ import type { MessageAttachment } from "./MessageAttachment";
 import type { ToolCallView } from "./ToolCallView";
 import type { TurnState } from "./TurnState";
 
-export type MessageView = { thread_id: string, turn_id?: string | null, role: string, content: string,
+export type MessageView = {
+/**
+ * The message's own identity — what a branch is taken from.
+ */
+id: string, thread_id: string, turn_id?: string | null, role: string, content: string,
 /**
  * Content parts recorded beside the text when the message was
  * submitted; absent for text-only messages.

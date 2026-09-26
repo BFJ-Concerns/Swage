@@ -5,6 +5,7 @@
 
 import { fromStore, get, writable, type Writable } from "svelte/store";
 
+import type { MessageAttachment } from "../protocol/MessageAttachment";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 // Approval state surfaced for the ApprovalCard / MessageInput swap.
@@ -86,6 +87,8 @@ export interface StreamingStoreOptions {
    *  assistant turns). */
   conversationStore?: {
     readonly activeConversation?: { id?: string; messages: MessageView[] } | null;
+    /** The thread the composer sends on; null or absent is the root thread. */
+    readonly activeThreadId?: string | null;
     appendOptimisticUserMessage(message: {
       content: string;
       timestamp: string;
@@ -103,7 +106,13 @@ export interface StreamingStoreOptions {
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
-    sendMessage(conversationId: string, content: string, selectedModelId?: string | null): void;
+    sendMessage(
+      conversationId: string,
+      content: string,
+      selectedModelId?: string | null,
+      attachments?: MessageAttachment[],
+      threadId?: string | null,
+    ): void;
     cancelTurn(conversationId: string): void;
     setStreamActive?(conversationId: string, active: boolean): void;
   };
@@ -569,8 +578,12 @@ export function createStreamingStore(
         timestamp: new Date().toISOString(),
       });
 
-      // Dispatch the outgoing message over the WebSocket.
-      if (conversationId) options?.connectionStore?.sendMessage(conversationId, content, selectedModelId);
+      // Dispatch the outgoing message over the WebSocket, on the thread the
+      // person is standing on — a branch, or the root when none is selected.
+      const threadId = options?.conversationStore?.activeThreadId ?? null;
+      if (conversationId) {
+        options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId);
+      }
     },
 
     cancelTurn(): void {

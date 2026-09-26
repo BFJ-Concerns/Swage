@@ -680,11 +680,33 @@
         ],
         "type": "object"
       },
+      "ConversationBranchListResponse": {
+        "properties": {
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationBranchResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "branches"
+        ],
+        "type": "object"
+      },
       "ConversationBranchResponse": {
+        "description": "A branch: a sibling thread that carries its parent's messages up to the\nmessage it was branched from, then diverges.",
         "properties": {
           "branched_from_message_id": {
             "format": "uuid",
             "type": "string"
+          },
+          "branched_from_preview": {
+            "description": "The opening of the message the branch was taken from, so a person\ncan tell branches apart; absent when that message no longer exists.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "child_thread_id": {
             "format": "uuid",
@@ -697,12 +719,17 @@
           "parent_thread_id": {
             "format": "uuid",
             "type": "string"
+          },
+          "state": {
+            "description": "The branch thread's state (`idle`, `processing`, `interrupted`,\n`completed`, `abandoned`).",
+            "type": "string"
           }
         },
         "required": [
           "child_thread_id",
           "parent_thread_id",
           "branched_from_message_id",
+          "state",
           "created_at"
         ],
         "type": "object"
@@ -731,6 +758,11 @@
             },
             "type": "array"
           },
+          "root_thread_id": {
+            "description": "The thread the conversation started on. `messages` are its messages;\na branch's messages are read from `GET /api/threads/{id}`.",
+            "format": "uuid",
+            "type": "string"
+          },
           "selected_model_id": {
             "type": [
               "string",
@@ -751,6 +783,7 @@
           "agent_id",
           "created_at",
           "last_activity",
+          "root_thread_id",
           "messages"
         ],
         "type": "object"
@@ -2119,6 +2152,11 @@
           "content": {
             "type": "string"
           },
+          "id": {
+            "description": "The message's own identity — what a branch is taken from.",
+            "format": "uuid",
+            "type": "string"
+          },
           "role": {
             "type": "string"
           },
@@ -2155,6 +2193,7 @@
           }
         },
         "required": [
+          "id",
           "thread_id",
           "role",
           "content",
@@ -8280,6 +8319,78 @@
         "summary": "Read a conversation."
       }
     },
+    "/api/conversations/{id}/branches": {
+      "get": {
+        "operationId": "list_conversation_branches",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationBranchListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List a conversation's branches: the sibling threads taken from earlier messages."
+      },
+      "post": {
+        "operationId": "create_conversation_branch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConversationBranchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationBranchResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Branch a conversation at an earlier message into a sibling thread."
+      }
+    },
     "/api/docs": {
       "get": {
         "operationId": "list_documents",
@@ -9040,6 +9151,70 @@
           }
         },
         "summary": "Preserve a surface in the shared library with a name, a description of what it does and when to use it, and tags."
+      }
+    },
+    "/api/threads/{id}": {
+      "get": {
+        "operationId": "get_thread",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationThreadDetail"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read one thread with its messages and, for a branch, its lineage."
+      }
+    },
+    "/api/threads/{id}/abandon": {
+      "post": {
+        "operationId": "abandon_thread",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationThreadDetail"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Abandon a branch: it keeps its history and lineage but takes no further turns."
       }
     },
     "/api/topics": {

@@ -87,6 +87,10 @@ fn typescript_bindings_are_regenerated() {
     client::topic::UpdateWorkspaceTrustRequest::export_all(&cfg).expect("export workspace trust");
     client::conversation::CreateConversationBranchRequest::export_all(&cfg)
         .expect("export conversation branch request");
+    client::conversation::ConversationBranchResponse::export_all(&cfg)
+        .expect("export conversation branch");
+    client::conversation::ConversationBranchListResponse::export_all(&cfg)
+        .expect("export conversation branch list");
     client::docs::DocumentListResponse::export_all(&cfg).expect("export document list");
     client::docs::DocumentResponse::export_all(&cfg).expect("export document");
     client::voice::TranscribeAudioResponse::export_all(&cfg)

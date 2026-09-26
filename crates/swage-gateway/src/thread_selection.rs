@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_storage::{Thread, store::Storage};
+use swage_storage::{Thread, model::ThreadState, store::Storage};
 
 /// Resolve the thread a session-scoped operation should target.
 ///
@@ -21,14 +21,20 @@ pub(crate) async fn resolve_thread_for_session(
     }
 
     if let Some(thread_id) = requested_thread_id {
-        return threads
+        let thread = threads
             .into_iter()
             .find(|thread| thread.id == thread_id)
             .ok_or_else(|| {
                 GatewayError::ValidationError(format!(
                     "thread {thread_id} does not belong to conversation {session_id}"
                 ))
-            });
+            })?;
+        if thread.state == ThreadState::Abandoned {
+            return Err(GatewayError::ValidationError(format!(
+                "thread {thread_id} is abandoned and takes no further turns"
+            )));
+        }
+        return Ok(thread);
     }
 
     let child_thread_ids: HashSet<Uuid> = storage

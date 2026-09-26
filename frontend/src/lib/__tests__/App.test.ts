@@ -89,6 +89,10 @@ vi.mock("../api/conversations", () => ({
   getConversation: vi.fn(async (id: string) => detail(id)),
   createConversation: vi.fn(),
   deleteConversation: vi.fn(),
+  listBranches: vi.fn(async () => []),
+  createBranch: vi.fn(),
+  getThread: vi.fn(),
+  abandonThread: vi.fn(),
 }));
 
 vi.mock("../api/sessions", () => ({

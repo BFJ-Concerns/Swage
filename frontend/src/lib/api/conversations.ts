@@ -7,6 +7,8 @@ import type {
   ConversationSummary,
   ConversationDetail,
   ConversationResponse,
+  ConversationBranch,
+  ConversationThreadDetail,
 } from "../types";
 import type { CreateConversationRequest } from "../protocol/CreateConversationRequest";
 import type { Effort } from "../protocol/Effort";
@@ -68,4 +70,38 @@ export async function getConversation(id: string): Promise<ConversationDetail> {
  */
 export async function deleteConversation(id: string): Promise<void> {
   await generated.deleteConversation(id);
+}
+
+// ---------------------------------------------------------------------------
+// Branches — sibling threads taken from an earlier message
+// ---------------------------------------------------------------------------
+
+/** The branches taken within a conversation, oldest first. */
+export async function listBranches(conversationId: string): Promise<ConversationBranch[]> {
+  return (await generated.listConversationBranches(conversationId)).branches;
+}
+
+/**
+ * Branch `threadId` at `fromMessageId`: the new thread carries the messages
+ * up to that one and diverges after it.
+ */
+export async function createBranch(
+  conversationId: string,
+  threadId: string,
+  fromMessageId: string,
+): Promise<ConversationBranch> {
+  return generated.createConversationBranch(conversationId, {
+    thread_id: threadId,
+    from_message_id: fromMessageId,
+  });
+}
+
+/** One thread's messages and, for a branch, its lineage. */
+export async function getThread(threadId: string): Promise<ConversationThreadDetail> {
+  return (await generated.getThread(threadId)) as unknown as ConversationThreadDetail;
+}
+
+/** Set a branch aside: it keeps its history and takes no further turns. */
+export async function abandonThread(threadId: string): Promise<ConversationThreadDetail> {
+  return (await generated.abandonThread(threadId)) as unknown as ConversationThreadDetail;
 }

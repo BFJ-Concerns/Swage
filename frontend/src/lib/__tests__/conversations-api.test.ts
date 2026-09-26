@@ -13,6 +13,10 @@ import {
   createConversation,
   getConversation,
   deleteConversation,
+  listBranches,
+  createBranch,
+  getThread,
+  abandonThread,
   setBaseUrl,
 } from "../api/conversations";
 
@@ -241,5 +245,70 @@ describe("setBaseUrl", () => {
       "http://localhost:3000/api/topics/proj-1/sessions",
       expect.objectContaining({ method: "GET" }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Branches
+// ---------------------------------------------------------------------------
+
+describe("branches", () => {
+  const branch = {
+    child_thread_id: "branch-1",
+    parent_thread_id: "root-1",
+    branched_from_message_id: "msg-1",
+    branched_from_preview: "first",
+    state: "idle",
+    created_at: "2026-01-01T00:00:00Z",
+  };
+
+  it("listBranches reads the conversation's branches", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockResponse({ branches: [branch] }));
+
+    const result = await listBranches("conv-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/conversations/conv-1/branches",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(result).toEqual([branch]);
+  });
+
+  it("createBranch posts the thread and message to branch from", async () => {
+    vi.mocked(fetch).mockResolvedValue(mockResponse(branch, 201));
+
+    const result = await createBranch("conv-1", "root-1", "msg-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/conversations/conv-1/branches",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ thread_id: "root-1", from_message_id: "msg-1" }),
+      }),
+    );
+    expect(result).toEqual(branch);
+  });
+
+  it("getThread reads one thread", async () => {
+    const thread = { id: "branch-1", session_id: "conv-1", agent_id: "gateway", state: "idle", messages: [], branch };
+    vi.mocked(fetch).mockResolvedValue(mockResponse(thread));
+
+    const result = await getThread("branch-1");
+
+    expect(fetch).toHaveBeenCalledWith("/api/threads/branch-1", expect.objectContaining({ method: "GET" }));
+    expect(result).toEqual(thread);
+  });
+
+  it("abandonThread posts to the thread's abandon route", async () => {
+    const thread = { id: "branch-1", session_id: "conv-1", agent_id: "gateway", state: "abandoned", messages: [], branch };
+    vi.mocked(fetch).mockResolvedValue(mockResponse(thread));
+
+    const result = await abandonThread("branch-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/threads/branch-1/abandon",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(result.state).toBe("abandoned");
   });
 });

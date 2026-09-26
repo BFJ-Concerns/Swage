@@ -18,6 +18,8 @@
   import type { ConversationStore } from "../stores/conversations";
   import type { StreamingStore } from "../stores/streaming";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+  import type { ConversationBranch } from "../types";
+  import { relativeTime } from "../utils/relative-time";
 
   interface Props {
     conversationStore: ConversationStore;
@@ -77,6 +79,34 @@
   function cycleSession(id: string): void {
     if (id && id !== activeConversation?.id) conversationStore.selectConversation(id);
   }
+
+  // ---- Threads ---------------------------------------------------------------
+  // The switcher appears once the conversation has a branch: until then the
+  // root thread is the only thread and a control would be noise.
+  const branches = $derived(conversationStore.branches ?? []);
+  const activeThreadId = $derived(conversationStore.activeThreadId ?? null);
+  const activeBranch = $derived(
+    branches.find((branch) => branch.child_thread_id === activeThreadId) ?? null,
+  );
+  const activeBranchAbandoned = $derived(activeBranch?.state === "abandoned");
+
+  let selectedThreadId = $state("");
+  $effect(() => {
+    selectedThreadId = activeThreadId ?? "";
+  });
+
+  function branchLabel(branch: ConversationBranch): string {
+    const from = branch.branched_from_preview
+      ? `Branch from “${branch.branched_from_preview}”`
+      : "Branch";
+    const when = relativeTime(branch.created_at);
+    return branch.state === "abandoned" ? `${from} · ${when} · abandoned` : `${from} · ${when}`;
+  }
+
+  function switchThread(id: string): void {
+    const next = id === "" ? null : id;
+    if (next !== activeThreadId) void conversationStore.selectThread?.(next);
+  }
 </script>
 
 <section aria-label="Conversation">
@@ -101,9 +131,36 @@
     {/if}
     <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.(selectedAgentId || undefined)}>+ New</button>
   </header>
+  {#if activeConversation && branches.length > 0}
+    <!-- Which thread the history and composer show. The root is always
+         first; a branch is named by the message it was taken from, so two
+         branches from different points read apart. -->
+    <div class="thread-bar">
+      <select
+        class="thread-select"
+        aria-label="Active thread"
+        bind:value={selectedThreadId}
+        onchange={(event) => switchThread(event.currentTarget.value)}
+      >
+        <option value="">Main thread</option>
+        {#each branches as branch (branch.child_thread_id)}
+          <option value={branch.child_thread_id}>{branchLabel(branch)}</option>
+        {/each}
+      </select>
+      {#if activeBranch && !activeBranchAbandoned}
+        <button
+          class="abandon-branch"
+          aria-label="Abandon branch"
+          onclick={() => conversationStore.abandonActiveBranch?.()}
+        >Abandon</button>
+      {/if}
+    </div>
+  {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
   <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
-  {#if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
+  {#if activeBranchAbandoned}
+    <p class="thread-notice" role="status">This branch is abandoned — it takes no further messages. Switch to the main thread or another branch to continue.</p>
+  {:else if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
     <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
   {:else}
     <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
@@ -159,4 +216,55 @@
   }
 
   .new-session:hover { color: var(--ink-orange); }
+
+  /* The thread bar sits under the session bar in the same mono register:
+     the switcher fills the line, the abandon control keeps to its end. */
+  .thread-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 22px;
+    border-bottom: 1px dotted var(--rule-soft);
+  }
+
+  .thread-select {
+    flex: 1;
+    min-width: 0;
+    background: var(--paper);
+    border: 1px solid var(--rule-soft);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.4;
+    letter-spacing: 0.08em;
+    padding: 3px 6px;
+  }
+
+  .abandon-branch {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .abandon-branch:hover { color: var(--ink-orange); }
+
+  .thread-notice {
+    margin: 0;
+    padding: 12px 22px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--ink-soft);
+    border-top: 1px dotted var(--rule-soft);
+  }
 </style>

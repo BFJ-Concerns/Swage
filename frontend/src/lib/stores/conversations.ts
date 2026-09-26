@@ -5,7 +5,12 @@
 
 import { fromStore, get, writable } from "svelte/store";
 
-import type { ConversationSummary, ConversationDetail, MessageView } from "../types";
+import type {
+  ConversationBranch,
+  ConversationSummary,
+  ConversationDetail,
+  MessageView,
+} from "../types";
 import * as api from "../api/conversations";
 
 export interface ConversationStore {
@@ -49,6 +54,23 @@ export interface ConversationStore {
   /** Install a fetched snapshot only when its owner is still selected. */
   replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
+
+  // ---- Threads and branches ------------------------------------------------
+  // A conversation starts on its root thread. Branching at an earlier message
+  // opens a sibling thread that carries the history up to that message and
+  // diverges after it; the history and the composer follow whichever thread
+  // is active, and the root is never overwritten by exploring a branch.
+
+  /** The thread the history and composer show; null is the root thread. */
+  readonly activeThreadId?: string | null;
+  /** The active conversation's branches, oldest first. */
+  readonly branches?: ConversationBranch[];
+  /** Show `threadId`'s messages, or the root thread's for null. */
+  selectThread?(threadId: string | null): Promise<void>;
+  /** Branch the active thread at `messageId` and move onto the branch. */
+  branchFrom?(messageId: string): Promise<void>;
+  /** Set the active branch aside and return to the root thread. */
+  abandonActiveBranch?(): Promise<void>;
 }
 
 // Sort conversations by last_activity, newest first.
@@ -65,10 +87,42 @@ export function createConversationStore(): ConversationStore {
   const conversationsStore = writable<ConversationSummary[]>([]);
   const activeConversationStore = writable<ConversationDetail | null>(null);
   const isLoadingStore = writable(false);
+  const activeThreadIdStore = writable<string | null>(null);
+  const branchesStore = writable<ConversationBranch[]>([]);
 
   const conversationsState = fromStore(conversationsStore);
   const activeConversationState = fromStore(activeConversationStore);
   const isLoadingState = fromStore(isLoadingStore);
+  const activeThreadIdState = fromStore(activeThreadIdStore);
+  const branchesState = fromStore(branchesStore);
+
+  // Load a conversation's root view and its branches together, so the
+  // thread switcher never shows a stale set beside a fresh history.
+  async function loadConversationDetail(id: string): Promise<void> {
+    const [detail, branches] = await Promise.all([
+      api.getConversation(id),
+      api.listBranches(id),
+    ]);
+    activeConversationStore.set(detail);
+    activeThreadIdStore.set(null);
+    branchesStore.set(branches);
+  }
+
+  // Show one thread's messages inside the active conversation. The root is
+  // re-read whole (its view is the conversation's); a branch replaces only
+  // the message list, so the conversation's identity and scope stay put.
+  async function showThread(threadId: string | null): Promise<void> {
+    const activeConversation = get(activeConversationStore);
+    if (!activeConversation) return;
+    if (threadId === null) {
+      activeConversationStore.set(await api.getConversation(activeConversation.id));
+      activeThreadIdStore.set(null);
+      return;
+    }
+    const thread = await api.getThread(threadId);
+    activeConversationStore.set({ ...activeConversation, messages: thread.messages });
+    activeThreadIdStore.set(threadId);
+  }
 
   function updateConversationSummary(
     conversationId: string,
@@ -120,11 +174,14 @@ export function createConversationStore(): ConversationStore {
     const ownerId = conversationId ?? activeConversation?.id;
     if (!ownerId) return;
 
+    // A message appended while a branch is active belongs to that branch.
+    const threadId = get(activeThreadIdStore) ?? activeConversation?.root_thread_id;
     const appendedMessage: MessageView = {
       role: message.role,
       content: message.content,
       timestamp: message.timestamp,
       turn_state: message.turn_state,
+      ...(threadId === undefined ? {} : { thread_id: threadId }),
       ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
     };
@@ -163,6 +220,14 @@ export function createConversationStore(): ConversationStore {
       return isLoadingState.current;
     },
 
+    get activeThreadId() {
+      return activeThreadIdState.current;
+    },
+
+    get branches() {
+      return branchesState.current;
+    },
+
     // ---------------------------------------------------------------------------
     // Actions
     // ---------------------------------------------------------------------------
@@ -184,7 +249,7 @@ export function createConversationStore(): ConversationStore {
         // The server is authoritative for an off-screen conversation. Terminal
         // stream events update its summary only; retaining synthetic messages
         // here duplicates partial errors that have no stable turn identity.
-        activeConversationStore.set(await api.getConversation(id));
+        await loadConversationDetail(id);
       } finally {
         isLoadingStore.set(false);
       }
@@ -221,6 +286,8 @@ export function createConversationStore(): ConversationStore {
       // Prepend: the freshly created conversation is the most recent.
       conversationsStore.update((conversations) => [summary, ...conversations]);
       activeConversationStore.set(detail);
+      activeThreadIdStore.set(null);
+      branchesStore.set([]);
     },
 
     async deleteConversation(id) {
@@ -234,15 +301,19 @@ export function createConversationStore(): ConversationStore {
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id === id) {
         if (remaining.length > 0) {
-          activeConversationStore.set(await api.getConversation(remaining[0].id));
+          await loadConversationDetail(remaining[0].id);
         } else {
           activeConversationStore.set(null);
+          activeThreadIdStore.set(null);
+          branchesStore.set([]);
         }
       }
     },
 
     clearActiveConversation() {
       activeConversationStore.set(null);
+      activeThreadIdStore.set(null);
+      branchesStore.set([]);
     },
 
     appendOptimisticUserMessage(message) {
@@ -271,10 +342,51 @@ export function createConversationStore(): ConversationStore {
 
     async refreshActiveConversation() {
       // Called after WebSocket reconnect to reconcile any state changes
-      // that happened while the connection was down.
+      // that happened while the connection was down. A branch in view is
+      // re-read as that thread, so the reconciliation lands on what the
+      // person is looking at.
       const activeConversation = get(activeConversationStore);
       if (!activeConversation) return;
+      const activeThreadId = get(activeThreadIdStore);
+      if (activeThreadId !== null) {
+        const thread = await api.getThread(activeThreadId);
+        if (get(activeConversationStore)?.id === activeConversation.id) {
+          activeConversationStore.set({ ...activeConversation, messages: thread.messages });
+        }
+        return;
+      }
       replaceActiveConversationIfCurrent(await api.getConversation(activeConversation.id));
+    },
+
+    async selectThread(threadId) {
+      await showThread(threadId);
+    },
+
+    async branchFrom(messageId) {
+      const activeConversation = get(activeConversationStore);
+      if (!activeConversation) return;
+      const parentThreadId = get(activeThreadIdStore) ?? activeConversation.root_thread_id;
+      if (parentThreadId === undefined) {
+        // A locally built detail that has not been fetched yet has no root
+        // thread to branch; reading the conversation settles it.
+        await loadConversationDetail(activeConversation.id);
+        return this.branchFrom!(messageId);
+      }
+      const branch = await api.createBranch(activeConversation.id, parentThreadId, messageId);
+      branchesStore.update((branches) => [...branches, branch]);
+      await showThread(branch.child_thread_id);
+    },
+
+    async abandonActiveBranch() {
+      const activeThreadId = get(activeThreadIdStore);
+      if (activeThreadId === null) return;
+      const thread = await api.abandonThread(activeThreadId);
+      branchesStore.update((branches) =>
+        branches.map((branch) =>
+          branch.child_thread_id === activeThreadId ? { ...branch, state: thread.state } : branch,
+        ),
+      );
+      await showThread(null);
     },
   };
 }

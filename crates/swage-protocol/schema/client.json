@@ -19,6 +19,12 @@
     "conversation": {
       "$ref": "#/$defs/ConversationResponse"
     },
+    "conversation_branch": {
+      "$ref": "#/$defs/ConversationBranchResponse"
+    },
+    "conversation_branch_list": {
+      "$ref": "#/$defs/ConversationBranchListResponse"
+    },
     "conversation_detail": {
       "$ref": "#/$defs/ConversationDetail"
     },
@@ -292,6 +298,8 @@
     "recent_sessions",
     "conversation_detail",
     "conversation_thread",
+    "conversation_branch",
+    "conversation_branch_list",
     "document_list",
     "document",
     "turn_context",
@@ -1011,12 +1019,34 @@
         "allowed_fields"
       ]
     },
+    "ConversationBranchListResponse": {
+      "type": "object",
+      "properties": {
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConversationBranchResponse"
+          }
+        }
+      },
+      "required": [
+        "branches"
+      ]
+    },
     "ConversationBranchResponse": {
+      "description": "A branch: a sibling thread that carries its parent's messages up to the\nmessage it was branched from, then diverges.",
       "type": "object",
       "properties": {
         "branched_from_message_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "branched_from_preview": {
+          "description": "The opening of the message the branch was taken from, so a person\ncan tell branches apart; absent when that message no longer exists.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "child_thread_id": {
           "type": "string",
@@ -1029,12 +1059,17 @@
         "parent_thread_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "state": {
+          "description": "The branch thread's state (`idle`, `processing`, `interrupted`,\n`completed`, `abandoned`).",
+          "type": "string"
         }
       },
       "required": [
         "child_thread_id",
         "parent_thread_id",
         "branched_from_message_id",
+        "state",
         "created_at"
       ]
     },
@@ -1063,6 +1098,11 @@
             "$ref": "#/$defs/MessageView"
           }
         },
+        "root_thread_id": {
+          "description": "The thread the conversation started on. `messages` are its messages;\na branch's messages are read from `GET /api/threads/{id}`.",
+          "type": "string",
+          "format": "uuid"
+        },
         "selected_model_id": {
           "type": [
             "string",
@@ -1083,6 +1123,7 @@
         "agent_id",
         "created_at",
         "last_activity",
+        "root_thread_id",
         "messages"
       ]
     },
@@ -2451,6 +2492,11 @@
         "content": {
           "type": "string"
         },
+        "id": {
+          "description": "The message's own identity — what a branch is taken from.",
+          "type": "string",
+          "format": "uuid"
+        },
         "role": {
           "type": "string"
         },
@@ -2487,6 +2533,7 @@
         }
       },
       "required": [
+        "id",
         "thread_id",
         "role",
         "content",

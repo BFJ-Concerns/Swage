@@ -136,6 +136,7 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::list_conversation_branches).post(handlers::create_conversation_branch),
         )
         .route("/api/threads/{id}", get(handlers::get_thread_detail))
+        .route("/api/threads/{id}/abandon", post(handlers::abandon_thread))
         // The platform's own documentation, compiled in and read-only.
         .route("/api/docs", get(shipped_docs::list_documents))
         .route("/api/docs/{name}", get(shipped_docs::get_document))

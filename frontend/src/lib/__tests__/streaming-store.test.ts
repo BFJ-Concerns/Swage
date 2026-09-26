@@ -197,7 +197,32 @@ describe("startTurn", () => {
 
     store.startTurn("Tell me about Svelte");
 
-    expect(conn.sendMessage).toHaveBeenCalledWith("test-conversation", "Tell me about Svelte", undefined);
+    expect(conn.sendMessage).toHaveBeenCalledWith(
+      "test-conversation",
+      "Tell me about Svelte",
+      undefined,
+      undefined,
+      null,
+    );
+  });
+
+  it("sends the turn on the active branch when the conversation store names one", () => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({
+      conversationStore: { ...conv, activeThreadId: "branch-1" },
+      connectionStore: conn,
+    });
+
+    store.startTurn("Try it this way");
+
+    expect(conn.sendMessage).toHaveBeenCalledWith(
+      "test-conversation",
+      "Try it this way",
+      undefined,
+      undefined,
+      "branch-1",
+    );
   });
 
   it("does not throw when no dependencies are injected", () => {
@@ -322,6 +347,8 @@ describe("turn_complete", () => {
       "conv-b",
       "Question for B",
       undefined,
+      undefined,
+      null,
     );
   });
 
@@ -1137,7 +1164,13 @@ describe("withConversationAutoCreate", () => {
     store.startTurn("hello", "model-a");
 
     expect(createConversation).not.toHaveBeenCalled();
-    expect(connection.sendMessage).toHaveBeenCalledWith("test-conversation", "hello", "model-a");
+    expect(connection.sendMessage).toHaveBeenCalledWith(
+      "test-conversation",
+      "hello",
+      "model-a",
+      undefined,
+      null,
+    );
   });
 
   it("creates a conversation first when none is active, then starts the turn", async () => {
@@ -1156,6 +1189,8 @@ describe("withConversationAutoCreate", () => {
         "conv-9",
         "first message",
         "model-a",
+        undefined,
+        null,
       ),
     );
     expect(base.streamFor?.("conv-9").isStreaming).toBe(true);

@@ -102,6 +102,8 @@ import type { ConversationDetail as WireConversationDetail } from "./protocol/Co
 import type { ConversationResponse as WireConversationResponse } from "./protocol/ConversationResponse";
 import type { MessageView as WireMessageView } from "./protocol/MessageView";
 import type { ToolCallView as WireToolCallView } from "./protocol/ToolCallView";
+import type { ConversationThreadDetail as WireConversationThreadDetail } from "./protocol/ConversationThreadDetail";
+export type { ConversationBranchResponse as ConversationBranch } from "./protocol/ConversationBranchResponse";
 
 export type ConversationSummary = Omit<WireConversationSummary, "selected_model_id"> & {
   selected_model_id?: string | null;
@@ -109,11 +111,20 @@ export type ConversationSummary = Omit<WireConversationSummary, "selected_model_
 export type ConversationResponse = Omit<WireConversationResponse, "selected_model_id"> & {
   selected_model_id?: string | null;
 };
-export type ConversationDetail = Omit<WireConversationDetail, "messages" | "selected_model_id"> & {
+export type ConversationDetail = Omit<
+  WireConversationDetail,
+  "messages" | "selected_model_id" | "root_thread_id"
+> & {
   selected_model_id?: string | null;
+  // The thread the detail's messages belong to; a detail built locally for
+  // a just-created conversation learns it on the first fetch.
+  root_thread_id?: string;
   messages: MessageView[];
   input_tokens?: number | null;
   output_tokens?: number | null;
+};
+export type ConversationThreadDetail = Omit<WireConversationThreadDetail, "messages"> & {
+  messages: MessageView[];
 };
 
 export type ToolCallView = Omit<
@@ -130,7 +141,13 @@ export type ToolCallView = Omit<
   sub_calls?: ToolCallView[];
 };
 
-export type MessageView = Omit<WireMessageView, "role" | "tool_calls" | "thread_id" | "turn_id"> & {
+export type MessageView = Omit<
+  WireMessageView,
+  "id" | "role" | "tool_calls" | "thread_id" | "turn_id"
+> & {
+  // Absent on a message appended locally before the gateway has recorded
+  // it; only a recorded message can be branched from.
+  id?: string;
   thread_id?: string;
   turn_id?: string | null;
   role: "user" | "assistant";
