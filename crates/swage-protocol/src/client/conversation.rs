@@ -86,16 +86,34 @@ pub struct ConversationDetail {
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
+    /// The thread the conversation started on. `messages` are its messages;
+    /// a branch's messages are read from `GET /api/threads/{id}`.
+    pub root_thread_id: Uuid,
     pub messages: Vec<MessageView>,
 }
 
+/// A branch: a sibling thread that carries its parent's messages up to the
+/// message it was branched from, then diverges.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct ConversationBranchResponse {
     pub child_thread_id: Uuid,
     pub parent_thread_id: Uuid,
     pub branched_from_message_id: Uuid,
+    /// The opening of the message the branch was taken from, so a person
+    /// can tell branches apart; absent when that message no longer exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branched_from_preview: Option<String>,
+    /// The branch thread's state (`idle`, `processing`, `interrupted`,
+    /// `completed`, `abandoned`).
+    pub state: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ConversationBranchListResponse {
+    pub branches: Vec<ConversationBranchResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -144,6 +162,8 @@ pub struct ToolCallView {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct MessageView {
+    /// The message's own identity — what a branch is taken from.
+    pub id: Uuid,
     pub thread_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<Uuid>,

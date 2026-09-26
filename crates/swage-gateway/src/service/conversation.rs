@@ -6,16 +6,21 @@ use uuid::Uuid;
 use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
-    model::{NewSession, NewThread, SessionOrigin, ThreadBranch, TurnState},
+    model::{
+        NewAuditEvent, NewSession, NewThread, SessionOrigin, ThreadBranch, ThreadState, TurnState,
+    },
     store::{Storage, TopicStore},
 };
 
 use swage_protocol::client::conversation::TurnState as WireTurnState;
 pub use swage_protocol::client::conversation::{
-    ConversationBranchResponse, ConversationDetail, ConversationResponse, ConversationSummary,
-    ConversationThreadDetail, CreateConversationBranchRequest, CreateConversationRequest,
-    MessageView, ToolCallView,
+    ConversationBranchListResponse, ConversationBranchResponse, ConversationDetail,
+    ConversationResponse, ConversationSummary, ConversationThreadDetail,
+    CreateConversationBranchRequest, CreateConversationRequest, MessageView, ToolCallView,
 };
+
+/// How much of the branch-point message a branch listing shows.
+const BRANCH_PREVIEW_CHARS: usize = 80;
 
 /// The built-in agent a session runs under when no definition is selected.
 /// It needs no agent-definition row, so selector validation always admits it.
@@ -267,33 +272,30 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::ConversationNotFound { id })?;
 
-        // Collect messages and tool calls across all threads for this session.
-        let threads = self.storage.list_by_session(id).await?;
+        // The detail is the root thread's view: a branch carries copies of
+        // these messages up to its branch point and diverges after it, so
+        // its messages are read from the thread route, never merged here.
+        let root_thread =
+            crate::thread_selection::resolve_thread_for_session(self.storage.as_ref(), id, None)
+                .await?;
 
-        let mut all_messages = Vec::new();
+        let mut all_messages = self.storage.list_messages_by_thread(root_thread.id).await?;
         let mut tool_calls_by_turn: HashMap<Uuid, Vec<ToolCallView>> = HashMap::new();
         let mut turn_state_by_turn: HashMap<Uuid, TurnState> = HashMap::new();
 
-        for thread in &threads {
-            let messages = self.storage.list_messages_by_thread(thread.id).await?;
-            all_messages.extend(messages);
-
-            let turns = self.storage.list_turns_by_thread(thread.id).await?;
-            for turn in turns {
-                let turn_id = turn.id;
-                turn_state_by_turn.insert(turn_id, turn.state);
-                let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
-                tool_calls_by_turn.insert(
-                    turn_id,
-                    records.into_iter().map(tool_call_record_to_view).collect(),
-                );
-            }
+        for turn in self.storage.list_turns_by_thread(root_thread.id).await? {
+            let turn_id = turn.id;
+            turn_state_by_turn.insert(turn_id, turn.state);
+            let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
+            tool_calls_by_turn.insert(
+                turn_id,
+                records.into_iter().map(tool_call_record_to_view).collect(),
+            );
         }
 
         all_messages.sort_by(|a, b| {
             a.created_at
                 .cmp(&b.created_at)
-                .then(a.thread_id.cmp(&b.thread_id))
                 .then(a.position.cmp(&b.position))
         });
 
@@ -315,6 +317,7 @@ impl ConversationService {
                 };
 
                 Ok(MessageView {
+                    id: message.id,
                     thread_id: message.thread_id,
                     turn_id,
                     role: message.role.to_string(),
@@ -341,6 +344,7 @@ impl ConversationService {
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
+            root_thread_id: root_thread.id,
             messages: message_views,
         })
     }
@@ -561,29 +565,124 @@ impl ConversationService {
             .create_branch(req.thread_id, req.from_message_id)
             .await?;
 
-        Ok(thread_branch_to_response(branch))
+        // The lineage is audit-trail material: a reader reconstructs where a
+        // branch came from without opening the thread.
+        self.storage
+            .create_audit_event(NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(session_id),
+                entity_kind: "thread".to_owned(),
+                entity_id: branch.child_thread_id.to_string(),
+                event_kind: "thread_branched".to_owned(),
+                summary: format!(
+                    "Branched thread {} from thread {} at message {}",
+                    branch.child_thread_id,
+                    branch.parent_thread_id,
+                    branch.branched_from_message_id
+                ),
+                metadata: serde_json::json!({
+                    "child_thread_id": branch.child_thread_id,
+                    "parent_thread_id": branch.parent_thread_id,
+                    "branched_from_message_id": branch.branched_from_message_id,
+                }),
+            })
+            .await?;
+
+        self.branch_response(branch).await
     }
 
-    /// List branches created within a conversation.
+    /// List branches created within a conversation, each with its thread's
+    /// state and the opening of the message it was taken from.
     pub async fn list_branches(
         &self,
         session_id: Uuid,
-    ) -> Result<Vec<ConversationBranchResponse>, GatewayError> {
+    ) -> Result<ConversationBranchListResponse, GatewayError> {
         self.storage
             .get_session(session_id)
             .await?
             .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
 
-        self.storage
-            .list_branches_by_session(session_id)
-            .await
-            .map(|branches| {
-                branches
-                    .into_iter()
-                    .map(thread_branch_to_response)
-                    .collect()
+        let mut branches = Vec::new();
+        for branch in self.storage.list_branches_by_session(session_id).await? {
+            branches.push(self.branch_response(branch).await?);
+        }
+        Ok(ConversationBranchListResponse { branches })
+    }
+
+    /// Abandon a branch: the thread keeps its history and lineage and takes
+    /// no further turns. The root thread is the conversation itself and is
+    /// never abandoned this way; a thread mid-turn is cancelled first.
+    pub async fn abandon_thread(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<ConversationThreadDetail, GatewayError> {
+        let thread = self.storage.get(thread_id).await?.ok_or_else(|| {
+            GatewayError::Storage(StorageError::NotFound {
+                entity: "thread".into(),
+                id: thread_id.to_string(),
             })
-            .map_err(GatewayError::Storage)
+        })?;
+        let branch = self.storage.get_branch(thread.id).await?.ok_or_else(|| {
+            GatewayError::ValidationError(format!(
+                "thread {thread_id} is the conversation's root thread, not a branch"
+            ))
+        })?;
+
+        self.storage
+            .update_state(thread.id, ThreadState::Abandoned)
+            .await?;
+        self.storage
+            .create_audit_event(NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(thread.session_id),
+                entity_kind: "thread".to_owned(),
+                entity_id: thread.id.to_string(),
+                event_kind: "thread_abandoned".to_owned(),
+                summary: format!(
+                    "Abandoned branch thread {} (branched from thread {} at message {})",
+                    thread.id, branch.parent_thread_id, branch.branched_from_message_id
+                ),
+                metadata: serde_json::json!({
+                    "child_thread_id": branch.child_thread_id,
+                    "parent_thread_id": branch.parent_thread_id,
+                    "branched_from_message_id": branch.branched_from_message_id,
+                }),
+            })
+            .await?;
+
+        self.get_thread_detail(thread.id).await
+    }
+
+    /// Project a lineage row with what a person needs to recognise it: the
+    /// branch thread's state and the opening of the branch-point message.
+    async fn branch_response(
+        &self,
+        branch: ThreadBranch,
+    ) -> Result<ConversationBranchResponse, GatewayError> {
+        let state = self
+            .storage
+            .get(branch.child_thread_id)
+            .await?
+            .map(|thread| thread.state.to_string())
+            .ok_or_else(|| {
+                GatewayError::Storage(StorageError::NotFound {
+                    entity: "thread".into(),
+                    id: branch.child_thread_id.to_string(),
+                })
+            })?;
+        let branched_from_preview = self
+            .storage
+            .get_message(branch.branched_from_message_id)
+            .await?
+            .map(|message| message_preview(&message.content));
+        Ok(ConversationBranchResponse {
+            child_thread_id: branch.child_thread_id,
+            parent_thread_id: branch.parent_thread_id,
+            branched_from_message_id: branch.branched_from_message_id,
+            branched_from_preview,
+            state,
+            created_at: branch.created_at,
+        })
     }
 
     /// Fetch a single thread with its copied history and branch metadata.
@@ -611,7 +710,10 @@ impl ConversationService {
                 records.into_iter().map(tool_call_record_to_view).collect(),
             );
         }
-        let branch = self.storage.get_branch(thread.id).await?;
+        let branch = match self.storage.get_branch(thread.id).await? {
+            Some(branch) => Some(self.branch_response(branch).await?),
+            None => None,
+        };
 
         Ok(ConversationThreadDetail {
             id: thread.id,
@@ -623,6 +725,7 @@ impl ConversationService {
                 .map(|message| -> Result<MessageView, GatewayError> {
                     let is_assistant = message.role == Role::Assistant;
                     Ok(MessageView {
+                        id: message.id,
                         thread_id: message.thread_id,
                         turn_id: message.turn_id,
                         role: message.role.to_string(),
@@ -644,7 +747,7 @@ impl ConversationService {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?,
-            branch: branch.map(thread_branch_to_response),
+            branch,
         })
     }
 
@@ -708,17 +811,229 @@ fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> Too
     }
 }
 
-fn thread_branch_to_response(branch: ThreadBranch) -> ConversationBranchResponse {
-    ConversationBranchResponse {
-        child_thread_id: branch.child_thread_id,
-        parent_thread_id: branch.parent_thread_id,
-        branched_from_message_id: branch.branched_from_message_id,
-        created_at: branch.created_at,
+/// The opening of a message, on one line, for telling branches apart.
+fn message_preview(content: &str) -> String {
+    let single_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.chars().count() <= BRANCH_PREVIEW_CHARS {
+        return single_line;
     }
+    let mut preview = single_line
+        .chars()
+        .take(BRANCH_PREVIEW_CHARS)
+        .collect::<String>();
+    preview.push('…');
+    preview
 }
 
 fn normalise_selected_model_id(selected_model_id: Option<String>) -> Option<String> {
     selected_model_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod branch_tests {
+    use std::sync::Arc;
+
+    use swage_core::Role;
+    use swage_storage::model::NewMessage;
+    use swage_storage::sqlite::SqliteStorage;
+    use swage_storage::store::{AuditStore, MessageStore, Storage, ThreadStore, TopicStore};
+    use uuid::Uuid;
+
+    use super::*;
+
+    async fn service_with_conversation() -> (ConversationService, Arc<SqliteStorage>, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
+        let service = ConversationService::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+        );
+        let conversation = service.create_conversation().await.expect("conversation");
+        (service, storage, conversation.id)
+    }
+
+    async fn say(
+        storage: &SqliteStorage,
+        thread_id: Uuid,
+        role: Role,
+        content: &str,
+        position: i32,
+    ) -> Uuid {
+        storage
+            .create_message(NewMessage {
+                thread_id,
+                attachments: Vec::new(),
+                turn_id: None,
+                role,
+                content: content.into(),
+                position,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .expect("message")
+            .id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_branch_carries_its_lineage_state_and_preview_and_lands_in_the_audit_trail() {
+        let (service, storage, session_id) = service_with_conversation().await;
+        let root = service.get_conversation(session_id).await.expect("detail");
+        let first = say(
+            &storage,
+            root.root_thread_id,
+            Role::User,
+            "  What about\nthe other  approach?",
+            0,
+        )
+        .await;
+        say(
+            &storage,
+            root.root_thread_id,
+            Role::Assistant,
+            "It also works.",
+            1,
+        )
+        .await;
+
+        let branch = service
+            .create_branch(
+                session_id,
+                CreateConversationBranchRequest {
+                    thread_id: root.root_thread_id,
+                    from_message_id: first,
+                },
+            )
+            .await
+            .expect("branch");
+        assert_eq!(branch.parent_thread_id, root.root_thread_id);
+        assert_eq!(branch.branched_from_message_id, first);
+        assert_eq!(branch.state, "idle");
+        assert_eq!(
+            branch.branched_from_preview.as_deref(),
+            Some("What about the other approach?")
+        );
+
+        let listed = service.list_branches(session_id).await.expect("list");
+        assert_eq!(listed.branches.len(), 1);
+        assert_eq!(listed.branches[0].child_thread_id, branch.child_thread_id);
+
+        // The branch carries the ancestor message; the root view is untouched.
+        let thread = service
+            .get_thread_detail(branch.child_thread_id)
+            .await
+            .expect("thread");
+        assert_eq!(thread.messages.len(), 1);
+        assert_eq!(
+            thread.messages[0].content,
+            "  What about\nthe other  approach?"
+        );
+        assert_eq!(
+            thread
+                .branch
+                .as_ref()
+                .map(|lineage| lineage.parent_thread_id),
+            Some(root.root_thread_id)
+        );
+        let root_again = service.get_conversation(session_id).await.expect("detail");
+        assert_eq!(root_again.messages.len(), 2);
+        assert!(
+            root_again
+                .messages
+                .iter()
+                .all(|message| message.thread_id == root.root_thread_id)
+        );
+        assert_eq!(root_again.messages[0].id, first);
+
+        let events = storage
+            .list_audit_events_by_session(session_id)
+            .await
+            .expect("audit");
+        let branched = events
+            .iter()
+            .find(|event| event.event_kind == "thread_branched")
+            .expect("thread_branched event");
+        assert_eq!(branched.entity_id, branch.child_thread_id.to_string());
+        assert_eq!(
+            branched.metadata["parent_thread_id"],
+            serde_json::json!(root.root_thread_id)
+        );
+        assert_eq!(
+            branched.metadata["branched_from_message_id"],
+            serde_json::json!(first)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abandoning_a_branch_is_terminal_recorded_and_refused_for_the_root() {
+        let (service, storage, session_id) = service_with_conversation().await;
+        let root = service.get_conversation(session_id).await.expect("detail");
+        let first = say(&storage, root.root_thread_id, Role::User, "hello", 0).await;
+        let branch = service
+            .create_branch(
+                session_id,
+                CreateConversationBranchRequest {
+                    thread_id: root.root_thread_id,
+                    from_message_id: first,
+                },
+            )
+            .await
+            .expect("branch");
+
+        let abandoned = service
+            .abandon_thread(branch.child_thread_id)
+            .await
+            .expect("abandon");
+        assert_eq!(abandoned.state, "abandoned");
+        assert_eq!(
+            abandoned
+                .branch
+                .as_ref()
+                .map(|lineage| lineage.state.as_str()),
+            Some("abandoned")
+        );
+        let listed = service.list_branches(session_id).await.expect("list");
+        assert_eq!(listed.branches[0].state, "abandoned");
+        assert_eq!(
+            ThreadStore::get(storage.as_ref(), branch.child_thread_id)
+                .await
+                .expect("thread")
+                .expect("exists")
+                .state,
+            ThreadState::Abandoned
+        );
+
+        let events = storage
+            .list_audit_events_by_session(session_id)
+            .await
+            .expect("audit");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_kind == "thread_abandoned"
+                    && event.entity_id == branch.child_thread_id.to_string())
+        );
+
+        // Abandoning again is a conflict (terminal state), and the root is
+        // not a branch at all.
+        assert!(matches!(
+            service.abandon_thread(branch.child_thread_id).await,
+            Err(GatewayError::Storage(StorageError::ConstraintViolation(_)))
+        ));
+        assert!(matches!(
+            service.abandon_thread(root.root_thread_id).await,
+            Err(GatewayError::ValidationError(_))
+        ));
+
+        // An abandoned branch takes no further turns.
+        let refused = crate::thread_selection::resolve_thread_for_session(
+            storage.as_ref(),
+            session_id,
+            Some(branch.child_thread_id),
+        )
+        .await;
+        assert!(
+            matches!(refused, Err(GatewayError::ValidationError(message)) if message.contains("abandoned"))
+        );
+    }
 }

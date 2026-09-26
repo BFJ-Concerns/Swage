@@ -18,6 +18,10 @@ vi.mock("../api/conversations", () => ({
   createConversation: vi.fn(),
   getConversation: vi.fn(),
   deleteConversation: vi.fn(),
+  listBranches: vi.fn(),
+  createBranch: vi.fn(),
+  getThread: vi.fn(),
+  abandonThread: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -52,6 +56,9 @@ function makeDetail(id: string) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  // A conversation with no branches is the ordinary case; a test about
+  // branches sets its own listing.
+  vi.mocked(api.listBranches).mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -552,5 +559,183 @@ describe("createConversation (topic-scoped)", () => {
       undefined,
       undefined,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Threads and branches
+// ---------------------------------------------------------------------------
+
+describe("threads and branches", () => {
+  function makeBranch(childThreadId: string, state = "idle") {
+    return {
+      child_thread_id: childThreadId,
+      parent_thread_id: "root-1",
+      branched_from_message_id: "msg-1",
+      branched_from_preview: "What about the other approach?",
+      state,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+  }
+
+  function makeRootDetail(id: string) {
+    return {
+      ...makeDetail(id),
+      root_thread_id: "root-1",
+      messages: [
+        {
+          id: "msg-1",
+          thread_id: "root-1",
+          role: "user" as const,
+          content: "first",
+          timestamp: "2026-01-01T00:00:01Z",
+          turn_state: "completed" as const,
+        },
+      ],
+    };
+  }
+
+  it("selecting a conversation lands on the root thread with its branches listed", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    vi.mocked(api.listBranches).mockResolvedValue([makeBranch("branch-1")]);
+    const store = createConversationStore();
+
+    await store.selectConversation("conv-1");
+
+    expect(store.activeThreadId).toBeNull();
+    expect(store.branches).toEqual([makeBranch("branch-1")]);
+    expect(store.activeConversation?.messages.map((m) => m.content)).toEqual(["first"]);
+  });
+
+  it("selecting a branch shows that thread's messages without losing the conversation", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    vi.mocked(api.listBranches).mockResolvedValue([makeBranch("branch-1")]);
+    vi.mocked(api.getThread).mockResolvedValue({
+      id: "branch-1",
+      session_id: "conv-1",
+      agent_id: "gateway",
+      state: "idle",
+      messages: [
+        {
+          id: "msg-1-copy",
+          thread_id: "branch-1",
+          role: "user",
+          content: "first",
+          timestamp: "2026-01-01T00:00:01Z",
+          turn_state: "completed",
+        },
+        {
+          id: "msg-b",
+          thread_id: "branch-1",
+          role: "assistant",
+          content: "a different answer",
+          timestamp: "2026-01-01T00:00:02Z",
+          turn_state: "completed",
+        },
+      ],
+      branch: makeBranch("branch-1"),
+    });
+    const store = createConversationStore();
+    await store.selectConversation("conv-1");
+
+    await store.selectThread!("branch-1");
+
+    expect(api.getThread).toHaveBeenCalledWith("branch-1");
+    expect(store.activeThreadId).toBe("branch-1");
+    expect(store.activeConversation?.id).toBe("conv-1");
+    expect(store.activeConversation?.messages.map((m) => m.content)).toEqual([
+      "first",
+      "a different answer",
+    ]);
+
+    // Back to the root: the conversation is re-read whole.
+    await store.selectThread!(null);
+    expect(store.activeThreadId).toBeNull();
+    expect(store.activeConversation?.messages.map((m) => m.content)).toEqual(["first"]);
+  });
+
+  it("branching from a message creates the branch on the active thread and moves onto it", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    vi.mocked(api.createBranch).mockResolvedValue(makeBranch("branch-2"));
+    vi.mocked(api.getThread).mockResolvedValue({
+      id: "branch-2",
+      session_id: "conv-1",
+      agent_id: "gateway",
+      state: "idle",
+      messages: [],
+      branch: makeBranch("branch-2"),
+    });
+    const store = createConversationStore();
+    await store.selectConversation("conv-1");
+
+    await store.branchFrom!("msg-1");
+
+    expect(api.createBranch).toHaveBeenCalledWith("conv-1", "root-1", "msg-1");
+    expect(store.branches?.map((b) => b.child_thread_id)).toEqual(["branch-2"]);
+    expect(store.activeThreadId).toBe("branch-2");
+  });
+
+  it("a message appended while a branch is active belongs to that branch", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    vi.mocked(api.listBranches).mockResolvedValue([makeBranch("branch-1")]);
+    vi.mocked(api.getThread).mockResolvedValue({
+      id: "branch-1",
+      session_id: "conv-1",
+      agent_id: "gateway",
+      state: "idle",
+      messages: [],
+      branch: makeBranch("branch-1"),
+    });
+    const store = createConversationStore();
+    await store.selectConversation("conv-1");
+    await store.selectThread!("branch-1");
+
+    store.appendOptimisticUserMessage({ content: "on the branch", timestamp: "2026-01-01T00:00:05Z" });
+
+    expect(store.activeConversation?.messages.at(-1)).toMatchObject({
+      content: "on the branch",
+      thread_id: "branch-1",
+    });
+  });
+
+  it("abandoning the active branch marks it and returns to the root thread", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    vi.mocked(api.listBranches).mockResolvedValue([makeBranch("branch-1")]);
+    vi.mocked(api.getThread).mockResolvedValue({
+      id: "branch-1",
+      session_id: "conv-1",
+      agent_id: "gateway",
+      state: "idle",
+      messages: [],
+      branch: makeBranch("branch-1"),
+    });
+    vi.mocked(api.abandonThread).mockResolvedValue({
+      id: "branch-1",
+      session_id: "conv-1",
+      agent_id: "gateway",
+      state: "abandoned",
+      messages: [],
+      branch: makeBranch("branch-1", "abandoned"),
+    });
+    const store = createConversationStore();
+    await store.selectConversation("conv-1");
+    await store.selectThread!("branch-1");
+
+    await store.abandonActiveBranch!();
+
+    expect(api.abandonThread).toHaveBeenCalledWith("branch-1");
+    expect(store.branches?.[0].state).toBe("abandoned");
+    expect(store.activeThreadId).toBeNull();
+    expect(store.activeConversation?.messages.map((m) => m.content)).toEqual(["first"]);
+  });
+
+  it("abandoning with the root thread active does nothing", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
+    const store = createConversationStore();
+    await store.selectConversation("conv-1");
+
+    await store.abandonActiveBranch!();
+
+    expect(api.abandonThread).not.toHaveBeenCalled();
   });
 });

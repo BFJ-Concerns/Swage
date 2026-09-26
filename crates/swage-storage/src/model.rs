@@ -1504,25 +1504,34 @@ pub enum ThreadState {
     Processing,
     Completed,
     Interrupted,
+    /// A branch thread a person set aside. Terminal: the thread keeps its
+    /// history and lineage but takes no further turns.
+    Abandoned,
 }
 
 impl ThreadState {
     /// Whether this state can transition to `target`.
     ///
     /// Permitted edges:
-    ///   Idle        → Processing, Completed
+    ///   Idle        → Processing, Completed, Abandoned
     ///   Processing  → Idle, Completed, Interrupted
-    ///   Interrupted → Idle
+    ///   Interrupted → Idle, Abandoned
     ///   Completed   → (terminal, no exits)
+    ///   Abandoned   → (terminal, no exits)
+    ///
+    /// A thread mid-turn cannot be abandoned: cancel the turn first, so the
+    /// turn settles its own record before the thread is set aside.
     pub fn can_transition_to(&self, target: &ThreadState) -> bool {
         matches!(
             (self, target),
             (ThreadState::Idle, ThreadState::Processing)
                 | (ThreadState::Idle, ThreadState::Completed)
+                | (ThreadState::Idle, ThreadState::Abandoned)
                 | (ThreadState::Processing, ThreadState::Idle)
                 | (ThreadState::Processing, ThreadState::Completed)
                 | (ThreadState::Processing, ThreadState::Interrupted)
                 | (ThreadState::Interrupted, ThreadState::Idle)
+                | (ThreadState::Interrupted, ThreadState::Abandoned)
         )
     }
 }
@@ -1534,6 +1543,7 @@ impl std::fmt::Display for ThreadState {
             ThreadState::Processing => "processing",
             ThreadState::Completed => "completed",
             ThreadState::Interrupted => "interrupted",
+            ThreadState::Abandoned => "abandoned",
         };
         write!(f, "{s}")
     }
@@ -1548,6 +1558,7 @@ impl FromStr for ThreadState {
             "processing" => Ok(ThreadState::Processing),
             "completed" => Ok(ThreadState::Completed),
             "interrupted" => Ok(ThreadState::Interrupted),
+            "abandoned" => Ok(ThreadState::Abandoned),
             other => Err(format!("unknown thread state: {other}")),
         }
     }

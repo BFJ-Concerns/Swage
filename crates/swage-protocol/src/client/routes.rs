@@ -16,8 +16,9 @@ use schemars::JsonSchema;
 use super::{
     context::TurnContextResponse,
     conversation::{
-        ConversationDetail, ConversationListResponse, ConversationResponse,
-        CreateConversationRequest, RecentSessionsResponse,
+        ConversationBranchListResponse, ConversationBranchResponse, ConversationDetail,
+        ConversationListResponse, ConversationResponse, ConversationThreadDetail,
+        CreateConversationBranchRequest, CreateConversationRequest, RecentSessionsResponse,
     },
     docs::{DocumentListResponse, DocumentResponse},
     provider_signin::{
@@ -342,6 +343,78 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<ConversationDetail>(),
+            },
+        },
+        Route {
+            operation_id: "list_conversation_branches",
+            method: Method::Get,
+            path: "/api/conversations/{id}/branches",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "List a conversation's branches: the sibling threads taken from earlier messages.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ConversationBranchListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "create_conversation_branch",
+            method: Method::Post,
+            path: "/api/conversations/{id}/branches",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Branch a conversation at an earlier message into a sibling thread.",
+            request_optional: false,
+
+            request: schema::<CreateConversationBranchRequest>(),
+            response: Response {
+                status: 201,
+                body: schema::<ConversationBranchResponse>(),
+            },
+        },
+        Route {
+            operation_id: "get_thread",
+            method: Method::Get,
+            path: "/api/threads/{id}",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Read one thread with its messages and, for a branch, its lineage.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ConversationThreadDetail>(),
+            },
+        },
+        Route {
+            operation_id: "abandon_thread",
+            method: Method::Post,
+            path: "/api/threads/{id}/abandon",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Abandon a branch: it keeps its history and lineage but takes no further turns.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ConversationThreadDetail>(),
             },
         },
         Route {

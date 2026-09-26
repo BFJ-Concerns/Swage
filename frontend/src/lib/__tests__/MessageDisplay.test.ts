@@ -75,7 +75,10 @@ function makeAssistantMessage(
   };
 }
 
-function makeConversationStore(messages: MessageView[]): ConversationStore {
+function makeConversationStore(
+  messages: MessageView[],
+  branchFrom?: (messageId: string) => Promise<void>,
+): ConversationStore {
   const detail: ConversationDetail = {
     id: "conv-1",
     agent_id: "gateway",
@@ -104,6 +107,7 @@ function makeConversationStore(messages: MessageView[]): ConversationStore {
     },
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
+    ...(branchFrom ? { branchFrom } : {}),
   };
 }
 
@@ -588,5 +592,58 @@ describe("live tool calls from streaming store", () => {
     expect(document.body.textContent).toContain("WAIT 4s");
     expect(document.body.textContent).toContain("retry 2 of 3 · provider · anthropic");
     expect(document.body.textContent).not.toContain("SHELL");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Branching from a message
+// ---------------------------------------------------------------------------
+
+describe("branching from a message", () => {
+  let component: ReturnType<typeof mount> | undefined;
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("offers a branch action on every recorded message and none on a pending one", async () => {
+    const branchFrom = vi.fn(async () => {});
+    const recorded = { ...makeAssistantMessage("recorded"), id: "msg-9" };
+    const pending: MessageView = {
+      role: "user",
+      content: "not yet recorded",
+      timestamp: "2026-03-20T10:59:00Z",
+      turn_state: "pending",
+    };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([recorded, pending], branchFrom),
+        streamingStore: makeStreamingStore(),
+      },
+    });
+
+    const actions = document.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Branch from this message"]',
+    );
+    expect(actions).toHaveLength(1);
+    actions[0].click();
+
+    await vi.waitFor(() => expect(branchFrom).toHaveBeenCalledWith("msg-9"));
+  });
+
+  it("offers no branch action when the store cannot branch", () => {
+    const recorded = { ...makeAssistantMessage("recorded"), id: "msg-9" };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([recorded]),
+        streamingStore: makeStreamingStore(),
+      },
+    });
+
+    expect(document.querySelector('button[aria-label="Branch from this message"]')).toBeNull();
   });
 });

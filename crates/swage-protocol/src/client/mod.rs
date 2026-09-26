@@ -70,6 +70,8 @@ pub struct ClientSurface {
     recent_sessions: conversation::RecentSessionsResponse,
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
+    conversation_branch: conversation::ConversationBranchResponse,
+    conversation_branch_list: conversation::ConversationBranchListResponse,
     document_list: docs::DocumentListResponse,
     document: docs::DocumentResponse,
     turn_context: context::TurnContextResponse,

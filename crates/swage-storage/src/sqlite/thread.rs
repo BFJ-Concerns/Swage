@@ -934,6 +934,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_or_interrupted_thread_can_be_abandoned_and_stays_abandoned() {
+        let (storage, _, session_id) = make_session().await;
+        let idle = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        storage
+            .update_state(idle.id, ThreadState::Abandoned)
+            .await
+            .unwrap();
+        assert_eq!(
+            ThreadStore::get(&storage, idle.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ThreadState::Abandoned
+        );
+        let back_to_idle = storage.update_state(idle.id, ThreadState::Idle).await;
+        assert!(matches!(
+            back_to_idle,
+            Err(StorageError::ConstraintViolation(_))
+        ));
+
+        let interrupted = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        storage
+            .update_state(interrupted.id, ThreadState::Processing)
+            .await
+            .unwrap();
+        storage
+            .update_state(interrupted.id, ThreadState::Interrupted)
+            .await
+            .unwrap();
+        storage
+            .update_state(interrupted.id, ThreadState::Abandoned)
+            .await
+            .unwrap();
+
+        let processing = ThreadStore::create(&storage, new_thread(session_id))
+            .await
+            .unwrap();
+        storage
+            .update_state(processing.id, ThreadState::Processing)
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage
+                .update_state(processing.id, ThreadState::Abandoned)
+                .await,
+            Err(StorageError::ConstraintViolation(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn update_state_not_found_returns_not_found() {
         let (storage, _, _) = make_session().await;
         let result = storage
