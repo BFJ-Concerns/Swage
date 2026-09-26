@@ -458,6 +458,10 @@ async fn provider_response_snapshot_failure_records_reconstruction_gap() {
 
 /// Seed enough history to cross the compaction threshold on the next turn.
 async fn seed_history_over_threshold(storage: &MockStorage, session_id: Uuid) -> Uuid {
+    seed_history(storage, session_id, 101).await
+}
+
+async fn seed_history(storage: &MockStorage, session_id: Uuid, count: usize) -> Uuid {
     let thread_id = storage
         .list_by_session(session_id)
         .await
@@ -466,7 +470,7 @@ async fn seed_history_over_threshold(storage: &MockStorage, session_id: Uuid) ->
         .next()
         .expect("default thread")
         .id;
-    for index in 0..101 {
+    for index in 0..count {
         storage
             .append_message(AppendMessage {
                 thread_id,
@@ -543,6 +547,56 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
         succession_position < history_position,
         "the summary opens the conversation: {names:?}"
     );
+}
+
+#[tokio::test]
+async fn a_long_thread_s_successor_is_sized_to_the_threshold_so_the_runtime_stays_idle() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    seed_history(&storage, session_id, 300).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let db = storage.db.lock().await;
+    let (report_json, _) = db
+        .snapshots
+        .values()
+        .next()
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    let records = report["compaction_applied"]
+        .as_array()
+        .expect("compaction records");
+    assert_eq!(
+        records.len(),
+        1,
+        "one succession, no runtime pass over the successor: {records:?}"
+    );
+    let removed = records[0]["messages_removed"].as_u64().expect("count");
+    assert!(
+        removed > 151,
+        "301 history messages: the midpoint would keep 151, more than the threshold holds; removed {removed}"
+    );
+    let retained_history = report["elements"]
+        .as_array()
+        .expect("element reports")
+        .iter()
+        .find(|element| element["name"] == "history")
+        .and_then(|element| element["token_count"].as_u64())
+        .expect("the retained history's report");
+    assert!(retained_history > 0);
 }
 
 #[tokio::test]
@@ -11777,11 +11831,8 @@ async fn make_storage_with_session_metadata(
     let topic = storage.general_scope().await.expect("topic");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
             metadata,
-            active_workspace_attachment_id: None,
+            ..new_session(topic.id)
         })
         .await
         .expect("session");

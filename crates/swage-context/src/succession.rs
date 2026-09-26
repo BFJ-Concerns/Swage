@@ -43,6 +43,11 @@ pub struct SuccessionRequest<'a> {
     pub history: &'a [ChatMessage],
     /// The agent's shaping instructions for the summary, when it gave any.
     pub focus: Option<&'a str>,
+    /// The most history messages the successor may keep verbatim, when the
+    /// caller's threshold counts messages: the successor is built to fit,
+    /// so the runtime's own compactor never runs over it. `None` keeps the
+    /// midpoint rule.
+    pub retain_at_most: Option<usize>,
 }
 
 /// What the succession pass produced: the summary element, the history the
@@ -117,10 +122,17 @@ impl ContextElement for SuccessionElement {
 }
 
 /// How many of `history_len` messages the summary replaces: the older half,
-/// the newer half staying verbatim — the split the agent runtime's own
-/// compactor uses, so the two never disagree about what "recent" means.
-pub fn summarised_count(history_len: usize) -> usize {
-    history_len / 2
+/// the newer half staying verbatim — the midpoint the agent runtime's own
+/// compactor also uses — lowered to keep at most `retain_at_most` when the
+/// newer half alone would not fit the caller's threshold, and never below
+/// one retained message (the newest is always kept as it was).
+pub fn summarised_count(history_len: usize, retain_at_most: Option<usize>) -> usize {
+    let midpoint_retained = history_len - history_len / 2;
+    let retained = match retain_at_most {
+        Some(at_most) => midpoint_retained.min(at_most.max(1)),
+        None => midpoint_retained,
+    };
+    history_len - retained.min(history_len)
 }
 
 /// Run the pass: summarise the older half of `history` against `carried`
@@ -134,7 +146,7 @@ pub async fn succeed(
     if history_len < 2 {
         return Err(SuccessionError::TooShort(history_len));
     }
-    let summarised = summarised_count(history_len);
+    let summarised = summarised_count(history_len, request.retain_at_most);
     let (older, newer) = request.history.split_at(summarised);
     let tokens_before = tokeniser.count_messages(request.history);
 
@@ -376,6 +388,7 @@ mod tests {
                 carried: &carried,
                 history: &history,
                 focus: Some("keep the open questions"),
+                retain_at_most: None,
             },
             &provider,
             &CharTokeniser,
@@ -424,6 +437,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                retain_at_most: None,
             },
             &provider,
             &CharTokeniser,
@@ -453,6 +467,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                retain_at_most: None,
             },
             &provider,
             &CharTokeniser,
@@ -471,6 +486,7 @@ mod tests {
                 carried: &[],
                 history: &history,
                 focus: None,
+                retain_at_most: None,
             },
             &provider,
             &CharTokeniser,
@@ -479,6 +495,23 @@ mod tests {
         .expect_err("nothing to summarise");
         assert!(matches!(error, SuccessionError::TooShort(1)));
         assert!(provider.requests.lock().expect("requests").is_empty());
+    }
+
+    #[test]
+    fn the_split_is_the_midpoint_unless_the_threshold_cannot_hold_the_newer_half() {
+        assert_eq!(summarised_count(102, None), 51);
+        assert_eq!(summarised_count(2, None), 1);
+        assert_eq!(summarised_count(300, Some(95)), 205, "keeps 95, not 150");
+        assert_eq!(
+            summarised_count(102, Some(95)),
+            51,
+            "the midpoint already fits"
+        );
+        assert_eq!(
+            summarised_count(10, Some(0)),
+            9,
+            "the newest message is always kept"
+        );
     }
 
     #[test]
