@@ -1393,6 +1393,68 @@
         ],
         "type": "object"
       },
+      "DocumentListResponse": {
+        "properties": {
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "documents"
+        ],
+        "type": "object"
+      },
+      "DocumentResponse": {
+        "description": "One hosted document with its body.",
+        "properties": {
+          "content": {
+            "description": "The document's Markdown, front matter included.",
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "title",
+          "description",
+          "content"
+        ],
+        "type": "object"
+      },
+      "DocumentSummary": {
+        "description": "One hosted document, without its body.",
+        "properties": {
+          "description": {
+            "description": "The one-line description the document carries in its front matter.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The document's address: `GET /api/docs/{name}`.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The document's first heading.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "title",
+          "description"
+        ],
+        "type": "object"
+      },
       "Duration": {
         "properties": {
           "nanos": {
@@ -8216,6 +8278,59 @@
           }
         },
         "summary": "Read a conversation."
+      }
+    },
+    "/api/docs": {
+      "get": {
+        "operationId": "list_documents",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List the platform's own documentation, hosted by the gateway."
+      }
+    },
+    "/api/docs/{name}": {
+      "get": {
+        "operationId": "get_document",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read one hosted document by name."
       }
     },
     "/api/sessions": {

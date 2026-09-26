@@ -64,6 +64,12 @@
     "delete_surface_annotation_response": {
       "$ref": "#/$defs/DeleteSurfaceAnnotationResponse"
     },
+    "document": {
+      "$ref": "#/$defs/DocumentResponse"
+    },
+    "document_list": {
+      "$ref": "#/$defs/DocumentListResponse"
+    },
     "effort_capability": {
       "$ref": "#/$defs/EffortCapability"
     },
@@ -286,6 +292,8 @@
     "recent_sessions",
     "conversation_detail",
     "conversation_thread",
+    "document_list",
+    "document",
     "turn_context",
     "submit_turn",
     "message_attachment",
@@ -1714,6 +1722,68 @@
       "required": [
         "id",
         "name"
+      ]
+    },
+    "DocumentListResponse": {
+      "type": "object",
+      "properties": {
+        "documents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DocumentSummary"
+          }
+        }
+      },
+      "required": [
+        "documents"
+      ]
+    },
+    "DocumentResponse": {
+      "description": "One hosted document with its body.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "description": "The document's Markdown, front matter included.",
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "content"
+      ]
+    },
+    "DocumentSummary": {
+      "description": "One hosted document, without its body.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "The one-line description the document carries in its front matter.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The document's address: `GET /api/docs/{name}`.",
+          "type": "string"
+        },
+        "title": {
+          "description": "The document's first heading.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description"
       ]
     },
     "Duration": {

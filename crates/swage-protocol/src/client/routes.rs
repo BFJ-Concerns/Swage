@@ -19,6 +19,7 @@ use super::{
         ConversationDetail, ConversationListResponse, ConversationResponse,
         CreateConversationRequest, RecentSessionsResponse,
     },
+    docs::{DocumentListResponse, DocumentResponse},
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
     },
@@ -666,6 +667,39 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<SettingsResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_documents",
+            method: Method::Get,
+            path: "/api/docs",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List the platform's own documentation, hosted by the gateway.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<DocumentListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "get_document",
+            method: Method::Get,
+            path: "/api/docs/{name}",
+            path_parameters: vec![Parameter {
+                name: "name",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "Read one hosted document by name.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<DocumentResponse>(),
             },
         },
         Route {

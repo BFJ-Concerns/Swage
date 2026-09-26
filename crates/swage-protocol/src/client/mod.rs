@@ -6,6 +6,7 @@ pub mod channel;
 pub mod context;
 pub mod conversation;
 pub mod delivery;
+pub mod docs;
 pub mod error;
 pub mod knowledge;
 pub mod material;
@@ -69,6 +70,8 @@ pub struct ClientSurface {
     recent_sessions: conversation::RecentSessionsResponse,
     conversation_detail: conversation::ConversationDetail,
     conversation_thread: conversation::ConversationThreadDetail,
+    document_list: docs::DocumentListResponse,
+    document: docs::DocumentResponse,
     turn_context: context::TurnContextResponse,
     submit_turn: turn::SubmitTurnRequest,
     message_attachment: turn::MessageAttachment,

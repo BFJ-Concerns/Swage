@@ -10,6 +10,8 @@ import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRe
 import type { CreateSurfaceRequest } from "./CreateSurfaceRequest";
 import type { CreateTopicRequest } from "./CreateTopicRequest";
 import type { DeleteSurfaceAnnotationResponse } from "./DeleteSurfaceAnnotationResponse";
+import type { DocumentListResponse } from "./DocumentListResponse";
+import type { DocumentResponse } from "./DocumentResponse";
 import type { LibraryEntryResponse } from "./LibraryEntryResponse";
 import type { LibraryListResponse } from "./LibraryListResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
@@ -212,6 +214,16 @@ export async function getSettings(): Promise<SettingsResponse> {
 /** Save gateway settings. */
 export async function saveSettings(body: SaveSettingsRequest): Promise<SettingsResponse> {
   return request<SettingsResponse>("PUT", `/api/settings`, body);
+}
+
+/** List the platform's own documentation, hosted by the gateway. */
+export async function listDocuments(): Promise<DocumentListResponse> {
+  return request<DocumentListResponse>("GET", `/api/docs`);
+}
+
+/** Read one hosted document by name. */
+export async function getDocument(name: string): Promise<DocumentResponse> {
+  return request<DocumentResponse>("GET", `/api/docs/${encodeURIComponent(name)}`);
 }
 
 /** Discover models for a configured provider. */
