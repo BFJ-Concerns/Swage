@@ -520,36 +520,28 @@ pub(super) async fn process_turn_with_composition_and_focus(
         session.active_workspace_attachment_id,
     )
     .await;
-    let (workspace_root, mut allowed_paths) = if let Some(path) = session
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("worker_placement_cwd"))
-        .and_then(serde_json::Value::as_str)
+    let worker_placement = worker_placement_path(session.metadata.as_ref());
+    if attendance == TurnAttendance::Unattended
+        && worker_placement.is_none()
+        && workspace_policy.active_workspace.is_none()
+        && !state.config_root.is_absolute()
     {
-        let path = std::path::PathBuf::from(path);
-        (path.clone(), vec![path])
-    } else {
-        if attendance == TurnAttendance::Unattended
-            && workspace_policy.active_workspace.is_none()
-            && !state.config_root.is_absolute()
-        {
-            record_terminal_state_and_release(
-                state,
-                session_id,
-                prepared_turn_id,
-                TurnState::Failed,
-            )
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;
-            return Err(GatewayError::ConfigError(format!(
-                "unattended turn has no deliberate tool root: attach a workspace or configure an absolute managed scratch root (current root: {})",
-                state.config_root.display()
-            )));
-        }
-        agent_workspace_from_policy(&state.config_root, &workspace_policy, &scope, session.id)
-    };
+        return Err(GatewayError::ConfigError(format!(
+            "unattended turn has no deliberate tool root: attach a workspace or configure an absolute managed scratch root (current root: {})",
+            state.config_root.display()
+        )));
+    }
+    let (tool_root, mut allowed_paths) = resolve_turn_tool_root(
+        &state.config_root,
+        &workspace_policy,
+        &scope,
+        session.id,
+        worker_placement,
+    );
 
-    let environment =
-        build_session_environment(&topic, Some(workspace_root.display().to_string()), &session);
+    let environment = build_session_environment(&topic, &tool_root, &session);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
@@ -606,7 +598,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
     assembly_report.tool_scope = Some(serde_json::json!({
-        "effective_root": workspace_root,
+        "effective_root": tool_root.path,
     }));
 
     tracing::debug!(
@@ -649,7 +641,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         session.agent_id.clone(),
         &config,
         output_schema_override,
-        &workspace_root,
+        &tool_root.path,
         allowed_paths,
     );
     if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
