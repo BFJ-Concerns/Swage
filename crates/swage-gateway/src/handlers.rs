@@ -925,6 +925,7 @@ pub async fn create_conversation(
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
     let svc = ConversationService::new(state.storage, state.topic_store)
+        .with_broadcast(state.broadcast)
         .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
@@ -1007,6 +1008,7 @@ pub async fn create_topic_session(
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
     let svc = ConversationService::new(state.storage, state.topic_store)
+        .with_broadcast(state.broadcast)
         .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc
@@ -1678,12 +1680,12 @@ async fn execute_external_delegate_message(
     );
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let mut target_agent_config = crate::turn::build_agent_config_for_topic_workspace(
+    let (mut target_agent_config, tool_root) = crate::turn::build_agent_config_for_topic_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
         None,
-        topic_id,
+        &topic,
         sender_turn_id.unwrap_or_else(Uuid::new_v4),
         active_workspace_attachment_id,
     )
@@ -1734,7 +1736,7 @@ async fn execute_external_delegate_message(
             topic.clone(),
             target_resolved.clone(),
             delegate_msg.recipient_agent_id.clone(),
-            target_agent_config.working_directory.display().to_string(),
+            tool_root,
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
@@ -3087,7 +3089,9 @@ mod tests {
         );
         assert!(
             request_text.contains("Topic: none — this session was started without a topic")
-                && request_text.contains("Working directory:")
+                && request_text.contains("No workspace is attached. Tool paths resolve at ")
+                && request_text.contains("/scratch/general/sessions/")
+                && !request_text.contains("Working directory:")
                 && request_text.contains("Session started:"),
             "external delegated provider request should include the child session's place: {request_text}"
         );

@@ -18,6 +18,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Sessions without an attached workspace say so in their orientation and name the scratch directory where tool paths resolve; attached workspaces and placed workers retain their working-directory line.
 - The client OpenAPI document declares the recent-sessions `archived` query parameter as a boolean, matching the generated TypeScript client and gateway.
 - Topic-local surface templates are replaced by the shared surface library; surfaces are listed and created per session (`/api/sessions/{id}/surfaces`) rather than per topic, and a schedule may deliver to a surface only when it continues the session that owns it.
 - The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.
@@ -25,6 +26,8 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart or cancellation is settled as interrupted, and the resumed conversation replays those calls with their results.
+- Surfaces opened by a topic when a person starts a session now appear in the local audit trail with their library origin and module content, and notify open surface views. Saving a surface to the library records the entry and its audit event together.
+- Fresh schedule runs no longer open a topic's person-facing default surfaces; those defaults open when a person starts a session.
 - Deleting a topic leaves library entries saved from it and other topics' default designations intact; the catalogue identifies the deleted origin, and seeded surfaces retain the source entry's name after its removal.
 - Starting a session and moving to another scope before the gateway answers no longer activates the late session where the user now stands; it exists in the scope it was asked for and the recent list finds it.
 - The top bar and the two-column surfaces wrap and stack on phone-sized viewports instead of clipping at the right edge, so every control stays reachable.
