@@ -1235,6 +1235,8 @@ pub struct Surface {
     /// origin, not a live link: the surface's modules are its own from birth,
     /// and neither side's later edits reach the other.
     pub library_entry_id: Option<Uuid>,
+    /// Name captured when the library entry was seeded, retained if it is deleted.
+    pub seeded_from_name: Option<String>,
     /// When the seeding happened, alongside `library_entry_id`.
     pub seeded_at: Option<DateTime<Utc>>,
 }
