@@ -21,6 +21,9 @@ pub mod message;
 pub mod router;
 pub mod schema_contract;
 
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures;
+
 // Public re-exports — the primary surface for consumers.
 pub use agent::Agent;
 pub use approval::{ApprovalChannelRegistrar, ApprovalDecision};
