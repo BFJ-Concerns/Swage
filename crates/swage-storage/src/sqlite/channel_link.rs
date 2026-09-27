@@ -212,7 +212,6 @@ mod tests {
 
         let session_id = storage
             .create_session(NewSession {
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await

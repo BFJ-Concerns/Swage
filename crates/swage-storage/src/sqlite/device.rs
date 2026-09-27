@@ -218,7 +218,6 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                origin: crate::model::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
                         "integration": "dev_dm",

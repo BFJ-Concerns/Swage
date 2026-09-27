@@ -1294,7 +1294,6 @@ mod tests {
             .await
             .expect("second topic");
         let new_run = |topic_id| NewWorkflowRun {
-            source_hash: Uuid::new_v4().to_string(),
             ..crate::fixtures::new_workflow_run(topic_id)
         };
 
@@ -1350,7 +1349,6 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                source_hash: Uuid::new_v4().to_string(),
                 ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
@@ -1476,7 +1474,6 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                source_hash: Uuid::new_v4().to_string(),
                 ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
@@ -1555,7 +1552,6 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                source_hash: Uuid::new_v4().to_string(),
                 ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
