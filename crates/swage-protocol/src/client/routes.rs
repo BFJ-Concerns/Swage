@@ -90,13 +90,21 @@ pub struct Route {
 pub enum ParameterType {
     Uuid,
     String,
+    Boolean,
 }
 
 impl ParameterType {
+    pub const fn openapi_type(self) -> &'static str {
+        match self {
+            Self::Uuid | Self::String => "string",
+            Self::Boolean => "boolean",
+        }
+    }
+
     pub const fn openapi_format(self) -> Option<&'static str> {
         match self {
             Self::Uuid => Some("uuid"),
-            Self::String => None,
+            Self::String | Self::Boolean => None,
         }
     }
 
@@ -104,6 +112,7 @@ impl ParameterType {
         match self {
             Self::Uuid => "not-a-uuid",
             Self::String => "probe",
+            Self::Boolean => "true",
         }
     }
 }
@@ -304,7 +313,7 @@ pub fn routes() -> Vec<Route> {
                 },
                 QueryParameter {
                     name: "archived",
-                    kind: ParameterType::String,
+                    kind: ParameterType::Boolean,
                     required: false,
                 },
             ],

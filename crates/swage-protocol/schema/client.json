@@ -2266,6 +2266,9 @@
         "name": {
           "type": "string"
         },
+        "origin_topic_deleted": {
+          "type": "boolean"
+        },
         "origin_topic_id": {
           "type": [
             "string",
@@ -2289,6 +2292,7 @@
         "name",
         "description",
         "tags",
+        "origin_topic_deleted",
         "created_at",
         "updated_at",
         "modules"
@@ -2308,8 +2312,12 @@
         "name": {
           "type": "string"
         },
+        "origin_topic_deleted": {
+          "description": "True when the entry's saved-from topic has been deleted.",
+          "type": "boolean"
+        },
         "origin_topic_id": {
-          "description": "The scope the surface was saved from: absent for the general scope.\nA session in this scope receives the saved content when it adds the\nentry; any other scope receives the shape.",
+          "description": "The scope the surface was saved from: absent for the general scope;\nretained when the topic has been deleted.\nA session in this scope receives the saved content when it adds the\nentry; any other scope receives the shape.",
           "type": [
             "string",
             "null"
@@ -2332,6 +2340,7 @@
         "name",
         "description",
         "tags",
+        "origin_topic_deleted",
         "updated_at"
       ]
     },
@@ -4904,7 +4913,7 @@
       ]
     },
     "SessionPolicy": {
-      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `topic_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in the selected topic, or\n  the general scope when `topic_id` is absent, for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
       "oneOf": [
         {
           "type": "object",
@@ -4917,13 +4926,15 @@
               "const": "fresh"
             },
             "topic_id": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "format": "uuid"
             }
           },
           "required": [
             "policy",
-            "topic_id",
             "agent_id"
           ]
         },
@@ -5415,6 +5426,14 @@
             "null"
           ],
           "format": "date-time",
+          "default": null
+        },
+        "seeded_from_name": {
+          "description": "The library entry's name when this surface was seeded.",
+          "type": [
+            "string",
+            "null"
+          ],
           "default": null
         },
         "session_id": {

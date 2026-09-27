@@ -221,6 +221,26 @@ describe("ScheduleAutomationPanel", () => {
     expect(operatorApi.triggerSchedule).toHaveBeenCalledWith("schedule-1");
   });
 
+  it("creates a fresh schedule without a topic from the general scope", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(SCHEDULE);
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: null, sessionId: null },
+    });
+    await flushUi();
+
+    setFieldValue(
+      document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!,
+      "Check the queue.",
+    );
+    clickButton("Create schedule");
+    await flushUi();
+
+    const request = vi.mocked(workflowApi.createSchedule).mock.calls[0]?.[0];
+    expect(request?.session).toEqual({ policy: "fresh", agent_id: "gateway" });
+  });
+
   it("blocks a ticked gate with a blank model before submitting", async () => {
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
     component = mount(ScheduleAutomationPanel, {

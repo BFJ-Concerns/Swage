@@ -42,11 +42,14 @@ pub struct LibraryEntrySummary {
     pub name: String,
     pub description: String,
     pub tags: Vec<String>,
-    /// The scope the surface was saved from: absent for the general scope.
+    /// The scope the surface was saved from: absent for the general scope;
+    /// retained when the topic has been deleted.
     /// A session in this scope receives the saved content when it adds the
     /// entry; any other scope receives the shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_topic_id: Option<Uuid>,
+    /// True when the entry's saved-from topic has been deleted.
+    pub origin_topic_deleted: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -59,6 +62,7 @@ pub struct LibraryEntryResponse {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_topic_id: Option<Uuid>,
+    pub origin_topic_deleted: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub modules: Vec<LibraryEntryModuleView>,
@@ -178,6 +182,10 @@ pub struct SurfaceResponse {
     #[serde(default)]
     #[ts(optional, type = "string | null")]
     pub library_entry_id: Option<Uuid>,
+    /// The library entry's name when this surface was seeded.
+    #[serde(default)]
+    #[ts(optional, type = "string | null")]
+    pub seeded_from_name: Option<String>,
     #[serde(default)]
     #[ts(optional, type = "string | null")]
     pub seeded_at: Option<DateTime<Utc>>,
