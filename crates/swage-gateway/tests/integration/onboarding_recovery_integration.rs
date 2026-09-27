@@ -365,7 +365,11 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
         }),
     )
     .await;
-    assert_eq!(general_schedule_status, StatusCode::CREATED, "{general_schedule}");
+    assert_eq!(
+        general_schedule_status,
+        StatusCode::CREATED,
+        "{general_schedule}"
+    );
 
     let (export_status, export_body) = get_json(origin_addr, "/api/recovery/export").await;
     assert_eq!(export_status, StatusCode::OK);
