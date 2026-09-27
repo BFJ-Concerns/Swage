@@ -9465,7 +9465,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("Topic: none — this session was started without a topic")
-            && child_request_text.contains("Working directory:")
+            && child_request_text.contains("No workspace is attached.")
+            && child_request_text.contains("Tool paths resolve at")
             && child_request_text.contains("Session started:"),
         "delegated provider request should include the child session's place: {child_request_text}"
     );
@@ -14164,6 +14165,178 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
     assert_eq!(allowed_paths, vec![active_workspace, attachment_workspace]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unattached_session_environment_identifies_resolved_scratch_root() {
+    let root = tempfile::tempdir().expect("root");
+    let storage = swage_storage::SqliteStorage::in_memory().expect("storage");
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("session");
+    let policy = TrustedWorkspacePolicy::default();
+    let (tool_root, _) =
+        resolve_agent_tool_root_from_policy(root.path(), &policy, &topic.location(), session.id);
+
+    let environment = build_session_environment(&topic, &tool_root, &session);
+    assert_eq!(
+        environment.tool_root,
+        swage_context::orientation::ToolRoot::ManagedScratch(tool_root.path.display().to_string())
+    );
+    assert_eq!(tool_root.source, ToolRootSource::ManagedScratch);
+    assert_eq!(
+        tool_root.path,
+        managed_scratch_workspace(root.path(), &topic.location(), session.id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_worker_orientation_keeps_its_working_directory() {
+    let root = tempfile::tempdir().expect("root");
+    let placed = root.path().join("placed-worker");
+    std::fs::create_dir_all(&placed).expect("placed directory");
+    let storage = swage_storage::SqliteStorage::in_memory().expect("storage");
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(NewSession {
+            metadata: Some(serde_json::json!({
+                "worker_placement_cwd": placed.display().to_string(),
+            })),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("placed worker");
+    let policy = TrustedWorkspacePolicy::default();
+    let (tool_root, _) = resolve_turn_tool_root(
+        root.path(),
+        &policy,
+        &topic.location(),
+        session.id,
+        worker_placement_path(session.metadata.as_ref()),
+    );
+    let environment = build_session_environment(&topic, &tool_root, &session);
+    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
+        [0]
+    .text_content();
+    assert!(text.contains(&format!("Working directory: {}", placed.display())));
+    assert!(!text.contains("No workspace is attached"));
+    assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_child_names_parent_selected_non_default_workspace() {
+    let root = tempfile::tempdir().expect("root");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("general scope");
+    let other = root.path().join("other-workspace");
+    let selected = root.path().join("selected-workspace");
+    std::fs::create_dir_all(&other).expect("other workspace");
+    std::fs::create_dir_all(&selected).expect("selected workspace");
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            topic_id: topic.id,
+            label: "other".into(),
+            path: other.display().to_string(),
+            permissions: vec!["read".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("other attachment");
+    let selected_attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            topic_id: topic.id,
+            label: "selected".into(),
+            path: selected.display().to_string(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("selected attachment");
+    assert!(!selected_attachment.is_default);
+    let parent = storage
+        .create_session(NewSession {
+            active_workspace_attachment_id: Some(selected_attachment.id),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("parent session");
+    let parent_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: parent.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .expect("parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: parent_thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate from the selected workspace".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("parent turn");
+    let (provider, requests) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "delegated work complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "delegate",
+            "work in the selected workspace",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "selected-workspace-delegate",
+            "gateway",
+            parent_turn.id,
+            topic.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("delegation completes");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+    let child = storage
+        .list_sessions_by_agent_id("delegate")
+        .await
+        .expect("child sessions")
+        .into_iter()
+        .next()
+        .expect("delegated child session");
+    assert_eq!(child.active_workspace_attachment_id, None);
+    let requests = requests.lock().expect("captured provider requests");
+    assert_eq!(requests.len(), 1, "one child request");
+    let text = requests[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(text.contains(&format!("Working directory: {}", selected.display())));
+    assert!(!text.contains("No workspace is attached"));
+}
+
 #[test]
 fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing() {
     let config = swage_config::ResolvedConfig::default();
@@ -14247,7 +14420,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
     swage_context::orientation::SessionEnvironment {
         topic_name: String::new(),
         topic_description: String::new(),
-        working_directory: None,
+        tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
         started_at: chrono::Utc::now(),
         channel: None,
     }
@@ -14481,7 +14654,10 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
         topic,
         config,
         "delegate".into(),
-        "/workspace".into(),
+        ResolvedToolRoot {
+            path: "/workspace".into(),
+            source: ToolRootSource::AttachedWorkspace,
+        },
         context_event_tx,
         serde_json::json!({}),
         DispatchContextComposition {
