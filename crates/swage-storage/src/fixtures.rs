@@ -117,28 +117,44 @@ mod tests {
         assert_eq!(run.topic_id, topic_id);
         assert_eq!(run.task.as_deref(), Some("review"));
         assert!(run.parent_run_id.is_none());
+        assert!(run.parent_seq.is_none());
         assert!(run.dispatching_session_id.is_none());
+        assert!(run.script_version_id.is_none());
+        assert!(run.inline_workflow_id.is_none());
+        assert!(run.inline_workflow_name.is_none());
+        assert!(run.inline_workflow_version.is_none());
+        assert!(run.carrying_skill.is_none());
         assert!(run.workflow_call_tools.is_none());
         assert!(run.dispatch_bound_agent_ids.is_empty());
         assert!(run.dispatch_bound_task_definition_ids.is_empty());
         assert_eq!(run.args, serde_json::Value::Null);
         assert_eq!(run.budget, serde_json::json!({}));
+        assert_eq!(run.source.as_deref(), Some("return null"));
+        assert!(Uuid::parse_str(&run.source_hash).is_ok());
+        assert_eq!(run.engine_version, "test");
+        assert!(run.inherited_worker_placement.is_none());
     }
 
     #[test]
     fn a_session_record_override_keeps_the_neutral_record_shape() {
         let topic_id = Uuid::new_v4();
+        let before = Utc::now();
         let record = Session {
             agent_id: "reviewer".into(),
             ..session(topic_id)
         };
+        let after = Utc::now();
+        assert!(!record.id.is_nil());
         assert_eq!(record.topic_id, topic_id);
         assert_eq!(record.agent_id, "reviewer");
+        assert_eq!(record.origin, SessionOrigin::Direct);
         assert!(record.metadata.is_none());
         assert!(record.selected_model_id.is_none());
         assert!(record.archived_at.is_none());
         assert!(record.active_workspace_attachment_id.is_none());
         assert_eq!(record.created_at, record.updated_at);
+        assert!(record.created_at >= before);
+        assert!(record.created_at <= after);
     }
 
     #[test]
