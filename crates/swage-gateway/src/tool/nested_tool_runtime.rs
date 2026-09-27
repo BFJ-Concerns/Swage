@@ -85,26 +85,30 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             parent_call_id: Some(self.parent_call_id.clone()),
             display_summary,
         };
-        if let Err(error) = self.storage.create_tool_call(new_call).await {
-            // No row was written, so there is nothing to settle; the call is
-            // still finished for the client's sake (its ToolEnd), and the
-            // refused dispatch is the loud response the contract asks of a
-            // constitutive write (record_durability.rs, class 1).
-            let failure = error.to_string();
-            let _ = self
-                .finish_tool_call(
-                    &call_id,
-                    tool_name,
-                    &Value::String(failure.clone()),
-                    "error",
-                    0,
-                )
-                .await;
-            return Err(WorkerToolError {
-                message: failure,
-                result: None,
-            });
-        }
+        let record = match self.storage.create_tool_call(new_call).await {
+            Ok(record) => record,
+            Err(error) => {
+                // No row was written, so there is nothing to settle; the call is
+                // still finished for the client's sake (its ToolEnd), and the
+                // refused dispatch is the loud response the contract asks of a
+                // constitutive write (record_durability.rs, class 1).
+                let failure = error.to_string();
+                let _ = self.ws_tx.send(ServerEvent::ToolEnd {
+                    call_id: call_id.clone(),
+                    tool: tool_name.to_string(),
+                    result: Value::String(failure.clone()),
+                    status: "error".to_string(),
+                    duration_ms: 0,
+                    truncated: false,
+                    total_bytes: None,
+                    parent_call_id: Some(self.parent_call_id.clone()),
+                });
+                return Err(WorkerToolError {
+                    message: failure,
+                    result: None,
+                });
+            }
+        };
 
         let ctx = SerializableToolContext {
             call_id: Some(call_id.clone()),
@@ -126,7 +130,14 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
         match dispatched {
             Ok(output) => {
                 if let Err(error) = self
-                    .finish_tool_call(&call_id, tool_name, &output.result, "success", duration_ms)
+                    .finish_tool_call(
+                        record.id,
+                        &call_id,
+                        tool_name,
+                        &output.result,
+                        "success",
+                        duration_ms,
+                    )
                     .await
                 {
                     return Err(WorkerToolError {
@@ -141,7 +152,14 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             Err(error) => {
                 let failure = Value::String(error.to_string());
                 let message = match self
-                    .finish_tool_call(&call_id, tool_name, &failure, "error", duration_ms)
+                    .finish_tool_call(
+                        record.id,
+                        &call_id,
+                        tool_name,
+                        &failure,
+                        "error",
+                        duration_ms,
+                    )
                     .await
                 {
                     Ok(()) => error.to_string(),
@@ -164,6 +182,7 @@ impl NestedToolRuntime {
     /// with no recorded outcome means to the model.
     async fn finish_tool_call(
         &self,
+        record_id: Uuid,
         call_id: &str,
         tool_name: &str,
         result: &Value,
@@ -186,8 +205,7 @@ impl NestedToolRuntime {
         let settled = self
             .storage
             .update_tool_call_result(
-                call_id,
-                self.turn_id,
+                record_id,
                 &result_text,
                 &model_result,
                 status,
@@ -264,7 +282,7 @@ mod tests {
             "python_parent".into(),
             serialise_tool_context(&parent_context(turn_id)),
         );
-        storage
+        let record = storage
             .create_tool_call(swage_storage::model::NewToolCall {
                 turn_id,
                 agent_id: "gateway".into(),
@@ -287,6 +305,7 @@ mod tests {
             .unwrap();
         runtime
             .finish_tool_call(
+                record.id,
                 "nested-secret",
                 "secret_tool",
                 &json!({"token": "sk-abcdefghijklmnopqrstuvwxyz123456"}),

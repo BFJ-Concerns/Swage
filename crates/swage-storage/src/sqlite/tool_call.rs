@@ -189,8 +189,7 @@ impl ToolCallStore for SqliteStorage {
 
     async fn update_tool_call_result(
         &self,
-        call_id: &str,
-        turn_id: Uuid,
+        id: Uuid,
         result: &str,
         model_result: &str,
         status: &str,
@@ -198,18 +197,17 @@ impl ToolCallStore for SqliteStorage {
         truncated: bool,
         total_bytes: Option<i64>,
     ) -> Result<(), StorageError> {
-        let call_id = call_id.to_owned();
-        let turn_id_str = turn_id.to_string();
+        let id = id.to_string();
         let result = result.to_owned();
         let model_result = model_result.to_owned();
         let status = status.to_owned();
 
         self.with_conn(move |conn| {
-            conn.execute(
+            let updated = conn.execute(
                 "UPDATE tool_calls
                  SET result=?1, model_result=?2, status=?3, duration_ms=?4, truncated=?5,
                      total_bytes=?6
-                 WHERE call_id=?7 AND turn_id=?8",
+                 WHERE id=?7",
                 params![
                     &result,
                     &model_result,
@@ -217,10 +215,12 @@ impl ToolCallStore for SqliteStorage {
                     duration_ms,
                     truncated as i32,
                     total_bytes,
-                    &call_id,
-                    &turn_id_str,
+                    &id,
                 ],
             )?;
+            if updated != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             Ok(())
         })
         .await
@@ -395,8 +395,7 @@ mod tests {
         );
         storage
             .update_tool_call_result(
-                &record.call_id,
-                turn_id,
+                record.id,
                 "file1\nsk-live-secret",
                 &scanned,
                 "success",
@@ -434,6 +433,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_provider_call_id_keeps_each_rounds_result() {
+        let (storage, turn_id) = make_turn().await;
+        let first = storage
+            .create_tool_call(new_call(turn_id, "reused", 0))
+            .await
+            .unwrap();
+        storage
+            .update_tool_call_result(first.id, "first", "first", "success", 1, false, None)
+            .await
+            .unwrap();
+        let mut later = new_call(turn_id, "reused", 0);
+        later.provider_round = 2;
+        let second = storage.create_tool_call(later).await.unwrap();
+        storage
+            .update_tool_call_result(second.id, "second", "second", "success", 2, false, None)
+            .await
+            .unwrap();
+
+        let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+        assert_eq!(calls[0].id, first.id);
+        assert_eq!(calls[0].result.as_deref(), Some("first"));
+        assert_eq!(calls[1].id, second.id);
+        assert_eq!(calls[1].result.as_deref(), Some("second"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn update_result_with_truncation() {
         let (storage, turn_id) = make_turn().await;
         let record = storage
@@ -443,8 +468,7 @@ mod tests {
 
         storage
             .update_tool_call_result(
-                &record.call_id,
-                turn_id,
+                record.id,
                 "...truncated",
                 "...truncated",
                 "success",
@@ -655,8 +679,7 @@ mod tests {
         // Update only call_a's result.
         storage
             .update_tool_call_result(
-                &call_a.call_id,
-                turn_id,
+                call_a.id,
                 "127.0.0.1 localhost",
                 "127.0.0.1 localhost",
                 "success",
