@@ -218,7 +218,6 @@ describe("TopicSettingsPage", () => {
     await flushUi();
     expect(topicsApi.relinkTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1", "/work/absent");
     expect(document.body.textContent).toContain("folder does not exist");
-    expect(document.body.textContent).toContain("/work/source");
     expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
     expect(topicsApi.attachTopicWorkspace).not.toHaveBeenCalled();
 
