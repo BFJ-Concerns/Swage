@@ -254,18 +254,13 @@ mod tests {
     use axum::{Router, http::HeaderMap, routing::post};
     use swage_protocol::client::{surface::CreateSurfaceRequest, websocket::ServerEvent};
     use swage_storage::{
-        NewSession, NewTopic, SessionOrigin, SessionStore, SqliteStorage, Storage, SurfaceStore,
-        TopicStore,
+        NewSession, NewTopic, SessionStore, SqliteStorage, Storage, SurfaceStore, TopicStore,
     };
 
     async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".into(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .unwrap()
@@ -274,17 +269,6 @@ mod tests {
 
     use super::*;
     use crate::secret::CreateSecretRequest;
-
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn webhook_resolves_bearer_auth_from_governed_secret_reference() {
@@ -367,7 +351,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let session = session_in(&storage, topic.id).await;
         let surface = crate::surface::create_surface(
             &state,
@@ -450,7 +434,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let session = session_in(&storage, other_topic.id).await;
         let surface = crate::surface::create_surface(
             &state,

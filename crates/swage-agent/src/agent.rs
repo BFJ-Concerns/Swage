@@ -130,11 +130,8 @@ mod approval_tests {
         let topic = storage.general_scope().await.expect("default topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -254,55 +251,7 @@ mod approval_tests {
     async fn rejected_tool_approval_emits_settlement_log() {
         use tracing_subscriber::{Registry, layer::SubscriberExt};
 
-        type RecordedMessages = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
-
-        #[derive(Default)]
-        struct MessageRecorder(RecordedMessages);
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _context: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                #[derive(Default)]
-                struct MessageVisitor {
-                    message: Option<String>,
-                    approval_id: Option<String>,
-                }
-
-                impl tracing::field::Visit for MessageVisitor {
-                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                        if field.name() == "message" {
-                            self.message = Some(value.to_owned());
-                        } else if field.name() == "approval_id" {
-                            self.approval_id = Some(value.to_owned());
-                        }
-                    }
-
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        if field.name() == "message" {
-                            self.message = Some(format!("{value:?}"));
-                        } else if field.name() == "approval_id" {
-                            self.approval_id = Some(format!("{value:?}"));
-                        }
-                    }
-                }
-
-                let mut visitor = MessageVisitor::default();
-                event.record(&mut visitor);
-                if visitor.message.is_some() {
-                    self.0
-                        .lock()
-                        .expect("recorded log messages")
-                        .push((visitor.message, visitor.approval_id));
-                }
-            }
-        }
+        use crate::fixtures::MessageRecorder;
 
         let recorder = MessageRecorder::default();
         let messages = Arc::clone(&recorder.0);
@@ -349,12 +298,14 @@ mod approval_tests {
         };
 
         assert!(
-            messages.lock().expect("recorded log messages").iter().any(
-                |(message, recorded_approval_id)| {
-                    message.as_deref() == Some("tool approval rejected and settled")
-                        && recorded_approval_id.as_deref() == Some(approval_id.as_str())
-                }
-            ),
+            messages
+                .lock()
+                .expect("recorded log messages")
+                .iter()
+                .any(|event| {
+                    event.message == "tool approval rejected and settled"
+                        && event.approval_id.as_deref() == Some(approval_id.as_str())
+                }),
             "human rejection must emit its settlement log"
         );
     }
@@ -433,11 +384,8 @@ mod compaction_caller_tests {
         let topic = storage.general_scope().await.expect("default topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");

@@ -115,25 +115,8 @@ mod tests {
         let topic = storage.general_scope().await.unwrap();
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: "test".into(),
-                args: Value::Null,
-                budget: json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .unwrap();

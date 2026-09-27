@@ -4898,7 +4898,7 @@
       ]
     },
     "SessionPolicy": {
-      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in `topic_id` for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
+      "description": "Which session each run executes in.\n\n- `fresh` — every run creates a new session in the selected topic, or\n  the general scope when `topic_id` is absent, for\n  `agent_id`, with a deliberately assembled opening context (the\n  schedule's message plus the previous run's outcome).\n- `continuation` — every run continues the named session, executing as\n  whatever agent that session has at run time.",
       "oneOf": [
         {
           "type": "object",
@@ -4911,13 +4911,15 @@
               "const": "fresh"
             },
             "topic_id": {
-              "type": "string",
+              "type": [
+                "string",
+                "null"
+              ],
               "format": "uuid"
             }
           },
           "required": [
             "policy",
-            "topic_id",
             "agent_id"
           ]
         },
