@@ -104,6 +104,41 @@ mod tests {
         assert_eq!(input.topic_id, topic_id);
         assert_eq!(input.origin, SessionOrigin::Direct);
         assert!(input.metadata.is_none());
+        assert!(input.active_workspace_attachment_id.is_none());
+    }
+
+    #[test]
+    fn a_workflow_override_keeps_the_neutral_run_shape() {
+        let topic_id = Uuid::new_v4();
+        let run = NewWorkflowRun {
+            task: Some("review".into()),
+            ..new_workflow_run(topic_id)
+        };
+        assert_eq!(run.topic_id, topic_id);
+        assert_eq!(run.task.as_deref(), Some("review"));
+        assert!(run.parent_run_id.is_none());
+        assert!(run.dispatching_session_id.is_none());
+        assert!(run.workflow_call_tools.is_none());
+        assert!(run.dispatch_bound_agent_ids.is_empty());
+        assert!(run.dispatch_bound_task_definition_ids.is_empty());
+        assert_eq!(run.args, serde_json::Value::Null);
+        assert_eq!(run.budget, serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_session_record_override_keeps_the_neutral_record_shape() {
+        let topic_id = Uuid::new_v4();
+        let record = Session {
+            agent_id: "reviewer".into(),
+            ..session(topic_id)
+        };
+        assert_eq!(record.topic_id, topic_id);
+        assert_eq!(record.agent_id, "reviewer");
+        assert!(record.metadata.is_none());
+        assert!(record.selected_model_id.is_none());
+        assert!(record.archived_at.is_none());
+        assert!(record.active_workspace_attachment_id.is_none());
+        assert_eq!(record.created_at, record.updated_at);
     }
 
     #[test]
