@@ -29,6 +29,13 @@ use crate::tokeniser::Tokeniser;
 /// The element name the successor's summary is carried under.
 pub const SUCCESSION_ELEMENT: &str = "succession";
 
+/// The strategy a threshold-triggered pass records.
+pub const THRESHOLD_STRATEGY: &str = "succession";
+
+/// The strategy a degradation-triggered pass records: the summary is a
+/// diagnosis of where the session went wrong, written by readers outside it.
+pub const DEGRADATION_STRATEGY: &str = "succession-degradation";
+
 /// Directly above history (0) and below everything rendered from sources:
 /// the summary reads as the conversation's own opening.
 pub const SUCCESSION_PRIORITY: i32 = 1;
@@ -67,6 +74,8 @@ pub enum SuccessionError {
     Provider(#[from] ProviderError),
     #[error("the summarising provider returned an empty summary")]
     EmptySummary,
+    #[error("the diagnosis could not be written: {0}")]
+    Diagnosis(String),
 }
 
 /// The summary of the conversation's earlier part, as an element.
@@ -142,28 +151,48 @@ pub async fn succeed(
     provider: &dyn LlmProvider,
     tokeniser: &dyn Tokeniser,
 ) -> Result<Succession, SuccessionError> {
+    let summarised = split_point(&request)?;
+    let response = provider
+        .complete(summary_request(
+            request.carried,
+            &request.history[..summarised],
+            request.focus,
+        ))
+        .await?;
+    successor(&request, response.content, THRESHOLD_STRATEGY, tokeniser)
+}
+
+/// Where `request`'s history splits into the summarised part and the part
+/// kept as it was; history too short to split refuses the pass.
+pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionError> {
     let history_len = request.history.len();
     if history_len < 2 {
         return Err(SuccessionError::TooShort(history_len));
     }
-    let summarised = summarised_count(history_len, request.retain_at_most);
-    let (older, newer) = request.history.split_at(summarised);
-    let tokens_before = tokeniser.count_messages(request.history);
+    Ok(summarised_count(history_len, request.retain_at_most))
+}
 
-    let response = provider
-        .complete(summary_request(request.carried, older, request.focus))
-        .await?;
-
-    if response.content.trim().is_empty() {
+/// The successor's parts from a summary of `request`'s older history,
+/// whoever wrote it, recorded under `strategy`.
+pub fn successor(
+    request: &SuccessionRequest<'_>,
+    summary: String,
+    strategy: &str,
+    tokeniser: &dyn Tokeniser,
+) -> Result<Succession, SuccessionError> {
+    let summarised = split_point(request)?;
+    if summary.trim().is_empty() {
         return Err(SuccessionError::EmptySummary);
     }
-    let element = SuccessionElement::new(response.content, summarised, newer.len());
+    let newer = &request.history[summarised..];
+    let tokens_before = tokeniser.count_messages(request.history);
+    let element = SuccessionElement::new(summary, summarised, newer.len());
     let retained_history = newer.to_vec();
     let tokens_after = element.token_count(tokeniser) + tokeniser.count_messages(&retained_history);
     let record = CompactionRecord {
         element: "history".to_string(),
-        requested_strategy: "succession".to_string(),
-        actual_strategy: "succession".to_string(),
+        requested_strategy: strategy.to_string(),
+        actual_strategy: THRESHOLD_STRATEGY.to_string(),
         messages_removed: summarised,
         tokens_before,
         tokens_after,
@@ -185,12 +214,13 @@ pub fn failure_record(
     history: &[ChatMessage],
     tokeniser: &dyn Tokeniser,
     focus: Option<&str>,
+    strategy: &str,
     error: &SuccessionError,
 ) -> CompactionRecord {
     let tokens = tokeniser.count_messages(history);
     CompactionRecord {
         element: "history".to_string(),
-        requested_strategy: "succession".to_string(),
+        requested_strategy: strategy.to_string(),
         actual_strategy: "none".to_string(),
         messages_removed: 0,
         tokens_before: tokens,
@@ -240,9 +270,9 @@ fn summary_request(
     }
 }
 
-/// Messages as labelled prose for the summariser; non-text parts are
-/// named rather than dropped silently.
-fn transcript(messages: &[ChatMessage]) -> String {
+/// Messages as labelled prose for a reader outside the conversation;
+/// non-text parts are named rather than dropped silently.
+pub fn transcript(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .map(|message| {
@@ -428,6 +458,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_diagnosis_becomes_the_successor_s_summary_under_its_trigger_s_strategy() {
+        let history = history(6);
+        let succession = successor(
+            &SuccessionRequest {
+                carried: &[],
+                history: &history,
+                focus: None,
+                retain_at_most: Some(1),
+            },
+            "The build kept failing on a missing file.".to_string(),
+            DEGRADATION_STRATEGY,
+            &CharTokeniser,
+        )
+        .expect("a diagnosis makes a successor");
+        assert_eq!(succession.record.requested_strategy, "succession-degradation");
+        assert_eq!(succession.record.actual_strategy, "succession");
+        assert_eq!(succession.record.messages_removed, 5);
+        assert_eq!(
+            succession
+                .retained_history
+                .iter()
+                .map(|m| m.text_content())
+                .collect::<Vec<_>>(),
+            ["message 5"]
+        );
+        assert!(
+            succession.element.content()[0]
+                .text_content()
+                .contains("The build kept failing on a missing file.")
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_summariser_is_an_error_the_caller_records() {
         let provider = RecordingProvider::failing();
@@ -446,7 +509,7 @@ mod tests {
         .expect_err("the provider failed");
         assert!(matches!(error, SuccessionError::Provider(_)));
 
-        let record = failure_record(&history, &CharTokeniser, None, &error);
+        let record = failure_record(&history, &CharTokeniser, None, THRESHOLD_STRATEGY, &error);
         assert_eq!(record.actual_strategy, "none");
         assert_eq!(record.messages_removed, 0);
         assert_eq!(record.tokens_before, record.tokens_after);
