@@ -225,10 +225,13 @@ mod tests {
             "file_write",
             "file_search",
             "file_list",
-            "memory",
         ] {
             assert!(names.contains(name), "sandbox agent must register {name}");
         }
+        assert!(
+            !names.contains("memory"),
+            "shared memory lives in the session's scope on the gateway host, not in the sandbox"
+        );
     }
 
     #[test]
