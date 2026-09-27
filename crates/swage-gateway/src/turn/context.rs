@@ -1,7 +1,7 @@
 use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
-    MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement,
-    TrustedWorkspacePolicy, Uuid, WORKER_PLACEMENT_CWD_METADATA_KEY,
+    MemoryElement, Path, PathBuf, PromptRule, PromptsElement, ResolvedToolRoot, SkillManager,
+    SkillsElement, ToolRootSource, Uuid,
 };
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
@@ -152,8 +152,7 @@ pub(crate) fn is_default_context_assembly(assembly_name: &str) -> bool {
 /// session's channel origin when it speaks through one.
 pub(crate) fn build_session_environment(
     topic: &swage_storage::Topic,
-    tool_root: &Path,
-    workspace_policy: &TrustedWorkspacePolicy,
+    tool_root: &ResolvedToolRoot,
     session: &swage_storage::Session,
 ) -> SessionEnvironment {
     let session_metadata = session.metadata.as_ref();
@@ -191,15 +190,13 @@ pub(crate) fn build_session_environment(
         } else {
             topic.description.clone()
         },
-        tool_root: if session_metadata
-            .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY))
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-            || workspace_policy.active_workspace.is_some()
-        {
-            ToolRoot::WorkingDirectory(tool_root.display().to_string())
-        } else {
-            ToolRoot::ManagedScratch(tool_root.display().to_string())
+        tool_root: match tool_root.source {
+            ToolRootSource::WorkerPlacement | ToolRootSource::AttachedWorkspace => {
+                ToolRoot::WorkingDirectory(tool_root.path.display().to_string())
+            }
+            ToolRootSource::ManagedScratch => {
+                ToolRoot::ManagedScratch(tool_root.path.display().to_string())
+            }
         },
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the

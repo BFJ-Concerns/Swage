@@ -1678,7 +1678,7 @@ async fn execute_external_delegate_message(
     );
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let mut target_agent_config = crate::turn::build_agent_config_for_topic_workspace(
+    let (mut target_agent_config, tool_root) = crate::turn::build_agent_config_for_topic_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
@@ -1734,7 +1734,7 @@ async fn execute_external_delegate_message(
             topic.clone(),
             target_resolved.clone(),
             delegate_msg.recipient_agent_id.clone(),
-            target_agent_config.working_directory.display().to_string(),
+            tool_root,
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
