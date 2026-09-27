@@ -308,14 +308,23 @@ the connection, advertises what it can run, and the gateway invokes operations
 back over the same socket. The `swage device connect` command runs a machine
 as a device.
 
-### Registration
+### Registration and pairing
 
-Registration is through `POST /api/devices/register`. The `kind` field
-defaults to `attached_device` and names the device type; registering with
-kind `local` is refused, since a local device has no remote producer.
-The same constraint applies to recovery imports, so the remote-device
-registry never holds a local entry. What a device can run is not registered —
-the device advertises its capabilities each time it connects.
+A device can join in two ways. Direct registration
+(`POST /api/devices/register`) takes the device identity, the gateway secret
+its credential resolves against, and the workspace it operates in. Pairing
+is a two-step alternative: the gateway issues a one-time pairing code
+(`POST /api/onboarding/devices/pairing-codes`), and the device redeems it
+(`POST /api/onboarding/devices/redeem`) to register and trust itself in one
+step. Pairing codes expire after a configurable interval (default ten
+minutes).
+
+In both paths the `kind` field defaults to `attached_device` and names the
+device type; registering with kind `local` is refused, since a local device
+has no remote producer. The same constraint applies to recovery imports, so
+the remote-device registry never holds a local entry. What a device can run
+is not registered — the device advertises its capabilities each time it
+connects.
 
 ### The connection
 
@@ -333,11 +342,17 @@ cancel an operation it sent, when the turn that requested it is interrupted.
 
 ### Presence
 
-Heartbeats ride the device connection and are the sole signal for presence.
-The gateway reads a device as connected while heartbeats arrive on time,
-stale after three missed intervals, and disconnected when the WebSocket
-closes. Every connect, disconnect, invocation, and settlement lands in the
-audit trail under the device's ID.
+Presence begins when the gateway accepts the device's hello — the gateway
+records the device as connected before sending the welcome. Subsequent
+heartbeats keep the device connected; the gateway marks it stale after three
+missed intervals, and disconnected when the WebSocket closes.
+
+An operator can also close a device's connection from the gateway side with
+`DELETE /api/presence/devices/{id}`, which disconnects the device
+immediately.
+
+Every connect, disconnect, invocation, and settlement lands in the audit
+trail under the device's ID.
 
 ## API error contract
 
