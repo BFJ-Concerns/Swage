@@ -65,4 +65,4 @@ tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.30"
 tempfile = { workspace = true }
 base64 = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { workspace = true, features = ["trace"] }

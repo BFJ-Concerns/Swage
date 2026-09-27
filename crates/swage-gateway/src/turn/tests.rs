@@ -2124,7 +2124,9 @@ impl SessionStore for MockStorage {
                     .topic_id
                     .is_none_or(|topic| session.topic_id == topic)
             })
-            .filter(|session| session.archived_at.is_some() == listing.archived)
+            .filter(|session| {
+                listing.include_archived || session.archived_at.is_some() == listing.archived
+            })
             .map(|session| {
                 let thread_ids: Vec<Uuid> = db
                     .threads
@@ -2175,6 +2177,7 @@ impl SessionStore for MockStorage {
             .list_recent_sessions(swage_storage::SessionListing {
                 topic_id: None,
                 archived,
+                include_archived: false,
             })
             .await?
             .into_iter()

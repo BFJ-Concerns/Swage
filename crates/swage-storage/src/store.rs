@@ -116,8 +116,8 @@ pub trait SessionStore: Send + Sync {
     /// Bump the session's updated_at to now.
     async fn update_activity(&self, id: Uuid) -> Result<(), StorageError>;
     /// The recent-sessions list: sessions with their latest user-or-assistant
-    /// activity, newest first, across every scope or one topic, live or
-    /// archived (`SessionListing`).
+    /// activity, newest first, across every scope or one topic, with archive
+    /// visibility selected by `SessionListing`.
     async fn list_recent_sessions(
         &self,
         listing: SessionListing,

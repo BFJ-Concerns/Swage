@@ -28,11 +28,15 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
+use swage_core::Role;
 use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::{AuditStore, SqliteStorage, TopicStore};
+use swage_storage::{
+    AuditStore, MessageStore, NewMessage, NewTurn, SqliteStorage, ThreadStore, TopicStore,
+    TurnState, TurnStore,
+};
 use uuid::Uuid;
 
 use crate::support::{ProcessEnvGuard, start_live_server};
@@ -118,6 +122,252 @@ async fn http_json(
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json_body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json_body)
+}
+
+async fn say_in_session(storage: &SqliteStorage, session_id: Uuid, role: Role, text: &str) {
+    let thread = storage.list_by_session(session_id).await.unwrap()[0].id;
+    let position = storage.list_messages_by_thread(thread).await.unwrap().len() as i32;
+    storage
+        .create_message(NewMessage {
+            thread_id: thread,
+            turn_id: None,
+            role,
+            content: text.into(),
+            attachments: vec![],
+            position,
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_lists_share_message_and_interruption_facts_without_changing_their_order() {
+    let (router, storage) = make_test_router();
+    let (_, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Alpha"})),
+    )
+    .await;
+    let topic_id = topic["id"].as_str().unwrap();
+    let (_, general_a) = http_json(&router, "POST", "/api/conversations", None).await;
+    let (_, general_b) = http_json(&router, "POST", "/api/conversations", None).await;
+    let (_, topical) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let (_, topical_b) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let a: Uuid = general_a["id"].as_str().unwrap().parse().unwrap();
+    let b: Uuid = general_b["id"].as_str().unwrap().parse().unwrap();
+    let t: Uuid = topical["id"].as_str().unwrap().parse().unwrap();
+    let t2: Uuid = topical_b["id"].as_str().unwrap().parse().unwrap();
+
+    say_in_session(&storage, a, Role::User, "general user").await;
+    say_in_session(&storage, a, Role::Tool, "tool noise").await;
+    say_in_session(&storage, b, Role::Assistant, "general assistant").await;
+    say_in_session(&storage, t, Role::Assistant, "topic answer").await;
+    say_in_session(&storage, t, Role::System, "system noise").await;
+    say_in_session(&storage, t2, Role::User, "newer topic message").await;
+    let thread = storage.list_by_session(t).await.unwrap()[0].id;
+    storage
+        .create_turn(NewTurn {
+            thread_id: thread,
+            agent_id: "gateway".into(),
+            state: TurnState::Interrupted,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+
+    // The recent projection has a different order. These routes retain the
+    // older updated_at order and continue to show archived sessions.
+    let now = chrono::Utc::now();
+    storage
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (
+                    (now + chrono::Duration::days(3)).to_rfc3339(),
+                    a.to_string(),
+                ),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (now.to_rfc3339(), b.to_string()),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (
+                    (now + chrono::Duration::days(2)).to_rfc3339(),
+                    t.to_string(),
+                ),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (
+                    (now + chrono::Duration::days(1)).to_rfc3339(),
+                    t2.to_string(),
+                ),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET archived_at = created_at WHERE id = ?1",
+                [t.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, general) = http_json(&router, "GET", "/api/conversations", None).await;
+    let general = general["conversations"].as_array().unwrap();
+    assert_eq!(
+        general.iter().map(|item| &item["id"]).collect::<Vec<_>>(),
+        vec![&general_a["id"], &general_b["id"]]
+    );
+    assert_eq!(general[0]["message_preview"], "general user");
+    assert_eq!(general[1]["message_preview"], "general assistant");
+
+    let (_, topic_list) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let topic_list = topic_list["conversations"].as_array().unwrap();
+    assert_eq!(
+        topic_list.len(),
+        2,
+        "archived topic session remains visible"
+    );
+    assert_eq!(topic_list[0]["id"], topical["id"]);
+    assert_eq!(topic_list[1]["id"], topical_b["id"]);
+    assert_eq!(topic_list[0]["message_preview"], "topic answer");
+    assert_eq!(topic_list[0]["has_interrupted_turn"], true);
+
+    let (_, overview) = http_json(&router, "GET", "/api/operator/overview", None).await;
+    let sessions = overview["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 4);
+    assert_eq!(sessions[0]["id"], general_a["id"]);
+    assert_eq!(sessions[1]["id"], topical["id"]);
+    assert_eq!(sessions[2]["id"], topical_b["id"]);
+    assert_eq!(sessions[3]["id"], general_b["id"]);
+    let topical = sessions
+        .iter()
+        .find(|item| item["id"] == topical["id"])
+        .unwrap();
+    assert_eq!(topical["message_preview"], "topic answer");
+    assert_eq!(topical["has_interrupted_turn"], true);
+
+    let (_, all_activity) =
+        http_json(&router, "GET", "/api/sessions?include_archived=true", None).await;
+    assert_eq!(all_activity["entries"].as_array().unwrap().len(), 4);
+}
+
+static LISTED_SQL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn record_list_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
+        if sql.contains("FROM sessions")
+            || sql.contains("FROM messages")
+            || sql.contains("FROM threads")
+            || sql.contains("FROM turns")
+        {
+            LISTED_SQL.lock().unwrap().push(sql.to_owned());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_session_list_uses_one_activity_statement_for_multiple_sessions() {
+    let (router, storage) = make_test_router();
+    let (_, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Counted"})),
+    )
+    .await;
+    let topic_id = topic["id"].as_str().unwrap();
+    for _ in 0..3 {
+        http_json(
+            &router,
+            "POST",
+            &format!("/api/topics/{topic_id}/sessions"),
+            None,
+        )
+        .await;
+    }
+    for _ in 0..2 {
+        http_json(&router, "POST", "/api/conversations", None).await;
+    }
+
+    LISTED_SQL.lock().unwrap().clear();
+    storage
+        .with_conn(|conn| {
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(record_list_sql),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut counts = Vec::new();
+    for (path, expected) in [
+        (format!("/api/topics/{topic_id}/sessions"), 3),
+        ("/api/conversations".to_owned(), 2),
+        ("/api/operator/overview".to_owned(), 5),
+    ] {
+        LISTED_SQL.lock().unwrap().clear();
+        let (status, listed) = http_json(&router, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let sessions = if path == "/api/operator/overview" {
+            &listed["sessions"]
+        } else {
+            &listed["conversations"]
+        };
+        assert_eq!(sessions.as_array().unwrap().len(), expected, "{path}");
+        let statements = LISTED_SQL.lock().unwrap();
+        counts.push((
+            path,
+            statements.len(),
+            ["sessions", "messages", "threads", "turns"].map(|table| {
+                statements
+                    .iter()
+                    .filter(|sql| sql.contains(&format!("FROM {table}")))
+                    .count()
+            }),
+            statements
+                .iter()
+                .any(|sql| sql.contains("latest.content") && sql.contains("has_interrupted_turn")),
+        ));
+    }
+    storage
+        .with_conn(|conn| {
+            conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        counts
+            .iter()
+            .all(|(_, count, _, shape)| *count == 1 && *shape),
+        "session-related statement counts (sessions/messages/threads/turns) and activity shape: {counts:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
