@@ -106,6 +106,10 @@ pub fn build_router(state: AppState) -> Router {
             put(handlers::update_topic_workspace_trust),
         )
         .route(
+            "/api/topics/{topic_id}/workspaces/{workspace_id}/relink",
+            put(handlers::relink_topic_workspace),
+        )
+        .route(
             "/api/topics/{id}/knowledge-mirror",
             post(knowledge_mirror::regenerate),
         )
