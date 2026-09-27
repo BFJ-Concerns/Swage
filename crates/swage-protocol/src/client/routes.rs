@@ -34,7 +34,10 @@ use super::{
         SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse,
         TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
     },
-    topic::{CreateTopicRequest, TopicListResponse, TopicResponse, UpdateTopicRequest},
+    topic::{
+        CreateTopicRequest, RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
+        UpdateTopicRequest, WorkspaceAttachmentResponse,
+    },
 };
 
 /// HTTP method, as the OpenAPI document spells it.
@@ -233,6 +236,29 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 204,
                 body: None,
+            },
+        },
+        Route {
+            operation_id: "relink_topic_workspace",
+            method: Method::Put,
+            path: "/api/topics/{topic_id}/workspaces/{workspace_id}/relink",
+            path_parameters: vec![
+                Parameter {
+                    name: "topic_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "workspace_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Relink a topic workspace attachment to a moved folder.",
+            request: schema::<RelinkWorkspaceAttachmentRequest>(),
+            request_optional: false,
+            response: Response {
+                status: 200,
+                body: schema::<WorkspaceAttachmentResponse>(),
             },
         },
         Route {

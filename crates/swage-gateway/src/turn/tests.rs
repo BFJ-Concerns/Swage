@@ -2408,6 +2408,26 @@ impl WorkspaceAttachmentStore for MockStorage {
         Ok(workspace.clone())
     }
 
+    async fn relink_workspace_attachment(
+        &self,
+        id: Uuid,
+        path: String,
+    ) -> Result<WorkspaceAttachment, StorageError> {
+        let mut db = self.db.lock().await;
+        let workspace =
+            db.workspace_attachments
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "workspace_attachment".to_string(),
+                    id: id.to_string(),
+                })?;
+        workspace.path = path.clone();
+        workspace.canonical_path = path;
+        workspace.is_missing = false;
+        workspace.updated_at = chrono::Utc::now();
+        Ok(workspace.clone())
+    }
+
     async fn set_workspace_missing_state(
         &self,
         id: Uuid,

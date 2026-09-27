@@ -10,6 +10,7 @@ import type { Topic } from "../types";
 vi.mock("../api/topics", () => ({
   attachTopicWorkspace: vi.fn(),
   detachTopicWorkspace: vi.fn(),
+  relinkTopicWorkspace: vi.fn(),
   listTopicSessions: vi.fn(),
   listTopicWorkspaces: vi.fn(),
   updateTopicWorkspaceTrust: vi.fn(),
@@ -195,6 +196,40 @@ describe("TopicSettingsPage", () => {
     await flushUi();
     expect(topicsApi.detachTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1");
     expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+  });
+
+  it("relinks a missing folder without detaching its attachment, including on refusal", async () => {
+    const missing = {
+      id: "workspace-1", topic_id: "topic-1", label: "Source", path: "/work/source",
+      canonical_path: "/work/source", is_missing: true, permissions: ["read", "write"],
+      is_trusted: true, is_default: true, created_at: "2026-05-26T10:00:00Z",
+    };
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValue([missing]);
+    vi.mocked(topicsApi.relinkTopicWorkspace).mockRejectedValueOnce(new Error("folder does not exist"))
+      .mockResolvedValueOnce({ ...missing, path: "/work/moved", canonical_path: "/work/moved", is_missing: false });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Replacement path for Source"]')!;
+    input.value = "/work/absent";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    const relink = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Relink")!;
+    relink.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushUi();
+    expect(topicsApi.relinkTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1", "/work/absent");
+    expect(document.body.textContent).toContain("folder does not exist");
+    expect(document.body.textContent).toContain("/work/source");
+    expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
+    expect(topicsApi.attachTopicWorkspace).not.toHaveBeenCalled();
+
+    input.value = "/work/moved";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    relink.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushUi();
+    expect(topicsApi.relinkTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1", "/work/moved");
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+    expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
   });
 
   it("designates a library surface as a topic default and saves the topic's tags", async () => {

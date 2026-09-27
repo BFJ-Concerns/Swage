@@ -87,6 +87,12 @@ pub trait WorkspaceAttachmentStore: Send + Sync {
         is_trusted: bool,
     ) -> Result<WorkspaceAttachment, StorageError>;
 
+    async fn relink_workspace_attachment(
+        &self,
+        id: Uuid,
+        path: String,
+    ) -> Result<WorkspaceAttachment, StorageError>;
+
     async fn set_workspace_missing_state(
         &self,
         id: Uuid,
@@ -2105,6 +2111,14 @@ mod tests {
             &self,
             _: Uuid,
             _: bool,
+        ) -> Result<WorkspaceAttachment, StorageError> {
+            unimplemented!()
+        }
+
+        async fn relink_workspace_attachment(
+            &self,
+            _: Uuid,
+            _: String,
         ) -> Result<WorkspaceAttachment, StorageError> {
             unimplemented!()
         }
