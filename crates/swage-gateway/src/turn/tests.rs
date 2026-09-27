@@ -199,48 +199,11 @@ async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identicall
 
 #[test]
 fn ordinary_and_delegated_snapshot_paths_fail_closed_with_their_audit_wording() {
-    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use swage_agent::fixtures::MessageRecorder;
     use tracing_subscriber::{Registry, layer::SubscriberExt};
 
-    #[derive(Default)]
-    struct MessageRecorder(StdArc<StdMutex<Vec<String>>>);
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for MessageRecorder {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            struct MessageVisitor<'a>(&'a mut Option<String>);
-
-            impl tracing::field::Visit for MessageVisitor<'_> {
-                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                    if field.name() == "message" {
-                        *self.0 = Some(value.to_owned());
-                    }
-                }
-
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        *self.0 = Some(format!("{value:?}"));
-                    }
-                }
-            }
-
-            let mut message = None;
-            event.record(&mut MessageVisitor(&mut message));
-            if let Some(message) = message {
-                self.0.lock().unwrap().push(message);
-            }
-        }
-    }
-
     let messages = MessageRecorder::default();
-    let captured_messages = StdArc::clone(&messages.0);
+    let captured_messages = Arc::clone(&messages.0);
     let subscriber = Registry::default().with(messages);
 
     tracing::subscriber::with_default(subscriber, || {
@@ -315,13 +278,12 @@ fn ordinary_and_delegated_snapshot_paths_fail_closed_with_their_audit_wording() 
     });
 
     let messages = captured_messages.lock().expect("recorded messages");
-    assert!(messages.iter().any(|message| {
-        message
+    assert!(messages.iter().any(|event| {
+        event.message
             == "provider-visible request capture omitted because secret redaction was unavailable"
     }));
-    assert!(messages.iter().any(|message| {
-        message
-            == "delegated provider-visible request capture omitted because secret redaction was unavailable"
+    assert!(messages.iter().any(|event| {
+        event.message == "delegated provider-visible request capture omitted because secret redaction was unavailable"
     }));
 }
 
@@ -3543,6 +3505,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         &self,
         _: swage_storage::NewLibraryEntry,
         _: Vec<swage_storage::NewLibraryEntryModule>,
+        _: swage_storage::NewAuditEvent,
     ) -> Result<swage_storage::LibraryEntry, StorageError> {
         unimplemented!()
     }
