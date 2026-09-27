@@ -17,6 +17,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Sessions without an attached workspace say so in their orientation and name the scratch directory where tool paths resolve; attached workspaces and placed workers retain their working-directory line.
 - Topic-local surface templates are replaced by the shared surface library; surfaces are listed and created per session (`/api/sessions/{id}/surfaces`) rather than per topic, and a schedule may deliver to a surface only when it continues the session that owns it.
 - The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.
 

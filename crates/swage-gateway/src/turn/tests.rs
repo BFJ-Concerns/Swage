@@ -9502,7 +9502,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("Topic: none — this session was started without a topic")
-            && child_request_text.contains("Working directory:")
+            && child_request_text.contains("No workspace is attached.")
+            && child_request_text.contains("Tool paths resolve at")
             && child_request_text.contains("Session started:"),
         "delegated provider request should include the child session's place: {child_request_text}"
     );
@@ -14201,6 +14202,56 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
     assert_eq!(allowed_paths, vec![active_workspace, attachment_workspace]);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unattached_session_environment_identifies_resolved_scratch_root() {
+    let root = tempfile::tempdir().expect("root");
+    let storage = swage_storage::SqliteStorage::in_memory().expect("storage");
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("session");
+    let policy = TrustedWorkspacePolicy::default();
+    let (tool_root, _) =
+        agent_workspace_from_policy(root.path(), &policy, &topic.location(), session.id);
+
+    let environment = build_session_environment(&topic, &tool_root, &policy, &session);
+    assert_eq!(
+        environment.tool_root,
+        swage_context::orientation::ToolRoot::ManagedScratch(tool_root.display().to_string())
+    );
+    assert_eq!(
+        tool_root,
+        managed_scratch_workspace(root.path(), &topic.location(), session.id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_worker_orientation_keeps_its_working_directory() {
+    let root = tempfile::tempdir().expect("root");
+    let placed = root.path().join("placed-worker");
+    std::fs::create_dir_all(&placed).expect("placed directory");
+    let storage = swage_storage::SqliteStorage::in_memory().expect("storage");
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(NewSession {
+            metadata: Some(serde_json::json!({
+                "worker_placement_cwd": placed.display().to_string(),
+            })),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("placed worker");
+    let policy = TrustedWorkspacePolicy::default();
+
+    let environment = build_session_environment(&topic, &placed, &policy, &session);
+    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
+        [0]
+    .text_content();
+    assert!(text.contains(&format!("Working directory: {}", placed.display())));
+    assert!(!text.contains("No workspace is attached"));
+}
+
 #[test]
 fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing() {
     let config = swage_config::ResolvedConfig::default();
@@ -14284,7 +14335,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
     swage_context::orientation::SessionEnvironment {
         topic_name: String::new(),
         topic_description: String::new(),
-        working_directory: None,
+        tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
         started_at: chrono::Utc::now(),
         channel: None,
     }

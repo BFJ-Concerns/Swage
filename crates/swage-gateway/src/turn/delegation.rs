@@ -281,13 +281,6 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             .map(|variable| (variable.name, variable.value))
             .collect();
         session_variables.extend(self.composition.variables.clone().unwrap_or_default());
-        let environment =
-            build_session_environment(&self.topic, Some(self.working_directory.clone()), session);
-        let available_skills = available_skills_for_agent(
-            &self.topic.location(),
-            &self.agent_id,
-            Some(&self.swage_root),
-        );
         // Delegated children read the same operator-guidance sources as
         // foreground turns: the trust policy is re-derived here because the
         // assembler holds only the working directory, not the policy.
@@ -297,6 +290,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
+        let environment = build_session_environment(
+            &self.topic,
+            std::path::Path::new(&self.working_directory),
+            &workspace_policy,
+            session,
+        );
+        let available_skills = available_skills_for_agent(
+            &self.topic.location(),
+            &self.agent_id,
+            Some(&self.swage_root),
+        );
         let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
         let hierarchy = configuration_hierarchy(
             &self.swage_root,
