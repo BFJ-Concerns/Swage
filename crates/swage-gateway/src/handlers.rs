@@ -925,6 +925,7 @@ pub async fn create_conversation(
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
     let svc = ConversationService::new(state.storage, state.topic_store)
+        .with_broadcast(state.broadcast)
         .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp: ConversationResponse = svc.create_conversation_from_request(request).await?;
@@ -1008,6 +1009,7 @@ pub async fn create_topic_session(
 ) -> Result<impl IntoResponse, ApiError> {
     let config = state.active_config();
     let svc = ConversationService::new(state.storage, state.topic_store)
+        .with_broadcast(state.broadcast)
         .with_config(config, state.config_root);
     let request = payload.map(|Json(request)| request).unwrap_or_default();
     let resp = svc

@@ -3508,6 +3508,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         &self,
         _: swage_storage::NewLibraryEntry,
         _: Vec<swage_storage::NewLibraryEntryModule>,
+        _: swage_storage::NewAuditEvent,
     ) -> Result<swage_storage::LibraryEntry, StorageError> {
         unimplemented!()
     }
