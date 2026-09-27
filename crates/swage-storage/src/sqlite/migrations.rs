@@ -111,10 +111,12 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 /// Surfaces belong to sessions, and the shared surface library replaces the
 /// topic-local templates. A surface row names the session it opens with;
 /// `library_entry_id` / `seeded_at` record the library entry it was seeded
-/// from, when it was. Library entries carry a name, a description written at
-/// save time (what the surface does and when to use it), catalogue tags, the
-/// scope they were saved from (`origin_topic_id`, which decides whether their
-/// content travels), and their module rows. `topic_default_surfaces` names the
+/// from and when; `seeded_from_name` keeps its name after the entry is removed.
+/// Library entries carry a name, a description written at save time (what the
+/// surface does and when to use it), catalogue tags, the
+/// scope they were saved from (`origin_topic_id`, retained after a topic is
+/// deleted so it remains distinct from the general scope), and their module
+/// rows. `topic_default_surfaces` names the
 /// entries a topic opens in each new session; `topics.tags` are the labels
 /// that narrow the catalogue for a topic's sessions. The alpha posture applies:
 /// topic-owned surfaces and templates are work product regenerable by their
@@ -131,6 +133,7 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         session_id       TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         title            TEXT NOT NULL,
         library_entry_id TEXT REFERENCES surface_library_entries(id) ON DELETE SET NULL,
+        seeded_from_name TEXT,
         seeded_at        TEXT,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
@@ -164,7 +167,7 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         name                  TEXT NOT NULL,
         description           TEXT NOT NULL,
         tags                  TEXT NOT NULL,
-        origin_topic_id       TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+        origin_topic_id       TEXT NOT NULL,
         saved_from_surface_id TEXT,
         created_at            TEXT NOT NULL,
         updated_at            TEXT NOT NULL
