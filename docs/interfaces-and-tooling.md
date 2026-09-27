@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, image attachments and reference admission, surfaces, delivery targets, device registration, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
+description: Network binding, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, delivery targets, devices (registration, the dial-in connection, and presence), hosted documentation, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -88,6 +88,26 @@ streaming store exposes the turn ID when the turn completes, so there is
 no need to reload the surface for the link to appear. The terminal UI has a
 comparable inspector toggled by a keybinding, showing a proportional fill bar
 per element.
+
+## Conversation branching
+
+Any message in a conversation can be branched from, creating a sibling thread
+that carries the history up to that message and then diverges. The
+conversation's main line is its root thread; its messages are what the
+conversation detail returns. A branch's messages are read separately through
+the thread endpoint.
+
+Branching and switching happen in the web UI's conversation channel: every
+recorded message has a branch action, a thread switcher shows when branches
+exist, and the composer sends on whichever thread is active. A branch can be
+abandoned — a terminal state that keeps its history and lineage but takes no
+further turns. Both branching and abandoning are recorded in the session's
+audit trail.
+
+Each branch listing entry shows which message the branch was taken from, a
+preview of that message's opening (so a person can tell branches apart), and
+the thread's state: `idle`, `processing`, `interrupted`, `completed`, or
+`abandoned`.
 
 ## Image attachments
 
@@ -279,14 +299,45 @@ A run that fails after delivery has already been attempted does not
 receive a no-delivery record — the delivery records themselves account
 for it.
 
-## Device registration
+## Devices
 
-Remote devices register through `POST /api/devices/register`. The `kind` field on a
-registration request names the device type and defaults to
-`attached_device`. Registering a device with kind `local` is refused —
-a local device has no remote producer to register. The same constraint
-applies to recovery imports, so the remote-device registry never holds a
-local entry.
+A device registers once, naming the gateway secret its credential resolves
+against and the workspace it operates in, then dials into the gateway over a
+persistent connection. Nothing listens on the device side: the device opens
+the connection, advertises what it can run, and the gateway invokes operations
+back over the same socket. The `swage device connect` command runs a machine
+as a device.
+
+### Registration
+
+Registration is through `POST /api/devices/register`. The `kind` field
+defaults to `attached_device` and names the device type; registering with
+kind `local` is refused, since a local device has no remote producer.
+The same constraint applies to recovery imports, so the remote-device
+registry never holds a local entry. What a device can run is not registered —
+the device advertises its capabilities each time it connects.
+
+### The connection
+
+The device dials `GET /api/devices/connect`, a WebSocket endpoint. It
+opens with a Hello frame carrying its identity, the shared credential
+(resolved against the secret named at registration), and the tools it
+can run. The gateway validates the credential and answers Welcome — which
+tells the device how often to heartbeat — or Rejected (closing the
+connection).
+
+After the welcome the gateway invokes operations over the socket, each
+carrying a correlation ID. The device settles each operation with a result,
+a failure message, or a cancellation acknowledgement. The gateway can also
+cancel an operation it sent, when the turn that requested it is interrupted.
+
+### Presence
+
+Heartbeats ride the device connection and are the sole signal for presence.
+The gateway reads a device as connected while heartbeats arrive on time,
+stale after three missed intervals, and disconnected when the WebSocket
+closes. Every connect, disconnect, invocation, and settlement lands in the
+audit trail under the device's ID.
 
 ## API error contract
 
@@ -465,6 +516,27 @@ Disconnecting the WebSocket is part of clearing the active conversation, so
 browser navigation to a deleted conversation does not leave an orphaned
 connection.
 
+## Hosted documentation
+
+The gateway compiles the agent-facing documentation set (the `agent-docs/`
+directory at build time) into its binary and serves it read-only. Each
+document is addressed by name — the file stem of its source — and the set
+is flat, with no subdirectories.
+
+`GET /api/docs` lists the documents with their titles and descriptions;
+`GET /api/docs/{name}` returns one document's full Markdown body.  Both
+endpoints are in the client route manifest, so they appear in the OpenAPI
+document and the generated TypeScript client.
+
+Agents access the same set through the `docs_read` tool: calling it with
+no arguments lists the documents, and calling it with a name reads one. A
+long document pages by byte offset, the same continuation shape
+`url_fetch` uses.
+
+The compiled set is byte-identical to the repository source by test, and
+every document must carry a title and a description — both are enforced
+by the gateway's test suite.
+
 ## Gateway tools
 
 The gateway ships a set of built-in tools that agents call during turns. Most
@@ -503,6 +575,9 @@ sandbox-eligible tools.
 **Delegation** — `delegate` dispatches a child turn to a named agent definition.
 
 **External** — `url_fetch` and `web_search`.
+
+**Documentation** — `docs_read` lists or reads the gateway's hosted
+documentation (see [Hosted documentation](#hosted-documentation)).
 
 Operators can register additional tools through plugins; plugin tool names come
 from the plugin manifest rather than the gateway's built-in set.
