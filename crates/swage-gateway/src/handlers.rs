@@ -952,6 +952,9 @@ pub struct RecentSessionsQuery {
     /// List the archived sessions instead of the live ones.
     #[serde(default)]
     pub archived: bool,
+    /// Include live and archived sessions in the same listing.
+    #[serde(default)]
+    pub include_archived: bool,
 }
 
 /// `GET /api/sessions` — the recent-sessions list across every scope.
@@ -967,6 +970,7 @@ pub async fn list_recent_sessions(
         swage_storage::SessionListing {
             topic_id: query.topic_id,
             archived: query.archived,
+            include_archived: query.include_archived,
         },
     )
     .await?;

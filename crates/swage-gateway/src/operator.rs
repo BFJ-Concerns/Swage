@@ -1,7 +1,7 @@
-use uuid::Uuid;
+use std::collections::HashMap;
 
 use swage_core::GatewayError;
-use swage_storage::ApprovalState;
+use swage_storage::{ApprovalState, SessionListing};
 
 use crate::{
     channel_gateway::{ChannelStatusListResponse, list_channel_statuses},
@@ -96,20 +96,27 @@ fn classify_gateway_health(
 async fn list_operator_sessions(
     state: &AppState,
 ) -> Result<Vec<OperatorSessionSummary>, GatewayError> {
-    let scopes = state.topic_store.list_scopes().await?;
+    let scopes: HashMap<_, _> = state
+        .topic_store
+        .list_scopes()
+        .await?
+        .into_iter()
+        .map(|topic| (topic.id, topic))
+        .collect();
     let active_connections = state.active_connections.lock().await.clone();
     let active_turns = state.active_turns.lock().await.clone();
-    let mut sessions = Vec::new();
+    let activities = state
+        .storage
+        .list_recent_sessions(SessionListing {
+            include_archived: true,
+            ..SessionListing::default()
+        })
+        .await?;
+    let mut sessions = Vec::with_capacity(activities.len());
 
-    for topic in scopes {
-        for session in state.storage.list_by_topic(topic.id).await? {
-            let preview = state
-                .storage
-                .get_latest_for_session(session.id)
-                .await?
-                .map(|message| message.content);
-            let has_interrupted_turn = has_interrupted_turn(state, session.id).await?;
-
+    for activity in activities {
+        let session = activity.session;
+        if let Some(topic) = scopes.get(&session.topic_id) {
             sessions.push(OperatorSessionSummary {
                 id: session.id,
                 topic_id: topic.client_topic_id(),
@@ -120,8 +127,8 @@ async fn list_operator_sessions(
                 },
                 created_at: session.created_at,
                 last_activity: session.updated_at,
-                message_preview: preview,
-                has_interrupted_turn,
+                message_preview: activity.latest_message,
+                has_interrupted_turn: activity.has_interrupted_turn,
                 has_active_connection: active_connections.contains(&session.id),
                 has_running_turn: active_turns.contains_key(&session.id),
             });
@@ -130,20 +137,6 @@ async fn list_operator_sessions(
 
     sessions.sort_by_key(|session| std::cmp::Reverse(session.last_activity));
     Ok(sessions)
-}
-
-async fn has_interrupted_turn(state: &AppState, session_id: Uuid) -> Result<bool, GatewayError> {
-    let threads = state.storage.list_by_session(session_id).await?;
-    for thread in threads {
-        let turns = state.storage.list_turns_by_thread(thread.id).await?;
-        if turns
-            .into_iter()
-            .any(|turn| turn.state == swage_storage::TurnState::Interrupted)
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 async fn list_pending_approvals(state: &AppState) -> Result<ApprovalListResponse, GatewayError> {
