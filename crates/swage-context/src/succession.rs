@@ -169,7 +169,30 @@ pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionE
     if history_len < 2 {
         return Err(SuccessionError::TooShort(history_len));
     }
-    Ok(summarised_count(history_len, request.retain_at_most))
+    let split = summarised_count(history_len, request.retain_at_most);
+    // A tool result must stay with the call it answers: a provider refuses
+    // a result whose call was summarised away. Retain the whole call and its
+    // results where anything older is left to summarise, otherwise summarise
+    // them all.
+    let answers_a_call = |at: usize| {
+        let message = &request.history[at];
+        message.role() == Role::Tool || message.tool_call_id().is_some()
+    };
+    let mut earlier = split;
+    while earlier > 0 && answers_a_call(earlier) {
+        earlier -= 1;
+    }
+    if earlier > 0 {
+        return Ok(earlier);
+    }
+    let mut later = split;
+    while later < history_len && answers_a_call(later) {
+        later += 1;
+    }
+    if later == history_len {
+        return Err(SuccessionError::TooShort(history_len));
+    }
+    Ok(later)
 }
 
 /// The successor's parts from a summary of `request`'s older history,
@@ -578,6 +601,56 @@ mod tests {
             9,
             "the newest message is always kept"
         );
+    }
+
+    fn split_of(history: &[ChatMessage], retain_at_most: Option<usize>) -> usize {
+        split_point(&SuccessionRequest {
+            carried: &[],
+            history,
+            focus: None,
+            retain_at_most,
+        })
+        .expect("history splits")
+    }
+
+    fn call(id: &str) -> ChatMessage {
+        ChatMessage::assistant_tool_calls(
+            "",
+            vec![swage_core::tool::ToolCall {
+                call_id: id.into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({}),
+            }],
+        )
+    }
+
+    #[test]
+    fn a_tool_result_is_kept_with_the_call_it_answers() {
+        let history = vec![
+            ChatMessage::new(Role::User, "u0"),
+            ChatMessage::new(Role::User, "u1"),
+            call("x"),
+            ChatMessage::tool_result("x", "r"),
+            ChatMessage::new(Role::User, "u4"),
+            ChatMessage::new(Role::Assistant, "a5"),
+        ];
+        assert_eq!(
+            summarised_count(history.len(), None),
+            3,
+            "midpoint is the result"
+        );
+        assert_eq!(split_of(&history, None), 2, "the call is retained with it");
+    }
+
+    #[test]
+    fn a_call_at_the_start_is_summarised_with_its_results() {
+        let history = vec![
+            call("x"),
+            ChatMessage::tool_result("x", "r"),
+            ChatMessage::new(Role::User, "u2"),
+        ];
+        assert_eq!(summarised_count(history.len(), Some(2)), 1);
+        assert_eq!(split_of(&history, Some(2)), 2);
     }
 
     #[test]
