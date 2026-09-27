@@ -505,7 +505,6 @@ async fn stream_cancellation_preserves_partial_response() {
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_recovery_marks_orphaned_turns() {
     use swage_storage::{
-        NewSession,
         store::{SessionStore, ThreadStore, TopicStore, TurnStore},
     };
 
@@ -516,13 +515,7 @@ async fn startup_recovery_marks_orphaned_turns() {
 
     // Session 1: an orphaned Processing turn (simulates a crash mid-turn).
     let session_orphan = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
         .unwrap();
     let thread_orphan = ThreadStore::create(
@@ -547,13 +540,7 @@ async fn startup_recovery_marks_orphaned_turns() {
 
     // Session 2: a completed turn (control case — should not be touched).
     let session_ok = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
         .unwrap();
     let thread_ok = ThreadStore::create(
