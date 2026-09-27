@@ -1128,7 +1128,7 @@ async fn process_turn_with_composition_and_focus(
     };
 
     let environment =
-        build_session_environment(&topic, Some(workspace_root.display().to_string()), &session);
+        build_session_environment(&topic, &workspace_root, &workspace_policy, &session);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);

@@ -26,8 +26,8 @@ pub struct SessionEnvironment {
     pub topic_name: String,
     /// Topic description, when the operator has written one.
     pub topic_description: String,
-    /// The directory tool paths resolve against, when a workspace is mounted.
-    pub working_directory: Option<String>,
+    /// The directory tool paths resolve against and where that path came from.
+    pub tool_root: ToolRoot,
     /// Session start time. Rendered to the minute — stable across the
     /// session's turns, so the assembled prefix stays cache-friendly.
     pub started_at: DateTime<Utc>,
@@ -35,6 +35,14 @@ pub struct SessionEnvironment {
     /// the model should know whose voice it is using and what that surface
     /// can render.
     pub channel: Option<ChannelOrientation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolRoot {
+    /// An attached workspace or a directory chosen for a placed worker.
+    WorkingDirectory(String),
+    /// The session's own scratch directory, used when no workspace is attached.
+    ManagedScratch(String),
 }
 
 /// The channel a session speaks through, described for the model.
@@ -126,9 +134,15 @@ impl OrientationElement {
             }
             place.push('\n');
         }
-        match &self.environment.working_directory {
-            Some(dir) => place.push_str(&format!("Working directory: {dir}\n")),
-            None => place.push_str("Working directory: none is attached.\n"),
+        match &self.environment.tool_root {
+            ToolRoot::WorkingDirectory(dir) => {
+                place.push_str(&format!("Working directory: {dir}\n"));
+            }
+            ToolRoot::ManagedScratch(dir) => {
+                place.push_str(&format!(
+                    "No workspace is attached. Tool paths resolve at {dir}, this session's scratch directory.\n"
+                ));
+            }
         }
         place.push_str(&format!(
             "Session started: {}\n",
@@ -203,7 +217,7 @@ mod tests {
         SessionEnvironment {
             topic_name: String::new(),
             topic_description: String::new(),
-            working_directory: None,
+            tool_root: ToolRoot::ManagedScratch("/scratch/general/sessions/example".into()),
             started_at: DateTime::parse_from_rfc3339("2026-08-09T18:30:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -225,7 +239,8 @@ mod tests {
         assert!(text.contains("agent running on Swage"));
         assert!(text.contains("Topic: none — this session was started without a topic"));
         assert!(text.contains("inherits nothing from any topic"));
-        assert!(text.contains("Working directory: none is attached."));
+        assert!(text.contains("No workspace is attached."));
+        assert!(text.contains("Tool paths resolve at /scratch/general/sessions/example"));
         assert!(text.contains("2026-08-09 18:30 UTC"));
     }
 
@@ -313,12 +328,27 @@ mod tests {
         let mut environment = bare_environment();
         environment.topic_name = "research".into();
         environment.topic_description = "material science digging".into();
-        environment.working_directory = Some("/data/projects/alloys".into());
+        environment.tool_root = ToolRoot::WorkingDirectory("/data/projects/alloys".into());
 
         let element = OrientationElement::new(environment, vec![]);
         let text = element.content()[0].text_content();
         assert!(text.contains("Topic: research — material science digging"));
         assert!(text.contains("Working directory: /data/projects/alloys"));
+        assert!(!text.contains("No workspace is attached"));
+    }
+
+    #[test]
+    fn topic_without_workspace_names_its_scratch_root() {
+        let mut environment = bare_environment();
+        environment.topic_name = "research".into();
+        environment.tool_root =
+            ToolRoot::ManagedScratch("/scratch/topics/research/sessions/42".into());
+
+        let text = OrientationElement::new(environment, vec![]).content()[0].text_content();
+        assert!(text.contains("Topic: research"));
+        assert!(text.contains("No workspace is attached."));
+        assert!(text.contains("Tool paths resolve at /scratch/topics/research/sessions/42"));
+        assert!(!text.contains("Working directory:"));
     }
 
     #[test]
