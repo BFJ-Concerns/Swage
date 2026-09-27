@@ -86,12 +86,11 @@ fn required_str<'p>(tool: &str, params: &'p Value, key: &str) -> Result<&'p str,
         .ok_or_else(|| invalid(tool, format!("'{key}' is required")))
 }
 
-/// Resolve the calling session's scope: the knowledge base is per scope — a
-/// topic's, or the general knowledge base for a session without one — and
-/// the session the tool call belongs to says which. The third element is the
+/// Resolve the calling session's scope for scope-owned tools. The session the
+/// tool call belongs to says which scope to use. The third element is the
 /// session's journalled-call scope — retry identity for idempotent writes —
 /// absent on anything but a workflow agent-call worker.
-async fn session_topic(
+pub(crate) async fn session_topic(
     tool: &str,
     state: &AppState,
     ctx: &dyn ToolContext,

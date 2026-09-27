@@ -13,7 +13,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
-use uuid::Uuid;
 
 use crate::tool::Tool;
 
@@ -92,32 +91,13 @@ impl Tool for MemoryTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        let failed = |message: String| ToolError::ExecutionFailed {
-            name: self.name().to_owned(),
-            message,
-        };
         let state = super::require_gateway_state(
             ctx,
             self.name(),
             "memory requires gateway execution context",
         )?;
-        let session_id = ctx
-            .session_id()
-            .parse::<Uuid>()
-            .map_err(|_| failed("the calling session has no usable id".into()))?;
-        let session = state
-            .storage
-            .get_session(session_id)
-            .await
-            .map_err(|error| failed(error.to_string()))?
-            .ok_or_else(|| failed("the calling session no longer exists".into()))?;
-        let topic = state
-            .topic_store
-            .get(session.topic_id)
-            .await
-            .map_err(|error| failed(error.to_string()))?
-            .ok_or_else(|| failed("the session's topic no longer exists".into()))?;
-        let memory_dir = topic.location().data_dir(&state.config_root).join("memory");
+        let (_, scope, _) = super::knowledge::session_topic(self.name(), state, ctx).await?;
+        let memory_dir = scope.data_dir(&state.config_root).join("memory");
 
         let operation =
             params["operation"]
