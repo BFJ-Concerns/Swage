@@ -13,7 +13,7 @@ pub(super) async fn rebuild_thread_history_messages(
 
     // A turn's durable tool rounds replay before its assistant message. A turn
     // that never reached one — interrupted mid-tool — still replays its
-    // rounds, anchored after its first stored message, so a resumed
+    // rounds after its last user message, so a resumed
     // continuation sees the calls that already ran (and those cut off) instead
     // of selecting them again.
     let turns_with_assistant_message: HashSet<Uuid> = stored_history
@@ -22,11 +22,26 @@ pub(super) async fn rebuild_thread_history_messages(
         .filter_map(|message| message.turn_id)
         .collect();
 
-    for message in stored_history {
+    let mut replay_anchor = HashMap::new();
+    for (index, message) in stored_history.iter().enumerate() {
+        if let Some(turn_id) = message.turn_id {
+            replay_anchor.insert(turn_id, index);
+        }
+    }
+    for (index, message) in stored_history.iter().enumerate() {
+        if message.role == Role::User
+            && let Some(turn_id) = message.turn_id
+        {
+            replay_anchor.insert(turn_id, index);
+        }
+    }
+
+    for (index, message) in stored_history.into_iter().enumerate() {
         let replay_turn = message.turn_id.filter(|turn_id| {
             !replay_inserted_for_turn.contains(turn_id)
                 && (message.role == Role::Assistant
-                    || !turns_with_assistant_message.contains(turn_id))
+                    || (!turns_with_assistant_message.contains(turn_id)
+                        && replay_anchor.get(turn_id) == Some(&index)))
         });
         let replay_before = replay_turn.filter(|_| message.role == Role::Assistant);
         let replay_after = replay_turn.filter(|_| message.role != Role::Assistant);
