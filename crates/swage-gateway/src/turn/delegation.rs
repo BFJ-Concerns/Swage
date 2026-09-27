@@ -696,7 +696,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             target_agent_id.to_string(),
             &target_resolved,
             None,
-            topic_id,
+            &topic,
             sender_turn_id,
             active_workspace_attachment_id,
         )

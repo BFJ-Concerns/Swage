@@ -1685,7 +1685,7 @@ async fn execute_external_delegate_message(
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
         None,
-        topic_id,
+        &topic,
         sender_turn_id.unwrap_or_else(Uuid::new_v4),
         active_workspace_attachment_id,
     )
