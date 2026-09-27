@@ -44,7 +44,16 @@ in it. A session started without one is a fully usable general assistant in
 the general scope — general memory, the general knowledge base, the ordinary
 granted tools — and inherits nothing from any topic, least of all the last
 one used. The general scope is not a topic: it is never listed, and cannot
-be opened or deleted.
+be opened or deleted. Schedules can run in the general scope: a schedule
+created without a topic resolves to the general scope.
+
+A session without a topic receives a built-in orientation at every turn,
+describing its environment: no topic is selected, general memory and the
+general knowledge base are in scope, and tool paths resolve at a scratch
+directory for the session. A session in a topic with an attached workspace
+sees its working directory instead. The scratch layout under the data root
+is `scratch/general/sessions/<session_id>` for topicless sessions and
+`scratch/topics/<topic>/sessions/<session_id>` for topic sessions.
 
 The top bar names the session's topic (or **General**). Clicking a topic's
 name opens its settings page, where its description, workspaces, default
