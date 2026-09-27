@@ -30,7 +30,10 @@ use tracing::{info, warn};
 
 use swage_core::{ApprovalTimeoutPolicy, StorageError};
 use swage_storage::model::{ApprovalState, ThreadState, TurnState};
-use swage_storage::store::{Storage, TopicStore};
+use swage_storage::store::{
+    INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS, Storage, TOOL_RESULT_UNAVAILABLE,
+    TOOL_RESULT_UNAVAILABLE_STATUS, TopicStore,
+};
 
 use crate::state::AppState;
 
@@ -112,11 +115,16 @@ pub async fn recover_orphaned_turns(
                         continue;
                     }
 
-                    // A settlement may have failed after the turn reached a
-                    // terminal state. Every started call needs an honest
-                    // interrupted result for the next history replay.
+                    // A settlement may have failed after a turn completed;
+                    // otherwise an outstanding call was cut off. Replay the
+                    // explanation that matches the persisted turn state.
+                    let (result, status) = if turn.state == TurnState::Completed {
+                        (TOOL_RESULT_UNAVAILABLE, TOOL_RESULT_UNAVAILABLE_STATUS)
+                    } else {
+                        (INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS)
+                    };
                     storage
-                        .settle_started_tool_calls_as_interrupted(turn.id)
+                        .settle_started_tool_calls(turn.id, result, status)
                         .await?;
                     if turn.state.is_terminal() {
                         continue;
@@ -496,13 +504,25 @@ mod tests {
                 .unwrap()
                 .pop()
                 .unwrap();
+            let (expected_result, expected_status) = if turn.state == TurnState::Completed {
+                (TOOL_RESULT_UNAVAILABLE, TOOL_RESULT_UNAVAILABLE_STATUS)
+            } else {
+                (INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS)
+            };
             assert_eq!(
                 call.status.as_deref(),
-                Some("interrupted"),
+                Some(expected_status),
                 "terminal turn {:?} retained an unsettled call",
                 turn.state
             );
-            assert!(call.model_result.is_some());
+            assert_eq!(call.result.as_deref(), Some(expected_result));
+            assert!(
+                call.model_result
+                    .as_deref()
+                    .is_some_and(|result| result.contains(expected_result)),
+                "replay must explain the missing result for {:?}",
+                turn.state
+            );
         }
     }
 

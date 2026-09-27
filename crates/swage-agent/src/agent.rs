@@ -1000,19 +1000,22 @@ impl Agent {
                     // as interrupted so the record and history replay show it.
                     if let Err(error) = self
                         .storage
-                        .settle_started_tool_calls_as_interrupted(turn.id)
+                        .settle_started_tool_calls(
+                            turn.id,
+                            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                            swage_storage::store::INTERRUPTED_TOOL_STATUS,
+                        )
                         .await
                     {
                         tracing::error!(turn_id = %turn.id, %error,
                             "cancelled tool call's record could not be settled");
-                        if let Err(failure_error) = self.storage.force_turn_failure(turn.id).await {
-                            tracing::error!(turn_id = %turn.id, %failure_error,
-                                "could not mark cancelled turn with lost record as failed");
-                        }
+                        let reason =
+                            format!("cancelled tool call's record could not be settled: {error}");
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            reason: reason.clone(),
+                        });
                         let _ = event_tx.send(AgentEvent::Error {
-                            message: format!(
-                                "cancelled tool call's record could not be settled: {error}"
-                            ),
+                            message: reason,
                             provider_failure: false,
                         });
                     }
@@ -1020,7 +1023,11 @@ impl Agent {
                 }
                 Err(error) => {
                     self.storage
-                        .settle_started_tool_calls_as_interrupted(turn.id)
+                        .settle_started_tool_calls(
+                            turn.id,
+                            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                            swage_storage::store::INTERRUPTED_TOOL_STATUS,
+                        )
                         .await?;
                     return Err(error);
                 }

@@ -214,6 +214,10 @@ pub enum AgentEvent {
         message: String,
         provider_failure: bool,
     },
+
+    /// A constitutive turn record could not be written. The coordinator owns
+    /// the Failed transition after the agent has settled.
+    RecordIntegrityLost { reason: String },
 }
 
 /// How one provider request round ended.

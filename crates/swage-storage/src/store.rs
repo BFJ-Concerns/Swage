@@ -665,17 +665,17 @@ pub trait ToolCallStore: Send + Sync {
         turn_id: Uuid,
     ) -> Result<Vec<ToolCallRecord>, StorageError>;
 
-    /// Settle every started (unsettled) tool call of a turn as interrupted.
+    /// Settle every started (unsettled) tool call of a turn.
     ///
     /// A started row is a call the model selected whose outcome was never
-    /// written — its execution was cut off. It settles through
-    /// [`update_tool_call_result`](Self::update_tool_call_result) with status
-    /// `interrupted` and an explicit interrupted result, so the record shows
-    /// the call and history replays it as interrupted instead of dropping it.
+    /// written. The caller supplies the result and status that describe why
+    /// the outcome is absent; history replays that explanation to the model.
     /// Returns how many rows were settled.
-    async fn settle_started_tool_calls_as_interrupted(
+    async fn settle_started_tool_calls(
         &self,
         turn_id: Uuid,
+        result: &str,
+        status: &str,
     ) -> Result<usize, StorageError> {
         let mut settled = 0;
         for record in self.list_tool_calls_by_turn(turn_id).await? {
@@ -683,16 +683,16 @@ pub trait ToolCallStore: Send + Sync {
                 continue;
             }
             let model_result = swage_core::compact_tool_result_for_model_with_reference(
-                INTERRUPTED_TOOL_RESULT,
+                result,
                 true,
                 swage_core::tool_result_reference(&turn_id.to_string(), &record.call_id),
             );
             self.update_tool_call_result(
                 &record.call_id,
                 turn_id,
-                INTERRUPTED_TOOL_RESULT,
+                result,
                 &model_result,
-                INTERRUPTED_TOOL_STATUS,
+                status,
                 0,
                 false,
                 None,
@@ -710,6 +710,12 @@ pub const INTERRUPTED_TOOL_STATUS: &str = "interrupted";
 /// Result a started tool call settles with when its execution was cut off.
 pub const INTERRUPTED_TOOL_RESULT: &str =
     "tool call interrupted before it finished; its outcome is unknown";
+
+/// Status for a call that ran but whose result could not be recorded.
+pub const TOOL_RESULT_UNAVAILABLE_STATUS: &str = "result_unavailable";
+
+/// Result replayed when a completed turn has a call with no recorded result.
+pub const TOOL_RESULT_UNAVAILABLE: &str = "tool call ran, but its result could not be recorded";
 
 /// Store for context assembly report snapshots.
 ///
