@@ -1922,6 +1922,9 @@
           "name": {
             "type": "string"
           },
+          "origin_topic_deleted": {
+            "type": "boolean"
+          },
           "origin_topic_id": {
             "format": "uuid",
             "type": [
@@ -1945,6 +1948,7 @@
           "name",
           "description",
           "tags",
+          "origin_topic_deleted",
           "created_at",
           "updated_at",
           "modules"
@@ -1964,8 +1968,12 @@
           "name": {
             "type": "string"
           },
+          "origin_topic_deleted": {
+            "description": "True when the entry's saved-from topic has been deleted.",
+            "type": "boolean"
+          },
           "origin_topic_id": {
-            "description": "The scope the surface was saved from: absent for the general scope.\nA session in this scope receives the saved content when it adds the\nentry; any other scope receives the shape.",
+            "description": "The scope the surface was saved from: absent for the general scope;\nretained when the topic has been deleted.\nA session in this scope receives the saved content when it adds the\nentry; any other scope receives the shape.",
             "format": "uuid",
             "type": [
               "string",
@@ -1988,6 +1996,7 @@
           "name",
           "description",
           "tags",
+          "origin_topic_deleted",
           "updated_at"
         ],
         "type": "object"
@@ -5057,6 +5066,14 @@
           "seeded_at": {
             "default": null,
             "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "seeded_from_name": {
+            "default": null,
+            "description": "The library entry's name when this surface was seeded.",
             "type": [
               "string",
               "null"
