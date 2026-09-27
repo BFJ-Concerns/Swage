@@ -1418,11 +1418,13 @@ pub trait SurfaceStore: Send + Sync {
         source: &str,
     ) -> Result<(), StorageError>;
     /// Save a surface to the library: the entry and every module it keeps
-    /// land in one transaction, so a reader never sees a half-saved entry.
+    /// and their audit event land in one transaction. The generated entry id
+    /// replaces `audit.entity_id` before the event is inserted.
     async fn create_library_entry(
         &self,
         entry: NewLibraryEntry,
         modules: Vec<NewLibraryEntryModule>,
+        audit: NewAuditEvent,
     ) -> Result<LibraryEntry, StorageError>;
     async fn get_library_entry(&self, id: Uuid) -> Result<Option<LibraryEntry>, StorageError>;
     /// The whole library, newest first. Callers narrow by tag; the catalogue
@@ -2345,6 +2347,7 @@ mod tests {
             &self,
             _: NewLibraryEntry,
             _: Vec<NewLibraryEntryModule>,
+            _: NewAuditEvent,
         ) -> Result<LibraryEntry, StorageError> {
             unimplemented!()
         }
