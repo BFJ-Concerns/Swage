@@ -32,7 +32,7 @@ use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::{AuditStore, SqliteStorage, TopicStore};
+use swage_storage::{AuditStore, SqliteStorage, TopicStore, WorkspaceAttachmentStore};
 use uuid::Uuid;
 
 use crate::support::{ProcessEnvGuard, start_live_server};
@@ -323,6 +323,143 @@ async fn workspace_attachment_mutations_record_whole_state_audit_events() {
         .expect("detach audit event");
     assert_eq!(detached_event.metadata["prior_state"]["is_trusted"], true);
     assert!(detached_event.metadata["new_state"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relinking_a_moved_workspace_preserves_its_settings_and_records_one_change() {
+    let (router, storage) = make_test_router();
+    let (status, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({ "name": "Relink" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let topic_id = topic["id"].as_str().expect("topic id");
+    let root = tempfile::tempdir().expect("workspace parent");
+    let original = root.path().join("original");
+    let moved = root.path().join("moved");
+    std::fs::create_dir(&original).expect("original folder");
+
+    let (status, attached) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        Some(json!({
+            "path": original,
+            "label": "Reference files",
+            "permissions": ["read", "write"],
+            "is_trusted": true,
+            "set_as_default": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let workspace_id = attached["id"].as_str().expect("workspace id");
+    let workspace_uuid = Uuid::parse_str(workspace_id).expect("workspace uuid");
+    let before = serde_json::to_value(
+        storage
+            .get_workspace_attachment(workspace_uuid)
+            .await
+            .expect("read attached workspace")
+            .expect("attached workspace"),
+    )
+    .expect("serialise attached workspace");
+    std::fs::rename(&original, &moved).expect("move folder");
+    let route = format!("/api/topics/{topic_id}/workspaces/{workspace_id}/relink");
+    let (status, relinked) =
+        http_json(&router, "PUT", &route, Some(json!({ "path": moved }))).await;
+    assert_eq!(status, StatusCode::OK, "{relinked}");
+    assert_eq!(relinked["id"], attached["id"]);
+    assert_eq!(relinked["label"], "Reference files");
+    assert_eq!(relinked["permissions"], json!(["read", "write"]));
+    assert_eq!(relinked["is_trusted"], true);
+    assert_eq!(relinked["is_default"], true);
+    assert_eq!(relinked["path"], moved.to_string_lossy().as_ref());
+    assert_eq!(relinked["is_missing"], false);
+
+    let (status, listing) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listing["workspaces"], json!([relinked]));
+    let after = serde_json::to_value(
+        storage
+            .get_workspace_attachment(workspace_uuid)
+            .await
+            .expect("read relinked workspace")
+            .expect("relinked workspace"),
+    )
+    .expect("serialise relinked workspace");
+
+    let events = storage.list_audit_events().await.expect("audit events");
+    let relink_events = events
+        .iter()
+        .filter(|event| {
+            event.entity_id == workspace_id && event.metadata["action"] == "relink_workspace"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relink_events.len(), 1);
+    let event = relink_events[0];
+    assert_eq!(event.event_kind, "configuration_change");
+    assert_eq!(event.metadata["prior_state"], before);
+    assert_eq!(event.metadata["new_state"], after);
+    for field in [
+        "id",
+        "topic_id",
+        "label",
+        "permissions",
+        "is_trusted",
+        "is_default",
+        "created_at",
+    ] {
+        assert_eq!(
+            event.metadata["prior_state"][field], event.metadata["new_state"][field],
+            "{field} changed"
+        );
+    }
+
+    let (status, _) = http_json(
+        &router,
+        "PUT",
+        &route,
+        Some(json!({ "path": root.path().join("absent") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, after_refusal) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after_refusal["workspaces"], json!([relinked]));
+    assert_eq!(
+        serde_json::to_value(
+            storage
+                .get_workspace_attachment(workspace_uuid)
+                .await
+                .expect("read after refusal")
+                .expect("workspace survives refusal")
+        )
+        .expect("serialise workspace after refusal"),
+        after,
+    );
+    assert_eq!(
+        storage
+            .list_audit_events()
+            .await
+            .expect("audit events")
+            .len(),
+        events.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

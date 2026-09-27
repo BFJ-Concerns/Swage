@@ -124,6 +124,9 @@
     "recovery_exports": {
       "$ref": "#/$defs/RecoveryExportListResponse"
     },
+    "relink_workspace_attachment_request": {
+      "$ref": "#/$defs/RelinkWorkspaceAttachmentRequest"
+    },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
     },
@@ -289,6 +292,7 @@
     "topic_list",
     "create_workspace_attachment_request",
     "update_workspace_trust_request",
+    "relink_workspace_attachment_request",
     "workspace_attachment_list",
     "channel_link_code_response",
     "create_conversation_request",
@@ -3267,6 +3271,17 @@
         "channel_links",
         "devices",
         "schedules"
+      ]
+    },
+    "RelinkWorkspaceAttachmentRequest": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
       ]
     },
     "RequireApprovalEntry": {
