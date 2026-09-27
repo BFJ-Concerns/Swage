@@ -203,6 +203,7 @@ describe("TopicSettingsPage", () => {
       name: "Standup",
       description: "Daily standup notes — use at the start of a working day.",
       tags: ["standup"],
+      origin_topic_deleted: false,
       updated_at: "2026-09-15T10:00:00Z",
     };
     vi.mocked(surfacesApi.listLibrary).mockResolvedValue({ entries: [standup] });

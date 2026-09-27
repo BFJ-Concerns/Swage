@@ -8,6 +8,9 @@ description = "Deterministic JavaScript orchestration and replay for Swage"
 [lints]
 workspace = true
 
+[features]
+test-fixtures = []
+
 [dependencies]
 swage-protocol = { path = "../swage-protocol" }
 async-trait = { workspace = true }

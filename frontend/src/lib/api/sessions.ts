@@ -1,7 +1,7 @@
 // HTTP API client for the recent-sessions list: every scope's sessions ordered
 // by their latest user or assistant message, automated sessions grouped
 // beneath their source. The wire shape is the generated client's; this module
-// only unwraps the envelope and turns the caller's options into query values.
+// only unwraps the envelope and adapts the caller's scope option.
 
 import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
 import * as generated from "../protocol/client";
@@ -17,7 +17,7 @@ export async function listRecentSessions(
 ): Promise<RecentSessionsEntry[]> {
   const response = await generated.listRecentSessions(
     topicId ?? undefined,
-    archived ? "true" : undefined,
+    archived,
   );
   return response.entries;
 }
