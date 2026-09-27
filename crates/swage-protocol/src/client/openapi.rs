@@ -92,8 +92,10 @@ fn parameter_value(
     required: bool,
     kind: super::routes::ParameterType,
 ) -> Value {
-    let mut schema =
-        Map::from_iter([(String::from("type"), Value::String(String::from("string")))]);
+    let mut schema = Map::from_iter([(
+        String::from("type"),
+        Value::String(String::from(kind.openapi_type())),
+    )]);
     if let Some(format) = kind.openapi_format() {
         schema.insert(String::from("format"), Value::String(String::from(format)));
     }
@@ -190,6 +192,14 @@ mod tests {
         assert_eq!(discover["parameters"][1]["name"], "q");
         assert_eq!(discover["parameters"][1]["in"], "query");
         assert_eq!(discover["parameters"][1]["required"], false);
+    }
+
+    #[test]
+    fn archived_query_is_projected_as_boolean() {
+        let document = document();
+        let archived = &document["paths"]["/api/sessions"]["get"]["parameters"][1];
+        assert_eq!(archived["name"], "archived");
+        assert_eq!(archived["schema"]["type"], "boolean");
     }
 
     #[test]

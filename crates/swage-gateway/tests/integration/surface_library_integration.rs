@@ -459,6 +459,94 @@ async fn deleting_a_library_entry_leaves_the_surfaces_added_from_it() {
         survivor["library_entry_id"].is_null(),
         "the origin link clears; the surface stays"
     );
+    assert_eq!(survivor["seeded_from_name"], "Standup");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_origin_topic_preserves_the_library_and_other_topics_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("swage.db");
+    let (router, storage) = {
+        let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
+        (router_over(Arc::clone(&storage)), storage)
+    };
+    let origin_topic = make_topic(&router, "Origin").await;
+    let destination_topic = make_topic(&router, "Destination").await;
+    let origin_session = make_session(&router, Some(&origin_topic)).await;
+    let original = make_populated_surface(&router, &origin_session).await;
+    let entry_id = save(&router, &original, &[]).await;
+    let (status, _) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{destination_topic}/default-surfaces"),
+        Some(json!({ "library_entry_id": entry_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = http_json(
+        &router,
+        "DELETE",
+        &format!("/api/topics/{origin_topic}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    drop(router);
+    drop(storage);
+
+    let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
+    let router = router_over(storage);
+    let (status, catalogue) = http_json(&router, "GET", "/api/surface-library", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        catalogue["entries"].as_array().unwrap().len(),
+        1,
+        "the entry survives topic deletion"
+    );
+    assert_eq!(catalogue["entries"][0]["id"], entry_id);
+    assert_eq!(catalogue["entries"][0]["origin_topic_id"], origin_topic);
+    assert_eq!(catalogue["entries"][0]["origin_topic_deleted"], true);
+    let (_, entry) = http_json(
+        &router,
+        "GET",
+        &format!("/api/surface-library/{entry_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(entry["origin_topic_deleted"], true);
+    assert_eq!(entry["modules"].as_array().unwrap().len(), 2);
+
+    let destination_session = make_session(&router, Some(&destination_topic)).await;
+    let (_, opened) = http_json(
+        &router,
+        "GET",
+        &format!("/api/sessions/{destination_session}/surfaces"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        opened["surfaces"].as_array().unwrap().len(),
+        1,
+        "the destination default survives"
+    );
+    let default_id = opened["surfaces"][0]["id"].as_str().unwrap();
+    assert_eq!(sources_of(&router, default_id).await, vec!["", ""]);
+
+    let general_session = make_session(&router, None).await;
+    let (status, general_surface) = http_json(
+        &router,
+        "POST",
+        &format!("/api/sessions/{general_session}/surfaces"),
+        Some(json!({ "title": "General copy", "library_entry_id": entry_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sources_of(&router, general_surface["id"].as_str().unwrap()).await,
+        vec!["", ""],
+        "a deleted origin is never the general scope"
+    );
 }
 
 /// The agent's discovery path through the tool itself: the catalogue is
