@@ -355,8 +355,12 @@ pub struct SessionListing {
     /// Restrict to one scope's sessions. `None` lists every scope — the
     /// topics and the general scope alike.
     pub topic_id: Option<Uuid>,
-    /// List the archived sessions instead of the live ones.
+    /// List the archived sessions instead of the live ones unless
+    /// `include_archived` is set.
     pub archived: bool,
+    /// Include live and archived sessions together. Used by lists whose
+    /// visibility is independent of the recent list's archive view.
+    pub include_archived: bool,
 }
 
 /// A persisted non-local device registration. `capabilities` are what the
