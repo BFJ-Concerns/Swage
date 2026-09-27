@@ -132,17 +132,6 @@ mod tests {
     };
     use swage_tool::context::MockToolContext;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     fn context_for(
         state: AppState,
         storage: Arc<SqliteStorage>,
@@ -217,7 +206,7 @@ mod tests {
             .await
             .expect("session");
         let context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             session.id,
         );
@@ -254,7 +243,7 @@ mod tests {
             .await
             .expect("session");
         let context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             session.id,
         );
@@ -283,7 +272,7 @@ mod tests {
             .await
             .expect("session");
         let context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             session.id,
         );
@@ -325,7 +314,7 @@ mod tests {
             .await
             .expect("session");
         let context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             session.id,
         );
