@@ -504,9 +504,7 @@ async fn stream_cancellation_preserves_partial_response() {
 ///   with the interrupted turn visible.
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_recovery_marks_orphaned_turns() {
-    use swage_storage::{
-        store::{SessionStore, ThreadStore, TopicStore, TurnStore},
-    };
+    use swage_storage::store::{SessionStore, ThreadStore, TopicStore, TurnStore};
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
