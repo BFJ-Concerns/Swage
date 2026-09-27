@@ -658,7 +658,6 @@ mod tests {
         let session = storage
             .create_session(NewSession {
                 agent_id: "agent-1".into(),
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await
@@ -807,7 +806,6 @@ mod tests {
         let s1 = storage
             .create_session(NewSession {
                 agent_id: "a".into(),
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await
@@ -815,7 +813,6 @@ mod tests {
         let s2 = storage
             .create_session(NewSession {
                 agent_id: "a".into(),
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await

@@ -394,7 +394,6 @@ mod tests {
         let session = storage
             .create_session(NewSession {
                 agent_id: "test-agent".to_string(),
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await

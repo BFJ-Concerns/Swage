@@ -684,7 +684,6 @@ mod tests {
             .unwrap();
         let session = storage
             .create_session(crate::model::NewSession {
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await

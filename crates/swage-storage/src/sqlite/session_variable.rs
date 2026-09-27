@@ -96,7 +96,6 @@ mod tests {
         storage
             .create_session(NewSession {
                 agent_id: "lead".into(),
-                origin: crate::model::SessionOrigin::Direct,
                 ..crate::fixtures::new_session(topic.id)
             })
             .await
