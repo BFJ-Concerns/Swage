@@ -64,6 +64,8 @@ pub struct PartialContextConfig {
     pub alternatives: Option<Vec<String>>,
     pub timeout: Option<u64>,
     pub budget: Option<Option<usize>>,
+    pub compaction_threshold:
+        Option<Option<swage_protocol::client::settings::CompactionThresholdConfig>>,
 }
 
 /// Partial mirror of `PricingConfig`.
@@ -305,6 +307,7 @@ impl From<ResolvedConfig> for PartialConfig {
                 },
                 timeout: Some(r.context.timeout),
                 budget: Some(r.context.budget),
+                compaction_threshold: Some(r.context.compaction_threshold),
             }),
             pricing: Some(PartialPricingConfig {
                 models: if r.pricing.models.is_empty() {
@@ -481,6 +484,7 @@ impl_merge_overlay!(PartialContextConfig {
     alternatives,
     timeout,
     budget,
+    compaction_threshold,
 });
 impl_merge_overlay!(PartialObservabilityConfig { force_on });
 impl_merge_overlay!(PartialPythonExecuteToolConfig {
@@ -828,6 +832,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 timeout: c.timeout.unwrap_or(dc.timeout),
                 // Double-option: outer None → inherit default (None), Some(x) → use x.
                 budget: c.budget.unwrap_or(dc.budget),
+                compaction_threshold: c
+                    .compaction_threshold
+                    .unwrap_or(dc.compaction_threshold),
             }
         },
         pricing: {
@@ -1388,6 +1395,7 @@ mod tests {
                 alternatives: Some(vec!["alternate".to_string()]),
                 timeout: Some(15),
                 budget: Some(Some(8192)),
+                compaction_threshold: None,
             }),
             ..Default::default()
         };
@@ -1405,6 +1413,27 @@ mod tests {
         assert_eq!(resolved.context.assembly, default.assembly);
         assert_eq!(resolved.context.timeout, default.timeout);
         assert_eq!(resolved.context.budget, default.budget);
+    }
+
+    #[test]
+    fn a_topic_s_compaction_threshold_overrides_the_global_one() {
+        use swage_protocol::client::settings::CompactionThresholdConfig;
+        let global: PartialConfig =
+            toml::from_str("[context]\ncompaction_threshold = { tokens = 50000 }\n")
+                .expect("global config parses");
+        let topic: PartialConfig =
+            toml::from_str("[context]\ncompaction_threshold = { messages = 6 }\n")
+                .expect("topic config parses");
+        let resolved = resolve(merge_partial(global.clone(), topic));
+        assert_eq!(
+            resolved.context.compaction_threshold,
+            Some(CompactionThresholdConfig::Messages(6))
+        );
+        let resolved = resolve(merge_partial(global, PartialConfig::default()));
+        assert_eq!(
+            resolved.context.compaction_threshold,
+            Some(CompactionThresholdConfig::Tokens(50000))
+        );
     }
 
     #[test]

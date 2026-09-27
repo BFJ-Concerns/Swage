@@ -164,6 +164,7 @@ fn budget_triggers_truncation_preserving_recent_messages() {
         alternatives: Vec::new(),
         timeout: 5,
         budget: Some(200), // Very small budget — forces truncation
+        compaction_threshold: None,
     };
 
     let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("claude-sonnet-4-20250514");

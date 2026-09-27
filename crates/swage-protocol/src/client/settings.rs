@@ -355,6 +355,12 @@ pub struct ContextConfig {
     pub timeout: u64,
     #[ts(optional, type = "number | null")]
     pub budget: Option<usize>,
+    /// When a turn's context is too large and the turn continues on a
+    /// successor: a message count or a token count. Unset, a turn compacts
+    /// once its thread holds more than 100 messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compaction_threshold: Option<CompactionThresholdConfig>,
 }
 impl Default for ContextConfig {
     fn default() -> Self {
@@ -363,8 +369,17 @@ impl Default for ContextConfig {
             alternatives: Vec::new(),
             timeout: 5,
             budget: None,
+            compaction_threshold: None,
         }
     }
+}
+/// The size past which a turn's context is compacted, counted in messages or
+/// in tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionThresholdConfig {
+    Messages(u32),
+    Tokens(#[ts(type = "number")] u64),
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]

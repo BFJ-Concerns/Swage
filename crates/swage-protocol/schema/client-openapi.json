@@ -570,6 +570,39 @@
         ],
         "type": "object"
       },
+      "CompactionThresholdConfig": {
+        "description": "The size past which a turn's context is compacted, counted in messages or\nin tokens.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "messages": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "messages"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ContextConfig": {
         "additionalProperties": false,
         "properties": {
@@ -590,6 +623,17 @@
               "integer",
               "null"
             ]
+          },
+          "compaction_threshold": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompactionThresholdConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When a turn's context is too large and the turn continues on a\nsuccessor: a message count or a token count. Unset, a turn compacts\nonce its thread holds more than 100 messages."
           },
           "timeout": {
             "format": "uint64",

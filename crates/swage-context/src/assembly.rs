@@ -364,6 +364,7 @@ mod tests {
             alternatives: Vec::new(),
             timeout: 5,
             budget: None,
+            compaction_threshold: None,
         }
     }
 
@@ -373,6 +374,7 @@ mod tests {
             alternatives: Vec::new(),
             timeout: 5,
             budget: Some(tokens),
+            compaction_threshold: None,
         }
     }
 

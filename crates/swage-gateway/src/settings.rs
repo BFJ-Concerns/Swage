@@ -778,6 +778,7 @@ fn apply_runtime_settings_to_partial(
             alternatives: Some(context.alternatives),
             timeout: Some(context.timeout),
             budget: Some(context.budget),
+            compaction_threshold: Some(context.compaction_threshold),
         });
     }
     if let Some(pricing) = pricing {
@@ -1485,6 +1486,7 @@ mod tests {
                 alternatives: Vec::new(),
                 timeout: 7,
                 budget: Some(2048),
+                compaction_threshold: None,
             }),
             pricing: None,
             observability: None,
@@ -1954,6 +1956,7 @@ mod tests {
             alternatives: Vec::new(),
             timeout: 61,
             budget: None,
+            compaction_threshold: None,
         });
         let error = validate_settings_request(&request)
             .expect_err("context timeout above range is invalid");
@@ -2028,6 +2031,7 @@ mod tests {
                 alternatives: Vec::new(),
                 timeout: 10,
                 budget: Some(8192),
+                compaction_threshold: None,
             }),
             None,
             None,
