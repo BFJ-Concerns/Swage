@@ -21,6 +21,7 @@ import type { LibraryListResponse } from "./LibraryListResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
+import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
@@ -38,6 +39,7 @@ import type { TopicResponse } from "./TopicResponse";
 import type { TurnContextResponse } from "./TurnContextResponse";
 import type { UpdateSurfaceAnnotationRequest } from "./UpdateSurfaceAnnotationRequest";
 import type { UpdateTopicRequest } from "./UpdateTopicRequest";
+import type { WorkspaceAttachmentResponse } from "./WorkspaceAttachmentResponse";
 import type { WriteSurfaceModuleRequest } from "./WriteSurfaceModuleRequest";
 import { ApiError } from "../api/error";
 
@@ -91,6 +93,11 @@ export async function updateTopic(id: string, body: UpdateTopicRequest): Promise
 /** Delete a topic. */
 export async function deleteTopic(id: string): Promise<void> {
   return request<void>("DELETE", `/api/topics/${encodeURIComponent(id)}`);
+}
+
+/** Relink a topic workspace attachment to a moved folder. */
+export async function relinkTopicWorkspace(topicId: string, workspaceId: string, body: RelinkWorkspaceAttachmentRequest): Promise<WorkspaceAttachmentResponse> {
+  return request<WorkspaceAttachmentResponse>("PUT", `/api/topics/${encodeURIComponent(topicId)}/workspaces/${encodeURIComponent(workspaceId)}/relink`, body);
 }
 
 /** List the conversations that run in the general scope — started without a topic. */

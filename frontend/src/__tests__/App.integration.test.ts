@@ -116,6 +116,7 @@ vi.mock("../lib/api/topics", () => ({
   listTopicWorkspaces: vi.fn(),
   attachTopicWorkspace: vi.fn(),
   detachTopicWorkspace: vi.fn(),
+  relinkTopicWorkspace: vi.fn(),
   listTopicSessions: vi.fn(),
 }));
 
@@ -2108,8 +2109,7 @@ describe("App", () => {
     vi.mocked(topicsApi.listTopicWorkspaces)
       .mockResolvedValueOnce([missingWorkspace])
       .mockResolvedValueOnce([relinkedWorkspace]);
-    vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValueOnce(undefined);
-    vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(
+    vi.mocked(topicsApi.relinkTopicWorkspace).mockResolvedValueOnce(
       relinkedWorkspace,
     );
 
@@ -2133,19 +2133,12 @@ describe("App", () => {
     flushSync(() => relinkButton!.click());
     await settleUi();
 
-    expect(topicsApi.detachTopicWorkspace).toHaveBeenCalledWith(
+    expect(topicsApi.relinkTopicWorkspace).toHaveBeenCalledWith(
       defaultTopic.id,
       missingWorkspace.id,
+      "/srv/topic",
     );
-    expect(topicsApi.attachTopicWorkspace).toHaveBeenCalledWith(
-      defaultTopic.id,
-      {
-        path: "/srv/topic",
-        label: "Codebase",
-        permissions: ["read", "write"],
-        is_trusted: true,
-        set_as_default: true,
-      },
-    );
+    expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
+    expect(topicsApi.attachTopicWorkspace).not.toHaveBeenCalled();
   });
 });
