@@ -13,8 +13,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, NewLibraryEntry, NewLibraryEntryModule,
-    NewSurface, NewSurfaceModule, Surface, SurfaceModule,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, NewAuditEvent, NewLibraryEntry,
+    NewLibraryEntryModule, NewSurface, NewSurfaceModule, Surface, SurfaceModule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::topic::{decode_tags, encode_tags};
@@ -260,13 +260,13 @@ impl SurfaceStore for SqliteStorage {
         &self,
         entry: NewLibraryEntry,
         modules: Vec<NewLibraryEntryModule>,
+        mut audit: NewAuditEvent,
     ) -> Result<LibraryEntry, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            // One transaction: an entry whose modules are missing is never
-            // observable, and a failed copy leaves no entry behind.
+            // The entry, its modules and its origin event commit together.
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO surface_library_entries
@@ -298,6 +298,8 @@ impl SurfaceStore for SqliteStorage {
                     ],
                 )?;
             }
+            audit.entity_id = id.to_string();
+            super::audit::insert_audit_event(&tx, audit)?;
             tx.commit()?;
             Ok(LibraryEntry {
                 id,
@@ -500,6 +502,18 @@ mod tests {
 
     use super::*;
 
+    fn entry_audit(session_id: Uuid) -> NewAuditEvent {
+        NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: Some(session_id),
+            entity_kind: "surface_library_entry".into(),
+            entity_id: String::new(),
+            event_kind: "surface_saved_to_library".into(),
+            summary: "surface saved to the library".into(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
     /// A topic and a session in it: the owner every surface here belongs to.
     async fn make_session() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -580,6 +594,7 @@ mod tests {
                     saved_from_surface_id: Some(surface.id),
                 },
                 modules,
+                entry_audit(surface.session_id),
             )
             .await
             .unwrap()
@@ -654,7 +669,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn saving_rolls_back_when_a_later_module_insert_fails() {
-        let (storage, topic_id, _) = make_session().await;
+        let (storage, topic_id, session) = make_session().await;
         storage
             .with_conn(|conn| {
                 conn.execute_batch(
@@ -688,6 +703,7 @@ mod tests {
                         source: "reject this module".into(),
                     },
                 ],
+                entry_audit(session),
             )
             .await;
 
