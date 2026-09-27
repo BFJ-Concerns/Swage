@@ -3017,10 +3017,11 @@ async fn run_ephemeral_agent_call_with_admission(
             let session = state
                 .storage
                 .create_session(NewSession {
+                    topic_id,
                     agent_id: agent_id.clone(),
                     origin: swage_storage::SessionOrigin::WorkflowWorker { run_id },
                     metadata: Some(metadata),
-                    ..swage_storage::fixtures::new_session(topic_id)
+                    active_workspace_attachment_id: None,
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -8151,6 +8152,9 @@ async fn start_run(
     let record = state
         .storage
         .create_workflow_run(NewWorkflowRun {
+            topic_id,
+            parent_run_id: None,
+            parent_seq: None,
             dispatching_session_id,
             script_version_id,
             inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
@@ -8169,7 +8173,6 @@ async fn start_run(
             dispatch_bound_task_definition_ids,
             workflow_call_tools,
             inherited_worker_placement,
-            ..swage_storage::fixtures::new_workflow_run(topic_id)
         })
         .await
         .map_err(internal)?;
