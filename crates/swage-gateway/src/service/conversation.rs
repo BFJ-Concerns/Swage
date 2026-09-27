@@ -7,6 +7,7 @@ use uuid::Uuid;
 use serde_json::Value as JsonValue;
 use swage_core::{GatewayError, Role, StorageError};
 use swage_storage::{
+    SessionActivity, SessionListing,
     model::{
         NewAuditEvent, NewSession, NewThread, SessionOrigin, ThreadBranch, ThreadState, TurnState,
     },
@@ -245,35 +246,10 @@ impl ConversationService {
         Ok(agent_id)
     }
 
-    /// List the conversations of the general scope, ordered by most-recent activity.
+    /// List the conversations of the general scope, newest session update first.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
         let topic = self.topic_store.general_scope().await?;
-        let sessions = self.storage.list_by_topic(topic.id).await?;
-
-        let mut summaries = Vec::with_capacity(sessions.len());
-
-        for session in sessions {
-            let preview = self
-                .storage
-                .get_latest_for_session(session.id)
-                .await?
-                .map(|m| m.content);
-
-            // Check whether any thread has an Interrupted turn.
-            let has_interrupted_turn = self.has_interrupted_turn_in_session(session.id).await?;
-
-            summaries.push(ConversationSummary {
-                id: session.id,
-                agent_id: session.agent_id.clone(),
-                selected_model_id: session.selected_model_id,
-                created_at: session.created_at,
-                last_activity: session.updated_at,
-                message_preview: preview,
-                has_interrupted_turn,
-            });
-        }
-
-        Ok(summaries)
+        self.list_conversation_summaries(topic.id).await
     }
 
     /// Get a conversation with its full message history.
@@ -375,30 +351,7 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
 
-        let sessions = self.storage.list_by_topic(topic_id).await?;
-
-        let mut summaries = Vec::with_capacity(sessions.len());
-        for session in sessions {
-            let preview = self
-                .storage
-                .get_latest_for_session(session.id)
-                .await?
-                .map(|m| m.content);
-
-            let has_interrupted_turn = self.has_interrupted_turn_in_session(session.id).await?;
-
-            summaries.push(ConversationSummary {
-                id: session.id,
-                agent_id: session.agent_id.clone(),
-                selected_model_id: session.selected_model_id,
-                created_at: session.created_at,
-                last_activity: session.updated_at,
-                message_preview: preview,
-                has_interrupted_turn,
-            });
-        }
-
-        Ok(summaries)
+        self.list_conversation_summaries(topic_id).await
     }
 
     /// Create a new session in the specified topic.
@@ -770,26 +723,27 @@ impl ConversationService {
     // Private helpers
     // ---------------------------------------------------------------------------
 
+    async fn list_conversation_summaries(
+        &self,
+        topic_id: Uuid,
+    ) -> Result<Vec<ConversationSummary>, GatewayError> {
+        let mut activities = self
+            .storage
+            .list_recent_sessions(SessionListing {
+                topic_id: Some(topic_id),
+                include_archived: true,
+                ..SessionListing::default()
+            })
+            .await?;
+        activities.sort_by_key(|activity| std::cmp::Reverse(activity.session.updated_at));
+        Ok(activities.into_iter().map(conversation_summary).collect())
+    }
+
     /// A new session opens with its topic's default surfaces; the rule is
     /// the surface module's, shared with every other add.
     async fn open_default_surfaces(&self, session_id: Uuid) -> Result<(), GatewayError> {
         crate::surface::open_default_surfaces(self.storage.as_ref(), &self.broadcast, session_id)
             .await
-    }
-
-    /// Returns true if any thread in the session has an Interrupted turn.
-    async fn has_interrupted_turn_in_session(
-        &self,
-        session_id: Uuid,
-    ) -> Result<bool, GatewayError> {
-        let threads = self.storage.list_by_session(session_id).await?;
-        for thread in &threads {
-            let turns = self.storage.list_turns_by_thread(thread.id).await?;
-            if turns.iter().any(|t| t.state == TurnState::Interrupted) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     async fn default_workspace_for_topic(
@@ -803,6 +757,19 @@ impl ConversationService {
             .into_iter()
             .find(|workspace| workspace.is_default && !workspace.is_missing)
             .map(|workspace| workspace.id))
+    }
+}
+
+fn conversation_summary(activity: SessionActivity) -> ConversationSummary {
+    let session = activity.session;
+    ConversationSummary {
+        id: session.id,
+        agent_id: session.agent_id,
+        selected_model_id: session.selected_model_id,
+        created_at: session.created_at,
+        last_activity: session.updated_at,
+        message_preview: activity.latest_message,
+        has_interrupted_turn: activity.has_interrupted_turn,
     }
 }
 

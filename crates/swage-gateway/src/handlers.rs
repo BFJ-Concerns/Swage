@@ -968,6 +968,7 @@ pub async fn list_recent_sessions(
         swage_storage::SessionListing {
             topic_id: query.topic_id,
             archived: query.archived,
+            include_archived: false,
         },
     )
     .await?;
