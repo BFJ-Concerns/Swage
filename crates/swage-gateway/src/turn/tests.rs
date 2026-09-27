@@ -1056,15 +1056,34 @@ async fn a_turn_whose_window_no_longer_shows_a_wall_gets_its_full_history() {
         )
         .await;
     }
+    let unsuccessed: Vec<(swage_core::Role, String)> = storage
+        .list_messages_by_thread(thread_id)
+        .await
+        .expect("the thread's history")
+        .into_iter()
+        .map(|message| (message.role, message.content))
+        .chain([(swage_core::Role::User, "continue".to_string())])
+        .collect();
 
     run_continue_turn(&state, session_id).await;
 
     let records = records_of_the_turn_after(&*storage.db.lock().await, diagnosed);
     assert!(records.is_empty(), "{records:?}");
+    let conversation: Vec<(swage_core::Role, String)> =
+        provider.streamed.lock().expect("streamed requests")[0]
+            .messages
+            .iter()
+            .filter(|message| message.role() != swage_core::Role::System)
+            .map(|message| (message.role(), message.text_content()))
+            .collect();
+    assert_eq!(
+        conversation, unsuccessed,
+        "every history message returns, in order and verbatim, then the new input"
+    );
     let text = streamed_text(&provider);
     assert!(
-        text.contains("history message 0") && !text.contains(PRIOR_DIAGNOSIS),
-        "the full history, without the diagnosis: {text}"
+        !text.contains(PRIOR_DIAGNOSIS),
+        "without the diagnosis: {text}"
     );
 }
 
