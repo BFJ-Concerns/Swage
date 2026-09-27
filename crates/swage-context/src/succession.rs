@@ -473,7 +473,10 @@ mod tests {
             &CharTokeniser,
         )
         .expect("a diagnosis makes a successor");
-        assert_eq!(succession.record.requested_strategy, "succession-degradation");
+        assert_eq!(
+            succession.record.requested_strategy,
+            "succession-degradation"
+        );
         assert_eq!(succession.record.actual_strategy, "succession");
         assert_eq!(succession.record.messages_removed, 5);
         assert_eq!(
