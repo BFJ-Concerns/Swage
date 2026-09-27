@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use super::routes::{Method, Route, routes};
+use super::routes::{Method, ParameterType, Route, routes};
 
 /// Render the client module. Deterministic: same manifest, same text.
 pub fn render() -> String {
@@ -74,7 +74,11 @@ fn render_function(out: &mut String, route: &Route) {
     }
     signature.extend(route.query_parameters.iter().map(|parameter| {
         let optional = if parameter.required { "" } else { "?" };
-        format!("{}{}: string", camel(parameter.name), optional)
+        let kind = match parameter.kind {
+            ParameterType::Boolean => "boolean",
+            ParameterType::Uuid | ParameterType::String => "string",
+        };
+        format!("{}{}: {kind}", camel(parameter.name), optional)
     }));
     let return_type = route
         .response
@@ -115,12 +119,16 @@ fn render_function(out: &mut String, route: &Route) {
         out.push_str("  const query = new URLSearchParams();\n");
         for parameter in &route.query_parameters {
             let name = camel(parameter.name);
+            let value = match parameter.kind {
+                ParameterType::Boolean => format!("String({name})"),
+                ParameterType::Uuid | ParameterType::String => name.clone(),
+            };
             if parameter.required {
-                let _ = writeln!(out, "  query.set(\"{}\", {name});", parameter.name);
+                let _ = writeln!(out, "  query.set(\"{}\", {value});", parameter.name);
             } else {
                 let _ = writeln!(
                     out,
-                    "  if ({name} !== undefined) query.set(\"{}\", {name});",
+                    "  if ({name} !== undefined) query.set(\"{}\", {value});",
                     parameter.name
                 );
             }
@@ -213,5 +221,17 @@ mod tests {
         assert!(rendered.contains(
             "if (q !== undefined) query.set(\"q\", q);\n  const suffix = query.size === 0 ? \"\" : `?${query}`;\n  return request<ModelDiscoveryResponse>(\"GET\", `/api/settings/providers/${encodeURIComponent(id)}/models${suffix}`);"
         ));
+    }
+
+    #[test]
+    fn archived_query_is_projected_as_a_serialised_boolean() {
+        let rendered = render();
+        assert!(rendered.contains(
+            "export async function listRecentSessions(topicId?: string, archived?: boolean): Promise<RecentSessionsResponse>"
+        ));
+        assert!(
+            rendered
+                .contains("if (archived !== undefined) query.set(\"archived\", String(archived));")
+        );
     }
 }

@@ -1123,8 +1123,8 @@ mod tests {
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
     use serde_json::{Value, json};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
     use swage_config::{
         LogLevel, ModelCatalogConfig, ModelEndpointConfig, Protocol, ProviderCatalogConfig,
         ProviderEndpointConfig, TelegramChannelConfig,
@@ -1137,8 +1137,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tracing_subscriber::{Registry, layer::SubscriberExt};
 
-    #[derive(Clone, Default)]
-    struct RecordedEvents(Arc<Mutex<Vec<String>>>);
+    use swage_agent::fixtures::MessageRecorder;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn startup_recovery_retains_replayable_and_finalised_changed_worktrees() {
@@ -1183,25 +1182,8 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
         let new_run = |source_hash: &str| NewWorkflowRun {
-            topic_id: topic.id,
-            parent_run_id: None,
-            parent_seq: None,
-            dispatching_session_id: None,
-            script_version_id: None,
-            inline_workflow_id: None,
-            inline_workflow_name: None,
-            inline_workflow_version: None,
-            carrying_skill: None,
-            task: None,
-            source: Some("return null".into()),
             source_hash: source_hash.into(),
-            args: Value::Null,
-            budget: json!({}),
-            engine_version: "test".into(),
-            dispatch_bound_agent_ids: vec![],
-            dispatch_bound_task_definition_ids: vec![],
-            workflow_call_tools: None,
-            inherited_worker_placement: None,
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
         };
         let run = storage
             .create_workflow_run(new_run("startup-recovery-interrupted"))
@@ -1455,32 +1437,6 @@ mod tests {
         assert!(message.contains("046_workflow_run_parentage"));
         assert!(message.contains("Rebuild this data root"));
         assert!(message.contains("data migration is not supported"));
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordedEvents {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            struct MessageVisitor<'a>(&'a mut String);
-
-            impl tracing::field::Visit for MessageVisitor<'_> {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        *self.0 = format!("{value:?}");
-                    }
-                }
-            }
-
-            let mut message = String::new();
-            event.record(&mut MessageVisitor(&mut message));
-            self.0.lock().unwrap().push(message);
-        }
     }
 
     #[test]
@@ -1767,7 +1723,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let events = RecordedEvents::default();
+        let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
         let subscriber = Registry::default().with(events);
 
@@ -1799,9 +1755,9 @@ mod tests {
 
         let events = captured.lock().unwrap();
         assert!(
-            !events
-                .iter()
-                .any(|event| event.contains("No usable provider/model pairs are configured")),
+            !events.iter().any(|event| event
+                .message
+                .contains("No usable provider/model pairs are configured")),
             "Codex-only configuration emitted a false no-provider warning: {events:?}"
         );
         assert_eq!(provider_model, "unavailable");
@@ -1820,7 +1776,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
         );
         let config = swage_config::ResolvedConfig::default();
-        let events = RecordedEvents::default();
+        let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
         let subscriber = Registry::default().with(events);
 
@@ -1834,9 +1790,9 @@ mod tests {
 
         let events = captured.lock().unwrap();
         assert!(
-            events
-                .iter()
-                .any(|event| event.contains("No default provider/model pair is configured")),
+            events.iter().any(|event| event
+                .message
+                .contains("No default provider/model pair is configured")),
             "genuinely unusable configuration omitted the warning: {events:?}"
         );
     }
@@ -1852,7 +1808,7 @@ mod tests {
             std::env::set_var("SWAGE_LEGACY_PROVIDER_KEY_TEST", "provider-key");
             std::env::set_var("SWAGE_LEGACY_TELEGRAM_TOKEN_TEST", "telegram-token");
         }
-        let events = RecordedEvents::default();
+        let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
         let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
         let provider = ProviderEndpointConfig {
@@ -1883,13 +1839,13 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| event.contains("Settings > Providers")),
+                .any(|event| event.message.contains("Settings > Providers")),
             "provider legacy credential warning must direct operators to Settings: {events:?}"
         );
         assert!(
             events
                 .iter()
-                .any(|event| event.contains("POST /api/secrets")),
+                .any(|event| event.message.contains("POST /api/secrets")),
             "Telegram legacy credential warning must direct operators to its governed route: {events:?}"
         );
     }

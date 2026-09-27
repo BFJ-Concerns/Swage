@@ -104,10 +104,10 @@ export async function createConversation(body?: CreateConversationRequest): Prom
 }
 
 /** The recent-sessions list across every scope, newest activity first, automated sessions grouped beneath their source; `topic_id` narrows to a topic and `archived=true` lists the archived sessions instead. */
-export async function listRecentSessions(topicId?: string, archived?: string): Promise<RecentSessionsResponse> {
+export async function listRecentSessions(topicId?: string, archived?: boolean): Promise<RecentSessionsResponse> {
   const query = new URLSearchParams();
   if (topicId !== undefined) query.set("topic_id", topicId);
-  if (archived !== undefined) query.set("archived", archived);
+  if (archived !== undefined) query.set("archived", String(archived));
   const suffix = query.size === 0 ? "" : `?${query}`;
   return request<RecentSessionsResponse>("GET", `/api/sessions${suffix}`);
 }

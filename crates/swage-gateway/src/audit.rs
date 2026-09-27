@@ -201,6 +201,7 @@ pub async fn operator_search(
     let limit = query.limit.unwrap_or(50);
 
     let topics = state.topic_store.list_scopes().await?;
+    let general_scope_id = state.topic_store.general_scope().await?.id;
     let topic_names: HashMap<Uuid, String> = topics
         .iter()
         .map(|topic| (topic.id, topic.name.clone()))
@@ -347,7 +348,8 @@ pub async fn operator_search(
                         id: run.id.to_string(),
                         session_id: run_session,
                         topic_id: run_session
-                            .and_then(|session_id| session_topics.get(&session_id).copied()),
+                            .and_then(|session_id| session_topics.get(&session_id).copied())
+                            .filter(|id| *id != general_scope_id),
                         title: schedule.message.clone(),
                         excerpt,
                         occurred_at: run
