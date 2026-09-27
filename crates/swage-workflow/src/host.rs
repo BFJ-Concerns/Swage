@@ -633,6 +633,9 @@ mod tests {
     fn absent_composition_options_are_omitted_from_journal_shape() {
         let request = AgentCallRequest {
             agent: Some("worker".into()),
+            elements: None,
+            variables: None,
+            assembly: None,
             max_attempts: 3,
             ..crate::fixtures::agent_call_request("work".into())
         };
