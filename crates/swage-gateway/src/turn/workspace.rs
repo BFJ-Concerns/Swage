@@ -142,11 +142,18 @@ pub(crate) async fn resolve_authorised_worker_directory(
     let policy =
         load_trusted_workspace_policy(&state.storage, topic_id, active_workspace_attachment_id)
             .await;
+    let scope = state
+        .topic_store
+        .get(topic_id)
+        .await
+        .map_err(|error| format!("cannot resolve worker scope: {error}"))?
+        .ok_or_else(|| format!("worker scope {topic_id} is missing"))?
+        .location();
     let workspace_root = policy
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(&state.config_root, topic_id, context_id));
+        .unwrap_or_else(|| managed_scratch_workspace(&state.config_root, &scope, context_id));
     let approval_grants = state
         .session_approval_grants
         .lock()

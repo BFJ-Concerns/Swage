@@ -1124,7 +1124,7 @@ async fn process_turn_with_composition_and_focus(
                 state.config_root.display()
             )));
         }
-        agent_workspace_from_policy(&state.config_root, &workspace_policy, topic_id, session.id)
+        agent_workspace_from_policy(&state.config_root, &workspace_policy, &scope, session.id)
     };
 
     let environment =
