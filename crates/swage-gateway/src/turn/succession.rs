@@ -953,9 +953,25 @@ mod tests {
                 synthesis: Some("synthesis-model".to_string()),
             }),
         };
-        let history: Vec<ChatMessage> = (0..7)
-            .map(|index| ChatMessage::new(Role::User, format!("history message {index}")))
-            .collect();
+        // A failed call as the gateway replays it: an assistant message
+        // carrying the call, then a user message carrying its error result.
+        let mut history = vec![ChatMessage::new(Role::User, "history message 0")];
+        history.extend(swage_core::tool::build_tool_round_messages(
+            &[swage_core::tool::ToolCall {
+                call_id: "call-1".into(),
+                name: "file_read".into(),
+                arguments: json!({"path": "notes/missing.md"}),
+            }],
+            &[swage_core::tool::ToolResult {
+                call_id: "call-1".into(),
+                content: "no such file: notes/missing.md".into(),
+                is_error: true,
+            }],
+            "",
+        ));
+        history.extend(
+            (1..7).map(|index| ChatMessage::new(Role::User, format!("history message {index}"))),
+        );
         let degradation = Degradation {
             signal: WallSignal::RepeatedFailingCall {
                 tool: "file_read".to_string(),
@@ -992,6 +1008,16 @@ mod tests {
                 .iter()
                 .all(|text| !text.contains("history message 6")),
             "the newest message is kept, not diagnosed"
+        );
+        assert_eq!(
+            readers
+                .iter()
+                .filter(|text| text.contains("file_read")
+                    && text.contains("notes/missing.md")
+                    && text.contains("no such file: notes/missing.md"))
+                .count(),
+            1,
+            "a reader sees the failed call and its error result: {readers:?}"
         );
         let synthesis = shown(&requests[LOCATOR_COUNT]);
         assert!(synthesis.contains("`file_read` tool was called 3 times"));
