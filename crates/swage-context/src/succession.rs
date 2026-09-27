@@ -711,8 +711,16 @@ mod tests {
             ChatMessage::new(Role::User, "u4"),
             ChatMessage::new(Role::Assistant, "a5"),
         ];
-        assert_eq!(summarised_count(history.len(), None), 3);
-        assert_eq!(split_of(&history, None), 2);
+        assert_eq!(
+            summarised_count(history.len(), None),
+            3,
+            "midpoint is the result"
+        );
+        assert_eq!(
+            split_of(&history, None),
+            2,
+            "the call is retained with its result"
+        );
     }
 
     #[test]
