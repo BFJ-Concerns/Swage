@@ -355,8 +355,30 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     .await;
     assert_eq!(schedule_status, StatusCode::CREATED);
 
+    let (general_schedule_status, general_schedule) = post_json(
+        origin_addr,
+        "/api/schedules",
+        json!({
+            "message": "General morning check",
+            "spec": { "kind": "interval", "every": "every 1 days" },
+            "session": { "policy": "fresh", "agent_id": "gateway" }
+        }),
+    )
+    .await;
+    assert_eq!(general_schedule_status, StatusCode::CREATED, "{general_schedule}");
+
     let (export_status, export_body) = get_json(origin_addr, "/api/recovery/export").await;
     assert_eq!(export_status, StatusCode::OK);
+    let exported_general = export_body["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|schedule| schedule["message"] == "General morning check")
+        .expect("general schedule is exported");
+    assert!(
+        exported_general["session_policy"].get("topic_id").is_none(),
+        "the general scope is absent from the exported policy: {exported_general}"
+    );
 
     let destination_provider = ChannelProvider::new(vec![]);
     let destination_dispatcher =
@@ -397,6 +419,16 @@ async fn recovery_bundle_exports_and_imports_operator_state_into_fresh_instance(
     assert_eq!(
         schedules_body["schedules"][0]["session"]["policy"],
         "continuation"
+    );
+    let restored_general = schedules_body["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|schedule| schedule["message"] == "General morning check")
+        .expect("general schedule is restored");
+    assert!(
+        restored_general["session"].get("topic_id").is_none(),
+        "the restored schedule remains in the general scope: {restored_general}"
     );
 }
 
