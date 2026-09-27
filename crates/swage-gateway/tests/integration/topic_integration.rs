@@ -279,14 +279,13 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
 static LISTED_SQL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 fn record_list_sql(event: rusqlite::trace::TraceEvent<'_>) {
-    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
-        if sql.contains("FROM sessions")
+    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event
+        && (sql.contains("FROM sessions")
             || sql.contains("FROM messages")
             || sql.contains("FROM threads")
-            || sql.contains("FROM turns")
-        {
-            LISTED_SQL.lock().unwrap().push(sql.to_owned());
-        }
+            || sql.contains("FROM turns"))
+    {
+        LISTED_SQL.lock().unwrap().push(sql.to_owned());
     }
 }
 
