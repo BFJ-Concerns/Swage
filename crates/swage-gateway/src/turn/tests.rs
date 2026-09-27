@@ -1036,6 +1036,127 @@ async fn a_configured_message_threshold_succeeds_a_short_thread() {
     assert_eq!(records[0]["actual_strategy"], "succession");
 }
 
+/// Summarises every plain completion as `SUCCESSOR_SUMMARY` and records
+/// each streamed turn request.
+struct SummarisingCapturingProvider {
+    streamed: std::sync::Mutex<Vec<CompletionRequest>>,
+}
+
+const SUCCESSOR_SUMMARY: &str = "The plot is twelve metres by eight.";
+
+#[async_trait]
+impl LlmProvider for SummarisingCapturingProvider {
+    fn model_id(&self) -> &str {
+        "mock-summarising-capturing"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        Ok(CompletionResponse {
+            content: SUCCESSOR_SUMMARY.into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("turns stream")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.streamed
+            .lock()
+            .expect("streamed requests")
+            .push(request);
+        Box::pin(stream::iter(provider_witness_chunks()))
+    }
+}
+
+#[tokio::test]
+async fn the_successor_s_briefing_carries_a_session_variable_from_the_store() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(SummarisingCapturingProvider {
+        streamed: std::sync::Mutex::new(Vec::new()),
+    });
+    let root = tempfile::tempdir().expect("config root");
+    std::fs::create_dir_all(root.path().join("elements")).expect("elements directory");
+    std::fs::write(
+        root.path().join("elements/current-work.md"),
+        "Project codename: {{codename}}",
+    )
+    .expect("write the operator's briefing");
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let mut config = state.active_config();
+    config.context.compaction_threshold =
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+    );
+    seed_history(&storage, session_id, 12).await;
+    storage
+        .db
+        .lock()
+        .await
+        .session_variables
+        .push(swage_storage::SessionVariable {
+            session_id,
+            name: "codename".into(),
+            value: "HEXAGON-MARIGOLD-77".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let records = only_snapshot_records(&*storage.db.lock().await);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    let streamed = provider.streamed.lock().expect("streamed requests");
+    let text = streamed[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains(SUCCESSOR_SUMMARY), "the successor: {text}");
+    assert!(
+        text.contains("Project codename: HEXAGON-MARIGOLD-77"),
+        "the operator's briefing, rendered from the variable store: {text}"
+    );
+    assert!(
+        !text.contains("message 0"),
+        "the summarised messages are gone, so the value came from the store: {text}"
+    );
+}
+
 #[tokio::test]
 async fn compaction_snapshot_failure_records_reconstruction_gap_through_turn_loop() {
     // With the summariser down, succession cannot run and the agent
@@ -2171,14 +2292,22 @@ impl swage_storage::SessionVariableStore for MockStorage {
 
     async fn list_session_variables(
         &self,
-        _: Uuid,
+        session_id: Uuid,
     ) -> Result<Vec<swage_storage::SessionVariable>, StorageError> {
         if self.fail_session_variable_lists.load(Ordering::SeqCst) {
             return Err(StorageError::QueryFailed(
                 "injected session variable list failure".into(),
             ));
         }
-        Ok(Vec::new())
+        Ok(self
+            .db
+            .lock()
+            .await
+            .session_variables
+            .iter()
+            .filter(|variable| variable.session_id == session_id)
+            .cloned()
+            .collect())
     }
 
     async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
@@ -2214,6 +2343,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
     pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
+    pub(crate) session_variables: Vec<swage_storage::SessionVariable>,
 }
 
 impl MockStorage {
