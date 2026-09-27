@@ -187,17 +187,6 @@ mod tests {
     };
     use swage_tool::context::MockToolContext;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     fn context_for(
         state: AppState,
         storage: Arc<SqliteStorage>,
@@ -211,25 +200,11 @@ mod tests {
     async fn run_in(storage: &SqliteStorage, topic_id: Uuid, name: &str) -> Uuid {
         storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
                 inline_workflow_name: Some(name.into()),
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some("return null;".into()),
                 source_hash: "hash".into(),
-                args: Value::Null,
                 budget: Value::Null,
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic_id)
             })
             .await
             .expect("run")
@@ -239,11 +214,7 @@ mod tests {
     async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .expect("session")
@@ -284,7 +255,11 @@ mod tests {
             .await
             .expect("end the run");
         let session = session_in(&storage, topic.id).await;
-        let context = context_for(state(Arc::clone(&storage)), Arc::clone(&storage), session);
+        let context = context_for(
+            crate::test_support::state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session,
+        );
 
         let result = WorkflowRunStatusTool
             .execute(json!({}), &context)
@@ -333,7 +308,11 @@ mod tests {
         let foreign = run_in(&storage, theirs.id, "build-verify").await;
         post(&storage, foreign, "decision.needed", json!({"nonce": "x"})).await;
         let session = session_in(&storage, mine.id).await;
-        let context = context_for(state(Arc::clone(&storage)), Arc::clone(&storage), session);
+        let context = context_for(
+            crate::test_support::state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session,
+        );
 
         let listed = WorkflowRunStatusTool
             .execute(json!({}), &context)

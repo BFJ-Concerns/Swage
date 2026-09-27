@@ -6,8 +6,13 @@
  */
 export type LibraryEntrySummary = { id: string, name: string, description: string, tags: Array<string>,
 /**
- * The scope the surface was saved from: absent for the general scope.
+ * The scope the surface was saved from: absent for the general scope;
+ * retained when the topic has been deleted.
  * A session in this scope receives the saved content when it adds the
  * entry; any other scope receives the shape.
  */
-origin_topic_id?: string | null, updated_at: string, };
+origin_topic_id?: string | null,
+/**
+ * True when the entry's saved-from topic has been deleted.
+ */
+origin_topic_deleted: boolean, updated_at: string, };

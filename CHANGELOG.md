@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Fresh scheduled sessions can run without a topic in the general scope, from Settings, schedule tools, or the API.
 - The web UI's front door is the recent-sessions list with a **New session** control beneath it: choose a topic or none and the agent to run under, and the composer opens in that scope — the first message creates the conversation, so an abandoned start leaves nothing behind. The topic picker and the top-bar topic switcher are gone; a session's topic (or **General**) is named in the top bar and links to the topic's settings page, which now carries the topic's description, workspace relinking and deletion alongside its workspaces, default surfaces, tags and sessions. Every topic is listed in the settings sections.
 - The shared surface library has its own page (`/library`), reachable from the top bar, the front door and the surfaces pane, where entries are filtered, added to the open session, and removed. Saving or removing an entry broadcasts `library_updated` on the work-surface channel, so open catalogues refresh without a reload.
 - An open surface has an address (`/conversations/{id}/surfaces/{surface_id}`): surfaces can be linked to and restored with the browser's back button. Notes on a module can be edited in place.
@@ -17,12 +18,14 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The client OpenAPI document declares the recent-sessions `archived` query parameter as a boolean, matching the generated TypeScript client and gateway.
 - Topic-local surface templates are replaced by the shared surface library; surfaces are listed and created per session (`/api/sessions/{id}/surfaces`) rather than per topic, and a schedule may deliver to a surface only when it continues the session that owns it.
 - The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.
 
 ### Fixed
 
 - Session previews in conversation, topic and operator lists show the latest user or assistant message; tool and system messages do not replace the preview.
+- Deleting a topic leaves library entries saved from it and other topics' default designations intact; the catalogue identifies the deleted origin, and seeded surfaces retain the source entry's name after its removal.
 - Starting a session and moving to another scope before the gateway answers no longer activates the late session where the user now stands; it exists in the scope it was asked for and the recent list finds it.
 - The top bar and the two-column surfaces wrap and stack on phone-sized viewports instead of clipping at the right edge, so every control stays reachable.
 - A topic's default working folder and an explicitly selected workspace now pass the same trust gate as every other attachment: an untrusted selection grants no file access, and revoking trust removes the access it granted while leaving its configured permissions in place.

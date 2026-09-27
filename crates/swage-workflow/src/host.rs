@@ -517,27 +517,8 @@ mod task_request_tests {
 
     fn request(task: Option<&str>) -> AgentCallRequest {
         AgentCallRequest {
-            prompt: "work".into(),
-            agent: None,
             task: task.map(str::to_owned),
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            worker: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..crate::fixtures::agent_call_request("work".into())
         }
     }
 
@@ -651,27 +632,12 @@ mod tests {
     #[test]
     fn absent_composition_options_are_omitted_from_journal_shape() {
         let request = AgentCallRequest {
-            prompt: "work".into(),
             agent: Some("worker".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
-            schema: None,
-            max_attempts: 3,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            worker: None,
             elements: None,
             variables: None,
             assembly: None,
+            max_attempts: 3,
+            ..crate::fixtures::agent_call_request("work".into())
         };
 
         let value = serde_json::to_value(request).expect("serialise agent request");

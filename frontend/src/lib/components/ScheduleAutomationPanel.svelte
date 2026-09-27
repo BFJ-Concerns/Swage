@@ -87,10 +87,11 @@
       }
       return { policy: "continuation", session_id: sessionId };
     }
-    if (!topicId) throw new Error("Select a topic before scheduling work.");
     const agentId = scheduleAgentId.trim();
     if (!agentId) throw new Error("Fresh-session schedules need a target agent.");
-    return { policy: "fresh", topic_id: topicId, agent_id: agentId };
+    return topicId
+      ? { policy: "fresh", topic_id: topicId, agent_id: agentId }
+      : { policy: "fresh", agent_id: agentId };
   }
 
   async function createAutomationSchedule(): Promise<void> {
@@ -185,7 +186,7 @@
       ? topics.find((topic) => topic.id === session.topic_id)
       : null;
     return session.policy === "fresh"
-      ? `fresh · topic ${targetTopic?.name ?? session.topic_id} · agent ${session.agent_id}`
+      ? `fresh · ${session.topic_id ? `topic ${targetTopic?.name ?? session.topic_id}` : "general scope"} · agent ${session.agent_id}`
       : `continues session ${session.session_id}`;
   }
 
