@@ -15,7 +15,7 @@ use super::{
     load_session_config, load_topic_memory, load_trusted_workspace_policy, mpsc,
     operator_guidance_rules, resolve_authorised_worker_directory,
     resolve_requested_skills_for_agent, resolve_swage_root, select_context_assembly,
-    shutdown_sandbox_guard,
+    shutdown_sandbox_guard, worker_placement_path,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -1079,14 +1079,9 @@ impl GatewayDelegationHandler {
             .get_session(thread.session_id)
             .await?
             .ok_or(AgentError::SessionNotFound(thread.session_id))?;
-        let placement = match session
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY))
-            .and_then(serde_json::Value::as_str)
-        {
+        let placement = match worker_placement_path(session.metadata.as_ref()) {
             Some(path) => {
-                let path = tokio::fs::canonicalize(path).await.map_err(|error| {
+                let path = tokio::fs::canonicalize(&path).await.map_err(|error| {
                     AgentError::InvalidConfig(format!(
                         "cannot resolve dispatching worker placement {path:?}: {error}"
                     ))
