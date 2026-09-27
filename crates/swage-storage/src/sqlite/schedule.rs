@@ -64,9 +64,9 @@ fn parse_session_policy(
     };
     match policy {
         "fresh" => Ok(SessionPolicy::Fresh {
-            topic_id: parse_uuid(
+            topic_id: Some(parse_uuid(
                 &topic_id.ok_or_else(|| invalid("fresh policy row is missing topic_id"))?,
-            )?,
+            )?),
             agent_id: agent_id.ok_or_else(|| invalid("fresh policy row is missing agent_id"))?,
         }),
         "continuation" => Ok(SessionPolicy::Continuation {
@@ -86,7 +86,11 @@ fn session_policy_columns(
     match policy {
         SessionPolicy::Fresh { topic_id, agent_id } => (
             "fresh",
-            Some(topic_id.to_string()),
+            Some(
+                topic_id
+                    .expect("stored fresh policy has a scope id")
+                    .to_string(),
+            ),
             Some(agent_id.clone()),
             None,
         ),
@@ -703,7 +707,7 @@ mod tests {
             kind: ScheduleKind::Interval,
             expression: "every 5 seconds".into(),
             session_policy: SessionPolicy::Fresh {
-                topic_id,
+                topic_id: Some(topic_id),
                 agent_id: "gateway".into(),
             },
             creator: ScheduleCreator::User,
@@ -758,7 +762,7 @@ mod tests {
         assert_eq!(
             fetched.session_policy,
             SessionPolicy::Fresh {
-                topic_id,
+                topic_id: Some(topic_id),
                 agent_id: "gateway".into()
             }
         );

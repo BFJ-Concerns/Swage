@@ -243,6 +243,95 @@ fn create_request(
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fresh_schedule_without_a_topic_stores_general_scope_and_projects_no_topic() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("fresh-general.db"),
+        MockProvider::new(vec![
+            MockProvider::text_round("general outcome"),
+            MockProvider::text_round("topic outcome"),
+        ]),
+    );
+    let router = build_router(state.clone());
+    let general = state.topic_store.general_scope().await.unwrap();
+    let topic = state
+        .topic_store
+        .create(swage_storage::NewTopic {
+            name: "Scheduled topic".into(),
+            slug: "scheduled-topic".into(),
+        })
+        .await
+        .unwrap();
+
+    for (target, expected_scope, expected_topic) in [
+        (None, general.id, None),
+        (Some(topic.id), topic.id, Some(topic.id)),
+    ] {
+        let mut session = json!({ "policy": "fresh", "agent_id": "gateway" });
+        if let Some(topic_id) = target {
+            session["topic_id"] = json!(topic_id);
+        }
+        let (status, created) = request_json(
+            &router,
+            "POST",
+            "/api/schedules",
+            Some(json!({
+                "message": "Check the queue.",
+                "spec": { "kind": "interval", "every": "every 1 hours" },
+                "session": session,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(
+            created["session"].get("topic_id").cloned(),
+            expected_topic.map(|id| json!(id)),
+        );
+        let id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        let stored = state.storage.get_schedule(id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.session_policy,
+            SessionPolicy::Fresh {
+                topic_id: Some(expected_scope),
+                agent_id: "gateway".into(),
+            }
+        );
+
+        let run = schedule::trigger_schedule(&state, id).await.unwrap().run;
+        let session_id = run.session_id.expect("run records a session");
+        let stored_session = state
+            .storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_session.topic_id, expected_scope);
+        let (status, conversation) = request_json(
+            &router,
+            "GET",
+            &format!("/api/conversations/{session_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{conversation}");
+        assert_eq!(
+            conversation.get("topic_id").cloned(),
+            expected_topic.map(|id| json!(id)),
+        );
+    }
+
+    let (status, listed) = request_json(&router, "GET", "/api/schedules", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert!(
+        listed["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|schedule| { schedule["session"].get("topic_id").is_none() })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn schedule_lifecycle_create_edit_pause_resume_trigger_delete() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
@@ -908,7 +997,7 @@ async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
                 every: "every 1 hours".into(),
             },
             SessionPolicy::Fresh {
-                topic_id: target_topic.id,
+                topic_id: Some(target_topic.id),
                 agent_id: "gateway".into(),
             },
         ),
@@ -1051,7 +1140,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                topic_id: topic.id,
+                topic_id: Some(topic.id),
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1144,7 +1233,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                topic_id: topic.id,
+                topic_id: Some(topic.id),
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1191,7 +1280,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
                 every: "every 30 minutes".into(),
             },
             session: SessionPolicy::Fresh {
-                topic_id: topic.id,
+                topic_id: Some(topic.id),
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1243,7 +1332,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
                 every: "every 1 hours".into(),
             },
             session: SessionPolicy::Fresh {
-                topic_id: topic.id,
+                topic_id: Some(topic.id),
                 agent_id: "gateway".into(),
             },
             routing: None,
@@ -1550,7 +1639,7 @@ async fn surface_delivery_rejects_a_surface_of_another_session_and_any_fresh_pol
     let error = schedule::create_schedule(
         &state,
         request(SessionPolicy::Fresh {
-            topic_id: default.id,
+            topic_id: Some(default.id),
             agent_id: "gateway".into(),
         }),
         ScheduleCreator::User,
