@@ -55,31 +55,58 @@ use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerE
 
 mod configuration;
 mod context;
+mod context_selection;
 mod delegation;
+mod detached_delivery;
 mod dispatcher;
+mod dispatcher_settlement;
+mod entry_points;
 mod history;
+mod inbound_hooks;
 mod operator_guidance;
 mod projection;
 mod provider_record;
+mod runtime_launch;
 mod sandbox_approval;
 mod succession;
+mod turn_input;
+mod turn_release;
 mod workspace;
 
 pub(crate) use configuration::*;
 pub(crate) use context::*;
+#[cfg(test)]
+use context_selection::WORKING_NORMS_FAMILY_FALLBACK;
+use context_selection::{execute_context_assembly, select_context_assembly};
 pub(crate) use delegation::*;
+use detached_delivery::deliver_detached_results;
+#[cfg(test)]
+use detached_delivery::render_delegation_result;
 pub(crate) use dispatcher::*;
+use dispatcher_settlement::{DispatcherSettlement, SettledDispatcher, settle_turn_dispatcher};
+pub use entry_points::process_turn;
+pub(crate) use entry_points::*;
 #[cfg(test)]
 use history::compact_tool_replay_messages;
 use history::rebuild_thread_history_messages;
+pub(crate) use inbound_hooks::*;
 pub(crate) use operator_guidance::*;
 #[cfg(test)]
 pub(crate) use projection::route_approval_agent_event;
 use projection::{ProjectedTurn, TurnProjection, project_agent_events};
 pub(crate) use provider_record::*;
+#[cfg(test)]
+use runtime_launch::effort_capability_for_model;
+use runtime_launch::{RuntimeLaunch, launch_turn_runtime, requested_effort};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,
+};
+pub use turn_input::TurnInput;
+pub(crate) use turn_input::*;
+use turn_release::{
+    record_agent_call_attempt_before_execution, record_failed_turn_and_release_on_error,
+    record_terminal_state_and_release, release_active_turn,
 };
 pub(crate) use workspace::*;
 
@@ -87,154 +114,6 @@ pub(crate) use swage_core::DispatchContextComposition;
 
 /// Internal workflow-only witness that an agent reported a provider failure.
 pub(crate) type ProviderFailureObserver = Arc<StdMutex<Option<String>>>;
-
-/// What a caller submits for one turn: the message text plus the content
-/// parts sent beside it. Every turn entry point takes this; a `String`
-/// converts, so a text-only caller passes its text unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TurnInput {
-    pub text: String,
-    pub attachments: Vec<MessageAttachment>,
-}
-
-impl TurnInput {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            attachments: Vec::new(),
-        }
-    }
-
-    pub fn with_attachments(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
-        Self {
-            text: text.into(),
-            attachments,
-        }
-    }
-}
-
-impl From<String> for TurnInput {
-    fn from(text: String) -> Self {
-        Self::text(text)
-    }
-}
-
-impl From<&str> for TurnInput {
-    fn from(text: &str) -> Self {
-        Self::text(text)
-    }
-}
-
-/// The content parts a stored message carries, parsed against the wire
-/// contract. Storage keeps attachments as opaque JSON; a value outside the
-/// contract is a corrupt record and is refused loudly here, never dropped.
-pub(crate) fn message_attachments(
-    stored: &[serde_json::Value],
-) -> Result<Vec<MessageAttachment>, GatewayError> {
-    stored
-        .iter()
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|error| {
-                GatewayError::Storage(swage_core::StorageError::Corruption {
-                    message: format!("message attachment outside the wire contract: {error}"),
-                })
-            })
-        })
-        .collect()
-}
-
-/// The attachment values as storage records them: the wire representation
-/// verbatim, so the stored row and the client contract never disagree.
-pub(crate) fn attachment_records(attachments: &[MessageAttachment]) -> Vec<serde_json::Value> {
-    attachments
-        .iter()
-        .map(|attachment| serde_json::to_value(attachment).expect("attachments serialise"))
-        .collect()
-}
-
-/// The model-facing content parts for a submitted message: the text first,
-/// then one part per attachment in submission order.
-pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> Vec<ContentPart> {
-    let mut parts = Vec::with_capacity(1 + attachments.len());
-    parts.push(ContentPart::Text { text });
-    parts.extend(attachments.iter().map(|attachment| match attachment {
-        MessageAttachment::ImageUrl { url } => ContentPart::ImageUrl { url: url.clone() },
-    }));
-    parts
-}
-
-/// Refuse a submission whose attachments the selected provider cannot
-/// consume. The check runs before anything is persisted: a part the model
-/// would never see must fail the turn, not ride along silently.
-pub(crate) fn check_attachment_support(
-    capabilities: &crate::capabilities::WorkflowCapabilities,
-    attachments: &[MessageAttachment],
-) -> Result<(), GatewayError> {
-    for attachment in attachments {
-        match attachment {
-            MessageAttachment::ImageUrl { url } => {
-                if url.trim().is_empty() {
-                    return Err(GatewayError::ValidationError(
-                        "an image attachment needs a non-empty url".into(),
-                    ));
-                }
-                if !capabilities.vision() {
-                    return Err(GatewayError::ValidationError(
-                        "the selected provider does not accept image attachments".into(),
-                    ));
-                }
-                if !capabilities.accepts_image_reference(url) {
-                    return Err(GatewayError::ValidationError(
-                        "the selected provider cannot resolve this image reference: attach the \
-                         image inline as a base64 data URL"
-                            .into(),
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Resolve the request's effective model and admit its attachments against
-/// that model's provider protocol. Every entry point uses this seam before it
-/// persists a turn, so the admission decision cannot drift from execution.
-pub(crate) fn resolve_turn_model_and_attachments(
-    state: &AppState,
-    config: swage_config::ResolvedConfig,
-    requested_model: Option<&str>,
-    session_selected_model: Option<&str>,
-    session_id: Uuid,
-    attachments: &[MessageAttachment],
-) -> Result<(swage_config::ResolvedConfig, &'static str, Option<String>), GatewayError> {
-    let selected_model_id = requested_model.or(session_selected_model);
-    if let Some(requested_model) = requested_model {
-        resolve_requested_turn_model(&config, requested_model)?;
-    }
-    ensure_selected_model_available(state, &config, selected_model_id, session_id)?;
-    let effective_model_source = match requested_model {
-        Some(_) => "request",
-        None if session_selected_model
-            .filter(|model_id| !model_id.trim().is_empty())
-            .is_some_and(|model_id| {
-                resolve_model_catalogue_entry(&config.models, model_id).is_some()
-            }) =>
-        {
-            "conversation"
-        }
-        None => "configured_default",
-    };
-    let config = effective_session_config(config, selected_model_id);
-    let workflow_capabilities =
-        crate::capabilities::WorkflowCapabilities::for_protocol(config.default_provider_protocol());
-    check_attachment_support(&workflow_capabilities, attachments)?;
-
-    Ok((
-        config,
-        effective_model_source,
-        selected_model_id.map(str::to_owned),
-    ))
-}
 
 // Gateway messaging spans three surfaces: REST endpoints for durable messages
 // and turn submission, session-scoped WebSocket events for live approval and
@@ -249,449 +128,24 @@ fn map_turn_creation_error(error: swage_core::StorageError, session_id: Uuid) ->
     }
 }
 
-/// The effort control the effective model accepts: the catalogue's own
-/// declaration when the entry carries one, otherwise the provider adapter's
-/// account of the documented control, otherwise no control at all.
-pub(crate) fn effort_capability_for_model(
-    config: &swage_config::ResolvedConfig,
-    catalogue_entry: &str,
-    provider: &dyn swage_provider::LlmProvider,
-) -> swage_core::EffortCapability {
-    let model = config.models.entries.get(catalogue_entry);
-    model
-        .and_then(|model| model.capabilities.effort.clone())
-        .or_else(|| {
-            provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
-        })
-        .unwrap_or(swage_core::EffortCapability::None)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnAttendance {
     Attended,
     Unattended,
 }
 
-/// Distilled view of which permission grants the topic has actually accepted
-/// across its trusted workspace attachments. Untrusted attachments contribute
-/// nothing.
-
-#[derive(Debug, Clone)]
-pub(crate) struct BeforeInboundDispatchResult {
-    pub canonical_content: String,
-    pub modified_by_hooks: Vec<String>,
-}
-
-fn map_hook_block(reason: String) -> GatewayError {
-    GatewayError::ConfigError(format!(
-        "BeforeInbound hook blocked inbound content: {reason}"
-    ))
-}
-
-pub(crate) async fn dispatch_before_inbound(
-    hook_registry: Option<&Arc<HookRegistry>>,
-    raw_content: &str,
-) -> Result<BeforeInboundDispatchResult, GatewayError> {
-    let Some(hook_registry) = hook_registry else {
-        return Ok(BeforeInboundDispatchResult {
-            canonical_content: raw_content.to_string(),
-            modified_by_hooks: Vec::new(),
-        });
-    };
-
-    let traced = hook_registry
-        .dispatch_traced(HookEvent::BeforeInbound {
-            content: raw_content.to_string(),
-        })
-        .await;
-
-    match traced.outcome {
-        HookOutcome::Continue => Ok(BeforeInboundDispatchResult {
-            canonical_content: raw_content.to_string(),
-            modified_by_hooks: traced.modified_by_hooks,
-        }),
-        HookOutcome::ContinueModified(modified) => match *modified {
-            HookEvent::BeforeInbound { content } => Ok(BeforeInboundDispatchResult {
-                canonical_content: content,
-                modified_by_hooks: traced.modified_by_hooks,
-            }),
-            _ => Ok(BeforeInboundDispatchResult {
-                canonical_content: raw_content.to_string(),
-                modified_by_hooks: traced.modified_by_hooks,
-            }),
-        },
-        HookOutcome::Block(reason) => Err(map_hook_block(reason)),
-        HookOutcome::RequestApproval { .. } => Err(GatewayError::ConfigError(
-            "BeforeInbound hooks cannot request approval".to_string(),
-        )),
-    }
-}
-
-/// Render a completed delegation's Result message as thread content.
-///
-/// Reads the payload the delegation path writes — `response` with optional
-/// `structured_output`, or `error` for a failed child — and falls back to
-/// the raw JSON for any other shape, so an unrecognised payload is still
-/// delivered rather than dropped.
-fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
-    let sender = &result.sender_agent_id;
-    let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
-        Some(response) => format!("Delegated agent {sender} completed:\n{response}"),
-        None => match result.payload.get("error").and_then(|v| v.as_str()) {
-            Some(error) => format!("Delegated agent {sender} failed: {error}"),
-            None => format!(
-                "Delegated agent {sender} finished:\n{}",
-                serde_json::to_string_pretty(&result.payload)
-                    .unwrap_or_else(|_| result.payload.to_string())
-            ),
-        },
-    };
-    if let Some(structured) = result.payload.get("structured_output") {
-        let rendered =
-            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
-        text.push_str("\n\nStructured output:\n```json\n");
-        text.push_str(&rendered);
-        text.push_str("\n```");
-    }
-    text
-}
-
-async fn release_active_turn(state: &AppState, session_id: Uuid) {
-    state.active_turns.lock().await.remove(&session_id);
-}
-
-async fn release_active_turn_on_error<T, E>(
-    state: &AppState,
-    session_id: Uuid,
-    result: Result<T, E>,
-) -> Result<T, E> {
-    if result.is_err() {
-        release_active_turn(state, session_id).await;
-    }
-    result
-}
-
-async fn record_terminal_state_and_release(
-    state: &AppState,
-    session_id: Uuid,
-    turn_id: Uuid,
-    turn_state: TurnState,
-) -> Result<(), GatewayError> {
-    release_active_turn_on_error(
-        state,
-        session_id,
-        state.storage.update_turn_state(turn_id, turn_state).await,
-    )
-    .await?;
-    release_active_turn(state, session_id).await;
-    Ok(())
-}
-
-/// Persist the resolved dispatch before a provider can execute it.
-///
-/// Both provider runtimes share this refusal path so neither can make a call
-/// whose workflow attempt cannot be reconstructed from the durable record.
-async fn record_agent_call_attempt_before_execution(
-    state: &AppState,
-    session_id: Uuid,
-    prepared_turn_id: Uuid,
-    agent_call_scope: Option<Uuid>,
-    resolution: &WorkflowAgentCallResolution,
-    sandbox_guard: &Option<SandboxGuard>,
-) -> Result<(), GatewayError> {
-    let Some(agent_call_scope) = agent_call_scope else {
-        return Ok(());
-    };
-    let result = match serde_json::to_value(resolution) {
-        Ok(resolution) => crate::workflow::record_agent_call_attempt(
-            state.storage.as_ref(),
-            agent_call_scope,
-            resolution,
-        )
-        .await
-        .map_err(|error| {
-            GatewayError::WebSocketError(format!("failed to record agent call attempt: {error}"))
-        }),
-        Err(error) => Err(GatewayError::WebSocketError(format!(
-            "agent call attempt could not be serialised: {error}"
-        ))),
-    };
-    if let Err(error) = result {
-        shutdown_sandbox_guard(
-            sandbox_guard,
-            "failed to shut down sandbox after agent call attempt recording failure",
-        )
-        .await;
-        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
-            .await?;
-        return Err(error);
-    }
-    Ok(())
-}
-
-async fn record_failed_turn_and_release_on_error<T>(
-    state: &AppState,
-    session_id: Uuid,
-    turn_id: Uuid,
-    result: Result<T, GatewayError>,
-) -> Result<T, GatewayError> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            record_terminal_state_and_release(state, session_id, turn_id, TurnState::Failed)
-                .await?;
-            Err(error)
-        }
-    }
-}
-
-/// Orchestrate a complete agent turn: user message → provider stream → storage.
-///
-/// # Flow
-/// 1. Look up the session's default thread (created alongside the session).
-/// 2. Guard: reject if a turn is already Processing for this thread.
-/// 3. Resolve the topic for the session; load per-topic config and build ToolContext.
-/// 4. Create a Turn record (state=Pending), immediately advance to Processing.
-/// 5. Store the user message with thread_id and position.
-/// 6. Build message history from the thread and send a streaming request to the provider.
-/// 7. For each chunk: forward Token events to the WebSocket, accumulate content.
-/// 8. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
-/// 9. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
-/// 10. On provider Error: mark the turn Failed, send an Error event.
-/// 11. Cleanup: remove the CancellationToken from active_turns.
 // Because process_turn is spawned as a tokio task, it won't inherit the
 // HTTP request span. The instrument macro creates a self-contained "turn"
 // span so all log entries within the turn share the same turn_id and
 // session_id. turn_id is Empty at span creation and recorded once the
 // Turn record exists.
-pub async fn process_turn(
-    state: &AppState,
-    session_id: Uuid,
-    target_thread_id: Option<Uuid>,
-    input: impl Into<TurnInput>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    subscription: Arc<Mutex<SubscriptionState>>,
-    output_schema_override: Option<serde_json::Value>,
-) -> Result<(), GatewayError> {
-    process_turn_with_existing_turn(
-        state,
-        session_id,
-        target_thread_id,
-        input.into(),
-        ws_tx,
-        subscription,
-        output_schema_override,
-        None,
-        None,
-        None,
-        None,
-        TurnAttendance::Attended,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn process_turn_with_existing_turn(
-    state: &AppState,
-    session_id: Uuid,
-    target_thread_id: Option<Uuid>,
-    input: impl Into<TurnInput>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    subscription: Arc<Mutex<SubscriptionState>>,
-    output_schema_override: Option<serde_json::Value>,
-    max_output_retries_override: Option<u32>,
-    effort_override: Option<swage_core::Effort>,
-    cancellation_override: Option<CancellationToken>,
-    existing_turn_id: Option<Uuid>,
-    attendance: TurnAttendance,
-) -> Result<(), GatewayError> {
-    process_turn_with_existing_turn_and_focus(
-        state,
-        session_id,
-        target_thread_id,
-        input.into(),
-        ws_tx,
-        subscription,
-        output_schema_override,
-        max_output_retries_override,
-        effort_override,
-        cancellation_override,
-        existing_turn_id,
-        attendance,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn process_turn_with_existing_turn_and_focus(
-    state: &AppState,
-    session_id: Uuid,
-    target_thread_id: Option<Uuid>,
-    input: impl Into<TurnInput>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    subscription: Arc<Mutex<SubscriptionState>>,
-    output_schema_override: Option<serde_json::Value>,
-    max_output_retries_override: Option<u32>,
-    effort_override: Option<swage_core::Effort>,
-    cancellation_override: Option<CancellationToken>,
-    existing_turn_id: Option<Uuid>,
-    attendance: TurnAttendance,
-    compaction_focus: Option<String>,
-) -> Result<(), GatewayError> {
-    process_turn_with_existing_turn_and_focus_and_model(
-        state,
-        session_id,
-        target_thread_id,
-        input.into(),
-        ws_tx,
-        subscription,
-        output_schema_override,
-        max_output_retries_override,
-        effort_override,
-        cancellation_override,
-        existing_turn_id,
-        attendance,
-        compaction_focus,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
-    state: &AppState,
-    session_id: Uuid,
-    target_thread_id: Option<Uuid>,
-    input: impl Into<TurnInput>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    subscription: Arc<Mutex<SubscriptionState>>,
-    output_schema_override: Option<serde_json::Value>,
-    max_output_retries_override: Option<u32>,
-    effort_override: Option<swage_core::Effort>,
-    cancellation_override: Option<CancellationToken>,
-    existing_turn_id: Option<Uuid>,
-    attendance: TurnAttendance,
-    compaction_focus: Option<String>,
-    requested_model: Option<String>,
-) -> Result<(), GatewayError> {
-    process_turn_with_composition_and_focus(
-        state,
-        session_id,
-        target_thread_id,
-        input.into(),
-        ws_tx,
-        subscription,
-        output_schema_override,
-        max_output_retries_override,
-        effort_override,
-        cancellation_override,
-        existing_turn_id,
-        attendance,
-        DispatchContextComposition::default(),
-        None,
-        compaction_focus,
-        requested_model,
-        None,
-        false,
-    )
-    .await
-}
-
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn process_turn_with_composition(
-    state: &AppState,
-    session_id: Uuid,
-    target_thread_id: Option<Uuid>,
-    input: impl Into<TurnInput>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    subscription: Arc<Mutex<SubscriptionState>>,
-    output_schema_override: Option<serde_json::Value>,
-    max_output_retries_override: Option<u32>,
-    effort_override: Option<swage_core::Effort>,
-    cancellation_override: Option<CancellationToken>,
-    existing_turn_id: Option<Uuid>,
-    attendance: TurnAttendance,
-    composition: DispatchContextComposition,
-    agent_call_scope: Option<Uuid>,
-) -> Result<(), GatewayError> {
-    process_turn_with_composition_and_focus(
-        state,
-        session_id,
-        target_thread_id,
-        input.into(),
-        ws_tx,
-        subscription,
-        output_schema_override,
-        max_output_retries_override,
-        effort_override,
-        cancellation_override,
-        existing_turn_id,
-        attendance,
-        composition,
-        agent_call_scope,
-        None,
-        None,
-        None,
-        false,
-    )
-    .await
-}
-
-/// Process a composed turn with a call-scoped model selection. Workflow calls
-/// use this to make their journalled model choice explicit without changing
-/// the session's durable selection for an ordinary one-off turn.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn process_turn_with_composition_and_model(
-    state: &AppState,
-    session_id: Uuid,
-    target_thread_id: Option<Uuid>,
-    input: impl Into<TurnInput>,
-    ws_tx: mpsc::UnboundedSender<ServerEvent>,
-    subscription: Arc<Mutex<SubscriptionState>>,
-    output_schema_override: Option<serde_json::Value>,
-    max_output_retries_override: Option<u32>,
-    effort_override: Option<swage_core::Effort>,
-    cancellation_override: Option<CancellationToken>,
-    existing_turn_id: Option<Uuid>,
-    attendance: TurnAttendance,
-    composition: DispatchContextComposition,
-    agent_call_scope: Option<Uuid>,
-    requested_model: Option<String>,
-    provider_failure_observer: Option<ProviderFailureObserver>,
-    reuse_persisted_input: bool,
-) -> Result<(), GatewayError> {
-    process_turn_with_composition_and_focus(
-        state,
-        session_id,
-        target_thread_id,
-        input.into(),
-        ws_tx,
-        subscription,
-        output_schema_override,
-        max_output_retries_override,
-        effort_override,
-        cancellation_override,
-        existing_turn_id,
-        attendance,
-        composition,
-        agent_call_scope,
-        None,
-        requested_model,
-        provider_failure_observer,
-        reuse_persisted_input,
-    )
-    .await
-}
-
 #[tracing::instrument(
     name = "turn",
     skip(state, input, ws_tx, subscription, composition, compaction_focus),
     fields(turn_id = tracing::field::Empty),
 )]
 #[allow(clippy::too_many_arguments)]
-async fn process_turn_with_composition_and_focus(
+pub(super) async fn process_turn_with_composition_and_focus(
     state: &AppState,
     session_id: Uuid,
     target_thread_id: Option<Uuid>,
@@ -990,45 +444,12 @@ async fn process_turn_with_composition_and_focus(
         .await?;
     }
 
-    // Step 7: Deliver completed detached delegations. A detached child's
-    // Result waits in this agent's mailbox until its parent next turns;
-    // each is appended as a durable User-role message *before* history is
-    // rebuilt, so the result enters the thread record — visible in the
-    // UI, part of the audit trail, and carried to the model as ordinary
-    // history content, never as instructions. User role, deliberately:
-    // the history rebuild carries Tool-role rows only when they answer a
-    // recorded tool call (providers reject orphaned tool results), so a
-    // platform-delivered notification rides the same role a channel or
-    // scheduled message would, with the rendering naming its real sender.
-    // Append-before-claim: a failure between the two re-delivers next
-    // turn rather than losing the result, and a lost claim race leaves a
-    // duplicate row, not a gap. A storage failure here fails the turn —
-    // with the same explicit cleanup as the surrounding error paths, so
-    // the thread is not left guarded by a stale Pending turn.
-    let delivery_result: Result<(), GatewayError> = async {
-        let pending_results =
-            swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
-                .await
-                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-        for result in &pending_results {
-            state
-                .storage
-                .append_message(AppendMessage {
-                    thread_id,
-                    attachments: Vec::new(),
-                    turn_id: Some(prepared_turn_id),
-                    role: Role::User,
-                    content: render_delegation_result(result),
-                    agent_id: session.agent_id.clone(),
-                })
-                .await?;
-            swage_agent::mailbox::claim_result(&state.storage, result.id)
-                .await
-                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-        }
-        Ok(())
-    }
-    .await;
+    // Step 7: Deliver completed detached delegations (turn/detached_delivery.rs).
+    // A storage failure here fails the turn — with the same explicit cleanup
+    // as the surrounding error paths, so the thread is not left guarded by a
+    // stale Pending turn.
+    let delivery_result =
+        deliver_detached_results(state, &session.agent_id, thread_id, prepared_turn_id).await;
     if let Err(error) = delivery_result {
         record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;
@@ -1241,191 +662,27 @@ async fn process_turn_with_composition_and_focus(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
-    let execution_context = match attendance {
-        TurnAttendance::Attended => "interactive turn",
-        TurnAttendance::Unattended => "unattended turn",
-    };
-    let dispatcher_build = match build_gateway_dispatcher(
+    let dispatcher_build = match settle_turn_dispatcher(
         state,
-        GatewayDispatcherRequest {
+        DispatcherSettlement {
             config: &config,
             agent_config: &agent_config,
             session_metadata: session.metadata.as_ref(),
-            topic_id: Some(topic_id),
+            topic_id,
             active_workspace_attachment_id: session.active_workspace_attachment_id,
-            ws_tx: ws_tx.clone(),
-            session_id: Some(session_id),
-            turn_id: Some(prepared_turn_id),
+            ws_tx: &ws_tx,
+            session_id,
+            prepared_turn_id,
+            agent_id: &session.agent_id,
+            attendance,
+            cancel_token: &cancel_token,
         },
     )
-    .await
+    .await?
     {
-        Ok(build) => build,
-        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
-            let detected_degradation = ExecutionIsolation::Degraded {
-                reason: format!("sandbox_setup_failed: {error}"),
-            };
-            if let Err(audit_error) = record_degraded_execution(
-                state,
-                &detected_degradation,
-                execution_context,
-                Some(session_id),
-                Some(prepared_turn_id),
-            )
-            .await
-            {
-                record_terminal_state_and_release(
-                    state,
-                    session_id,
-                    prepared_turn_id,
-                    TurnState::Failed,
-                )
-                .await?;
-                return Err(audit_error);
-            }
-            let approval = record_failed_turn_and_release_on_error(
-                state,
-                session_id,
-                prepared_turn_id,
-                request_sandbox_degradation_approval(
-                    state,
-                    SandboxDegradationApprovalRequest {
-                    config: &config,
-                    ws_tx: &ws_tx,
-                    turn_id: prepared_turn_id,
-                    agent_id: &session.agent_id,
-                    prompt:
-                        "Sandbox setup failed. Approve running this turn without sandbox isolation?"
-                            .to_string(),
-                    context: serde_json::json!({
-                        "degradation": "unsandboxed_execution",
-                        "error": error.to_string(),
-                    }),
-                    cancel_token: &cancel_token,
-                    },
-                )
-                .await,
-            )
-            .await?;
-            match approval {
-                SandboxDegradationApproval::Approved => {
-                    // The approval wait temporarily marks the placeholder as
-                    // Processing. Agent::process_turn_streaming takes over
-                    // existing placeholders only while they are Pending.
-                    record_failed_turn_and_release_on_error(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        state
-                            .storage
-                            .update_turn_state(prepared_turn_id, TurnState::Pending)
-                            .await
-                            .map_err(GatewayError::from),
-                    )
-                    .await?;
-                }
-                SandboxDegradationApproval::Rejected => {
-                    record_terminal_state_and_release(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        TurnState::Failed,
-                    )
-                    .await?;
-                    return Err(GatewayError::WebSocketError(format!(
-                        "sandbox setup failed and unsandboxed execution was not approved: {error}"
-                    )));
-                }
-                SandboxDegradationApproval::Interrupted => {
-                    record_failed_turn_and_release_on_error(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        state
-                            .storage
-                            .update_turn_state(prepared_turn_id, TurnState::Interrupted)
-                            .await
-                            .map_err(GatewayError::from),
-                    )
-                    .await?;
-                    let _ = ws_tx.send(ServerEvent::Cancelled {});
-                    // Preserve the client-visible interrupt ordering: the old turn
-                    // remains active until its cancellation event has been sent.
-                    release_active_turn(state, session_id).await;
-                    return Ok(());
-                }
-            }
-
-            let mut unsandboxed_config = config.clone();
-            unsandboxed_config.sandbox.allow_degraded_execution = true;
-            record_failed_turn_and_release_on_error(
-                state,
-                session_id,
-                prepared_turn_id,
-                build_gateway_dispatcher(
-                    state,
-                    GatewayDispatcherRequest {
-                        config: &unsandboxed_config,
-                        agent_config: &agent_config,
-                        session_metadata: session.metadata.as_ref(),
-                        topic_id: Some(topic_id),
-                        active_workspace_attachment_id: session.active_workspace_attachment_id,
-                        ws_tx: ws_tx.clone(),
-                        session_id: Some(session_id),
-                        turn_id: Some(prepared_turn_id),
-                    },
-                )
-                .await
-                .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string())),
-            )
-            .await?
-        }
-        Err(error) => {
-            let isolation = ExecutionIsolation::Degraded {
-                reason: format!("sandbox_setup_failed: {error}"),
-            };
-            let _ = ws_tx.send(ServerEvent::Error {
-                code: "sandbox_unavailable".into(),
-                message: format!("Sandbox setup failed; the turn was not executed: {error}"),
-            });
-            record_terminal_state_and_release(
-                state,
-                session_id,
-                prepared_turn_id,
-                TurnState::Failed,
-            )
-            .await?;
-            record_degraded_execution(
-                state,
-                &isolation,
-                execution_context,
-                Some(session_id),
-                Some(prepared_turn_id),
-            )
-            .await?;
-            return Err(GatewayError::WebSocketError(format!(
-                "sandbox setup failed; execution was blocked: {error}"
-            )));
-        }
+        SettledDispatcher::Ready(build) => *build,
+        SettledDispatcher::Interrupted => return Ok(()),
     };
-    if let Err(error) = record_degraded_execution(
-        state,
-        &dispatcher_build.isolation,
-        execution_context,
-        Some(session_id),
-        Some(prepared_turn_id),
-    )
-    .await
-    {
-        shutdown_sandbox_guard(
-            &dispatcher_build.sandbox_guard,
-            "failed to shut down sandbox after degradation audit failure",
-        )
-        .await;
-        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
-            .await?;
-        return Err(error);
-    }
     let sandbox_guard = dispatcher_build.sandbox_guard;
     let dispatcher = dispatcher_build.dispatcher;
 
@@ -1433,193 +690,39 @@ async fn process_turn_with_composition_and_focus(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
-    let requested_effort = match effort_override {
-        Some(effort) => Some(effort),
-        None => session
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("effort"))
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| {
-                GatewayError::ConfigError(format!("session effort is invalid: {error}"))
-            })?
-            .or_else(|| {
-                match selected_model_id
-                    .as_deref()
-                    .filter(|model_id| !model_id.trim().is_empty())
-                {
-                    Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
-                        .and_then(|(_, model)| model.default_effort),
-                    None => config
-                        .models
-                        .entries
-                        .get(&config.models.default)
-                        .and_then(|model| model.default_effort),
-                }
-            }),
-    };
+    let requested_effort = requested_effort(
+        effort_override,
+        session.metadata.as_ref(),
+        selected_model_id.as_deref(),
+        &config,
+    )?;
     let model_name = config.default_model_id().to_string();
-    let agent_handle = if is_codex_turn {
-        let effort = requested_effort.map(|requested| {
-            let capability = config
-                .models
-                .entries
-                .get(&config.models.default)
-                .and_then(|model| model.capabilities.effort.clone())
-                .or_else(|| crate::codex::effort_capability(&model_name))
-                .unwrap_or(swage_core::EffortCapability::None);
-            swage_core::resolve_effort(requested, &capability)
-        });
-        if let Some(resolved) = effort.as_ref() {
-            record_effort_snapshot(&mut report_json, resolved);
-        }
-        let resolution = WorkflowAgentCallResolution {
-            model: Some(model_name.clone()),
-            effort: effort
-                .as_ref()
-                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
-            session_id: Some(session_id),
-            thread_id: Some(thread_id),
-            turn_id: Some(prepared_turn_id),
-        };
-        record_agent_call_attempt_before_execution(
-            state,
-            session_id,
-            prepared_turn_id,
-            agent_call_scope,
-            &resolution,
-            &sandbox_guard,
-        )
-        .await?;
-        let session_approval_grants = state
-            .session_approval_grants
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let permissions = build_permission_config(
-            &config,
-            &state.config,
-            Some(topic_id),
-            Some(session_id),
-            &session_approval_grants,
-        );
-        let codex_request = crate::codex::CodexTurnRequest {
+    let agent_handle = launch_turn_runtime(
+        state,
+        RuntimeLaunch {
+            config: &config,
+            is_codex_turn,
             session_id,
             thread_id,
-            turn_id: prepared_turn_id,
-            agent_id: session.agent_id.clone(),
-            model: model_name.clone(),
-            effort,
-            user_message: before_inbound.canonical_content.clone(),
-            assembled_context: assembled_messages,
-            agent_config,
-            permissions,
-            dispatcher: Arc::new(dispatcher),
-            event_tx,
-            cancellation: cancel_token,
-        };
-        let codex_state = state.clone();
-        tokio::spawn(async move { crate::codex::run_turn(codex_state, codex_request).await })
-    } else {
-        let mut agent_builder = AgentBuilder::new()
-            .config(agent_config)
-            .provider(state.active_provider())
-            .storage(state.storage.clone())
-            .tool_dispatcher(dispatcher)
-            .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
-            .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
-            .context_transfer_config(config.communication.context_transfer.clone());
-        if let Some(hook_registry) = state.hook_registry.clone() {
-            agent_builder = agent_builder.hook_registry(hook_registry);
-        }
-        let agent = match agent_builder.build() {
-            Ok(agent) => agent,
-            Err(error) => {
-                tracing::error!(%error, "failed to build agent for turn");
-                let _ = ws_tx.send(ServerEvent::Error {
-                    code: "agent_construction_error".to_string(),
-                    message: error.to_string(),
-                });
-                if let Err(update_error) = state
-                    .storage
-                    .update_turn_state(prepared_turn_id, TurnState::Failed)
-                    .await
-                {
-                    tracing::warn!(
-                        turn_id = %prepared_turn_id,
-                        error = %update_error,
-                        "failed to mark turn failed after agent construction error"
-                    );
-                }
-                shutdown_sandbox_guard(
-                    &sandbox_guard,
-                    "failed to shut down turn sandbox after agent construction error",
-                )
-                .await;
-                state.active_turns.lock().await.remove(&session_id);
-                return Err(GatewayError::WebSocketError(format!(
-                    "agent construction failed: {error}"
-                )));
-            }
-        };
-        // The intent is resolved once, here, against the effective model's
-        // declared capability; adapters express the resolved control. The
-        // outcome is written into the turn's audit snapshot so a clamp or an
-        // unsupported `off` is reconstructable from the record.
-        let effort = requested_effort.map(|requested| {
-            let capability = effort_capability_for_model(
-                &config,
-                &config.models.default,
-                state.active_provider().as_ref(),
-            );
-            swage_core::resolve_effort(requested, &capability)
-        });
-        if let Some(resolved) = effort.as_ref() {
-            record_effort_snapshot(&mut report_json, resolved);
-        }
-        // The dispatch record names what the call *asked* for; what the
-        // turn actually resolved is only known here, so it is stamped onto
-        // the same journal entry as a second field rather than by rewriting
-        // the dispatch one. Each turn appends its own attempt, so a call
-        // replay re-dispatched keeps the interrupted attempt beside the one
-        // that follows it.
-        let resolution = WorkflowAgentCallResolution {
-            model: Some(model_name.clone()),
-            effort: effort
-                .as_ref()
-                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
-            session_id: Some(session_id),
-            thread_id: Some(thread_id),
-            turn_id: Some(prepared_turn_id),
-        };
-        record_agent_call_attempt_before_execution(
-            state,
-            session_id,
             prepared_turn_id,
+            topic_id,
+            agent_id: &session.agent_id,
+            model_name: &model_name,
+            requested_effort,
             agent_call_scope,
-            &resolution,
-            &sandbox_guard,
-        )
-        .await?;
-        let turn_request = TurnRequest {
-            execution: swage_agent::context::TurnExecutionContext {
-                session_id,
-                thread_id,
-                turn_id: prepared_turn_id,
-                topic_id: Some(topic_id),
-            },
+            sandbox_guard: &sandbox_guard,
+            report_json: &mut report_json,
+            ws_tx: &ws_tx,
             user_message: before_inbound.canonical_content.clone(),
-            assembled_context: assembled_messages,
+            assembled_messages,
+            agent_config,
+            dispatcher,
             compaction_focus,
-            parent_turn_id: None,
-            existing_turn_id: Some(prepared_turn_id),
-            effort,
-            cancellation_token: cancel_token,
-        };
-        tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
-    };
+            event_tx,
+            cancel_token,
+        },
+    )
+    .await?;
 
     // Step 11: Project every AgentEvent to the client and the record
     // (turn/projection.rs) until the agent's sender closes.
@@ -1707,157 +810,6 @@ async fn process_turn_with_composition_and_focus(
     release_active_turn(state, session_id).await;
 
     Ok(())
-}
-
-pub(super) struct ContextChoices {
-    assembly_name: String,
-    working_norms_scaffold: swage_context::working_norms::WorkingNormsScaffold,
-}
-
-const WORKING_NORMS_AUTHORED_V1: &str = "authored-v1";
-const WORKING_NORMS_FAMILY_FALLBACK: &str = "family-fallback";
-
-async fn select_context_assembly(
-    state: &AppState,
-    config: &swage_config::ResolvedConfig,
-    session_id: Uuid,
-    turn_id: Uuid,
-    call_override: Option<&str>,
-) -> Result<ContextChoices, GatewayError> {
-    if let Some(call_override) = call_override {
-        swage_core::validate_context_assembly_name(call_override)
-            .map_err(GatewayError::ConfigError)?;
-    }
-    // The assembly name is an experiment location: when variants are
-    // registered for it, the selection loop chooses which serves this turn
-    // (honouring the kill switch and forced pins), and every decision —
-    // including "experimentation is off" — lands in the audit trail. The
-    // report and every model-facing surface stay function-named; the audit
-    // record is the only place the variant id appears.
-    let configured_assembly = call_override
-        .unwrap_or(&config.context.assembly)
-        .trim()
-        .to_owned();
-    let assembly_variants = config
-        .context
-        .alternatives
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let decision = crate::experimentation::select_variant(
-        &config.experimentation,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &assembly_variants,
-        &configured_assembly,
-        turn_id,
-    )
-    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    let decision = match crate::experimentation::record_selection(
-        state,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &decision,
-        Some(session_id),
-        Some(turn_id),
-    )
-    .await
-    {
-        Ok(()) => decision,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                variant = %decision.variant,
-                "variant selection could not be recorded; serving the configured default"
-            );
-            crate::experimentation::VariantDecision {
-                variant: configured_assembly.clone(),
-                reason: crate::experimentation::SelectionReason::RecordUnavailable,
-            }
-        }
-    };
-
-    // The working-norms text is its own experiment location, drawn beside
-    // the assembly choice. The exact-model native scaffold is the default;
-    // the established family text remains a registered alternative.
-    let norms_variants = [WORKING_NORMS_FAMILY_FALLBACK];
-    let norms_decision = crate::experimentation::select_variant(
-        &config.experimentation,
-        crate::experimentation::LOCATION_WORKING_NORMS,
-        &norms_variants,
-        WORKING_NORMS_AUTHORED_V1,
-        turn_id,
-    )
-    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    let norms_decision = match crate::experimentation::record_selection(
-        state,
-        crate::experimentation::LOCATION_WORKING_NORMS,
-        &norms_decision,
-        Some(session_id),
-        Some(turn_id),
-    )
-    .await
-    {
-        Ok(()) => norms_decision,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                variant = %norms_decision.variant,
-                "working-norms selection could not be recorded; serving the native scaffold"
-            );
-            crate::experimentation::VariantDecision {
-                variant: WORKING_NORMS_AUTHORED_V1.to_owned(),
-                reason: crate::experimentation::SelectionReason::RecordUnavailable,
-            }
-        }
-    };
-    let working_norms_scaffold = match norms_decision.variant.as_str() {
-        WORKING_NORMS_FAMILY_FALLBACK => {
-            swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
-        }
-        _ => swage_context::working_norms::WorkingNormsScaffold::Native,
-    };
-
-    Ok(ContextChoices {
-        assembly_name: decision.variant,
-        working_norms_scaffold,
-    })
-}
-
-fn execute_context_assembly(
-    assembly_name: &str,
-    config: &swage_config::ResolvedConfig,
-    elements: &[Box<dyn ContextElement>],
-    tokeniser: &TiktokenTokeniser,
-    swage_root: Option<&Path>,
-    scope: &ScopeLocation,
-    agent_id: &str,
-    variables: &std::collections::BTreeMap<String, String>,
-) -> swage_context::report::AssemblyOutput {
-    let assembly_name = assembly_name.trim();
-    if is_default_context_assembly(assembly_name) {
-        return swage_context::assembly::default_assembly_with_variables(
-            elements,
-            &config.context,
-            tokeniser,
-            variables,
-        );
-    }
-
-    let search_levels = swage_root
-        .map(|root| configuration_hierarchy(root, scope, Some(agent_id)))
-        .unwrap_or_default();
-    let level_refs: Vec<(swage_config::HierarchyLevel, &Path)> = search_levels
-        .iter()
-        .map(|(level, path)| (level.clone(), path.as_path()))
-        .collect();
-    let source_path = swage_context::js_assembly::resolve_js_assembly(assembly_name, &level_refs);
-    swage_context::js_assembly::assemble_named(
-        assembly_name,
-        source_path.as_deref(),
-        elements,
-        &config.context,
-        tokeniser,
-        variables,
-    )
 }
 
 /// Cancel the active turn for a session.

@@ -46,11 +46,8 @@ async fn create_full_hierarchy(
 ) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
     let session = storage
         .create_session(NewSession {
-            topic_id,
             agent_id: agent_id.to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic_id)
         })
         .await
         .expect("create session");
@@ -317,11 +314,8 @@ async fn thread_state_machine_enforced() {
     let (storage, topic_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            topic_id,
             agent_id: AGENT_A.to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic_id)
         })
         .await
         .unwrap();
@@ -413,11 +407,8 @@ async fn turn_recovery_finds_pending_and_processing() {
     let (storage, topic_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            topic_id,
             agent_id: AGENT_A.to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic_id)
         })
         .await
         .unwrap();
@@ -538,11 +529,8 @@ async fn messages_ordered_within_thread() {
     let (storage, topic_id) = setup().await;
     let session = storage
         .create_session(NewSession {
-            topic_id,
             agent_id: AGENT_A.to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic_id)
         })
         .await
         .unwrap();

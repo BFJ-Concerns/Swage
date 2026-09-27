@@ -518,7 +518,8 @@ describe("SettingsPage", () => {
     expect(payload.sessions).toEqual({ archive_after_days: 14 });
   });
 
-  it("blocks fresh schedule creation when no topic is selected", async () => {
+  it("creates a fresh schedule in the general scope when no topic is selected", async () => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(makeSchedule());
     component = mount(SettingsPage, {
       target: document.body,
       props: { tab: "automation", topicId: null },
@@ -532,7 +533,8 @@ describe("SettingsPage", () => {
     buttonNamed("Create schedule").click();
     await flushUi();
 
-    expect(document.body.textContent).toContain("Select a topic before scheduling work.");
-    expect(workflowApi.createSchedule).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
+    const request = vi.mocked(workflowApi.createSchedule).mock.calls[0]?.[0];
+    expect(request?.session).toEqual({ policy: "fresh", agent_id: "gateway" });
   });
 });

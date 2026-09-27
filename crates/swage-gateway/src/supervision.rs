@@ -119,7 +119,14 @@ async fn gather_runs(state: &AppState) -> Result<Vec<RunSummary>, GatewayError> 
                 SessionPolicy::Fresh { .. } => None,
             });
             let topic_id = match &schedule.session_policy {
-                SessionPolicy::Fresh { topic_id, .. } => Some(*topic_id),
+                SessionPolicy::Fresh { topic_id, .. } => match topic_id {
+                    Some(id) => state
+                        .topic_store
+                        .get(*id)
+                        .await?
+                        .and_then(|scope| scope.client_topic_id()),
+                    None => None,
+                },
                 SessionPolicy::Continuation { .. } => {
                     session_id.and_then(|id| session_topics.get(&id).copied())
                 }
@@ -215,7 +222,14 @@ async fn get_schedule_run_detail(
         SessionPolicy::Fresh { .. } => None,
     });
     let topic_id = match &schedule.session_policy {
-        SessionPolicy::Fresh { topic_id, .. } => Some(*topic_id),
+        SessionPolicy::Fresh { topic_id, .. } => match topic_id {
+            Some(id) => state
+                .topic_store
+                .get(*id)
+                .await?
+                .and_then(|scope| scope.client_topic_id()),
+            None => None,
+        },
         SessionPolicy::Continuation { session_id } => Some(
             state
                 .storage

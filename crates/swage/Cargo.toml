@@ -31,6 +31,7 @@ async-trait  = { workspace = true }
 integration = []
 
 [dev-dependencies]
+swage-storage = { path = "../swage-storage", features = ["test-fixtures"] }
 tokio      = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
