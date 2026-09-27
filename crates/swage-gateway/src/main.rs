@@ -11,7 +11,7 @@ use swage_core::ToolError;
 use swage_gateway::cli::{Cli, Command, GatewayCommand};
 use swage_gateway::tool::{
     file_edit::FileEditTool, file_list::FileListTool, file_read::FileReadTool,
-    file_search::FileSearchTool, file_write::FileWriteTool, memory::MemoryTool, shell::ShellTool,
+    file_search::FileSearchTool, file_write::FileWriteTool, shell::ShellTool,
 };
 use swage_tool::context::ToolContext;
 use swage_tool::tool::Tool;
@@ -90,7 +90,6 @@ fn build_sandbox_agent_tools() -> Vec<Box<dyn Tool>> {
         Box::new(FileWriteTool),
         Box::new(FileSearchTool { max_output_bytes }),
         Box::new(FileListTool),
-        Box::new(MemoryTool),
     ]
 }
 
