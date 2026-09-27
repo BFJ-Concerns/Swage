@@ -128,6 +128,15 @@ export async function updateTopicWorkspaceTrust(
   return response.json() as Promise<WorkspaceAttachment>;
 }
 
+/** Change the folder of an existing workspace attachment. */
+export async function relinkTopicWorkspace(
+  topicId: string,
+  workspaceId: string,
+  path: string,
+): Promise<WorkspaceAttachment> {
+  return generated.relinkTopicWorkspace(topicId, workspaceId, { path });
+}
+
 export async function detachTopicWorkspace(
   topicId: string,
   workspaceId: string,
