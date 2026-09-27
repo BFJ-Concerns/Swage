@@ -41,7 +41,7 @@ pub struct SessionEnvironment {
 pub enum ToolRoot {
     /// An attached workspace or a directory chosen for a placed worker.
     WorkingDirectory(String),
-    /// The session's own scratch directory, used when no workspace is attached.
+    /// A scratch directory used when no workspace is attached.
     ManagedScratch(String),
 }
 
@@ -140,7 +140,7 @@ impl OrientationElement {
             }
             ToolRoot::ManagedScratch(dir) => {
                 place.push_str(&format!(
-                    "No workspace is attached. Tool paths resolve at {dir}, this session's scratch directory.\n"
+                    "No workspace is attached. Tool paths resolve at {dir}, a scratch directory for this work.\n"
                 ));
             }
         }
@@ -241,6 +241,7 @@ mod tests {
         assert!(text.contains("inherits nothing from any topic"));
         assert!(text.contains("No workspace is attached."));
         assert!(text.contains("Tool paths resolve at /scratch/general/sessions/example"));
+        assert!(text.contains("a scratch directory for this work"));
         assert!(text.contains("2026-08-09 18:30 UTC"));
     }
 
