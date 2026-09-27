@@ -192,6 +192,50 @@ async fn fallback_sandbox_real_binary_runs_workspace_tools() {
 }
 
 #[tokio::test]
+async fn fallback_sandbox_shutdown_stops_a_running_shell_child() {
+    let mut env_guard = ProcessEnvGuard::new();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ready = temp_dir.path().join("ready");
+    let child_marker = temp_dir.path().join("child_finished");
+    let command = json!({
+        "command": "sh -c 'sleep 2; touch child_finished' & touch ready; wait"
+    });
+    let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    sandbox.spawn_agent().await.unwrap();
+    let sandbox = std::sync::Arc::new(sandbox);
+
+    sandbox
+        .execute_tool("shell", command.clone())
+        .await
+        .expect("unstopped control completes");
+    assert!(child_marker.exists(), "control child did not finish");
+    std::fs::remove_file(&ready).unwrap();
+    std::fs::remove_file(&child_marker).unwrap();
+
+    let execution = tokio::spawn({
+        let sandbox = std::sync::Arc::clone(&sandbox);
+        async move { sandbox.execute_tool("shell", command).await }
+    });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !ready.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "sandbox shell never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    execution.abort();
+    let _ = execution.await;
+    sandbox.shutdown().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+    assert!(
+        !child_marker.exists(),
+        "the sandbox shell's child continued after shutdown"
+    );
+}
+
+#[tokio::test]
 async fn fallback_sandbox_real_binary_rejects_oversized_ipc_payloads() {
     let mut env_guard = ProcessEnvGuard::new();
     let temp_dir = tempfile::tempdir().unwrap();
