@@ -8462,7 +8462,7 @@
             "name": "archived",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "boolean"
             }
           }
         ],
