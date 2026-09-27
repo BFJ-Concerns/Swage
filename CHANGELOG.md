@@ -22,7 +22,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Stopping a turn stops the shell command and its child processes on the gateway and on a device.
+- Stopping a turn stops the shell command and its child processes when it runs on a device or directly on the gateway without sandboxing.
 - Starting a session and moving to another scope before the gateway answers no longer activates the late session where the user now stands; it exists in the scope it was asked for and the recent list finds it.
 - The top bar and the two-column surfaces wrap and stack on phone-sized viewports instead of clipping at the right edge, so every control stays reachable.
 - A topic's default working folder and an explicitly selected workspace now pass the same trust gate as every other attachment: an untrusted selection grants no file access, and revoking trust removes the access it granted while leaving its configured permissions in place.
