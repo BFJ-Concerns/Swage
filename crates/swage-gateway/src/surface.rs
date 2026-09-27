@@ -18,6 +18,7 @@
 use axum::extract::{Query, State};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
@@ -42,22 +43,23 @@ use crate::state::AppState;
 /// the user cannot see.
 const MODULE_KINDS: &[&str] = &["document"];
 
-async fn session_or_not_found(state: &AppState, session_id: Uuid) -> Result<Session, GatewayError> {
-    state
-        .storage
+async fn session_or_not_found(
+    storage: &dyn swage_storage::Storage,
+    session_id: Uuid,
+) -> Result<Session, GatewayError> {
+    storage
         .get_session(session_id)
         .await?
         .ok_or(GatewayError::ConversationNotFound { id: session_id })
 }
 
-async fn entry_or_invalid(state: &AppState, entry_id: Uuid) -> Result<LibraryEntry, GatewayError> {
-    state
-        .storage
-        .get_library_entry(entry_id)
-        .await?
-        .ok_or_else(|| {
-            GatewayError::ValidationError(format!("no library entry with id {entry_id}"))
-        })
+async fn entry_or_invalid(
+    storage: &dyn swage_storage::Storage,
+    entry_id: Uuid,
+) -> Result<LibraryEntry, GatewayError> {
+    storage.get_library_entry(entry_id).await?.ok_or_else(|| {
+        GatewayError::ValidationError(format!("no library entry with id {entry_id}"))
+    })
 }
 
 /// Whether a library entry's content travels into a session: only within the
@@ -79,22 +81,37 @@ pub async fn create_surface(
     session_id: Uuid,
     request: CreateSurfaceRequest,
 ) -> Result<SurfaceResponse, GatewayError> {
+    let surface = create_surface_recorded(
+        state.storage.as_ref(),
+        &state.broadcast,
+        session_id,
+        request,
+    )
+    .await?;
+    surface_response(state, surface.id).await
+}
+
+async fn create_surface_recorded(
+    storage: &dyn swage_storage::Storage,
+    broadcast: &broadcast::Sender<ServerEvent>,
+    session_id: Uuid,
+    request: CreateSurfaceRequest,
+) -> Result<swage_storage::Surface, GatewayError> {
     let title = request.title.trim();
     if title.is_empty() {
         return Err(GatewayError::ValidationError(
             "a surface needs a non-empty title".into(),
         ));
     }
-    let session = session_or_not_found(state, session_id).await?;
+    let session = session_or_not_found(storage, session_id).await?;
     let entry = match request.library_entry_id {
-        Some(entry_id) => Some(entry_or_invalid(state, entry_id).await?),
+        Some(entry_id) => Some(entry_or_invalid(storage, entry_id).await?),
         None => None,
     };
 
     let surface = match &entry {
         Some(entry) => {
-            state
-                .storage
+            storage
                 .create_surface_from_library(
                     NewSurface {
                         session_id,
@@ -106,8 +123,7 @@ pub async fn create_surface(
                 .await?
         }
         None => {
-            state
-                .storage
+            storage
                 .create_page(NewSurface {
                     session_id,
                     title: title.to_string(),
@@ -126,8 +142,8 @@ pub async fn create_surface(
             },
         })
     });
-    state
-        .storage
+    let modules = storage.list_surface_modules(surface.id).await?;
+    storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
             session_id: Some(session_id),
@@ -146,15 +162,20 @@ pub async fn create_surface(
                 "topic_id": session.topic_id,
                 "title": title,
                 "seeded_from": seeded_from,
+                "modules": modules.iter().map(|module| json!({
+                    "kind": module.kind,
+                    "position": module.position,
+                    "source": module.source,
+                })).collect::<Vec<_>>(),
             }),
         })
         .await?;
     // Creation is a surface-level change: open surfaces refetch their list.
-    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+    let _ = broadcast.send(ServerEvent::SurfaceUpdated {
         surface_id: surface.id,
         module_id: None,
     });
-    surface_response(state, surface.id).await
+    Ok(surface)
 }
 
 /// Seed a new session's default surfaces: its topic's designated library
@@ -166,24 +187,21 @@ pub async fn create_surface(
 /// are the dispatcher's concern.
 pub async fn open_default_surfaces(
     storage: &dyn swage_storage::Storage,
+    broadcast: &broadcast::Sender<ServerEvent>,
     session_id: Uuid,
 ) -> Result<(), GatewayError> {
-    let session = storage
-        .get_session(session_id)
-        .await?
-        .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
+    let session = session_or_not_found(storage, session_id).await?;
     for entry in storage.list_topic_default_entries(session.topic_id).await? {
-        let seeding = seeding_for(&entry, &session);
-        storage
-            .create_surface_from_library(
-                NewSurface {
-                    session_id,
-                    title: entry.name,
-                },
-                entry.id,
-                seeding,
-            )
-            .await?;
+        create_surface_recorded(
+            storage,
+            broadcast,
+            session_id,
+            CreateSurfaceRequest {
+                title: entry.name,
+                library_entry_id: Some(entry.id),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -214,7 +232,7 @@ pub async fn save_surface_to_library(
         state.storage.get_page(surface_id).await?.ok_or_else(|| {
             GatewayError::ValidationError(format!("no surface with id {surface_id}"))
         })?;
-    let session = session_or_not_found(state, surface.session_id).await?;
+    let session = session_or_not_found(state.storage.as_ref(), surface.session_id).await?;
     let tags = normalised_tags(&request.tags);
     let modules = state
         .storage
@@ -228,6 +246,25 @@ pub async fn save_surface_to_library(
         })
         .collect::<Vec<_>>();
 
+    let audit = NewAuditEvent {
+        id: Uuid::new_v4().to_string(),
+        session_id: Some(session.id),
+        entity_kind: "surface_library_entry".into(),
+        entity_id: String::new(),
+        event_kind: "surface_saved_to_library".into(),
+        summary: format!(
+            "surface saved to the library as '{name}': {}",
+            surface.title
+        ),
+        metadata: json!({
+            "surface_id": surface.id,
+            "origin_topic_id": session.topic_id,
+            "author": author,
+            "name": name,
+            "description": description,
+            "tags": tags,
+        }),
+    };
     let entry = state
         .storage
         .create_library_entry(
@@ -239,30 +276,8 @@ pub async fn save_surface_to_library(
                 saved_from_surface_id: Some(surface.id),
             },
             modules,
+            audit,
         )
-        .await?;
-
-    state
-        .storage
-        .create_audit_event(NewAuditEvent {
-            id: Uuid::new_v4().to_string(),
-            session_id: Some(session.id),
-            entity_kind: "surface_library_entry".into(),
-            entity_id: entry.id.to_string(),
-            event_kind: "surface_saved_to_library".into(),
-            summary: format!(
-                "surface saved to the library as '{name}': {}",
-                surface.title
-            ),
-            metadata: json!({
-                "surface_id": surface.id,
-                "origin_topic_id": session.topic_id,
-                "author": author,
-                "name": name,
-                "description": description,
-                "tags": entry.tags,
-            }),
-        })
         .await?;
     let _ = state
         .broadcast
@@ -300,15 +315,18 @@ pub async fn library_catalogue(
 }
 
 fn entry_summary(entry: LibraryEntry, scopes: &[swage_storage::Topic]) -> LibraryEntrySummary {
+    let origin = scopes
+        .iter()
+        .find(|scope| scope.id == entry.origin_topic_id);
     LibraryEntrySummary {
         id: entry.id,
         name: entry.name,
         description: entry.description,
         tags: entry.tags,
-        origin_topic_id: scopes
-            .iter()
-            .find(|scope| scope.id == entry.origin_topic_id)
-            .and_then(|scope| scope.client_topic_id()),
+        origin_topic_id: origin
+            .and_then(|scope| scope.client_topic_id())
+            .or_else(|| origin.is_none().then_some(entry.origin_topic_id)),
+        origin_topic_deleted: origin.is_none(),
         updated_at: entry.updated_at,
     }
 }
@@ -317,7 +335,7 @@ pub async fn library_entry_response(
     state: &AppState,
     entry_id: Uuid,
 ) -> Result<LibraryEntryResponse, GatewayError> {
-    let entry = entry_or_invalid(state, entry_id).await?;
+    let entry = entry_or_invalid(state.storage.as_ref(), entry_id).await?;
     let origin = state.topic_store.get(entry.origin_topic_id).await?;
     let modules = state.storage.list_library_entry_modules(entry.id).await?;
     Ok(LibraryEntryResponse {
@@ -325,7 +343,11 @@ pub async fn library_entry_response(
         name: entry.name,
         description: entry.description,
         tags: entry.tags,
-        origin_topic_id: origin.and_then(|topic| topic.client_topic_id()),
+        origin_topic_id: origin
+            .as_ref()
+            .and_then(|topic| topic.client_topic_id())
+            .or_else(|| origin.is_none().then_some(entry.origin_topic_id)),
+        origin_topic_deleted: origin.is_none(),
         created_at: entry.created_at,
         updated_at: entry.updated_at,
         modules: modules
@@ -345,7 +367,7 @@ pub async fn delete_library_entry(
     entry_id: Uuid,
     author: &str,
 ) -> Result<(), GatewayError> {
-    let entry = entry_or_invalid(state, entry_id).await?;
+    let entry = entry_or_invalid(state.storage.as_ref(), entry_id).await?;
     if !state.storage.delete_library_entry(entry.id).await? {
         return Err(GatewayError::Storage(StorageError::NotFound {
             entity: "surface library entry".into(),
@@ -407,7 +429,7 @@ pub async fn add_topic_default(
     // The topic check first: a missing topic reports 404 before an unknown
     // entry reports a validation error.
     topic_defaults(state, topic_id).await?;
-    let entry = entry_or_invalid(state, request.library_entry_id).await?;
+    let entry = entry_or_invalid(state.storage.as_ref(), request.library_entry_id).await?;
     state
         .storage
         .add_topic_default_entry(topic_id, entry.id)
@@ -852,6 +874,7 @@ pub async fn surface_response(
             })
             .collect(),
         library_entry_id: surface.library_entry_id,
+        seeded_from_name: surface.seeded_from_name,
         seeded_at: surface.seeded_at,
     })
 }
@@ -890,7 +913,7 @@ pub async fn list_surfaces_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<SurfaceListResponse>, ApiError> {
-    session_or_not_found(&state, session_id).await?;
+    session_or_not_found(state.storage.as_ref(), session_id).await?;
     let surfaces = state
         .storage
         .list_surfaces_by_session(session_id)
@@ -1035,25 +1058,10 @@ mod tests {
 
     use super::*;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".into(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .unwrap()
@@ -1074,7 +1082,7 @@ mod tests {
         .await
         .unwrap();
         let session = session_in(&storage, topic.id).await;
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let surface = create_surface(
             &state,
             session,

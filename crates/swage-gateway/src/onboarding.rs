@@ -372,6 +372,10 @@ pub async fn export_gateway_recovery_bundle(
     let secrets = state.storage.list_secrets().await?;
     let devices = state.storage.list_devices().await?;
     let schedules = state.storage.list_schedules().await?;
+    let client_topic_ids: HashMap<Uuid, Option<Uuid>> = topics
+        .iter()
+        .map(|topic| (topic.id, topic.client_topic_id()))
+        .collect();
 
     let bundle = GatewayRecoveryBundle {
         version: 1,
@@ -459,7 +463,15 @@ pub async fn export_gateway_recovery_bundle(
                 status: schedule.status.to_string(),
                 kind: schedule.kind.to_string(),
                 expression: schedule.expression,
-                session_policy: schedule.session_policy,
+                session_policy: match schedule.session_policy {
+                    SessionPolicy::Fresh { topic_id, agent_id } => SessionPolicy::Fresh {
+                        topic_id: *client_topic_ids
+                            .get(&topic_id.expect("stored fresh policy has a scope id"))
+                            .expect("stored fresh policy names an exported scope"),
+                        agent_id,
+                    },
+                    continuation => continuation,
+                },
                 creator: schedule.creator,
                 delivery_routing: schedule.delivery_routing,
                 gate: schedule.gate,
@@ -652,11 +664,14 @@ pub async fn import_gateway_recovery_bundle(
         // remap them onto the rows this import just created.
         let session_policy = match schedule.session_policy {
             SessionPolicy::Fresh { topic_id, agent_id } => SessionPolicy::Fresh {
-                topic_id: *topic_map.get(&topic_id).ok_or_else(|| {
-                    GatewayError::ValidationError(format!(
-                        "schedule referenced unknown topic {topic_id}"
-                    ))
-                })?,
+                topic_id: Some(match topic_id {
+                    Some(topic_id) => *topic_map.get(&topic_id).ok_or_else(|| {
+                        GatewayError::ValidationError(format!(
+                            "schedule referenced unknown topic {topic_id}"
+                        ))
+                    })?,
+                    None => state.topic_store.general_scope().await?.id,
+                }),
                 agent_id,
             },
             SessionPolicy::Continuation { session_id } => SessionPolicy::Continuation {

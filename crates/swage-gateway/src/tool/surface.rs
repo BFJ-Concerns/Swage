@@ -508,6 +508,7 @@ impl Tool for SurfaceLibraryTool {
                 "description": entry.description,
                 "tags": entry.tags,
                 "origin_topic_id": entry.origin_topic_id,
+                "origin_topic_deleted": entry.origin_topic_deleted,
             })).collect::<Vec<_>>(),
         }))
     }

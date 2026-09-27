@@ -7,6 +7,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-fixtures = ["dep:tracing-subscriber"]
+
 [dependencies]
 swage-core = { path = "../swage-core" }
 swage-provider = { path = "../swage-provider" }
@@ -25,11 +28,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 jsonschema = { workspace = true }
 
 [dev-dependencies]
+swage-storage = { path = "../swage-storage", features = ["test-fixtures"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
