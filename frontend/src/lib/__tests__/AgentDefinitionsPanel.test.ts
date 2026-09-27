@@ -3,30 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
 import { createClassComponent } from "svelte/legacy";
 import AgentDefinitionsPanel from "../components/AgentDefinitionsPanel.svelte";
-import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+import { makeAgentDefinition } from "./fixtures/agent-definitions";
 
 type MountedComponent = ReturnType<typeof mount>;
-
-function definition(
-  id: string,
-  source_scope: EffectiveAgentDefinitionResponse["source_scope"],
-  overrides: Partial<EffectiveAgentDefinitionResponse> = {},
-): EffectiveAgentDefinitionResponse {
-  return {
-    id,
-    display_name: id,
-    description: "",
-    instructions: "",
-    model_id: null,
-    tool_permissions: null,
-    skills: [],
-    output_schema: null,
-    output_max_retries: null,
-    is_builtin: source_scope === "built_in",
-    source_scope,
-    ...overrides,
-  };
-}
 
 describe("AgentDefinitionsPanel", () => {
   let component: MountedComponent | undefined;
@@ -54,7 +33,7 @@ describe("AgentDefinitionsPanel", () => {
   });
 
   it("lists effective definitions with source labels and opens complete details", async () => {
-    const topicWinner = definition("shared", "topic", {
+    const topicWinner = makeAgentDefinition("shared", "topic", {
       display_name: "Primary researcher",
       instructions: "Use primary sources.",
       model_id: "research/model",
@@ -64,9 +43,9 @@ describe("AgentDefinitionsPanel", () => {
       output_max_retries: 4,
     });
     const definitions = [
-      definition("gateway", "built_in", { display_name: "Standard assistant" }),
+      makeAgentDefinition("gateway", "built_in", { display_name: "Standard assistant" }),
       topicWinner,
-      definition("global-only", "global", { display_name: "Shared helper" }),
+      makeAgentDefinition("global-only", "global", { display_name: "Shared helper" }),
     ];
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ definitions }), { status: 200 }),
@@ -96,7 +75,7 @@ describe("AgentDefinitionsPanel", () => {
 
   it("renders absent optional configuration explicitly", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      definitions: [definition("minimal", "global", { display_name: "Minimal" })],
+      definitions: [makeAgentDefinition("minimal", "global", { display_name: "Minimal" })],
     }), { status: 200 }));
     component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: "topic-1" } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("Minimal"));
@@ -109,7 +88,7 @@ describe("AgentDefinitionsPanel", () => {
 
   it("lists the general scope's definitions when no topic is selected", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({
-      definitions: [definition("gateway", "built_in", { display_name: "Swage default", is_builtin: true })],
+      definitions: [makeAgentDefinition("gateway", "built_in", { display_name: "Swage default", is_builtin: true })],
     }), { status: 200 }));
     component = mount(AgentDefinitionsPanel, { target: document.body, props: { topicId: null } });
 
@@ -120,10 +99,10 @@ describe("AgentDefinitionsPanel", () => {
   it("requests and renders the inventory for a newly selected topic", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        definitions: [definition("first", "topic", { display_name: "First topic agent" })],
+        definitions: [makeAgentDefinition("first", "topic", { display_name: "First topic agent" })],
       }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        definitions: [definition("second", "topic", { display_name: "Second topic agent" })],
+        definitions: [makeAgentDefinition("second", "topic", { display_name: "Second topic agent" })],
       }), { status: 200 }));
     const panel = createClassComponent({
       component: AgentDefinitionsPanel,

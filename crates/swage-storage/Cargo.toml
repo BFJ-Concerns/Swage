@@ -30,3 +30,4 @@ aes-gcm-siv = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+swage-storage = { path = ".", features = ["test-fixtures"] }

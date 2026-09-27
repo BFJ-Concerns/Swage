@@ -130,7 +130,7 @@
                 {/each}
               </span>
             {/if}
-            <span class="entry-origin">Saved from {originName(entry.origin_topic_id ?? undefined)}</span>
+            <span class="entry-origin">Saved from {entry.origin_topic_deleted ? "a deleted topic" : originName(entry.origin_topic_id ?? undefined)}</span>
           </div>
           <div class="entry-actions">
             {#if sessionId}

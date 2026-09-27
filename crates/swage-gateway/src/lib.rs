@@ -107,6 +107,22 @@ pub(crate) mod test_support {
     use swage_core::ToolError;
     use swage_tool::{context::ToolContext, tool::Tool};
 
+    /// Gateway state for tests of storage-backed surfaces with no provider turns.
+    pub(crate) fn state(
+        storage: std::sync::Arc<swage_storage::SqliteStorage>,
+    ) -> crate::state::AppState {
+        use swage_storage::{Storage, TopicStore};
+
+        crate::state::AppState::new(
+            std::sync::Arc::clone(&storage) as std::sync::Arc<dyn Storage>,
+            storage as std::sync::Arc<dyn TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        )
+    }
+
     static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static XDG_RUNTIME_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

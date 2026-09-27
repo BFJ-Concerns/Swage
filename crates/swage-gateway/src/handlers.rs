@@ -4321,21 +4321,13 @@ mod tests {
         // Add two sessions to that topic.
         storage
             .create_session(swage_storage::model::NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
@@ -4380,31 +4372,19 @@ mod tests {
         // One session in A, two in B.
         storage
             .create_session(swage_storage::model::NewSession {
-                topic_id: topic_a.id,
-                agent_id: "gateway".to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_a.id)
             })
             .await
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                topic_id: topic_b.id,
-                agent_id: "gateway".to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_b.id)
             })
             .await
             .unwrap();
         storage
             .create_session(swage_storage::model::NewSession {
-                topic_id: topic_b.id,
-                agent_id: "gateway".to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_b.id)
             })
             .await
             .unwrap();
@@ -4730,11 +4710,8 @@ mod tests {
         let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "operator".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();

@@ -120,11 +120,8 @@ async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".into(),
-            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(json!({"label": "Ops session"})),
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .unwrap();

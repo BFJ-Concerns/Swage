@@ -161,7 +161,17 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   from authored agent configuration and instructions.
 - `swage.db` — the SQLite store: conversations, turns, the audit trail,
   knowledge base, workflow runs. The one local record everything is
-  reconstructable from.
+  reconstructable from. At open, the gateway checks the store's recorded
+  migration history against its own list. Two mismatches refuse the open:
+  a recorded migration name this build does not know (the store was written
+  by a newer build — the message advises running that build, or rebuilding
+  the data root), and a known migration missing before a later recorded one
+  (the history is not one this build produced — the message advises
+  rebuilding the data root). Neither case applies anything half-finished.
+
+The gateway logs the resolved data root and whether `$SWAGE_HOME`
+supplied it at startup, so a gateway that fell back to the default
+`~/.swage/` says so in the log.
 
 The configuration cascade is Global → Topic → Agent for a session in a
 topic and Global → Agent for one without: the more specific level extends
@@ -249,9 +259,10 @@ first:
   definitions, operator guidance (`AGENTS.md`), effort resolution, what a
   tool call is allowed to do, approvals, and sandbox isolation.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the web UI's
-  turn context inspector, image attachments, surfaces, delivery targets, the
-  API error contract, the wire contract and its projections, the
-  verification gate, and the gateway's built-in tool inventory.
+  turn context inspector, conversation branching, image attachments,
+  surfaces, delivery targets, devices, hosted documentation, the API error
+  contract, the wire contract and its projections, the verification gate,
+  and the gateway's built-in tool inventory.
 
 Every failed API response carries a `{"code","message"}` body whose code
 vocabulary is defined in the protocol crate. The manifested client-surface
