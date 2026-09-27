@@ -1083,7 +1083,8 @@ impl GatewayDelegationHandler {
             Some(path) => {
                 let path = tokio::fs::canonicalize(&path).await.map_err(|error| {
                     AgentError::InvalidConfig(format!(
-                        "cannot resolve dispatching worker placement {path:?}: {error}"
+                        "cannot resolve dispatching worker placement {}: {error}",
+                        path.display()
                     ))
                 })?;
                 let authority_path = session
