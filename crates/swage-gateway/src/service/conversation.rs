@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use swage_core::ScopeLocation;
+use tokio::sync::broadcast;
 
 use uuid::Uuid;
 
@@ -47,15 +48,26 @@ pub struct ConversationService {
     pub(crate) storage: Arc<dyn Storage>,
     pub(crate) topic_store: Arc<dyn TopicStore>,
     config: Option<(swage_config::ResolvedConfig, PathBuf)>,
+    broadcast: broadcast::Sender<swage_protocol::client::websocket::ServerEvent>,
 }
 
 impl ConversationService {
     pub fn new(storage: Arc<dyn Storage>, topic_store: Arc<dyn TopicStore>) -> Self {
+        let (broadcast, _) = broadcast::channel(16);
         Self {
             storage,
             topic_store,
             config: None,
+            broadcast,
         }
+    }
+
+    pub fn with_broadcast(
+        mut self,
+        broadcast: broadcast::Sender<swage_protocol::client::websocket::ServerEvent>,
+    ) -> Self {
+        self.broadcast = broadcast;
+        self
     }
 
     pub fn with_config(
@@ -434,6 +446,7 @@ impl ConversationService {
         selected_model_id: Option<String>,
         effort: Option<swage_protocol::client::settings::Effort>,
     ) -> Result<ConversationResponse, GatewayError> {
+        let person_opened = matches!(origin, SessionOrigin::Direct);
         // Verify the topic exists — return 404 rather than a FK constraint error.
         let topic = self
             .topic_store
@@ -466,7 +479,9 @@ impl ConversationService {
                 agent_id: agent_id.to_string(),
             })
             .await?;
-        self.open_default_surfaces(session.id).await?;
+        if person_opened {
+            self.open_default_surfaces(session.id).await?;
+        }
 
         Ok(ConversationResponse {
             id: session.id,
@@ -727,7 +742,8 @@ impl ConversationService {
     /// A new session opens with its topic's default surfaces; the rule is
     /// the surface module's, shared with every other add.
     async fn open_default_surfaces(&self, session_id: Uuid) -> Result<(), GatewayError> {
-        crate::surface::open_default_surfaces(self.storage.as_ref(), session_id).await
+        crate::surface::open_default_surfaces(self.storage.as_ref(), &self.broadcast, session_id)
+            .await
     }
 
     async fn default_workspace_for_topic(
