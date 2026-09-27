@@ -1297,3 +1297,204 @@ async fn output_schema_declaration_is_scoped_to_schema_configured_turns() {
         "Respond normally"
     );
 }
+
+/// Signals when its execution starts, then runs until the turn is cancelled.
+struct HangingTool {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Tool for HangingTool {
+    fn name(&self) -> &str {
+        "hanging"
+    }
+
+    fn description(&self) -> &str {
+        "Runs until cancelled."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+/// Returns a secret the leak scan must keep from the model.
+struct SecretEchoTool;
+
+/// Matched only by the agent's own configured leak pattern, so the scan the
+/// agent runs is the one that redacts it.
+const TOOL_SECRET: &str = "swage-agent-private-marker-7f3c";
+
+#[async_trait]
+impl Tool for SecretEchoTool {
+    fn name(&self) -> &str {
+        "secret_echo"
+    }
+
+    fn description(&self) -> &str {
+        "Echoes a secret."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": {}, "additionalProperties": false })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
+        Ok(json!({ "key": TOOL_SECRET }))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_is_recorded_before_it_runs_and_settled_as_interrupted_on_cancel() {
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![vec![
+        StreamChunk::ToolUse {
+            call_id: "call-hang".into(),
+            name: "hanging".into(),
+            arguments: json!({}),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::ToolUse),
+        },
+    ]]));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dispatcher = ToolDispatcher::allow_all([Arc::new(HangingTool {
+        started: started.clone(),
+    }) as Arc<dyn Tool>]);
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider)
+        .storage(storage.clone())
+        .tool_dispatcher(dispatcher)
+        .build()
+        .expect("agent");
+
+    let request = test_request(topic.id, session.id, thread.id, "Hang", None);
+    let cancel = request.cancellation_token.clone();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let turn = tokio::spawn(async move { agent.process_turn_streaming(request, event_tx).await });
+
+    started.notified().await;
+    // Mid-execution — the state a killed gateway leaves behind — the call
+    // already has its started row.
+    let turn_id = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turns")[0]
+        .id;
+    let mid_run = storage
+        .list_tool_calls_by_turn(turn_id)
+        .await
+        .expect("calls");
+    assert_eq!(
+        mid_run.len(),
+        1,
+        "the selected call must be recorded before it runs"
+    );
+    assert_eq!(mid_run[0].call_id, "call-hang");
+    assert!(
+        mid_run[0].status.is_none(),
+        "a running call is started, not settled"
+    );
+    assert!(mid_run[0].result.is_none());
+
+    cancel.cancel();
+    let outcome = turn.await.expect("turn task");
+    assert!(matches!(outcome, Err(AgentError::Cancelled)), "{outcome:?}");
+
+    let settled = storage
+        .list_tool_calls_by_turn(turn_id)
+        .await
+        .expect("calls");
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].status.as_deref(), Some("interrupted"));
+    assert_eq!(
+        settled[0].result.as_deref(),
+        Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
+    );
+    assert!(
+        settled[0].model_result.is_some(),
+        "an interrupted call replays"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_settled_tool_call_keeps_the_raw_result_and_the_scanned_model_result() {
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call-secret".into(),
+                name: "secret_echo".into(),
+                arguments: json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]));
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider)
+        .storage(storage.clone())
+        .tool_dispatcher(ToolDispatcher::allow_all([
+            Arc::new(SecretEchoTool) as Arc<dyn Tool>
+        ]))
+        .leak_detector(Arc::new(
+            LeakDetector::new(vec![swage_safety::LeakPattern {
+                name: "private marker".into(),
+                kind: swage_safety::PatternKind::Literal(TOOL_SECRET.into()),
+                redaction_label: "private_marker".into(),
+            }])
+            .expect("leak patterns"),
+        ))
+        .build()
+        .expect("agent");
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(topic.id, session.id, thread.id, "Echo", None),
+            event_tx,
+        )
+        .await
+        .expect("turn");
+
+    let calls = storage
+        .list_tool_calls_by_turn(outbound.turn_id)
+        .await
+        .expect("calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+    assert!(
+        calls[0].result.as_deref().unwrap().contains(TOOL_SECRET),
+        "the store keeps the raw result: {:?}",
+        calls[0].result
+    );
+    let model_result = calls[0].model_result.as_deref().expect("model result");
+    assert!(
+        !model_result.contains(TOOL_SECRET),
+        "the model-facing result must be the scanned text: {model_result}"
+    );
+}

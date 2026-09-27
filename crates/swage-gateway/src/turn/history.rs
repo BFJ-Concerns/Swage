@@ -11,11 +11,43 @@ pub(super) async fn rebuild_thread_history_messages(
     let mut rebuilt = Vec::new();
     let mut replay_inserted_for_turn = HashSet::new();
 
-    for message in stored_history {
-        if message.role == Role::Assistant
+    // A turn's durable tool rounds replay before its assistant message. A turn
+    // that never reached one — interrupted mid-tool — still replays its
+    // rounds after its last user message, so a resumed
+    // continuation sees the calls that already ran (and those cut off) instead
+    // of selecting them again.
+    let turns_with_assistant_message: HashSet<Uuid> = stored_history
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .filter_map(|message| message.turn_id)
+        .collect();
+
+    let mut replay_anchor = HashMap::new();
+    for (index, message) in stored_history.iter().enumerate() {
+        if let Some(turn_id) = message.turn_id {
+            replay_anchor.insert(turn_id, index);
+        }
+    }
+    for (index, message) in stored_history.iter().enumerate() {
+        if message.role == Role::User
             && let Some(turn_id) = message.turn_id
-            && replay_inserted_for_turn.insert(turn_id)
         {
+            replay_anchor.insert(turn_id, index);
+        }
+    }
+
+    for (index, message) in stored_history.into_iter().enumerate() {
+        let replay_turn = message.turn_id.filter(|turn_id| {
+            !replay_inserted_for_turn.contains(turn_id)
+                && (message.role == Role::Assistant
+                    || (!turns_with_assistant_message.contains(turn_id)
+                        && replay_anchor.get(turn_id) == Some(&index)))
+        });
+        let replay_before = replay_turn.filter(|_| message.role == Role::Assistant);
+        let replay_after = replay_turn.filter(|_| message.role != Role::Assistant);
+
+        if let Some(turn_id) = replay_before {
+            replay_inserted_for_turn.insert(turn_id);
             let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
             rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
         }
@@ -34,6 +66,12 @@ pub(super) async fn rebuild_thread_history_messages(
                 ));
             }
         }
+
+        if let Some(turn_id) = replay_after {
+            replay_inserted_for_turn.insert(turn_id);
+            let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
+            rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
+        }
     }
 
     Ok(rebuilt)
@@ -49,10 +87,10 @@ pub(super) fn compact_tool_replay_messages(
         .collect();
     let mut records_by_round: BTreeMap<i32, Vec<&ToolCallRecord>> = BTreeMap::new();
 
-    for record in records
-        .iter()
-        .filter(|record| record.model_result.is_some() && !record.tool.trim().is_empty())
-    {
+    for record in records.iter().filter(|record| {
+        (record.model_result.is_some() || (record.result.is_none() && record.status.is_none()))
+            && !record.tool.trim().is_empty()
+    }) {
         let effective_round = match record.parent_call_id.as_deref() {
             Some(parent_call_id) => {
                 parent_rounds.get(parent_call_id).copied().ok_or_else(|| {
@@ -79,12 +117,16 @@ pub(super) fn compact_tool_replay_messages(
         let mut tool_results = Vec::new();
 
         for record in round_records {
-            // Only completed calls enter `records_by_round`; retaining the
-            // guard here prevents a future caller from replaying raw results
-            // when the compact, model-safe representation is absent.
-            let Some(model_result) = record.model_result.clone() else {
-                continue;
-            };
+            // A started row proves the model selected the call, even when
+            // settlement failed. Describe the unknown outcome without
+            // writing a second record or exposing an unscanned raw result.
+            let model_result = record.model_result.clone().unwrap_or_else(|| {
+                swage_core::compact_tool_result_for_model_with_reference(
+                    swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                    true,
+                    swage_core::tool_result_reference(&record.turn_id.to_string(), &record.call_id),
+                )
+            });
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),

@@ -85,6 +85,44 @@ fn provider_response_witness_is_appended_without_content_fields() {
 }
 
 #[tokio::test]
+async fn delegated_record_integrity_loss_fails_cancelled_child_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let thread_id = storage.list_by_session(session_id).await.unwrap()[0].id;
+    let child = storage
+        .create_turn(NewTurn {
+            thread_id,
+            agent_id: "delegate".into(),
+            state: TurnState::Pending,
+            user_input: Some("Run a tool".into()),
+            parent_turn_id: Some(Uuid::new_v4()),
+        })
+        .await
+        .unwrap();
+    storage
+        .update_turn_state(child.id, TurnState::Interrupted)
+        .await
+        .unwrap();
+
+    delegation_snapshot_recorder_for_state(state)
+        .record_event(
+            session_id,
+            AgentEvent::RecordIntegrityLost {
+                turn_id: child.id,
+                reason: "cancelled tool call's record could not be settled".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage.get_turn(child.id).await.unwrap().unwrap().state,
+        TurnState::Failed,
+        "delegated record loss must remain visible after cancellation"
+    );
+}
+
+#[tokio::test]
 async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
@@ -1334,6 +1372,7 @@ pub(crate) struct MockStorage {
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
     fail_tool_call_settlement: AtomicBool,
+    fail_tool_call_creates: AtomicBool,
     fail_provider_round_writes: AtomicBool,
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
@@ -1822,6 +1861,7 @@ impl MockStorage {
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
             fail_tool_call_settlement: AtomicBool::new(false),
+            fail_tool_call_creates: AtomicBool::new(false),
             fail_provider_round_writes: AtomicBool::new(false),
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
@@ -1885,6 +1925,11 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse every tool-call row creation from now on.
+    pub(crate) fn fail_tool_call_creates(&self) {
+        self.fail_tool_call_creates.store(true, Ordering::SeqCst);
     }
 
     /// Refuse every tool-call settlement from now on.
@@ -3938,6 +3983,11 @@ impl ToolCallStore for MockStorage {
         &self,
         tool_call: NewToolCall,
     ) -> Result<ToolCallRecord, StorageError> {
+        if self.fail_tool_call_creates.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "tool-call creation refused by the test".into(),
+            ));
+        }
         let record = ToolCallRecord {
             id: Uuid::new_v4(),
             turn_id: tool_call.turn_id,
@@ -3982,9 +4032,9 @@ impl ToolCallStore for MockStorage {
 
     async fn update_tool_call_result(
         &self,
-        call_id: &str,
-        turn_id: Uuid,
+        id: Uuid,
         result: &str,
+        model_result: &str,
         status: &str,
         duration_ms: i64,
         truncated: bool,
@@ -3996,17 +4046,9 @@ impl ToolCallStore for MockStorage {
             ));
         }
         let mut db = self.db.lock().await;
-        if let Some(tc) = db
-            .tool_calls
-            .iter_mut()
-            .find(|tc| tc.call_id == call_id && tc.turn_id == turn_id)
-        {
+        if let Some(tc) = db.tool_calls.iter_mut().find(|tc| tc.id == id) {
             tc.result = Some(result.to_string());
-            tc.model_result = Some(swage_core::compact_tool_result_for_model_with_reference(
-                result,
-                status != "success",
-                swage_core::tool_result_reference(&turn_id.to_string(), call_id),
-            ));
+            tc.model_result = Some(model_result.to_string());
             tc.status = Some(status.to_string());
             tc.duration_ms = Some(duration_ms);
             tc.truncated = truncated;
@@ -6960,6 +7002,13 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
 }
 
 async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
+    let (state, session_id, _) = make_state_with_tool_provider_and_storage(provider).await;
+    (state, session_id)
+}
+
+async fn make_state_with_tool_provider_and_storage(
+    provider: Arc<dyn LlmProvider>,
+) -> (AppState, Uuid, Arc<MockStorage>) {
     let storage = Arc::new(MockStorage::new());
 
     let topic = storage.general_scope().await.expect("create default topic");
@@ -6990,7 +7039,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
         ]),
         None,
     );
-    (state, session_id)
+    (state, session_id, storage)
 }
 
 pub(crate) async fn make_state_with_capturing_tools(
@@ -7362,6 +7411,110 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
         .unwrap();
     assert_eq!(thread.state, ThreadState::Idle);
 
+    release.notify_waiters();
+}
+
+#[tokio::test]
+async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_failed() {
+    let round_1 = vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "call_block".into(),
+            name: "block".into(),
+            arguments: serde_json::json!({}),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(BlockingMockTool {
+            started: started.clone(),
+            release: release.clone(),
+        }) as Arc<dyn crate::tool::Tool>]),
+        None,
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state = Arc::new(state);
+    let worker_state = state.clone();
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &worker_state,
+            session_id,
+            None,
+            "Run block".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    started.notified().await;
+    storage.fail_tool_call_settlement();
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while tool is running");
+
+    handle
+        .await
+        .expect("task should not panic")
+        .expect("process_turn ok");
+
+    let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Cancelled {})),
+        "expected Cancelled event, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ServerEvent::ToolEnd { tool, call_id, status, .. }
+            if tool == "block" && call_id == "call_block" && status == "cancelled"
+        )),
+        "expected cancelled ToolEnd event, got: {events:?}"
+    );
+
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let thread_id = threads[0].id;
+    let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+    assert_eq!(
+        turns[0].state,
+        TurnState::Failed,
+        "record failure must remain visible on a cancelled turn"
+    );
+    assert!(events.iter().any(|event| matches!(event, ServerEvent::Error { message, .. } if message.contains("tool-call settlement refused"))), "record failure must reach the client: {events:?}");
     release.notify_waiters();
 }
 
@@ -8544,6 +8697,24 @@ fn replay_omits_calls_without_model_safe_results() {
         .expect("an incomplete call should be omitted rather than replaying raw data");
 
     assert!(replay.is_empty());
+}
+
+#[test]
+fn replay_includes_started_call_with_unknown_outcome() {
+    let mut record = complete_replay_record("started-call");
+    record.result = None;
+    record.model_result = None;
+    record.status = None;
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let parts: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(parts.iter().any(
+        |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "started-call")
+    ));
+    assert!(parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "started-call" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))));
 }
 
 #[test]
@@ -17061,5 +17232,419 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
             .any(|m| m.text_content().contains("orphaned tool row")),
         "a tool row answering no recorded call is dropped by the rebuild — \
          which is why deliveries must not use Role::Tool"
+    );
+}
+
+/// A turn killed mid-tool leaves one settled call and one started call. On
+/// real SQLite: recovery settles the started row as interrupted, and the
+/// rebuilt history replays the turn's round — the completed call with its
+/// result, the cut-off one as interrupted — although the turn never reached
+/// an assistant message, so a resumed continuation does not run the completed
+/// call again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
+    use swage_storage::sqlite::SqliteStorage;
+    use swage_storage::store::{
+        MessageStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+    };
+    use swage_storage::{NewSession, NewThread, NewToolCall, NewTurn, TurnState};
+
+    let storage = SqliteStorage::in_memory().expect("sqlite");
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            topic_id: topic.id,
+            agent_id: "gateway".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id: thread.id,
+            attachments: Vec::new(),
+            turn_id: Some(turn.id),
+            role: Role::User,
+            content: "append the marker, then run the long job".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    let mut append_call_id = None;
+    for (position, call_id, tool) in [(0, "call-append", "file_edit"), (1, "call-long", "shell")] {
+        let created = storage
+            .create_tool_call(NewToolCall {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                call_id: call_id.into(),
+                tool: tool.into(),
+                arguments: "{}".into(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(&serde_json::json!(
+                    {}
+                )),
+                result: None,
+                model_result: None,
+                status: None,
+                duration_ms: None,
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+        if call_id == "call-append" {
+            append_call_id = Some(created.id);
+        }
+    }
+    storage
+        .update_tool_call_result(
+            append_call_id.unwrap(),
+            "marker appended",
+            "marker appended",
+            "success",
+            3,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    crate::shutdown::recover_orphaned_turns(&storage, &storage)
+        .await
+        .expect("recovery");
+
+    let calls = storage.list_tool_calls_by_turn(turn.id).await.unwrap();
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+    assert_eq!(calls[0].result.as_deref(), Some("marker appended"));
+    assert_eq!(calls[1].status.as_deref(), Some("interrupted"));
+    assert_eq!(
+        calls[1].result.as_deref(),
+        Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
+    );
+
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread.id)
+        .await
+        .unwrap();
+    let replay_parts: Vec<&swage_core::ToolReplayPart> = rebuilt
+        .iter()
+        .filter_map(|message| message.tool_replay())
+        .flatten()
+        .collect();
+    let replayed_calls: Vec<&str> = replay_parts
+        .iter()
+        .filter_map(|part| match part {
+            swage_core::ToolReplayPart::ToolCall { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replayed_calls, ["call-append", "call-long"]);
+    let result_for = |wanted: &str| {
+        replay_parts
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } if call_id == wanted => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no replayed result for {wanted}"))
+    };
+    assert_eq!(result_for("call-append"), "marker appended");
+    assert_eq!(
+        result_for("call-long"),
+        swage_core::compact_tool_result_for_model_with_reference(
+            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+            true,
+            swage_core::tool_result_reference(&turn.id.to_string(), "call-long"),
+        )
+    );
+    assert_eq!(
+        rebuilt[0].role(),
+        Role::User,
+        "the round follows the turn's input"
+    );
+}
+
+#[tokio::test]
+async fn assistantless_delegated_round_follows_the_delegated_task() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    let turn_id = Uuid::new_v4();
+    for content in ["Inherited Background Context", "Delegated Task"] {
+        storage
+            .append_message(AppendMessage {
+                thread_id,
+                attachments: Vec::new(),
+                turn_id: Some(turn_id),
+                role: Role::User,
+                content: content.into(),
+                agent_id: "child".into(),
+            })
+            .await
+            .unwrap();
+    }
+    storage
+        .create_tool_call(NewToolCall {
+            turn_id,
+            agent_id: "child".into(),
+            call_id: "child-call".into(),
+            tool: "echo".into(),
+            arguments: "{}".into(),
+            model_arguments: "{}".into(),
+            result: Some("done".into()),
+            model_result: Some("done".into()),
+            status: Some("success".into()),
+            duration_ms: Some(1),
+            truncated: false,
+            total_bytes: None,
+            provider_round: 1,
+            position: 0,
+            parent_call_id: None,
+            display_summary: None,
+        })
+        .await
+        .unwrap();
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .unwrap();
+    let task_index = rebuilt
+        .iter()
+        .position(|message| message.text_content().contains("Delegated Task"))
+        .unwrap();
+    let round_index = rebuilt
+        .iter()
+        .position(|message| message.tool_replay().is_some())
+        .unwrap();
+    assert!(
+        round_index > task_index,
+        "tool round at {round_index} precedes delegated task at {task_index}"
+    );
+}
+
+/// One echo call followed by a closing text round, for the record-failure tests.
+fn echo_then_reply_rounds() -> Vec<Vec<StreamChunk>> {
+    vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call_1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "hello" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]
+}
+
+async fn run_echo_turn(state: &AppState, session_id: Uuid) -> Vec<ServerEvent> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let _ = process_turn(
+        state,
+        session_id,
+        None,
+        "Use echo".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await;
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+/// A tool call whose settlement cannot be written has failed: the live
+/// consumer sees it end as an error naming the record failure, never as the
+/// success the execution alone reported.
+#[tokio::test]
+async fn a_failed_tool_call_settlement_ends_the_call_as_an_error_for_the_client() {
+    let mut rounds = echo_then_reply_rounds();
+    rounds.push(vec![
+        StreamChunk::Delta {
+            content: "follow-up".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    storage.fail_tool_call_settlement();
+
+    let events = run_echo_turn(&state, session_id).await;
+
+    let ends: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ToolEnd {
+                call_id,
+                status,
+                result,
+                ..
+            } if call_id == "call_1" => Some((status.as_str(), result.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        1,
+        "exactly one ToolEnd for the call: {events:?}"
+    );
+    assert_eq!(
+        ends[0].0, "error",
+        "a call with no settled record failed: {ends:?}"
+    );
+    assert!(
+        ends[0].1.contains("record could not be settled"),
+        "the ToolEnd names the record failure: {ends:?}"
+    );
+    let requests = captured.lock().unwrap();
+    let next = requests
+        .get(1)
+        .expect("provider continuation after the tool");
+    let results: Vec<_> = next
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .filter_map(|part| match part {
+            ToolReplayPart::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("record could not be settled")),
+        "model received record failure: {results:?}"
+    );
+    assert!(
+        !results.iter().any(|result| result.contains("hello")),
+        "model must not receive the executed output: {results:?}"
+    );
+    drop(requests);
+    let turn = storage
+        .db
+        .lock()
+        .await
+        .turns
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        turn.state,
+        TurnState::Failed,
+        "settlement loss must fail the turn"
+    );
+
+    run_echo_turn(&state, session_id).await;
+    let requests = captured.lock().unwrap();
+    let next_turn = requests.get(2).expect("next turn provider request");
+    let next_turn_parts: Vec<_> = next_turn
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        next_turn_parts.iter().any(
+            |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "call_1")
+        ),
+        "next turn provider must see the call: {next_turn_parts:?}"
+    );
+    assert!(next_turn_parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "call_1" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))), "next turn provider must see the unknown outcome: {next_turn_parts:?}");
+    drop(requests);
+
+    let thread_id = turn.thread_id;
+    let replay = super::history::rebuild_thread_history_messages(&*storage, thread_id)
+        .await
+        .unwrap();
+    let replay_parts: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        replay_parts.iter().any(
+            |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "call_1")
+        ),
+        "next turn must see the call: {replay_parts:?}"
+    );
+    assert!(replay_parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "call_1" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))), "next turn must see unknown outcome: {replay_parts:?}");
+}
+
+/// A tool call whose started row cannot be written is refused: it never
+/// runs, and the client sees it end as an error naming the record failure.
+#[tokio::test]
+async fn a_failed_tool_call_create_refuses_the_dispatch_for_the_client() {
+    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(
+        MultiRoundMockProvider::new(echo_then_reply_rounds()),
+    ))
+    .await;
+    storage.fail_tool_call_creates();
+
+    let events = run_echo_turn(&state, session_id).await;
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ServerEvent::ToolStart { call_id, .. } if call_id == "call_1"
+        )),
+        "a refused call must not start: {events:?}"
+    );
+    let ends: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ToolEnd {
+                call_id,
+                status,
+                result,
+                ..
+            } if call_id == "call_1" => Some((status.as_str(), result.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        1,
+        "exactly one ToolEnd for the call: {events:?}"
+    );
+    assert_eq!(ends[0].0, "error");
+    assert!(
+        ends[0].1.contains("record could not be written"),
+        "the ToolEnd names the record failure: {ends:?}"
     );
 }
