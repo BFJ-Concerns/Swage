@@ -96,8 +96,8 @@ mod tests {
 
     use swage_core::Role;
     use swage_storage::{
-        AuditStore, MessageStore, NewMessage, NewSession, NewThread, SessionListing, SessionOrigin,
-        SessionStore, SqliteStorage, ThreadStore, TopicStore,
+        AuditStore, MessageStore, NewMessage, NewSession, NewThread, SessionListing, SessionStore,
+        SqliteStorage, ThreadStore, TopicStore,
     };
 
     use super::*;
@@ -122,11 +122,7 @@ mod tests {
         let general = storage.general_scope().await.expect("general scope");
         let session = storage
             .create_session(NewSession {
-                topic_id: general.id,
-                agent_id: "gateway".to_string(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(general.id)
             })
             .await
             .expect("session");

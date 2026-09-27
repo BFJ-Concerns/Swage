@@ -300,15 +300,18 @@ pub async fn library_catalogue(
 }
 
 fn entry_summary(entry: LibraryEntry, scopes: &[swage_storage::Topic]) -> LibraryEntrySummary {
+    let origin = scopes
+        .iter()
+        .find(|scope| scope.id == entry.origin_topic_id);
     LibraryEntrySummary {
         id: entry.id,
         name: entry.name,
         description: entry.description,
         tags: entry.tags,
-        origin_topic_id: scopes
-            .iter()
-            .find(|scope| scope.id == entry.origin_topic_id)
-            .and_then(|scope| scope.client_topic_id()),
+        origin_topic_id: origin
+            .and_then(|scope| scope.client_topic_id())
+            .or_else(|| origin.is_none().then_some(entry.origin_topic_id)),
+        origin_topic_deleted: origin.is_none(),
         updated_at: entry.updated_at,
     }
 }
@@ -325,7 +328,11 @@ pub async fn library_entry_response(
         name: entry.name,
         description: entry.description,
         tags: entry.tags,
-        origin_topic_id: origin.and_then(|topic| topic.client_topic_id()),
+        origin_topic_id: origin
+            .as_ref()
+            .and_then(|topic| topic.client_topic_id())
+            .or_else(|| origin.is_none().then_some(entry.origin_topic_id)),
+        origin_topic_deleted: origin.is_none(),
         created_at: entry.created_at,
         updated_at: entry.updated_at,
         modules: modules
@@ -852,6 +859,7 @@ pub async fn surface_response(
             })
             .collect(),
         library_entry_id: surface.library_entry_id,
+        seeded_from_name: surface.seeded_from_name,
         seeded_at: surface.seeded_at,
     })
 }
@@ -1035,25 +1043,10 @@ mod tests {
 
     use super::*;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".into(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .unwrap()
@@ -1074,7 +1067,7 @@ mod tests {
         .await
         .unwrap();
         let session = session_in(&storage, topic.id).await;
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let surface = create_surface(
             &state,
             session,
