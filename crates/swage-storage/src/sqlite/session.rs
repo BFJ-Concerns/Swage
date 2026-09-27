@@ -256,11 +256,15 @@ impl SessionStore for SqliteStorage {
                 "SELECT {SESSION_COLUMNS}, {SESSION_ACTIVITY_COLUMNS}
                  FROM sessions {SESSION_ACTIVITY_JOIN}
                  WHERE (?1 IS NULL OR sessions.topic_id = ?1)
-                   AND (sessions.archived_at IS NULL) = (?2 = 0)
+                   AND (?3 OR (sessions.archived_at IS NULL) = (?2 = 0))
                  ORDER BY last_activity DESC, sessions.created_at DESC"
             ))?;
             let rows = stmt.query_map(
-                params![listing.topic_id.map(|id| id.to_string()), listing.archived],
+                params![
+                    listing.topic_id.map(|id| id.to_string()),
+                    listing.archived,
+                    listing.include_archived
+                ],
                 row_to_session_activity,
             )?;
             rows.collect()
@@ -627,11 +631,44 @@ mod tests {
             .list_recent_sessions(SessionListing {
                 topic_id: Some(topic_id),
                 archived: false,
+                include_archived: false,
             })
             .await
             .unwrap();
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].session.id, in_topic.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_activity_listing_can_include_live_and_archived_sessions_together() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let live = storage.create_session(new_session(topic_id)).await.unwrap();
+        let archived = storage.create_session(new_session(topic_id)).await.unwrap();
+        let archived_id = archived.id;
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE sessions SET archived_at = created_at WHERE id = ?1",
+                    [archived_id.to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let listed = storage
+            .list_recent_sessions(SessionListing {
+                topic_id: Some(topic_id),
+                include_archived: true,
+                ..SessionListing::default()
+            })
+            .await
+            .unwrap();
+        let ids: std::collections::HashSet<Uuid> = listed
+            .into_iter()
+            .map(|activity| activity.session.id)
+            .collect();
+        assert_eq!(ids, std::collections::HashSet::from([live.id, archived_id]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -667,6 +704,7 @@ mod tests {
             .list_recent_sessions(SessionListing {
                 topic_id: None,
                 archived: true,
+                include_archived: false,
             })
             .await
             .unwrap();

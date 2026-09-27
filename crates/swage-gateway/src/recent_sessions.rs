@@ -483,6 +483,7 @@ mod tests {
             SessionListing {
                 topic_id: Some(topic.id),
                 archived: false,
+                include_archived: false,
             },
         )
         .await
