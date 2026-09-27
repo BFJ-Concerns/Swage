@@ -21,7 +21,7 @@ use uuid::Uuid;
 use swage_core::{GatewayError, ToolError};
 use swage_protocol::client::delivery::DeliveryRoutingRequest;
 use swage_protocol::client::schedule as wire;
-use swage_storage::{ScheduleCreator, Storage};
+use swage_storage::{ScheduleCreator, Storage, TopicStore};
 use swage_tool::context::ToolContext;
 
 use crate::state::AppState;
@@ -261,7 +261,8 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "enum": ["fresh", "continuation"],
                     "description": "Which session each run executes in, fixed at creation. fresh: \
-                                    a new session in `topic_id` for `agent_id`, opened with only \
+                                    a new session in the selected topic, or the general scope, \
+                                    for `agent_id`, opened with only \
                                     the task and the last run's outcome — the isolated, recommended \
                                     choice for recurring work. continuation: reuse the existing \
                                     `continuation_session_id`, running as whatever agent it \
@@ -274,7 +275,7 @@ impl Tool for ScheduleTool {
                     "type": ["string", "null"],
                     "description": "For session=fresh: the UUID of the topic each new run's \
                                     session is created in. Omit it to use this conversation's \
-                                    topic."
+                                    scope; set null for the general scope."
                 },
                 "agent_id": {
                     "type": "string",
@@ -386,7 +387,13 @@ impl ScheduleTool {
     ) -> Result<Value, ToolError> {
         let message = required_str(SCHEDULE_TOOL, params, "message")?.to_owned();
         let spec = build_spec(params)?;
-        let session = build_session(state.storage.as_ref(), params, session_id).await?;
+        let session = build_session(
+            state.storage.as_ref(),
+            state.topic_store.as_ref(),
+            params,
+            session_id,
+        )
+        .await?;
         let gate = build_gate(params)?;
         let routing = build_routing(params)?;
 
@@ -555,6 +562,7 @@ fn build_spec(params: &Value) -> Result<wire::ScheduleSpec, ToolError> {
 /// Assemble a session policy from the flat session parameters.
 async fn build_session(
     storage: &dyn Storage,
+    topic_store: &dyn TopicStore,
     params: &Value,
     calling_session_id: Uuid,
 ) -> Result<wire::SessionPolicy, ToolError> {
@@ -562,7 +570,11 @@ async fn build_session(
     match session {
         "fresh" => {
             let explicit_topic_id = match params.get("topic_id") {
-                None | Some(Value::Null) => None,
+                None => None,
+                Some(Value::Null) => return Ok(wire::SessionPolicy::Fresh {
+                    topic_id: None,
+                    agent_id: required_str(SCHEDULE_TOOL, params, "agent_id")?.to_owned(),
+                }),
                 Some(Value::String(value)) if value.trim().is_empty() => None,
                 Some(Value::String(value)) => Some(parse_uuid(SCHEDULE_TOOL, "topic_id", value)
                     .map_err(|_| {
@@ -599,8 +611,16 @@ async fn build_session(
                         .topic_id
                 }
             };
+            let general_id = topic_store
+                .general_scope()
+                .await
+                .map_err(|error| ToolError::ExecutionFailed {
+                    name: SCHEDULE_TOOL.to_owned(),
+                    message: format!("failed to resolve the general scope: {error}"),
+                })?
+                .id;
             Ok(wire::SessionPolicy::Fresh {
-                topic_id,
+                topic_id: (topic_id != general_id).then_some(topic_id),
                 agent_id: required_str(SCHEDULE_TOOL, params, "agent_id")?.to_owned(),
             })
         }
@@ -856,6 +876,7 @@ mod tests {
 
         let policy = build_session(
             storage.as_ref(),
+            storage.as_ref(),
             &json!({"session": "fresh", "agent_id": "assistant"}),
             session.id,
         )
@@ -865,7 +886,7 @@ mod tests {
         assert_eq!(
             policy,
             wire::SessionPolicy::Fresh {
-                topic_id: topic.id,
+                topic_id: None,
                 agent_id: "assistant".into(),
             }
         );
@@ -877,6 +898,7 @@ mod tests {
         let explicit_topic_id = Uuid::new_v4();
 
         let policy = build_session(
+            storage.as_ref(),
             storage.as_ref(),
             &json!({
                 "session": "fresh",
@@ -890,7 +912,7 @@ mod tests {
 
         assert!(matches!(
             policy,
-            wire::SessionPolicy::Fresh { topic_id, .. } if topic_id == explicit_topic_id
+            wire::SessionPolicy::Fresh { topic_id, .. } if topic_id == Some(explicit_topic_id)
         ));
     }
 
@@ -899,6 +921,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
         let error = build_session(
+            storage.as_ref(),
             storage.as_ref(),
             &json!({"session": "fresh", "agent_id": "assistant"}),
             Uuid::new_v4(),
@@ -914,6 +937,7 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
         let error = build_session(
+            storage.as_ref(),
             storage.as_ref(),
             &json!({
                 "session": "fresh",
@@ -933,9 +957,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fresh_session_defaults_null_and_blank_spaces_to_the_calling_session() {
+    async fn fresh_session_null_targets_general_and_blank_inherits_the_calling_topic() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-        let topic = storage.general_scope().await.unwrap();
+        let topic = storage
+            .create(swage_storage::NewTopic {
+                name: "Calling topic".into(),
+                slug: "calling-topic".into(),
+            })
+            .await
+            .unwrap();
         let session = storage
             .create_session(NewSession {
                 topic_id: topic.id,
@@ -947,8 +977,12 @@ mod tests {
             .await
             .unwrap();
 
-        for topic_id in [Value::Null, Value::String("  ".into())] {
+        for (topic_id, expected_topic_id) in [
+            (Value::Null, None),
+            (Value::String("  ".into()), Some(topic.id)),
+        ] {
             let policy = build_session(
+                storage.as_ref(),
                 storage.as_ref(),
                 &json!({
                     "session": "fresh",
@@ -962,7 +996,7 @@ mod tests {
 
             assert!(matches!(
                 policy,
-                wire::SessionPolicy::Fresh { topic_id, .. } if topic_id == topic.id
+                wire::SessionPolicy::Fresh { topic_id, .. } if topic_id == expected_topic_id
             ));
         }
     }
