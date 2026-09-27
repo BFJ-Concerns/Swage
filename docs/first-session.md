@@ -14,13 +14,16 @@ guidance, but a conversation can start without any of them.
 ## The front door
 
 Opening the web UI presents the recent-sessions list — every session across
-every topic and the general scope, newest message first. **All sessions** is
-the default view; the topic buttons narrow the list to one topic without
-changing anything else, and **Archived** shows the sessions the inactivity
-sweep has hidden. Automated sessions (a schedule's runs, a workflow's
-workers, delegated children) sit beneath the conversation or schedule that
-caused them, each still its own session. Select any entry to resume it with
-its conversation and surfaces; **All sessions** in the top bar returns here.
+every topic and the general scope, newest message first. Each entry's
+preview shows the latest user or assistant message; tool and system messages
+never replace the preview. **All sessions** is the default view; the topic
+buttons narrow the list to one topic without changing anything else, and
+**Archived** (the `archived` boolean query parameter on the sessions route)
+shows the sessions the inactivity sweep has hidden. Automated sessions (a
+schedule's runs, a workflow's workers, delegated children) sit beneath the
+conversation or schedule that caused them, each still its own session.
+Select any entry to resume it with its conversation and surfaces; **All
+sessions** in the top bar returns here.
 
 Beneath the list is the **New session** control. Choose a topic from its
 selector, or leave it at **No topic — general assistant**; choose the agent
