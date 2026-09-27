@@ -644,13 +644,12 @@ pub trait ToolCallStore: Send + Sync {
     ///
     /// `result` is the raw output kept in the store; `model_result` is the
     /// model-facing text the caller computed (leak-scanned and compacted),
-    /// which history replays to the provider. Matched by `call_id` scoped to
-    /// `turn_id` to avoid cross-turn collisions.
+    /// which history replays to the provider. `id` identifies the exact row
+    /// returned by `create_tool_call`, even if a provider reuses a call ID.
     #[allow(clippy::too_many_arguments)]
     async fn update_tool_call_result(
         &self,
-        call_id: &str,
-        turn_id: Uuid,
+        id: Uuid,
         result: &str,
         model_result: &str,
         status: &str,
@@ -687,17 +686,8 @@ pub trait ToolCallStore: Send + Sync {
                 true,
                 swage_core::tool_result_reference(&turn_id.to_string(), &record.call_id),
             );
-            self.update_tool_call_result(
-                &record.call_id,
-                turn_id,
-                result,
-                &model_result,
-                status,
-                0,
-                false,
-                None,
-            )
-            .await?;
+            self.update_tool_call_result(record.id, result, &model_result, status, 0, false, None)
+                .await?;
             settled += 1;
         }
         Ok(settled)
@@ -2583,8 +2573,7 @@ mod tests {
         }
         async fn update_tool_call_result(
             &self,
-            _call_id: &str,
-            _turn_id: Uuid,
+            _id: Uuid,
             _result: &str,
             _model_result: &str,
             _status: &str,

@@ -4008,8 +4008,7 @@ impl ToolCallStore for MockStorage {
 
     async fn update_tool_call_result(
         &self,
-        call_id: &str,
-        turn_id: Uuid,
+        id: Uuid,
         result: &str,
         model_result: &str,
         status: &str,
@@ -4023,11 +4022,7 @@ impl ToolCallStore for MockStorage {
             ));
         }
         let mut db = self.db.lock().await;
-        if let Some(tc) = db
-            .tool_calls
-            .iter_mut()
-            .find(|tc| tc.call_id == call_id && tc.turn_id == turn_id)
-        {
+        if let Some(tc) = db.tool_calls.iter_mut().find(|tc| tc.id == id) {
             tc.result = Some(result.to_string());
             tc.model_result = Some(model_result.to_string());
             tc.status = Some(status.to_string());
@@ -8678,6 +8673,24 @@ fn replay_omits_calls_without_model_safe_results() {
         .expect("an incomplete call should be omitted rather than replaying raw data");
 
     assert!(replay.is_empty());
+}
+
+#[test]
+fn replay_includes_started_call_with_unknown_outcome() {
+    let mut record = complete_replay_record("started-call");
+    record.result = None;
+    record.model_result = None;
+    record.status = None;
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let parts: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(parts.iter().any(
+        |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "started-call")
+    ));
+    assert!(parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "started-call" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))));
 }
 
 #[test]
@@ -17035,8 +17048,9 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         })
         .await
         .unwrap();
+    let mut append_call_id = None;
     for (position, call_id, tool) in [(0, "call-append", "file_edit"), (1, "call-long", "shell")] {
-        storage
+        let created = storage
             .create_tool_call(NewToolCall {
                 turn_id: turn.id,
                 agent_id: "gateway".into(),
@@ -17059,11 +17073,13 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
             })
             .await
             .unwrap();
+        if call_id == "call-append" {
+            append_call_id = Some(created.id);
+        }
     }
     storage
         .update_tool_call_result(
-            "call-append",
-            turn.id,
+            append_call_id.unwrap(),
             "marker appended",
             "marker appended",
             "success",
@@ -17230,10 +17246,18 @@ async fn run_echo_turn(state: &AppState, session_id: Uuid) -> Vec<ServerEvent> {
 /// success the execution alone reported.
 #[tokio::test]
 async fn a_failed_tool_call_settlement_ends_the_call_as_an_error_for_the_client() {
-    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(
-        MultiRoundMockProvider::new(echo_then_reply_rounds()),
-    ))
-    .await;
+    let mut rounds = echo_then_reply_rounds();
+    rounds.push(vec![
+        StreamChunk::Delta {
+            content: "follow-up".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
     storage.fail_tool_call_settlement();
 
     let events = run_echo_turn(&state, session_id).await;
@@ -17263,6 +17287,80 @@ async fn a_failed_tool_call_settlement_ends_the_call_as_an_error_for_the_client(
         ends[0].1.contains("record could not be settled"),
         "the ToolEnd names the record failure: {ends:?}"
     );
+    let requests = captured.lock().unwrap();
+    let next = requests
+        .get(1)
+        .expect("provider continuation after the tool");
+    let results: Vec<_> = next
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .filter_map(|part| match part {
+            ToolReplayPart::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("record could not be settled")),
+        "model received record failure: {results:?}"
+    );
+    assert!(
+        !results.iter().any(|result| result.contains("hello")),
+        "model must not receive the executed output: {results:?}"
+    );
+    drop(requests);
+    let turn = storage
+        .db
+        .lock()
+        .await
+        .turns
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        turn.state,
+        TurnState::Failed,
+        "settlement loss must fail the turn"
+    );
+
+    run_echo_turn(&state, session_id).await;
+    let requests = captured.lock().unwrap();
+    let next_turn = requests.get(2).expect("next turn provider request");
+    let next_turn_parts: Vec<_> = next_turn
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        next_turn_parts.iter().any(
+            |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "call_1")
+        ),
+        "next turn provider must see the call: {next_turn_parts:?}"
+    );
+    assert!(next_turn_parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "call_1" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))), "next turn provider must see the unknown outcome: {next_turn_parts:?}");
+    drop(requests);
+
+    let thread_id = turn.thread_id;
+    let replay = super::history::rebuild_thread_history_messages(&*storage, thread_id)
+        .await
+        .unwrap();
+    let replay_parts: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        replay_parts.iter().any(
+            |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "call_1")
+        ),
+        "next turn must see the call: {replay_parts:?}"
+    );
+    assert!(replay_parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "call_1" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))), "next turn must see unknown outcome: {replay_parts:?}");
 }
 
 /// A tool call whose started row cannot be written is refused: it never

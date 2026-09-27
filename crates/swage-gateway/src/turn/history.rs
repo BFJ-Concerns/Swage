@@ -87,10 +87,10 @@ pub(super) fn compact_tool_replay_messages(
         .collect();
     let mut records_by_round: BTreeMap<i32, Vec<&ToolCallRecord>> = BTreeMap::new();
 
-    for record in records
-        .iter()
-        .filter(|record| record.model_result.is_some() && !record.tool.trim().is_empty())
-    {
+    for record in records.iter().filter(|record| {
+        (record.model_result.is_some() || (record.result.is_none() && record.status.is_none()))
+            && !record.tool.trim().is_empty()
+    }) {
         let effective_round = match record.parent_call_id.as_deref() {
             Some(parent_call_id) => {
                 parent_rounds.get(parent_call_id).copied().ok_or_else(|| {
@@ -117,12 +117,16 @@ pub(super) fn compact_tool_replay_messages(
         let mut tool_results = Vec::new();
 
         for record in round_records {
-            // Only completed calls enter `records_by_round`; retaining the
-            // guard here prevents a future caller from replaying raw results
-            // when the compact, model-safe representation is absent.
-            let Some(model_result) = record.model_result.clone() else {
-                continue;
-            };
+            // A started row proves the model selected the call, even when
+            // settlement failed. Describe the unknown outcome without
+            // writing a second record or exposing an unscanned raw result.
+            let model_result = record.model_result.clone().unwrap_or_else(|| {
+                swage_core::compact_tool_result_for_model_with_reference(
+                    swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                    true,
+                    swage_core::tool_result_reference(&record.turn_id.to_string(), &record.call_id),
+                )
+            });
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),

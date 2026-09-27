@@ -740,7 +740,7 @@ impl Agent {
                     // settles as interrupted rather than no row at all. A
                     // failed open refuses the dispatch: a call the record
                     // cannot show must not run.
-                    if let Err(error) = self
+                    let record = match self
                         .storage
                         .create_tool_call(NewToolCall {
                             turn_id: turn.id,
@@ -762,24 +762,28 @@ impl Agent {
                         })
                         .await
                     {
-                        let refusal =
-                            format!("tool call refused: its record could not be written: {error}");
-                        let _ = event_tx.send(AgentEvent::ToolEnd {
-                            call_id: call.call_id.clone(),
-                            tool_name: call.name.clone(),
-                            result: Value::String(refusal.clone()),
-                            status: "error".to_string(),
-                            duration_ms: Some(0),
-                        });
-                        tool_position += 1;
-                        total_tool_calls += 1;
-                        tool_results.push(ToolResult {
-                            call_id: call.call_id.clone(),
-                            content: refusal,
-                            is_error: true,
-                        });
-                        continue;
-                    }
+                        Ok(record) => record,
+                        Err(error) => {
+                            let refusal = format!(
+                                "tool call refused: its record could not be written: {error}"
+                            );
+                            let _ = event_tx.send(AgentEvent::ToolEnd {
+                                call_id: call.call_id.clone(),
+                                tool_name: call.name.clone(),
+                                result: Value::String(refusal.clone()),
+                                status: "error".to_string(),
+                                duration_ms: Some(0),
+                            });
+                            tool_position += 1;
+                            total_tool_calls += 1;
+                            tool_results.push(ToolResult {
+                                call_id: call.call_id.clone(),
+                                content: refusal,
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                    };
 
                     let start = std::time::Instant::now();
 
@@ -898,8 +902,7 @@ impl Agent {
                     if let Err(error) = self
                         .storage
                         .update_tool_call_result(
-                            &call.call_id,
-                            turn.id,
+                            record.id,
                             &result_content,
                             &model_result,
                             &status,
@@ -909,10 +912,15 @@ impl Agent {
                         )
                         .await
                     {
-                        safe_result = format!(
+                        let reason = format!(
                             "tool '{}' ran but its record could not be settled: {error}",
                             call.name
                         );
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: turn.id,
+                            reason: reason.clone(),
+                        });
+                        safe_result = reason;
                         is_error = true;
                         end_result = Value::String(safe_result.clone());
                         end_status = "error".to_string();
