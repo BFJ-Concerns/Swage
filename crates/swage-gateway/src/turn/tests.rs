@@ -14251,13 +14251,13 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         session.id,
         worker_placement_path(session.metadata.as_ref()),
     );
-    assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
     let environment = build_session_environment(&topic, &tool_root, &session);
     let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
         [0]
     .text_content();
     assert!(text.contains(&format!("Working directory: {}", placed.display())));
     assert!(!text.contains("No workspace is attached"));
+    assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -14322,14 +14322,13 @@ async fn delegated_child_names_parent_selected_non_default_workspace() {
     )
     .await;
     assert_eq!(config.working_directory, selected);
-    assert_eq!(tool_root.source, ToolRootSource::AttachedWorkspace);
-
     let environment = build_session_environment(&topic, &tool_root, &child);
     let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
         [0]
     .text_content();
     assert!(text.contains(&format!("Working directory: {}", selected.display())));
     assert!(!text.contains("No workspace is attached"));
+    assert_eq!(tool_root.source, ToolRootSource::AttachedWorkspace);
 }
 
 #[test]
