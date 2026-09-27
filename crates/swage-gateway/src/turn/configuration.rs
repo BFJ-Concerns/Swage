@@ -323,15 +323,19 @@ pub(crate) async fn build_agent_config_for_topic_workspace(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
     output_schema_override: Option<serde_json::Value>,
-    topic_id: Uuid,
+    topic: &swage_storage::model::Topic,
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
 ) -> AgentConfig {
     let workspace_policy =
-        load_trusted_workspace_policy(&state.storage, topic_id, active_workspace_attachment_id)
+        load_trusted_workspace_policy(&state.storage, topic.id, active_workspace_attachment_id)
             .await;
-    let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&state.config_root, &workspace_policy, topic_id, session_id);
+    let (workspace_root, allowed_paths) = agent_workspace_from_policy(
+        &state.config_root,
+        &workspace_policy,
+        &topic.location(),
+        session_id,
+    );
     build_agent_config_with_workspace(
         agent_id,
         config,
@@ -343,13 +347,11 @@ pub(crate) async fn build_agent_config_for_topic_workspace(
 
 pub(super) fn managed_scratch_workspace(
     config_root: &Path,
-    topic_id: Uuid,
+    scope: &ScopeLocation,
     session_id: Uuid,
 ) -> PathBuf {
-    config_root
-        .join("scratch")
-        .join("topics")
-        .join(topic_id.to_string())
+    scope
+        .scratch_dir(config_root)
         .join("sessions")
         .join(session_id.to_string())
 }
@@ -357,14 +359,14 @@ pub(super) fn managed_scratch_workspace(
 pub(super) fn agent_workspace_from_policy(
     config_root: &Path,
     policy: &TrustedWorkspacePolicy,
-    topic_id: Uuid,
+    scope: &ScopeLocation,
     session_id: Uuid,
 ) -> (PathBuf, Vec<PathBuf>) {
     let workspace_root = policy
         .active_workspace
         .as_ref()
         .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(config_root, topic_id, session_id));
+        .unwrap_or_else(|| managed_scratch_workspace(config_root, scope, session_id));
     if let Err(error) = std::fs::create_dir_all(&workspace_root) {
         tracing::warn!(
             path = %workspace_root.display(),

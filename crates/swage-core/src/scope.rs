@@ -47,6 +47,15 @@ impl ScopeLocation {
         self.data_dir(root).join("agents").join(agent_id)
     }
 
+    /// The scope's managed scratch root, separate from durable scope data.
+    pub fn scratch_dir(&self, root: &Path) -> PathBuf {
+        let scratch = root.join("scratch");
+        match self {
+            Self::General => scratch.join("general"),
+            Self::Topic(slug) => scratch.join("topics").join(slug),
+        }
+    }
+
     /// The name the scope is described by to a reader: a topic's slug, or
     /// `general`.
     pub fn name(&self) -> &str {
@@ -90,5 +99,21 @@ mod tests {
         assert_eq!(ScopeLocation::topic("alloys").to_string(), "alloys");
         assert!(ScopeLocation::General.is_general());
         assert!(!ScopeLocation::topic("alloys").is_general());
+    }
+
+    #[test]
+    fn scratch_roots_follow_scope_without_entering_durable_data() {
+        let root = Path::new("/srv/swage");
+        let general = ScopeLocation::General;
+        let topic = ScopeLocation::topic("alloys");
+        assert_eq!(general.scratch_dir(root), root.join("scratch/general"));
+        assert_eq!(topic.scratch_dir(root), root.join("scratch/topics/alloys"));
+        assert_ne!(general.scratch_dir(root), topic.scratch_dir(root));
+        assert!(
+            !general
+                .scratch_dir(root)
+                .starts_with(general.data_dir(root))
+        );
+        assert!(!topic.scratch_dir(root).starts_with(topic.data_dir(root)));
     }
 }
