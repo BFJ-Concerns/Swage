@@ -268,31 +268,8 @@ async fn ensure_session_for_origin(
             return Ok(session_id);
         }
 
-        let session = state
-            .storage
-            .create_session(NewSession {
-                topic_id: link.topic_id,
-                agent_id: link.agent_id.clone(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: Some(serde_json::json!({
-                    "channel_origin": {
-                        "integration": origin.integration,
-                        "account": origin.account,
-                        "conversation": origin.conversation
-                    }
-                })),
-                active_workspace_attachment_id: None,
-            })
-            .await?;
-        state
-            .storage
-            .create(swage_storage::model::NewThread {
-                session_id: session.id,
-                agent_id: link.agent_id.clone(),
-            })
-            .await?;
-        crate::surface::open_default_surfaces(state.storage.as_ref(), &state.broadcast, session.id)
-            .await?;
+        let session_id =
+            create_channel_session(state, origin, link.topic_id, &link.agent_id).await?;
         state
             .storage
             .upsert_channel_link(swage_storage::NewChannelLink {
@@ -301,7 +278,7 @@ async fn ensure_session_for_origin(
                 conversation: origin.conversation.clone(),
                 topic_id: link.topic_id,
                 agent_id: link.agent_id,
-                session_id: Some(session.id),
+                session_id: Some(session_id),
                 home_target: link.home_target,
             })
             .await?;
@@ -309,8 +286,8 @@ async fn ensure_session_for_origin(
             .channel_routes
             .lock()
             .await
-            .insert(origin.clone(), session.id);
-        return Ok(session.id);
+            .insert(origin.clone(), session_id);
+        return Ok(session_id);
     }
 
     if matches!(policy, SessionResolutionPolicy::LinkedOnly) {
@@ -323,11 +300,31 @@ async fn ensure_session_for_origin(
     }
 
     let topic = state.topic_store.general_scope().await?;
+    let session_id = create_channel_session(state, origin, topic.id, "gateway").await?;
+
+    state
+        .channel_routes
+        .lock()
+        .await
+        .insert(origin.clone(), session_id);
+
+    Ok(session_id)
+}
+
+/// Both channel opening routes establish the root thread before applying a
+/// topic's default surfaces. The general scope has no defaults, but shares the
+/// same ordering when a session is opened there.
+async fn create_channel_session(
+    state: &AppState,
+    origin: &ChannelOrigin,
+    topic_id: Uuid,
+    agent_id: &str,
+) -> Result<Uuid, GatewayError> {
     let session = state
         .storage
         .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".to_string(),
+            topic_id,
+            agent_id: agent_id.to_string(),
             origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(serde_json::json!({
                 "channel_origin": {
@@ -343,18 +340,11 @@ async fn ensure_session_for_origin(
         .storage
         .create(swage_storage::model::NewThread {
             session_id: session.id,
-            agent_id: "gateway".to_string(),
+            agent_id: agent_id.to_string(),
         })
         .await?;
     crate::surface::open_default_surfaces(state.storage.as_ref(), &state.broadcast, session.id)
         .await?;
-
-    state
-        .channel_routes
-        .lock()
-        .await
-        .insert(origin.clone(), session.id);
-
     Ok(session.id)
 }
 
@@ -934,6 +924,45 @@ mod tests {
                 .any(|event| event.event_kind == "surface_created"
                     && event.entity_id == surfaces[0].id.to_string()),
             "the channel seed has a creation event after its root thread"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unlinked_channel_opens_with_a_root_thread_in_the_general_scope() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let general = storage.general_scope().await.unwrap();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let origin = ChannelOrigin {
+            integration: ExternalChannelIntegration::DevDm,
+            account: "workspace".into(),
+            conversation: "unlinked".into(),
+        };
+
+        let session_id =
+            ensure_session_for_origin(&state, &origin, SessionResolutionPolicy::AllowDefaultTopic)
+                .await
+                .unwrap();
+        let session = storage.get_session(session_id).await.unwrap().unwrap();
+        assert_eq!(session.topic_id, general.id);
+        assert_eq!(
+            storage.list_by_session(session_id).await.unwrap().len(),
+            1,
+            "the unlinked branch uses the channel opening sequence with a root thread"
+        );
+        assert!(
+            storage
+                .list_surfaces_by_session(session_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the general scope has no default surfaces"
         );
     }
 
