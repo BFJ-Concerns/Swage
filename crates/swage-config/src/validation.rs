@@ -59,7 +59,13 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "bundles",
             "require_approval",
         ],
-        "context" => &["assembly", "alternatives", "timeout", "budget"],
+        "context" => &[
+            "assembly",
+            "alternatives",
+            "timeout",
+            "budget",
+            "compaction_threshold",
+        ],
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
         "pricing" => &["models"],
@@ -158,6 +164,7 @@ fn check_field_type(
         ("context", "alternatives") => ("array", matches!(value, Value::Array(_))),
         ("context", "timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
+        ("context", "compaction_threshold") => ("table", matches!(value, Value::Table(_))),
         // pricing.models is a dynamic map — validate only that it is a table.
         ("pricing", "models") => ("table", matches!(value, Value::Table(_))),
         // generation.presets is a dynamic map of preset name → preset config.
@@ -287,6 +294,25 @@ fn check_field_semantics(
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
                         message: format!("context.budget must be a positive integer, got {b}"),
+                    },
+                ));
+            }
+        }
+        ("context", "compaction_threshold") => {
+            // Exactly one of `messages` or `tokens`, a positive integer.
+            let well_formed = matches!(
+                value.as_table().map(|t| t.iter().collect::<Vec<_>>()).as_deref(),
+                Some([(unit, Value::Integer(n))])
+                    if matches!(unit.as_str(), "messages" | "tokens") && *n >= 1
+            );
+            if !well_formed {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: "context.compaction_threshold must be { messages = N } or \
+                                  { tokens = N } with N a positive integer"
+                            .to_string(),
                     },
                 ));
             }
@@ -1265,6 +1291,46 @@ max_tokens = 1024
             .any(|p| matches!(&p.kind, ConfigProblemKind::UnknownSection { .. }));
         assert!(has_type_err, "should report TypeError");
         assert!(has_unknown, "should report UnknownSection");
+    }
+
+    #[test]
+    fn a_compaction_threshold_passes_the_loader_and_reaches_the_config() {
+        let config = parse_and_validate(
+            "[context]\ncompaction_threshold = { messages = 8 }\n",
+            &path("config.toml"),
+        )
+        .expect("the threshold is a known [context] field");
+        assert_eq!(
+            config
+                .context
+                .and_then(|c| c.compaction_threshold)
+                .flatten(),
+            Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(8))
+        );
+    }
+
+    #[test]
+    fn a_compaction_threshold_needs_one_positive_unit() {
+        for bad in [
+            "{ messages = 0 }",
+            "{ lines = 5 }",
+            "{ messages = 3, tokens = 9 }",
+        ] {
+            let problems = validate_toml_string(
+                &format!("[context]\ncompaction_threshold = {bad}\n"),
+                &path("config.toml"),
+            );
+            assert!(
+                matches!(
+                    problems.as_slice(),
+                    [ConfigProblem {
+                        kind: ConfigProblemKind::SemanticError { .. },
+                        ..
+                    }]
+                ),
+                "{bad}: {problems:?}"
+            );
+        }
     }
 
     #[test]
