@@ -20,7 +20,7 @@ use swage_core::{
 use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewSchedule, NewScheduleRun, NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind,
+    NewSchedule, NewScheduleRun, NewThread, NewTurn, ScheduleCreator, ScheduleKind,
     ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy,
     SqliteStorage, TurnState,
     store::{ScheduleStore, SessionStore, Storage, ThreadStore, TopicStore, TurnStore},
@@ -96,13 +96,7 @@ async fn get_json(router: &Router, uri: &str) -> (StatusCode, Value) {
 async fn seed_session(storage: &Arc<SqliteStorage>) -> (Uuid, Uuid, Uuid) {
     let topic = storage.general_scope().await.unwrap();
     let session = storage
-        .create_session(NewSession {
-            topic_id: topic.id,
-            agent_id: "gateway".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
-        })
+        .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
         .unwrap();
     let thread = ThreadStore::create(

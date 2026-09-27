@@ -33,11 +33,8 @@ async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uu
     let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: agent_id.to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .unwrap();
@@ -148,11 +145,8 @@ async fn delegation_creates_child_turn_with_parent() {
     let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
     let child_session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "agent-b".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .unwrap();
