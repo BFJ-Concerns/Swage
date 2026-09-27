@@ -403,7 +403,7 @@ mod tests {
                 kind: ScheduleKind::Cron,
                 expression: "0 9 * * *".to_string(),
                 session_policy: SessionPolicy::Fresh {
-                    topic_id: topic.id,
+                    topic_id: Some(topic.id),
                     agent_id: "gateway".to_string(),
                 },
                 creator: ScheduleCreator::User,
