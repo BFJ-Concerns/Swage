@@ -5,10 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
-use swage_core::{
-    StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model,
-    compact_tool_result_for_model_with_reference, tool_result_reference,
-};
+use swage_core::{StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model};
 
 use crate::model::{NewToolCall, ToolCallRecord};
 use crate::sqlite::SqliteStorage;
@@ -192,30 +189,25 @@ impl ToolCallStore for SqliteStorage {
 
     async fn update_tool_call_result(
         &self,
-        call_id: &str,
-        turn_id: Uuid,
+        id: Uuid,
         result: &str,
+        model_result: &str,
         status: &str,
         duration_ms: i64,
         truncated: bool,
         total_bytes: Option<i64>,
     ) -> Result<(), StorageError> {
-        let call_id = call_id.to_owned();
-        let turn_id_str = turn_id.to_string();
+        let id = id.to_string();
         let result = result.to_owned();
+        let model_result = model_result.to_owned();
         let status = status.to_owned();
-        let model_result = compact_tool_result_for_model_with_reference(
-            &result,
-            status != "success",
-            tool_result_reference(&turn_id_str, &call_id),
-        );
 
         self.with_conn(move |conn| {
-            conn.execute(
+            let updated = conn.execute(
                 "UPDATE tool_calls
                  SET result=?1, model_result=?2, status=?3, duration_ms=?4, truncated=?5,
                      total_bytes=?6
-                 WHERE call_id=?7 AND turn_id=?8",
+                 WHERE id=?7",
                 params![
                     &result,
                     &model_result,
@@ -223,10 +215,12 @@ impl ToolCallStore for SqliteStorage {
                     duration_ms,
                     truncated as i32,
                     total_bytes,
-                    &call_id,
-                    &turn_id_str,
+                    &id,
                 ],
             )?;
+            if updated != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             Ok(())
         })
         .await
@@ -263,6 +257,7 @@ mod tests {
     use crate::store::{SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore};
 
     use super::*;
+    use swage_core::{compact_tool_result_for_model_with_reference, tool_result_reference};
 
     /// Set up an in-memory DB with a topic, session, thread, and turn.
     ///
@@ -390,11 +385,19 @@ mod tests {
             .await
             .unwrap();
 
+        // The raw output carries a secret; the caller's leak scan redacted it.
+        // The store keeps the raw result and settles the model-facing text the
+        // caller hands over — never one recomputed from the raw output.
+        let scanned = compact_tool_result_for_model_with_reference(
+            "file1\n[REDACTED]",
+            false,
+            tool_result_reference(&turn_id.to_string(), &record.call_id),
+        );
         storage
             .update_tool_call_result(
-                &record.call_id,
-                turn_id,
-                "file1\nfile2",
+                record.id,
+                "file1\nsk-live-secret",
+                &scanned,
                 "success",
                 42,
                 false,
@@ -406,7 +409,16 @@ mod tests {
         let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
         assert_eq!(calls.len(), 1);
         let updated = &calls[0];
-        assert_eq!(updated.result.as_deref(), Some("file1\nfile2"));
+        assert_eq!(updated.result.as_deref(), Some("file1\nsk-live-secret"));
+        assert_eq!(updated.model_result.as_deref(), Some(scanned.as_str()));
+        assert!(
+            !updated
+                .model_result
+                .as_deref()
+                .unwrap()
+                .contains("sk-live-secret"),
+            "the model-facing result must not carry the raw secret"
+        );
         assert_eq!(updated.status.as_deref(), Some("success"));
         assert_eq!(updated.duration_ms, Some(42));
         assert!(!updated.truncated);
@@ -421,6 +433,32 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_provider_call_id_keeps_each_rounds_result() {
+        let (storage, turn_id) = make_turn().await;
+        let first = storage
+            .create_tool_call(new_call(turn_id, "reused", 0))
+            .await
+            .unwrap();
+        storage
+            .update_tool_call_result(first.id, "first", "first", "success", 1, false, None)
+            .await
+            .unwrap();
+        let mut later = new_call(turn_id, "reused", 0);
+        later.provider_round = 2;
+        let second = storage.create_tool_call(later).await.unwrap();
+        storage
+            .update_tool_call_result(second.id, "second", "second", "success", 2, false, None)
+            .await
+            .unwrap();
+
+        let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+        assert_eq!(calls[0].id, first.id);
+        assert_eq!(calls[0].result.as_deref(), Some("first"));
+        assert_eq!(calls[1].id, second.id);
+        assert_eq!(calls[1].result.as_deref(), Some("second"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn update_result_with_truncation() {
         let (storage, turn_id) = make_turn().await;
         let record = storage
@@ -430,8 +468,8 @@ mod tests {
 
         storage
             .update_tool_call_result(
-                &record.call_id,
-                turn_id,
+                record.id,
+                "...truncated",
                 "...truncated",
                 "success",
                 10,
@@ -641,8 +679,8 @@ mod tests {
         // Update only call_a's result.
         storage
             .update_tool_call_result(
-                &call_a.call_id,
-                turn_id,
+                call_a.id,
+                "127.0.0.1 localhost",
                 "127.0.0.1 localhost",
                 "success",
                 5,
