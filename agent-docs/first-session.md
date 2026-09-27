@@ -15,7 +15,7 @@ The web UI opens to the recent-sessions list (`GET /api/sessions`): every
 scope's sessions ordered by their latest user or assistant message, with
 automated sessions grouped beneath their source (`entries[].automated`
 under a `conversation`, `schedule` or `workflow_run` source). `?topic_id=`
-narrows the list to a topic; `?archived=true` lists the sessions the
+narrows the list to a topic; `?archived=` (boolean) lists the sessions the
 inactivity sweep has hidden (`[sessions] archive_after_days`, default 7;
 a turn on an archived session unarchives it). Every session records its
 origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`).
@@ -37,7 +37,17 @@ workspaces, configuration — for the sessions started in it. A session
 started without one runs in the general scope: general memory, the general
 knowledge base, no inherited files or context from any topic, and no
 `topic_id` on the wire. `GET /api/topics` never lists the general scope,
-and it cannot be opened or deleted.
+and it cannot be opened or deleted. Schedules can run in the general scope:
+a schedule created without a topic resolves to the general scope.
+
+A session without a topic sees a built-in orientation element at every
+turn, describing its environment: no topic is selected, general memory and
+the general knowledge base are in scope, and tool paths resolve at a
+scratch directory for the session
+(`scratch/general/sessions/<session_id>` under the data root). A session
+in a topic whose workspace is attached sees its working directory instead;
+the scratch layout for topic sessions is
+`scratch/topics/<topic>/sessions/<session_id>`.
 
 The top bar names the session's scope; a topic's name links to its settings
 page (`/settings/topic/{slug}/{overview|workspaces|surfaces|sessions}`),
