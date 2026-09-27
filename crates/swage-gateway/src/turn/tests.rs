@@ -14228,7 +14228,7 @@ fn general_session_fallback_uses_general_scratch_without_a_topics_segment() {
     assert!(!workspace.to_string_lossy().contains("/topics/"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn general_scratch_authorises_worker_placement() {
     let root = tempfile::tempdir().expect("scratch root");
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
