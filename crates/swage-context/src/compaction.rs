@@ -62,6 +62,7 @@ impl TruncationCompactor {
                     budget: Some(budget),
                     failure_reason: None,
                     focus: None,
+                    diagnosis: None,
                 },
             );
         }
@@ -125,6 +126,7 @@ impl TruncationCompactor {
                 budget: Some(budget),
                 failure_reason: None,
                 focus: None,
+                diagnosis: None,
             },
         )
     }

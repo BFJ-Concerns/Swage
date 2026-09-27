@@ -779,6 +779,8 @@ fn apply_runtime_settings_to_partial(
             timeout: Some(context.timeout),
             budget: Some(context.budget),
             compaction_threshold: Some(context.compaction_threshold),
+            diagnosis_reader_model: Some(context.diagnosis_reader_model),
+            diagnosis_synthesis_model: Some(context.diagnosis_synthesis_model),
         });
     }
     if let Some(pricing) = pricing {
@@ -1487,6 +1489,8 @@ mod tests {
                 timeout: 7,
                 budget: Some(2048),
                 compaction_threshold: None,
+                diagnosis_reader_model: None,
+                diagnosis_synthesis_model: None,
             }),
             pricing: None,
             observability: None,
@@ -1957,6 +1961,8 @@ mod tests {
             timeout: 61,
             budget: None,
             compaction_threshold: None,
+            diagnosis_reader_model: None,
+            diagnosis_synthesis_model: None,
         });
         let error = validate_settings_request(&request)
             .expect_err("context timeout above range is invalid");
@@ -2032,6 +2038,8 @@ mod tests {
                 timeout: 10,
                 budget: Some(8192),
                 compaction_threshold: None,
+                diagnosis_reader_model: None,
+                diagnosis_synthesis_model: None,
             }),
             None,
             None,

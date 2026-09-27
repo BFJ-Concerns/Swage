@@ -76,6 +76,8 @@ pub enum SuccessionError {
     EmptySummary,
     #[error("the diagnosis could not be written: {0}")]
     Diagnosis(String),
+    #[error("history cannot be split after message {0}")]
+    SplitUnavailable(usize),
 }
 
 /// The summary of the conversation's earlier part, as an element.
@@ -173,18 +175,8 @@ pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionE
     // A tool result must stay with the call it answers: a provider refuses
     // a result whose call was summarised away. Retain the whole call and its
     // results where anything older is left to summarise, otherwise summarise
-    // them all. The gateway replays results inside a user message's tool
-    // replay; the runtime's own tool messages carry a call id.
-    let answers_a_call = |at: usize| {
-        let message = &request.history[at];
-        message.role() == Role::Tool
-            || message.tool_call_id().is_some()
-            || message.tool_replay().is_some_and(|parts| {
-                parts
-                    .iter()
-                    .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
-            })
-    };
+    // them all.
+    let answers_a_call = |at: usize| answers_a_call(&request.history[at]);
     let mut earlier = split;
     while earlier > 0 && answers_a_call(earlier) {
         earlier -= 1;
@@ -202,6 +194,19 @@ pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionE
     Ok(later)
 }
 
+/// Whether `message` carries a tool result. The gateway replays results
+/// inside a user message's tool replay; the runtime's own tool messages carry
+/// a call id.
+fn answers_a_call(message: &ChatMessage) -> bool {
+    message.role() == Role::Tool
+        || message.tool_call_id().is_some()
+        || message.tool_replay().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
+        })
+}
+
 /// The successor's parts from a summary of `request`'s older history,
 /// whoever wrote it, recorded under `strategy`.
 pub fn successor(
@@ -211,6 +216,27 @@ pub fn successor(
     tokeniser: &dyn Tokeniser,
 ) -> Result<Succession, SuccessionError> {
     let summarised = split_point(request)?;
+    successor_after(request, summarised, summary, strategy, tokeniser)
+}
+
+/// The successor's parts when `summary` replaces the first `summarised`
+/// messages of `request`'s history — a split an earlier pass chose, taken
+/// again over the history as it has since grown. A split that summarises
+/// nothing, retains nothing, or leaves the retained history opening on a
+/// tool result is refused.
+pub fn successor_after(
+    request: &SuccessionRequest<'_>,
+    summarised: usize,
+    summary: String,
+    strategy: &str,
+    tokeniser: &dyn Tokeniser,
+) -> Result<Succession, SuccessionError> {
+    if summarised == 0
+        || summarised >= request.history.len()
+        || answers_a_call(&request.history[summarised])
+    {
+        return Err(SuccessionError::SplitUnavailable(summarised));
+    }
     if summary.trim().is_empty() {
         return Err(SuccessionError::EmptySummary);
     }
@@ -230,6 +256,7 @@ pub fn successor(
         budget: None,
         failure_reason: None,
         focus: request.focus.map(str::to_owned),
+        diagnosis: None,
     };
     Ok(Succession {
         element,
@@ -259,6 +286,7 @@ pub fn failure_record(
         budget: None,
         failure_reason: Some(error.to_string()),
         focus: focus.map(str::to_owned),
+        diagnosis: None,
     }
 }
 
@@ -689,6 +717,44 @@ mod tests {
         ];
         assert_eq!(summarised_count(history.len(), None), 3);
         assert_eq!(split_of(&history, None), 2);
+    }
+
+    #[test]
+    fn an_earlier_split_is_taken_again_over_the_grown_history() {
+        let mut history = history(4);
+        history.extend(tool_round("x"));
+        history.push(ChatMessage::new(Role::User, "u6"));
+        let request = SuccessionRequest {
+            carried: &[],
+            history: &history,
+            focus: None,
+            retain_at_most: None,
+        };
+        let succession = successor_after(
+            &request,
+            3,
+            "The earlier diagnosis.".to_string(),
+            DEGRADATION_STRATEGY,
+            &CharTokeniser,
+        )
+        .expect("the earlier split still holds");
+        assert_eq!(succession.record.messages_removed, 3);
+        assert_eq!(succession.retained_history.len(), 4);
+        for refused in [0, 5, history.len()] {
+            assert!(
+                matches!(
+                    successor_after(
+                        &request,
+                        refused,
+                        "notes".to_string(),
+                        DEGRADATION_STRATEGY,
+                        &CharTokeniser
+                    ),
+                    Err(SuccessionError::SplitUnavailable(at)) if at == refused
+                ),
+                "split after {refused}"
+            );
+        }
     }
 
     #[test]

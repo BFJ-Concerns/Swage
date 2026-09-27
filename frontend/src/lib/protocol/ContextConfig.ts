@@ -12,4 +12,16 @@ alternatives?: Array<string>, timeout: number, budget?: number | null,
  * successor: a message count or a token count. Unset, a turn compacts
  * once its thread holds more than 100 messages.
  */
-compaction_threshold?: CompactionThresholdConfig, };
+compaction_threshold?: CompactionThresholdConfig,
+/**
+ * The model entry (a catalogue name or alias) that reads the history
+ * for where things went wrong when a session keeps hitting walls.
+ * Unset, the session's own model reads it.
+ */
+diagnosis_reader_model?: string,
+/**
+ * The model entry (a catalogue name or alias) that writes the diagnosis
+ * a stalled session continues from, out of the readers' reports. Unset,
+ * the session's own model writes it.
+ */
+diagnosis_synthesis_model?: string, };
