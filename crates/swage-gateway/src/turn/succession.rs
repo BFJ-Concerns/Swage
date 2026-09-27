@@ -24,7 +24,8 @@ use std::collections::{BTreeMap, HashMap};
 use swage_core::{CompletionRequest, Role};
 use swage_protocol::client::workflow::WorkflowProviderRoundOutcome;
 use swage_storage::{
-    ContextSnapshotStore, ProviderRoundStore, ToolCallStore, TurnState, TurnStore,
+    ContextSnapshotStore, ProviderRoundRecord, ProviderRoundStore, ToolCallStore, TurnState,
+    TurnStore,
 };
 use uuid::Uuid;
 
@@ -217,10 +218,8 @@ pub(super) const FAILED_TOOL_CALL_STATUS: &str = "error";
 /// records alone — never from what the conversation said.
 #[derive(Debug, Clone, Default)]
 pub(super) struct TurnWalls {
-    /// The turn ended failed for a reason other than its provider: a turn
-    /// with any provider round that failed or was interrupted — a timeout,
-    /// a rate limit, a dropped connection, a retry — is transport trouble,
-    /// not the agent stuck, and does not count.
+    /// The turn ended failed for a reason other than its provider, as
+    /// `ended_on_its_own` reads its last provider round.
     pub agent_failed: bool,
     /// The turn's tool calls whose recorded status is
     /// `FAILED_TOOL_CALL_STATUS`, as tool name and arguments.
@@ -257,7 +256,10 @@ impl WallSignal {
 }
 
 /// The wall the given turns — the thread's recent finished turns, oldest
-/// first — ran into, if any. An identical failing call repeated
+/// first — ran into, if any. Only tool calls recorded with status `error`
+/// (`FAILED_TOOL_CALL_STATUS`) count as failed calls; `rejected` (the user's
+/// decision at approval) and `interrupted` (cut off by the gateway stopping)
+/// never do. An identical failing call repeated
 /// `REPEATED_FAILING_CALL_THRESHOLD` times is reported in preference to the
 /// total reaching `WALL_THRESHOLD`.
 pub(super) fn detect_walls(turns: &[TurnWalls]) -> Option<WallSignal> {
@@ -331,14 +333,7 @@ where
             .await
             .inspect_err(|error| tracing::warn!(%error, "wall signal: rounds unreadable"))
             .ok()?;
-        !rounds.iter().any(|round| {
-            matches!(
-                serde_json::from_value::<WorkflowProviderRoundOutcome>(round.outcome.clone()),
-                Ok(WorkflowProviderRoundOutcome::Failed { .. }
-                    | WorkflowProviderRoundOutcome::Interrupted)
-                    | Err(_)
-            )
-        })
+        ended_on_its_own(&rounds)
     };
     let failed_calls = storage
         .list_tool_calls_by_turn(turn_id)
@@ -357,6 +352,47 @@ where
         agent_failed,
         failed_calls,
     })
+}
+
+/// Words in a failed round's recorded provider error that mark transport
+/// trouble. They match `ProviderError`'s own renderings: "rate limited by
+/// provider", "HTTP error 429", "request … timed out", "network error …",
+/// and the stream's connection and retry failures.
+const TRANSPORT_FAILURE_MARKERS: &[&str] = &[
+    "rate limit",
+    "429",
+    "timed out",
+    "timeout",
+    "network error",
+    "connection",
+    "retry",
+    "retries",
+];
+
+/// Whether a failed turn, by its provider rounds, failed on its own rather
+/// than on its provider. Only the last round decides: it is the turn's
+/// ending. An ending that is a transport failure (`TRANSPORT_FAILURE_MARKERS`)
+/// or an interruption is the provider's or the host's; an ending that is
+/// missing, still outstanding or unreadable cannot be told apart, so it does
+/// not count either. Any other ending — a response, or a provider refusal
+/// of what the agent sent — is the agent's.
+pub(super) fn ended_on_its_own(rounds: &[ProviderRoundRecord]) -> bool {
+    let Some(last) = rounds.iter().max_by_key(|round| round.round) else {
+        return false;
+    };
+    match serde_json::from_value::<WorkflowProviderRoundOutcome>(last.outcome.clone()) {
+        Ok(WorkflowProviderRoundOutcome::Responded { .. }) => true,
+        Ok(WorkflowProviderRoundOutcome::Failed { message }) => {
+            let message = message.to_lowercase();
+            !TRANSPORT_FAILURE_MARKERS
+                .iter()
+                .any(|marker| message.contains(marker))
+        }
+        Ok(
+            WorkflowProviderRoundOutcome::Interrupted | WorkflowProviderRoundOutcome::Outstanding,
+        )
+        | Err(_) => false,
+    }
 }
 
 async fn ran_on_degradation_successor<S>(storage: &S, turn_id: Uuid) -> bool
@@ -481,6 +517,86 @@ fn reader_request(instructions: &str, material: String) -> CompletionRequest {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn rounds(outcomes: &[serde_json::Value]) -> Vec<ProviderRoundRecord> {
+        outcomes
+            .iter()
+            .enumerate()
+            .map(|(index, outcome)| ProviderRoundRecord {
+                id: Uuid::new_v4(),
+                turn_id: Uuid::nil(),
+                round: index as i64 + 1,
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                outcome: outcome.clone(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_last_round_decides_whether_a_failed_turn_failed_on_its_own() {
+        let responded = json!({"outcome": "responded", "tool_calls": 1});
+        let rate_limited =
+            json!({"outcome": "failed", "message": "rate limited by provider anthropic"});
+        let refused =
+            json!({"outcome": "failed", "message": "HTTP error 400: unexpected tool_use_id"});
+        let cases = [
+            (
+                vec![responded.clone(), refused.clone()],
+                true,
+                "a refusal of what the agent sent",
+            ),
+            (
+                vec![rate_limited.clone(), responded.clone()],
+                true,
+                "an earlier transport failure recovered",
+            ),
+            (
+                vec![responded.clone(), rate_limited],
+                false,
+                "ended on a rate limit",
+            ),
+            (
+                vec![json!({"outcome": "failed", "message": "HTTP error 429: slow down"})],
+                false,
+                "429",
+            ),
+            (
+                vec![
+                    json!({"outcome": "failed", "message": "request to provider x timed out after 30s"}),
+                ],
+                false,
+                "timeout",
+            ),
+            (
+                vec![
+                    json!({"outcome": "failed", "message": "network error communicating with provider x: reset"}),
+                ],
+                false,
+                "network",
+            ),
+            (
+                vec![responded.clone(), json!({"outcome": "interrupted"})],
+                false,
+                "interrupted",
+            ),
+            (
+                vec![json!({"outcome": "outstanding"})],
+                false,
+                "ending never recorded",
+            ),
+            (
+                vec![json!({"outcome": "garbled"})],
+                false,
+                "ending unreadable",
+            ),
+            (vec![], false, "no rounds"),
+            (vec![responded], true, "responded, then the turn failed"),
+        ];
+        for (outcomes, expected, case) in cases {
+            assert_eq!(ended_on_its_own(&rounds(&outcomes)), expected, "{case}");
+        }
+    }
 
     fn failing(tool: &str, arguments: serde_json::Value) -> (String, serde_json::Value) {
         (tool.to_string(), arguments)
