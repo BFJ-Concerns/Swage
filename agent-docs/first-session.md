@@ -13,8 +13,10 @@ project guidance, but a conversation can start without any of them.
 
 The web UI opens to the recent-sessions list (`GET /api/sessions`): every
 scope's sessions ordered by their latest user or assistant message, with
-automated sessions grouped beneath their source (`entries[].automated`
-under a `conversation`, `schedule` or `workflow_run` source). `?topic_id=`
+each entry's preview showing the latest user or assistant message (tool and
+system messages never replace the preview). Automated sessions are grouped
+beneath their source (`entries[].automated` under a `conversation`,
+`schedule` or `workflow_run` source). `?topic_id=`
 narrows the list to a topic; `?archived=` (boolean) lists the sessions the
 inactivity sweep has hidden (`[sessions] archive_after_days`, default 7;
 a turn on an archived session unarchives it). Every session records its

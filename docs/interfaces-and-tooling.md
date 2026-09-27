@@ -228,7 +228,9 @@ name, a description of what it does and when to use it, and tags. Saving
 copies the surface's modules as they stand and opens nothing anywhere; the
 surface itself is untouched. Any session — in any topic, or without one — can
 add a library entry as a new surface of its own, seeded from the entry's
-modules and recording the entry as its origin. Content travels with an entry
+modules and recording the entry as its origin. The audit trail records a
+`surface_created` event with the library origin and seeding mode, and saving
+a surface to the library records its own `surface_saved_to_library` event. Content travels with an entry
 only within the topic it was saved from: added to a session in another topic
 or in the general scope, the shape comes over and each module starts empty
 for the destination's own data. The copies are the session's own from birth;
@@ -242,10 +244,13 @@ in each of the topic's new person-opened sessions (sessions with origin
 surfaces, and the general scope designates no defaults. Any other entry is
 added on demand.
 
-When a topic is deleted, its library entries remain in the catalogue with an
-`origin_topic_deleted` marker rather than being removed. A surface's record
-of which entry it was seeded from (`seeded_from_name`) persists even after
-that entry is deleted from the library.
+When a topic is deleted, the entries saved from it remain in the catalogue —
+marked with `origin_topic_deleted` — and other topics' default designations
+of those entries stay intact. A surface seeded from an entry whose origin
+topic has been deleted carries its shape only, because the entry's content
+travels to no session once its origin topic is gone. A surface's record of
+which entry it was seeded from (`seeded_from_name`) persists even after that
+entry is deleted from the library.
 
 The web UI shows the catalogue on the **Library** page, reachable from the
 top bar of any session, from the front door, and from the surfaces pane.

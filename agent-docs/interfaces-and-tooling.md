@@ -283,8 +283,11 @@ labels the `surface_library` tool narrows the catalogue by for a topic's
 sessions.
 
 Library entries carry an `origin_topic_deleted` boolean, set when the entry's
-origin topic is deleted. A deleted topic does not remove its entries from the
-library — they remain usable with `origin_topic_deleted: true`.
+origin topic is deleted. Deleting a topic keeps the entries saved from it
+and other topics' default designations of those entries intact — the
+catalogue marks the origin as deleted (`origin_topic_deleted: true`), and a
+surface seeded from such an entry carries its shape only, because the
+entry's content travels to no session once its origin topic is gone.
 
 A save or delete broadcasts `ServerEvent::LibraryUpdated { entry_id }` on
 the work-surface channel (`/api/work-surface/ws`), delivered like
