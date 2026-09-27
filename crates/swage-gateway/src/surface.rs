@@ -1035,25 +1035,10 @@ mod tests {
 
     use super::*;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".into(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .unwrap()
@@ -1074,7 +1059,7 @@ mod tests {
         .await
         .unwrap();
         let session = session_in(&storage, topic.id).await;
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let surface = create_surface(
             &state,
             session,

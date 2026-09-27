@@ -218,8 +218,6 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
                 origin: crate::model::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({
                     "channel_origin": {
@@ -228,7 +226,7 @@ mod tests {
                         "conversation": "alice"
                     }
                 })),
-                active_workspace_attachment_id: None,
+                ..crate::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();

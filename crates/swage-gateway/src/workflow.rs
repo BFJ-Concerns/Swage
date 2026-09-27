@@ -3017,11 +3017,10 @@ async fn run_ephemeral_agent_call_with_admission(
             let session = state
                 .storage
                 .create_session(NewSession {
-                    topic_id,
                     agent_id: agent_id.clone(),
                     origin: swage_storage::SessionOrigin::WorkflowWorker { run_id },
                     metadata: Some(metadata),
-                    active_workspace_attachment_id: None,
+                    ..swage_storage::fixtures::new_session(topic_id)
                 })
                 .await
                 .map_err(|error| error.to_string())?;
@@ -8152,9 +8151,6 @@ async fn start_run(
     let record = state
         .storage
         .create_workflow_run(NewWorkflowRun {
-            topic_id,
-            parent_run_id: None,
-            parent_seq: None,
             dispatching_session_id,
             script_version_id,
             inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
@@ -8173,6 +8169,7 @@ async fn start_run(
             dispatch_bound_task_definition_ids,
             workflow_call_tools,
             inherited_worker_placement,
+            ..swage_storage::fixtures::new_workflow_run(topic_id)
         })
         .await
         .map_err(internal)?;
@@ -9425,6 +9422,38 @@ mod completion_handoff_test_support {
 
 #[cfg(test)]
 mod tests {
+
+    /// Create a committed local repository for worktree and placement tests.
+    fn seed_git_repo(repo: &std::path::Path) {
+        std::fs::create_dir(repo).expect("create repository");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "test@example.invalid"][..],
+            &["config", "user.name", "Test"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .status()
+                    .expect("configure repository")
+                    .success()
+            );
+        }
+        std::fs::write(repo.join("seed"), "seed").expect("write seed");
+        for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .status()
+                    .expect("commit seed")
+                    .success()
+            );
+        }
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -9448,25 +9477,9 @@ mod tests {
     async fn journalled_agent_call(storage: &SqliteStorage, topic_id: Uuid) -> (Uuid, Uuid) {
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some("agent call fixture".into()),
                 source_hash: source_hash("agent call fixture"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic_id)
             })
             .await
             .expect("run");
@@ -10050,11 +10063,7 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -10161,11 +10170,8 @@ mod tests {
         store_test_agent(&storage, topic.id, AGENT_ID).await;
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: AGENT_ID.into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -10294,25 +10300,11 @@ mod tests {
         let recorded_source = "return { resumed: true };";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
                 carrying_skill: Some("operator-proof".into()),
-                task: None,
                 source: Some(recorded_source.into()),
                 source_hash: source_hash(recorded_source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -10346,50 +10338,18 @@ mod tests {
         let source = r#"return await agent("reuse recorded result", { schema: { type: 7 } });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
                 engine_version: "pre-change".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = AgentCallRequest {
-            worker: None,
-            prompt: "reuse recorded result".into(),
-            agent: None,
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
             schema: Some(serde_json::json!({"type": 7})),
             max_attempts: 3,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("reuse recorded result".into())
         };
         let request_json = serde_json::to_value(&request).expect("agent request");
         let recorded = storage
@@ -10485,25 +10445,11 @@ mod tests {
             r#"return await agent("continue bounded work", {agent: "default", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
-                engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec!["lead".into()],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -10596,27 +10542,8 @@ mod tests {
             &[],
             Uuid::new_v4(),
             AgentCallRequest {
-                worker: None,
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "Use echo".into(),
                 agent: Some("gateway".into()),
-                task: None,
-                tools: None,
-                skills: None,
-                model: None,
-                fallback_model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("Use echo".into())
             },
             None,
             CancellationToken::new(),
@@ -10675,27 +10602,9 @@ mod tests {
             None,
         );
         let request = |skills| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "Use the requested skill".into(),
             agent: Some("workflow-worker".into()),
-            task: None,
-            tools: None,
             skills,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("Use the requested skill".into())
         };
 
         let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
@@ -10802,27 +10711,8 @@ mod tests {
 
         let (gather_run_id, journal_entry_id) = journalled_agent_call(&storage, topic.id).await;
         let gather = |prompt: &str, tools: Vec<&str>| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
-            agent: None,
-            task: None,
             tools: Some(tools.into_iter().map(String::from).collect()),
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         let result = run_ephemeral_agent_call(
             &state,
@@ -10902,25 +10792,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -10973,25 +10846,8 @@ mod tests {
         );
         let other_run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("other run");
@@ -11133,25 +10989,10 @@ mod tests {
 
         let saved = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
                 script_version_id: Some(version.id),
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: None,
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("saved run");
@@ -11188,25 +11029,10 @@ mod tests {
             .expect("ungranted saved script");
         let ungranted = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
                 script_version_id: Some(ungranted_version.id),
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: None,
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("ungranted saved run");
@@ -11232,11 +11058,6 @@ mod tests {
 
         let carried = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
                 inline_workflow_id: Some(crate::synthetic_id::synthetic_id(
                     CARRIED_WORKFLOW_ID_DOMAIN,
                     topic.id,
@@ -11245,16 +11066,9 @@ mod tests {
                 inline_workflow_name: Some("research-sweep".into()),
                 inline_workflow_version: Some(1),
                 carrying_skill: Some("research".into()),
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("carried run");
@@ -11280,25 +11094,13 @@ mod tests {
 
         let builtin = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
                 inline_workflow_id: Some(research_sweep_id(topic.id)),
                 inline_workflow_name: Some("research-sweep".into()),
                 inline_workflow_version: Some(1),
                 carrying_skill: Some("research".into()),
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("built-in run");
@@ -11488,25 +11290,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -11550,30 +11335,14 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
-            worker: None,
-            prompt: "Use the briefing".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
             elements: Some(vec!["current-work".into()]),
             variables: Some(std::collections::BTreeMap::from([(
                 "owner".into(),
                 "journal owner".into(),
             )])),
             assembly: Some("focused".into()),
+            ..swage_workflow::fixtures::agent_call_request("Use the briefing".into())
         };
         let (reply, receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -11901,25 +11670,8 @@ mod tests {
             let topic = storage.general_scope().await.expect("topic");
             let run = storage
                 .create_workflow_run(NewWorkflowRun {
-                    topic_id: topic.id,
-                    parent_run_id: None,
-                    parent_seq: None,
-                    dispatching_session_id: None,
-                    script_version_id: None,
-                    inline_workflow_id: None,
-                    inline_workflow_name: None,
-                    inline_workflow_version: None,
-                    carrying_skill: None,
-                    task: None,
-                    source: Some("return null".into()),
                     source_hash: source_hash("return null"),
-                    args: Value::Null,
-                    budget: serde_json::json!({}),
-                    engine_version: "test".into(),
-                    dispatch_bound_agent_ids: vec![],
-                    dispatch_bound_task_definition_ids: vec![],
-                    workflow_call_tools: None,
-                    inherited_worker_placement: None,
+                    ..swage_storage::fixtures::new_workflow_run(topic.id)
                 })
                 .await
                 .expect("run");
@@ -12580,25 +12332,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -13010,27 +12745,8 @@ mod tests {
             0,
         );
         let request = |prompt: &str| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -13073,25 +12789,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -13128,27 +12827,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "hold capacity".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("hold capacity".into())
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -13239,25 +12919,9 @@ mod tests {
         }
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
                 dispatch_bound_agent_ids: vec!["lead".into()],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -13330,27 +12994,10 @@ mod tests {
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
-                worker: None,
                 cwd: Some(worker_directory.path().to_string_lossy().into_owned()),
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "restate the brief".into(),
                 agent: Some("worker".into()),
-                task: None,
-                tools: None,
                 skills: Some(vec!["workflow-specialist".into()]),
-                model: None,
-                fallback_model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
-                session: None,
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("restate the brief".into())
             },
             cancellation: CancellationToken::new(),
             reply: first_reply,
@@ -13406,27 +13053,9 @@ mod tests {
         let (second_reply, second_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
-                worker: None,
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "now do the work".into(),
                 agent: Some("worker".into()),
-                task: None,
-                tools: None,
-                skills: None,
-                model: None,
-                fallback_model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
                 session: Some(token.clone()),
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("now do the work".into())
             },
             cancellation: CancellationToken::new(),
             reply: second_reply,
@@ -13465,27 +13094,11 @@ mod tests {
         let (replacement_reply, replacement_receive) = oneshot::channel();
         tx.send(HostCommand::DispatchAgent {
             request: AgentCallRequest {
-                worker: None,
                 cwd: Some("/unused-replacement".into()),
                 isolation: Some(swage_protocol::client::workflow::WorkerIsolation::Worktree),
-                effort: None,
-                timeout_ms: None,
-                prompt: "move the continued worker".into(),
                 agent: Some("worker".into()),
-                task: None,
-                tools: None,
-                skills: None,
-                model: None,
-                fallback_model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
                 session: Some(token.clone()),
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("move the continued worker".into())
             },
             cancellation: CancellationToken::new(),
             reply: replacement_reply,
@@ -13732,25 +13345,10 @@ mod tests {
         }
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                carrying_skill: None,
-                task: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -14397,25 +13995,10 @@ mod tests {
         let source = "return await agent('bounded work');";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                carrying_skill: None,
-                task: None,
                 dispatch_bound_agent_ids: vec!["lead".into()],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -14683,9 +14266,6 @@ mod tests {
         let placed = std::fs::canonicalize(&placed).expect("canonical placed directory");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({
                     "worker_placement_cwd": placed.to_string_lossy(),
                     "worker_placement_can_write": true,
@@ -14693,6 +14273,7 @@ mod tests {
                     "worker_placement_authority_context_id": authority_context_id,
                 })),
                 active_workspace_attachment_id: Some(workspace_id),
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("placed session");
@@ -14802,11 +14383,8 @@ mod tests {
             .expect("store workflow");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({"task_definition": "restricted"})),
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -14939,13 +14517,10 @@ mod tests {
             .expect("store outer workflow");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({
                     crate::turn::WORKFLOW_CALL_TOOLS_METADATA_KEY: ["workflow_run"]
                 })),
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("call-scoped worker session");
@@ -15083,18 +14658,7 @@ mod tests {
             None,
         );
         let request = || AgentCallRequest {
-            worker: None,
-            prompt: "Use the current review contract".into(),
-            agent: None,
             task: Some("review".into()),
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            effort: None,
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
             // A call-level schema governs this invocation, while the named
             // task still supplies its configured retry count.
             schema: Some(serde_json::json!({
@@ -15102,14 +14666,7 @@ mod tests {
                 "required": ["call_level_override"],
                 "properties": {"call_level_override": {"const": true}}
             })),
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("Use the current review contract".into())
         };
 
         let (fixture_run_id, fixture_entry_id) = journalled_agent_call(&storage, topic.id).await;
@@ -15245,41 +14802,7 @@ mod tests {
     async fn worktree_provisioning_journal_replays_lists_and_rejects_changed_arguments() {
         let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
-        std::fs::create_dir(&repo).expect("repo");
-        for args in [
-            &["init"][..],
-            &["config", "user.email", "test@example.invalid"][..],
-            &["config", "user.name", "Test"][..],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        std::fs::write(repo.join("seed"), "seed").expect("seed");
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["add", "seed"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["commit", "-m", "seed"])
-                .status()
-                .unwrap()
-                .success()
-        );
+        seed_git_repo(&repo);
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
@@ -15288,25 +14811,8 @@ mod tests {
         std::fs::create_dir(&newly_allowed).expect("newly allowed fixture");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                carrying_skill: None,
-                task: None,
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -15617,41 +15123,8 @@ mod tests {
     async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
         let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        for args in [
-            &["init"][..],
-            &["config", "user.email", "test@example.invalid"][..],
-            &["config", "user.name", "Test"][..],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        std::fs::write(repo.join("seed"), "seed").unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["add", "seed"])
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["commit", "-m", "seed"])
-                .status()
-                .unwrap()
-                .success()
-        );
+        seed_git_repo(&repo);
+
         let base_commit = String::from_utf8(
             std::process::Command::new("git")
                 .arg("-C")
@@ -16100,25 +15573,9 @@ mod tests {
         });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                carrying_skill: None,
-                task: None,
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -16218,17 +15675,8 @@ mod tests {
         });"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget {
                     max_agent_calls: Some(1),
                     per_route: Default::default(),
@@ -16237,13 +15685,7 @@ mod tests {
                     max_concurrent_agent_calls: Some(1),
                 })
                 .expect("budget"),
-                engine_version: "test".into(),
-                carrying_skill: None,
-                task: None,
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -16328,19 +15770,8 @@ mod tests {
         );
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.clone()),
                 source_hash: source_hash(&source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget {
                     max_agent_calls: Some(3),
                     per_route: Default::default(),
@@ -16349,11 +15780,7 @@ mod tests {
                     max_concurrent_agent_calls: Some(1),
                 })
                 .expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -16450,25 +15877,9 @@ mod tests {
         "#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -16547,34 +15958,7 @@ mod tests {
     async fn parked_cancellation_losing_after_return_withdraws_its_retention_claim() {
         let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
-        std::fs::create_dir(&repo).expect("create repository");
-        for args in [
-            &["init"][..],
-            &["config", "user.email", "test@example.invalid"][..],
-            &["config", "user.name", "Test"][..],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .expect("run git setup")
-                    .success()
-            );
-        }
-        std::fs::write(repo.join("seed"), "seed").expect("write seed");
-        for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .expect("commit seed")
-                    .success()
-            );
-        }
+        seed_git_repo(&repo);
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
@@ -16714,34 +16098,7 @@ mod tests {
     async fn stale_parked_cancellation_preserves_a_failed_winner_retention_claim() {
         let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
-        std::fs::create_dir(&repo).expect("create repository");
-        for args in [
-            &["init"][..],
-            &["config", "user.email", "test@example.invalid"][..],
-            &["config", "user.name", "Test"][..],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .expect("run git setup")
-                    .success()
-            );
-        }
-        std::fs::write(repo.join("seed"), "seed").expect("write seed");
-        for args in [&["add", "seed"][..], &["commit", "-m", "seed"][..]] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .expect("commit seed")
-                    .success()
-            );
-        }
+        seed_git_repo(&repo);
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
@@ -16864,25 +16221,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -16890,11 +16230,8 @@ mod tests {
         // exactly what a token must not be able to reach.
         let foreign_session = storage
             .create_session(swage_storage::NewSession {
-                topic_id: topic.id,
                 agent_id: "interactive".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("foreign session");
@@ -16934,30 +16271,12 @@ mod tests {
         tx.send(HostCommand::Agent {
             resolved_working_directory: None,
             request: AgentCallRequest {
-                worker: None,
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "hijack".into(),
                 agent: Some("worker".into()),
-                task: None,
-                tools: None,
-                skills: None,
-                model: None,
-                fallback_model: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
                 session: Some(AgentSessionRef {
                     session_id: foreign_session.id,
                     thread_id: Uuid::new_v4(),
                 }),
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("hijack".into())
             },
             cancellation: CancellationToken::new(),
             reply,
@@ -16993,30 +16312,12 @@ mod tests {
             &[],
             fixture_entry_id,
             AgentCallRequest {
-                worker: None,
-                prompt: "continue".into(),
-                agent: None,
                 task: Some("review".into()),
-                tools: None,
-                skills: None,
-                model: None,
-                fallback_model: None,
-                effort: None,
-                timeout_ms: None,
-                cwd: None,
-                isolation: None,
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
                 session: Some(AgentSessionRef {
                     session_id: Uuid::new_v4(),
                     thread_id: Uuid::new_v4(),
                 }),
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("continue".into())
             },
             None,
             CancellationToken::new(),
@@ -17144,25 +16445,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -17237,25 +16521,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -17464,11 +16731,8 @@ mod tests {
     ) {
         let session = storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: agent_id.into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .expect("answering session");
@@ -20531,25 +19795,9 @@ mod tests {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
         let make_run = |source: &str| NewWorkflowRun {
-            topic_id: topic.id,
-            parent_run_id: None,
-            parent_seq: None,
-            dispatching_session_id: None,
-            script_version_id: None,
-            inline_workflow_id: None,
-            inline_workflow_name: None,
-            inline_workflow_version: None,
-            carrying_skill: None,
-            task: None,
             source: Some(source.into()),
             source_hash: source_hash(source),
-            args: Value::Null,
-            budget: serde_json::json!({}),
-            engine_version: "test".into(),
-            dispatch_bound_agent_ids: vec![],
-            dispatch_bound_task_definition_ids: vec![],
-            workflow_call_tools: None,
-            inherited_worker_placement: None,
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
         };
         let interrupted = storage
             .create_workflow_run(make_run(r#"return "a-done""#))
@@ -20625,35 +19873,17 @@ mod tests {
         "#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let session = storage
             .create_session(swage_storage::NewSession {
-                topic_id: topic.id,
                 agent_id: "worker".into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({})),
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("worker session");
@@ -20681,27 +19911,9 @@ mod tests {
             .await
             .expect("orphaned worker turn");
         let first_request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "restate".into(),
             agent: Some("worker".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
             max_attempts: 3,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("restate".into())
         };
         let first_json = serde_json::to_value(&first_request).expect("first request");
         let first = storage
@@ -20739,30 +19951,13 @@ mod tests {
             .await
             .expect("complete first call");
         let continuation = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "continue".into(),
             agent: Some("worker".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
             session: Some(AgentSessionRef {
                 session_id: session.id,
                 thread_id: thread.id,
             }),
             max_attempts: 3,
-            label: None,
-            phase: None,
-            identity: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("continue".into())
         };
         let continuation_json = serde_json::to_value(&continuation).expect("continuation request");
         storage
@@ -20832,11 +20027,9 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "worker".into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({})),
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("worker session");
@@ -20897,25 +20090,8 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -20957,27 +20133,8 @@ mod tests {
             rx,
         ));
         let request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "account usage".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("account usage".into())
         };
         let (first_reply, first_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -21042,27 +20199,8 @@ mod tests {
             2,
         );
         let request = |prompt: &str| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         let first_cancellation = CancellationToken::new();
         let (first_reply, first_receive) = oneshot::channel();
@@ -21133,27 +20271,8 @@ mod tests {
         let storage = Arc::clone(&scaffold.storage);
         let run_id = scaffold.run_id;
         let request = |prompt: &str| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         for (seq, prompt) in [(0, "working one"), (1, "working two")] {
             let request_json = serde_json::to_value(request(prompt)).expect("working request");
@@ -21285,50 +20404,14 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "resume work".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("resume work".into())
         };
         let request_json = serde_json::to_value(&request).expect("request");
         for seq in 0..2 {
@@ -21430,50 +20513,14 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let working_request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "resume working call".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("resume working call".into())
         };
         let working_json = serde_json::to_value(&working_request).expect("working request");
         storage
@@ -21588,27 +20635,8 @@ mod tests {
             true
         );
         let closing_request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "closing call".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("closing call".into())
         };
         let (closing_reply, closing_receive) = oneshot::channel();
         tx.send(HostCommand::Agent {
@@ -21652,50 +20680,14 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -21909,50 +20901,14 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         let work_request = request("completed work");
         let work_json = serde_json::to_value(&work_request).expect("work request");
@@ -22154,50 +21110,16 @@ mod tests {
         };
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(&budget).expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "must not execute".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("must not execute".into())
         };
         let request_json = serde_json::to_value(&request).expect("request");
         let refused = storage
@@ -22981,50 +21903,16 @@ mod tests {
         let source = r#"await agent("known failing call", {agent: "default", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "known failing call".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("known failing call".into())
         };
         let request = serde_json::to_value(request).expect("request");
         let mismatched = storage
@@ -23096,50 +21984,17 @@ mod tests {
         let source = r#"await agent("known failing call", {agent: "default", label: "recorded failure", maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = serde_json::to_value(AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "known failing call".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
-            model: None,
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
             label: Some("recorded failure".into()),
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("known failing call".into())
         })
         .expect("request");
         let failed = storage
@@ -23207,25 +22062,10 @@ mod tests {
         let source = "return 1;";
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget::default()).expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -24876,41 +23716,7 @@ mod tests {
     async fn invalid_placed_agent_schema_fails_before_worktree_provisioning() {
         let fixture = tempfile::tempdir().expect("scratch fixture");
         let repo = fixture.path().join("repo");
-        std::fs::create_dir(&repo).expect("repo");
-        for args in [
-            &["init"][..],
-            &["config", "user.email", "test@example.invalid"][..],
-            &["config", "user.name", "Test"][..],
-        ] {
-            assert!(
-                std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(args)
-                    .status()
-                    .expect("run git")
-                    .success()
-            );
-        }
-        std::fs::write(repo.join("seed"), "seed").expect("seed");
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["add", "seed"])
-                .status()
-                .expect("stage seed")
-                .success()
-        );
-        assert!(
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(["commit", "-m", "seed"])
-                .status()
-                .expect("commit seed")
-                .success()
-        );
+        seed_git_repo(&repo);
 
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
@@ -25412,50 +24218,15 @@ protocol = "openai"
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                task: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = |prompt: &str| AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
             model: Some("alpha".into()),
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         };
         let journal_request = |request: &AgentCallRequest| {
             let mut value = serde_json::to_value(request).expect("request serialises");
@@ -25879,50 +24650,15 @@ protocol = "openai"
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                task: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
         let request = AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: "unconfigured route".into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
             model: Some("unconfigured".into()),
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request("unconfigured route".into())
         };
         let mut journal_request = serde_json::to_value(&request).expect("request serialises");
         journal_request["provider_route"] = Value::String("unconfigured-route".into());
@@ -26072,52 +24808,17 @@ protocol = "openai"
 
     fn route_test_request(prompt: &str, model: Option<&str>) -> AgentCallRequest {
         AgentCallRequest {
-            worker: None,
-            cwd: None,
-            isolation: None,
-            effort: None,
-            timeout_ms: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
-            tools: None,
-            skills: None,
             model: model.map(str::to_string),
-            fallback_model: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         }
     }
 
     async fn empty_journal_run(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic_id)
             })
             .await
             .expect("run")
@@ -27374,27 +26075,11 @@ protocol = "openai"
             &[],
             Uuid::new_v4(),
             AgentCallRequest {
-                cwd: None,
-                isolation: None,
-                effort: None,
-                timeout_ms: None,
-                prompt: "answer".into(),
                 agent: Some("gateway".into()),
-                task: None,
                 tools: Some(vec!["echo".into()]),
-                skills: None,
                 model: Some("pinned".into()),
                 fallback_model: Some("fallback".into()),
-                schema: None,
-                max_attempts: 1,
-                label: None,
-                phase: None,
-                identity: None,
-                session: None,
-                worker: None,
-                elements: None,
-                variables: None,
-                assembly: None,
+                ..swage_workflow::fixtures::agent_call_request("answer".into())
             },
             None,
             CancellationToken::new(),
@@ -28558,25 +27243,10 @@ protocol = "openai"
         // it stands in for the run whose gateway died under it.
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: None,
                 source_hash: source_hash(""),
-                args: Value::Null,
                 budget: Value::Null,
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -28662,25 +27332,10 @@ protocol = "openai"
         // test is the only one the projection can read.
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: None,
                 source_hash: source_hash(""),
-                args: Value::Null,
                 budget: Value::Null,
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -28747,25 +27402,8 @@ protocol = "openai"
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: source_hash("return null"),
-                args: Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -28782,27 +27420,10 @@ protocol = "openai"
 
     fn worker_call_request(prompt: &str) -> AgentCallRequest {
         AgentCallRequest {
-            worker: None,
-            prompt: prompt.into(),
             agent: Some("default".into()),
-            task: None,
             tools: Some(vec!["file_read".into()]),
-            skills: None,
-            model: None,
-            fallback_model: None,
             effort: Some(swage_protocol::client::settings::Effort::Low),
-            timeout_ms: None,
-            cwd: None,
-            isolation: None,
-            schema: None,
-            max_attempts: 1,
-            label: None,
-            phase: None,
-            identity: None,
-            session: None,
-            elements: None,
-            variables: None,
-            assembly: None,
+            ..swage_workflow::fixtures::agent_call_request(prompt.into())
         }
     }
 
@@ -28879,11 +27500,9 @@ protocol = "openai"
     async fn worker_turn(storage: &SqliteStorage, topic_id: Uuid, input: &str) -> Uuid {
         let session = storage
             .create_session(swage_storage::NewSession {
-                topic_id,
                 agent_id: BARE_WORKFLOW_AGENT_ID.into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(serde_json::json!({})),
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .expect("worker session");
@@ -29670,19 +28289,8 @@ protocol = "openai"
         let source = r#"return await agent("work the run interrupts", {maxAttempts: 1});"#;
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some(source.into()),
                 source_hash: source_hash(source),
-                args: Value::Null,
                 budget: serde_json::to_value(WorkflowBudget {
                     max_agent_calls: Some(1),
                     per_route: Default::default(),
@@ -29691,11 +28299,7 @@ protocol = "openai"
                     max_concurrent_agent_calls: Some(1),
                 })
                 .expect("budget"),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
