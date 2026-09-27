@@ -998,9 +998,24 @@ impl Agent {
                         .await;
                     // A call cut off mid-execution has a started row; settle it
                     // as interrupted so the record and history replay show it.
-                    self.storage
+                    if let Err(error) = self
+                        .storage
                         .settle_started_tool_calls_as_interrupted(turn.id)
-                        .await?;
+                        .await
+                    {
+                        tracing::error!(turn_id = %turn.id, %error,
+                            "cancelled tool call's record could not be settled");
+                        if let Err(failure_error) = self.storage.force_turn_failure(turn.id).await {
+                            tracing::error!(turn_id = %turn.id, %failure_error,
+                                "could not mark cancelled turn with lost record as failed");
+                        }
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: format!(
+                                "cancelled tool call's record could not be settled: {error}"
+                            ),
+                            provider_failure: false,
+                        });
+                    }
                     return Err(AgentError::Cancelled);
                 }
                 Err(error) => {

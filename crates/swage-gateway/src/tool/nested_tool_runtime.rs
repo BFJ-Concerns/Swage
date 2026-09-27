@@ -171,12 +171,11 @@ impl NestedToolRuntime {
         duration_ms: u64,
     ) -> Result<(), swage_core::StorageError> {
         let result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
-        // A nested call's output returns to the calling script, not straight
-        // to the provider, so no leak scan runs here; the model-facing text is
-        // the compacted result, settled through the same parameter the agent's
-        // scanned text takes.
+        // History can replay this result to the provider. Scan it before
+        // compaction, as the ordinary agent call path does.
+        let safe_result = swage_safety::LeakDetector::default().scan(&result_text);
         let model_result = swage_core::compact_tool_result_for_model_with_reference(
-            &result_text,
+            &safe_result,
             status != "success",
             swage_core::tool_result_reference(&self.turn_id.to_string(), call_id),
         );
@@ -247,6 +246,73 @@ mod tests {
 
     struct ObservingTool {
         observed: Arc<Mutex<Option<ObservedContext>>>,
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_model_result_redacts_credentials_before_replay() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let turn_id = create_turn(storage.as_ref()).await;
+        let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
+            Vec::<Arc<dyn Tool>>::new(),
+        ));
+        let (ws_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = NestedToolRuntime::new(
+            dispatcher,
+            ws_tx,
+            storage.clone(),
+            turn_id,
+            "python_parent".into(),
+            serialise_tool_context(&parent_context(turn_id)),
+        );
+        storage
+            .create_tool_call(swage_storage::model::NewToolCall {
+                turn_id,
+                agent_id: "gateway".into(),
+                call_id: "nested-secret".into(),
+                tool: "secret_tool".into(),
+                arguments: "{}".into(),
+                model_arguments: "{}".into(),
+                result: None,
+                model_result: None,
+                status: None,
+                duration_ms: None,
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position: 0,
+                parent_call_id: Some("python_parent".into()),
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+        runtime
+            .finish_tool_call(
+                "nested-secret",
+                "secret_tool",
+                &json!({"token": "sk-abcdefghijklmnopqrstuvwxyz123456"}),
+                "success",
+                1,
+            )
+            .await
+            .unwrap();
+        let call = storage
+            .list_tool_calls_by_turn(turn_id)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(
+            call.result
+                .unwrap()
+                .contains("sk-abcdefghijklmnopqrstuvwxyz123456")
+        );
+        assert!(
+            !call
+                .model_result
+                .unwrap()
+                .contains("sk-abcdefghijklmnopqrstuvwxyz123456"),
+            "the provider-facing nested result contains the credential"
+        );
     }
 
     #[async_trait]

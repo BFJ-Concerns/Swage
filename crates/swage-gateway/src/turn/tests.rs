@@ -7396,6 +7396,110 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
 }
 
 #[tokio::test]
+async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_failed() {
+    let round_1 = vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "call_block".into(),
+            name: "block".into(),
+            arguments: serde_json::json!({}),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(BlockingMockTool {
+            started: started.clone(),
+            release: release.clone(),
+        }) as Arc<dyn crate::tool::Tool>]),
+        None,
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state = Arc::new(state);
+    let worker_state = state.clone();
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &worker_state,
+            session_id,
+            None,
+            "Run block".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    started.notified().await;
+    storage.fail_tool_call_settlement();
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while tool is running");
+
+    handle
+        .await
+        .expect("task should not panic")
+        .expect("process_turn ok");
+
+    let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Cancelled {})),
+        "expected Cancelled event, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ServerEvent::ToolEnd { tool, call_id, status, .. }
+            if tool == "block" && call_id == "call_block" && status == "cancelled"
+        )),
+        "expected cancelled ToolEnd event, got: {events:?}"
+    );
+
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let thread_id = threads[0].id;
+    let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+    assert_eq!(
+        turns[0].state,
+        TurnState::Failed,
+        "record failure must remain visible on a cancelled turn"
+    );
+    assert!(events.iter().any(|event| matches!(event, ServerEvent::Error { message, .. } if message.contains("tool-call settlement refused"))), "record failure must reach the client: {events:?}");
+    release.notify_waiters();
+}
+
+#[tokio::test]
 async fn multi_round_tool_calling() {
     let round_1 = vec![
         StreamChunk::ToolUse {
@@ -17023,6 +17127,62 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         rebuilt[0].role(),
         Role::User,
         "the round follows the turn's input"
+    );
+}
+
+#[tokio::test]
+async fn assistantless_delegated_round_follows_the_delegated_task() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    let turn_id = Uuid::new_v4();
+    for content in ["Inherited Background Context", "Delegated Task"] {
+        storage
+            .append_message(AppendMessage {
+                thread_id,
+                attachments: Vec::new(),
+                turn_id: Some(turn_id),
+                role: Role::User,
+                content: content.into(),
+                agent_id: "child".into(),
+            })
+            .await
+            .unwrap();
+    }
+    storage
+        .create_tool_call(NewToolCall {
+            turn_id,
+            agent_id: "child".into(),
+            call_id: "child-call".into(),
+            tool: "echo".into(),
+            arguments: "{}".into(),
+            model_arguments: "{}".into(),
+            result: Some("done".into()),
+            model_result: Some("done".into()),
+            status: Some("success".into()),
+            duration_ms: Some(1),
+            truncated: false,
+            total_bytes: None,
+            provider_round: 1,
+            position: 0,
+            parent_call_id: None,
+            display_summary: None,
+        })
+        .await
+        .unwrap();
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .unwrap();
+    let task_index = rebuilt
+        .iter()
+        .position(|message| message.text_content().contains("Delegated Task"))
+        .unwrap();
+    let round_index = rebuilt
+        .iter()
+        .position(|message| message.tool_replay().is_some())
+        .unwrap();
+    assert!(
+        round_index > task_index,
+        "tool round at {round_index} precedes delegated task at {task_index}"
     );
 }
 
