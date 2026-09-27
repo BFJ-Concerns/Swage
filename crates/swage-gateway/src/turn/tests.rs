@@ -14156,7 +14156,7 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
     let (workspace_root, allowed_paths) = agent_workspace_from_policy(
         std::path::Path::new(".swage"),
         &policy,
-        Uuid::new_v4(),
+        &ScopeLocation::General,
         Uuid::new_v4(),
     );
 
@@ -14173,6 +14173,57 @@ fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing(
         policy.deny.is_empty(),
         "missing topic workspace grants must inherit global permissions rather than denying"
     );
+}
+
+#[test]
+fn general_session_fallback_uses_general_scratch_without_a_topics_segment() {
+    let root = tempfile::tempdir().expect("scratch root");
+    let session_id = Uuid::new_v4();
+    let policy = TrustedWorkspacePolicy::default();
+    let (workspace, allowed) =
+        agent_workspace_from_policy(root.path(), &policy, &ScopeLocation::General, session_id);
+    let expected = root
+        .path()
+        .join("scratch/general/sessions")
+        .join(session_id.to_string());
+    assert_eq!(workspace, expected);
+    assert_eq!(allowed, vec![expected]);
+    assert!(!workspace.to_string_lossy().contains("/topics/"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn general_scratch_authorises_worker_placement() {
+    let root = tempfile::tempdir().expect("scratch root");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+    let general = storage.general_scope().await.expect("general scope");
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let context_id = Uuid::new_v4();
+    let permitted = root
+        .path()
+        .join("scratch/general/sessions")
+        .join(context_id.to_string());
+    std::fs::create_dir_all(&permitted).expect("create prospective worker directory");
+    let placement = resolve_authorised_worker_directory(
+        &state,
+        general.id,
+        context_id,
+        None,
+        None,
+        None,
+        permitted.to_str().expect("UTF-8 scratch path"),
+    )
+    .await
+    .expect("general scratch is authorised");
+    assert_eq!(placement.path, permitted);
+    assert!(placement.can_write);
 }
 
 #[test]
@@ -14719,8 +14770,12 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
         assert_eq!(stored.permissions, vec!["read", "write"]);
         for selected in [None, Some(attachment.id)] {
             let policy = load_trusted_workspace_policy(&storage, topic_id, selected).await;
-            let (root, paths) =
-                agent_workspace_from_policy(config_root.path(), &policy, topic_id, session_id);
+            let (root, paths) = agent_workspace_from_policy(
+                config_root.path(),
+                &policy,
+                &ScopeLocation::General,
+                session_id,
+            );
             let mut context =
                 swage_tool::context::MockToolContext::new("reader", session_id.to_string());
             context.working_directory = root;
@@ -15029,22 +15084,16 @@ async fn context_assembled_precedes_first_token() {
                 !report.elements.is_empty(),
                 "report should contain elements key"
             );
-            let session = state
-                .storage
-                .get_session(session_id)
-                .await
-                .expect("session lookup")
-                .expect("session");
+            let expected = state
+                .config_root
+                .join("scratch/general/sessions")
+                .join(session_id.to_string());
             assert_eq!(
                 report
                     .tool_scope
                     .as_ref()
                     .and_then(|scope| scope.get("effective_root")),
-                Some(&serde_json::json!(managed_scratch_workspace(
-                    &state.config_root,
-                    session.topic_id,
-                    session_id
-                ))),
+                Some(&serde_json::json!(expected)),
                 "live turn diagnostics must report the root passed to tools"
             );
         }
@@ -15104,19 +15153,13 @@ async fn assembly_report_persisted_as_context_snapshot() {
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
     );
-    let session = state
-        .storage
-        .get_session(session_id)
-        .await
-        .expect("session lookup")
-        .expect("session");
+    let expected = state
+        .config_root
+        .join("scratch/general/sessions")
+        .join(session_id.to_string());
     assert_eq!(
         parsed["tool_scope"]["effective_root"],
-        serde_json::json!(managed_scratch_workspace(
-            &state.config_root,
-            session.topic_id,
-            session_id
-        )),
+        serde_json::json!(expected),
         "turn diagnostics must record the root passed to tools"
     );
     let provider_request = &parsed["provider_visible"]["requests"][0];
