@@ -12,8 +12,8 @@ use crate::config_change::{ConfigChange, record_config_change};
 use crate::state::AppState;
 
 pub use swage_protocol::client::topic::{
-    CreateWorkspaceAttachmentRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
-    WorkspaceAttachmentResponse,
+    CreateWorkspaceAttachmentRequest, RelinkWorkspaceAttachmentRequest,
+    UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
 };
 
 fn default_workspace_permissions() -> Vec<String> {
@@ -66,23 +66,7 @@ impl WorkspaceAttachmentService {
         req: CreateWorkspaceAttachmentRequest,
     ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
         self.ensure_topic_exists(topic_id).await?;
-        let path = req.path.trim();
-        if path.is_empty() {
-            return Err(GatewayError::ValidationError(
-                "workspace path must not be empty".into(),
-            ));
-        }
-        if !Path::new(path).exists() {
-            return Err(GatewayError::ValidationError(format!(
-                "workspace path '{path}' does not exist on disk"
-            )));
-        }
-        let canonical_path = std::fs::canonicalize(path).map_err(|error| {
-            GatewayError::ValidationError(format!(
-                "workspace path '{path}' could not be resolved: {error}"
-            ))
-        })?;
-        let canonical_path = canonical_path.to_string_lossy().into_owned();
+        let canonical_path = canonical_workspace_path(&req.path)?;
 
         let label = req
             .label
@@ -159,6 +143,32 @@ impl WorkspaceAttachmentService {
                 if req.is_trusted { "enabled" } else { "revoked" },
                 workspace.label
             ),
+            Some(prior),
+            Some(workspace_snapshot(&workspace)?),
+        )
+        .await?;
+        Ok(workspace_to_response(workspace))
+    }
+
+    pub async fn relink_workspace(
+        &self,
+        topic_id: Uuid,
+        workspace_id: Uuid,
+        req: RelinkWorkspaceAttachmentRequest,
+    ) -> Result<WorkspaceAttachmentResponse, GatewayError> {
+        let canonical_path = canonical_workspace_path(&req.path)?;
+
+        let prior = self.workspace_snapshot(workspace_id).await?;
+        self.ensure_workspace_belongs_to_topic(topic_id, workspace_id)
+            .await?;
+        let workspace = self
+            .storage
+            .relink_workspace_attachment(workspace_id, canonical_path)
+            .await?;
+        self.record_change(
+            "relink_workspace",
+            workspace_id,
+            format!("relinked workspace '{}'", workspace.label),
             Some(prior),
             Some(workspace_snapshot(&workspace)?),
         )
@@ -298,6 +308,27 @@ impl WorkspaceAttachmentService {
 
 fn workspace_snapshot(workspace: &WorkspaceAttachment) -> Result<serde_json::Value, GatewayError> {
     serde_json::to_value(workspace).map_err(|error| GatewayError::ConfigError(error.to_string()))
+}
+
+fn canonical_workspace_path(requested: &str) -> Result<String, GatewayError> {
+    let path = requested.trim();
+    if path.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "workspace path must not be empty".into(),
+        ));
+    }
+    if !Path::new(path).exists() {
+        return Err(GatewayError::ValidationError(format!(
+            "workspace path '{path}' does not exist on disk"
+        )));
+    }
+    std::fs::canonicalize(path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|error| {
+            GatewayError::ValidationError(format!(
+                "workspace path '{path}' could not be resolved: {error}"
+            ))
+        })
 }
 
 fn workspace_to_response(workspace: WorkspaceAttachment) -> WorkspaceAttachmentResponse {

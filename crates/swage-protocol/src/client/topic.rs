@@ -76,6 +76,11 @@ pub struct UpdateWorkspaceTrustRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct RelinkWorkspaceAttachmentRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct WorkspaceAttachmentResponse {
     pub id: Uuid,
