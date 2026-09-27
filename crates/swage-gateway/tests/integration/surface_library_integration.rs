@@ -16,9 +16,10 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
+use swage_gateway::service::ConversationService;
 use swage_gateway::state::AppState;
 use swage_storage::SqliteStorage;
-use swage_storage::store::SurfaceStore;
+use swage_storage::store::{AuditStore, SurfaceStore};
 
 fn router_over(storage: Arc<SqliteStorage>) -> Router {
     let state = AppState::new(
@@ -418,6 +419,195 @@ async fn a_topic_default_opens_in_its_new_sessions_and_persists_on_disk() {
         none["surfaces"],
         json!([]),
         "a withdrawn default opens nowhere"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn seeded_and_manual_surfaces_record_their_actual_modules() {
+    let (router, storage) = make_test_router();
+    let topic_id = make_topic(&router, "Audit").await;
+    let owner = make_session(&router, Some(&topic_id)).await;
+    let surface_id = make_populated_surface(&router, &owner).await;
+    let entry_id = save(&router, &surface_id, &[]).await;
+    let (status, _) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/default-surfaces"),
+        Some(json!({ "library_entry_id": entry_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let session = make_session(&router, Some(&topic_id)).await;
+    let (status, manual) = http_json(
+        &router,
+        "POST",
+        &format!("/api/sessions/{session}/surfaces"),
+        Some(json!({ "title": "Added", "library_entry_id": entry_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, opened) = http_json(
+        &router,
+        "GET",
+        &format!("/api/sessions/{session}/surfaces"),
+        None,
+    )
+    .await;
+    let seeded_id = opened["surfaces"][0]["id"].as_str().unwrap();
+    let events = storage
+        .list_audit_events_by_session(session.parse().unwrap())
+        .await
+        .unwrap();
+    for id in [seeded_id, manual["id"].as_str().unwrap()] {
+        let event = events
+            .iter()
+            .find(|event| event.event_kind == "surface_created" && event.entity_id == id)
+            .expect("each created surface has its own event");
+        assert_eq!(event.metadata["seeded_from"]["library_entry_id"], entry_id);
+        assert_eq!(event.metadata["seeded_from"]["seeding"], "with_content");
+        assert_eq!(
+            event.metadata["modules"],
+            json!([
+                { "kind": "document", "position": 0, "source": "## Yesterday: shipped the gateway" },
+                { "kind": "document", "position": 1, "source": "## Blockers: none" }
+            ])
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_save_audit_leaves_no_library_entry() {
+    let (router, storage) = make_test_router();
+    let topic_id = make_topic(&router, "Atomic save").await;
+    let session = make_session(&router, Some(&topic_id)).await;
+    let surface_id = make_populated_surface(&router, &session).await;
+    storage
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_save_audit BEFORE INSERT ON audit_events
+         WHEN NEW.event_kind = 'surface_saved_to_library'
+         BEGIN SELECT RAISE(ABORT, 'forced audit failure'); END;",
+            )
+        })
+        .await
+        .unwrap();
+
+    let (status, _) = http_json(
+        &router,
+        "POST",
+        &format!("/api/surfaces/{surface_id}/save"),
+        Some(json!({ "name": "Failed", "description": "Must not persist" })),
+    )
+    .await;
+    assert!(!status.is_success(), "the audit insert must fail the save");
+    assert!(
+        storage.list_library_entries().await.unwrap().is_empty(),
+        "the entry rolls back with its rejected audit event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(StubProvider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let broadcast = state.broadcast.clone();
+    let router = build_router(state);
+    let topic_id = make_topic(&router, "Signals").await;
+    let owner = make_session(&router, Some(&topic_id)).await;
+    let surface_id = make_populated_surface(&router, &owner).await;
+    let entry_id = save(&router, &surface_id, &[]).await;
+    let (status, _) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/default-surfaces"),
+        Some(json!({ "library_entry_id": entry_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut signals = broadcast.subscribe();
+
+    let session = make_session(&router, Some(&topic_id)).await;
+    let (_, opened) = http_json(
+        &router,
+        "GET",
+        &format!("/api/sessions/{session}/surfaces"),
+        None,
+    )
+    .await;
+    let seeded_id = opened["surfaces"][0]["id"].as_str().unwrap();
+    let signal = signals
+        .try_recv()
+        .expect("default seeding broadcasts a refetch");
+    assert_eq!(
+        serde_json::to_value(signal).unwrap(),
+        json!({
+            "type": "surface_updated", "surface_id": seeded_id
+        })
+    );
+
+    let (_, manual) = http_json(
+        &router,
+        "POST",
+        &format!("/api/sessions/{session}/surfaces"),
+        Some(json!({ "title": "Manual" })),
+    )
+    .await;
+    let signal = signals
+        .try_recv()
+        .expect("manual creation broadcasts a refetch");
+    assert_eq!(
+        serde_json::to_value(signal).unwrap(),
+        json!({
+            "type": "surface_updated", "surface_id": manual["id"]
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn automated_sessions_do_not_open_topic_defaults() {
+    let (router, storage) = make_test_router();
+    let topic_id = make_topic(&router, "People only").await;
+    let owner = make_session(&router, Some(&topic_id)).await;
+    let surface_id = make_populated_surface(&router, &owner).await;
+    let entry_id = save(&router, &surface_id, &[]).await;
+    let (status, _) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/default-surfaces"),
+        Some(json!({ "library_entry_id": entry_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let service = ConversationService::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+    );
+    let automated = service
+        .create_session_in_topic_for_agent(
+            topic_id.parse().unwrap(),
+            "gateway",
+            swage_storage::SessionOrigin::ScheduleRun {
+                schedule_id: uuid::Uuid::new_v4(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .list_surfaces_by_session(automated.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a scheduled session has no person's default surfaces"
     );
 }
 
