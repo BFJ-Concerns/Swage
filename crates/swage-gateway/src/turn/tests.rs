@@ -14297,38 +14297,81 @@ async fn delegated_child_names_parent_selected_non_default_workspace() {
         })
         .await
         .expect("parent session");
-    let child = storage
-        .create_session(new_session(topic.id))
+    let parent_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: parent.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .expect("parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: parent_thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate from the selected workspace".into()),
+            parent_turn_id: None,
+        })
         .await
-        .expect("delegated child session");
-    assert_eq!(child.active_workspace_attachment_id, None);
+        .expect("parent turn");
+    let (provider, requests) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "delegated work complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
-        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
         root.path().to_path_buf(),
     );
-    let (config, tool_root) = build_agent_config_for_topic_workspace(
-        &state,
-        "delegate".into(),
-        &swage_config::ResolvedConfig::default(),
-        None,
-        &topic,
-        parent.id,
-        parent.active_workspace_attachment_id,
-    )
-    .await;
-    assert_eq!(config.working_directory, selected);
-    let environment = build_session_environment(&topic, &tool_root, &child);
-    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
-        [0]
-    .text_content();
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "delegate",
+            "work in the selected workspace",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "selected-workspace-delegate",
+            "gateway",
+            parent_turn.id,
+            topic.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("delegation completes");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+    let child = storage
+        .list_sessions_by_agent_id("delegate")
+        .await
+        .expect("child sessions")
+        .into_iter()
+        .next()
+        .expect("delegated child session");
+    assert_eq!(child.active_workspace_attachment_id, None);
+    let requests = requests.lock().expect("captured provider requests");
+    assert_eq!(requests.len(), 1, "one child request");
+    let text = requests[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
     assert!(text.contains(&format!("Working directory: {}", selected.display())));
     assert!(!text.contains("No workspace is attached"));
-    assert_eq!(tool_root.source, ToolRootSource::AttachedWorkspace);
 }
 
 #[test]
