@@ -996,8 +996,8 @@ impl Agent {
                     // from tool dispatch may leave without persisting it here.
                     self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
                         .await;
-                    // A call cut off mid-execution has a started row; settle it
-                    // as interrupted so the record and history replay show it.
+                    // Settle every started row without a recorded result so
+                    // history replay can explain the unknown outcome.
                     if let Err(error) = self
                         .storage
                         .settle_started_tool_calls(
@@ -1012,6 +1012,7 @@ impl Agent {
                         let reason =
                             format!("cancelled tool call's record could not be settled: {error}");
                         let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: turn.id,
                             reason: reason.clone(),
                         });
                         let _ = event_tx.send(AgentEvent::Error {

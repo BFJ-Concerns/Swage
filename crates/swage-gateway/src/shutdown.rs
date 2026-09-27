@@ -512,7 +512,7 @@ mod tests {
             assert_eq!(
                 call.status.as_deref(),
                 Some(expected_status),
-                "terminal turn {:?} retained an unsettled call",
+                "terminal turn {:?} settled a call with the wrong status",
                 turn.state
             );
             assert_eq!(call.result.as_deref(), Some(expected_result));

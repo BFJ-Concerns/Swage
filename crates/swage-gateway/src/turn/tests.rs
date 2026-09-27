@@ -85,6 +85,44 @@ fn provider_response_witness_is_appended_without_content_fields() {
 }
 
 #[tokio::test]
+async fn delegated_record_integrity_loss_fails_cancelled_child_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let thread_id = storage.list_by_session(session_id).await.unwrap()[0].id;
+    let child = storage
+        .create_turn(NewTurn {
+            thread_id,
+            agent_id: "delegate".into(),
+            state: TurnState::Pending,
+            user_input: Some("Run a tool".into()),
+            parent_turn_id: Some(Uuid::new_v4()),
+        })
+        .await
+        .unwrap();
+    storage
+        .update_turn_state(child.id, TurnState::Interrupted)
+        .await
+        .unwrap();
+
+    delegation_snapshot_recorder_for_state(state)
+        .record_event(
+            session_id,
+            AgentEvent::RecordIntegrityLost {
+                turn_id: child.id,
+                reason: "cancelled tool call's record could not be settled".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage.get_turn(child.id).await.unwrap().unwrap().state,
+        TurnState::Failed,
+        "delegated record loss must remain visible after cancellation"
+    );
+}
+
+#[tokio::test]
 async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
