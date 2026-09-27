@@ -13,8 +13,8 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, NewLibraryEntry, NewLibraryEntryModule,
-    NewSurface, NewSurfaceModule, Surface, SurfaceModule,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, NewAuditEvent, NewLibraryEntry,
+    NewLibraryEntryModule, NewSurface, NewSurfaceModule, Surface, SurfaceModule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::topic::{decode_tags, encode_tags};
@@ -22,7 +22,7 @@ use crate::store::SurfaceStore;
 
 /// Every surface read selects the same column list, lineage included.
 const SURFACE_COLUMNS: &str =
-    "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at";
+    "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name";
 const ENTRY_COLUMNS: &str = "id, name, description, tags, origin_topic_id, saved_from_surface_id, \
     created_at, updated_at";
 const MODULE_COLUMNS: &str = "id, surface_id, kind, position, source, created_at, updated_at";
@@ -42,6 +42,7 @@ fn row_to_surface(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
         library_entry_id: entry.as_deref().map(parse_uuid).transpose()?,
+        seeded_from_name: row.get(7)?,
         seeded_at: seeded_at.as_deref().map(parse_dt).transpose()?,
     })
 }
@@ -135,6 +136,7 @@ impl SurfaceStore for SqliteStorage {
                 created_at: now,
                 updated_at: now,
                 library_entry_id: None,
+                seeded_from_name: None,
                 seeded_at: None,
             })
         })
@@ -258,13 +260,13 @@ impl SurfaceStore for SqliteStorage {
         &self,
         entry: NewLibraryEntry,
         modules: Vec<NewLibraryEntryModule>,
+        mut audit: NewAuditEvent,
     ) -> Result<LibraryEntry, StorageError> {
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
             let now_str = now.to_rfc3339();
-            // One transaction: an entry whose modules are missing is never
-            // observable, and a failed copy leaves no entry behind.
+            // The entry, its modules and its origin event commit together.
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO surface_library_entries
@@ -296,6 +298,8 @@ impl SurfaceStore for SqliteStorage {
                     ],
                 )?;
             }
+            audit.entity_id = id.to_string();
+            super::audit::insert_audit_event(&tx, audit)?;
             tx.commit()?;
             Ok(LibraryEntry {
                 id,
@@ -376,8 +380,8 @@ impl SurfaceStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO surfaces
-                     (id, session_id, title, created_at, updated_at, library_entry_id, seeded_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4)",
+                     (id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, (SELECT name FROM surface_library_entries WHERE id = ?5))",
                 params![
                     id.to_string(),
                     surface.session_id.to_string(),
@@ -417,6 +421,11 @@ impl SurfaceStore for SqliteStorage {
                     ],
                 )?;
             }
+            let seeded_from_name: String = tx.query_row(
+                "SELECT seeded_from_name FROM surfaces WHERE id = ?1",
+                params![id.to_string()],
+                |row| row.get(0),
+            )?;
             tx.commit()?;
             Ok(Surface {
                 id,
@@ -425,6 +434,7 @@ impl SurfaceStore for SqliteStorage {
                 created_at: now,
                 updated_at: now,
                 library_entry_id: Some(entry_id),
+                seeded_from_name: Some(seeded_from_name),
                 seeded_at: Some(now),
             })
         })
@@ -487,10 +497,22 @@ impl SurfaceStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{NewSession, NewSurface, NewSurfaceModule, NewTopic, SessionOrigin};
+    use crate::model::{NewSession, NewSurface, NewSurfaceModule, NewTopic};
     use crate::store::{SessionStore, TopicStore};
 
     use super::*;
+
+    fn entry_audit(session_id: Uuid) -> NewAuditEvent {
+        NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: Some(session_id),
+            entity_kind: "surface_library_entry".into(),
+            entity_id: String::new(),
+            event_kind: "surface_saved_to_library".into(),
+            summary: "surface saved to the library".into(),
+            metadata: serde_json::json!({}),
+        }
+    }
 
     /// A topic and a session in it: the owner every surface here belongs to.
     async fn make_session() -> (SqliteStorage, Uuid, Uuid) {
@@ -511,11 +533,7 @@ mod tests {
     async fn session_in(storage: &SqliteStorage, topic_id: Uuid) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".into(),
-                origin: SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..crate::fixtures::new_session(topic_id)
             })
             .await
             .unwrap()
@@ -576,6 +594,7 @@ mod tests {
                     saved_from_surface_id: Some(surface.id),
                 },
                 modules,
+                entry_audit(surface.session_id),
             )
             .await
             .unwrap()
@@ -650,7 +669,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn saving_rolls_back_when_a_later_module_insert_fails() {
-        let (storage, topic_id, _) = make_session().await;
+        let (storage, topic_id, session) = make_session().await;
         storage
             .with_conn(|conn| {
                 conn.execute_batch(
@@ -684,6 +703,7 @@ mod tests {
                         source: "reject this module".into(),
                     },
                 ],
+                entry_audit(session),
             )
             .await;
 
@@ -918,6 +938,49 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_an_origin_topic_keeps_entry_modules_and_other_topics_designation() {
+        let (storage, origin_topic, origin_session) = make_session().await;
+        let destination = TopicStore::create(
+            &storage,
+            NewTopic {
+                name: "destination".into(),
+                slug: "destination".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let surface = surface_with_modules(&storage, origin_session, &["saved content"]).await;
+        let entry = save(&storage, &surface, origin_topic, &[]).await;
+        storage
+            .add_topic_default_entry(destination.id, entry.id)
+            .await
+            .unwrap();
+
+        assert!(TopicStore::delete(&storage, origin_topic).await.unwrap());
+        let survivor = storage
+            .get_library_entry(entry.id)
+            .await
+            .unwrap()
+            .expect("entry remains");
+        assert_eq!(
+            survivor.origin_topic_id, origin_topic,
+            "the vanished origin remains distinct from general"
+        );
+        assert_eq!(
+            storage.list_library_entry_modules(entry.id).await.unwrap()[0].source,
+            "saved content"
+        );
+        assert_eq!(
+            storage
+                .list_topic_default_entries(destination.id)
+                .await
+                .unwrap()[0]
+                .id,
+            entry.id
         );
     }
 }

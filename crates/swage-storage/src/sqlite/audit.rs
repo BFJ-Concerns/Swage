@@ -50,41 +50,45 @@ fn row_to_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEvent> {
     })
 }
 
+pub(super) fn insert_audit_event(
+    conn: &rusqlite::Connection,
+    event: NewAuditEvent,
+) -> rusqlite::Result<AuditEvent> {
+    let created_at = Utc::now();
+    let metadata_json = serde_json::to_string(&event.metadata)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    conn.execute(
+        "INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            event.id,
+            event.session_id.map(|id| id.to_string()),
+            event.entity_kind,
+            event.entity_id,
+            event.event_kind,
+            event.summary,
+            metadata_json,
+            created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(AuditEvent {
+        id: event.id,
+        session_id: event.session_id,
+        entity_kind: event.entity_kind,
+        entity_id: event.entity_id,
+        event_kind: event.event_kind,
+        summary: event.summary,
+        metadata: event.metadata,
+        created_at,
+    })
+}
+
 #[async_trait]
 impl AuditStore for SqliteStorage {
     async fn create_audit_event(&self, event: NewAuditEvent) -> Result<AuditEvent, StorageError> {
-        self.with_conn(move |conn| {
-            let created_at = Utc::now();
-            let created_at_str = created_at.to_rfc3339();
-            let metadata_json = serde_json::to_string(&event.metadata)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            conn.execute(
-                "INSERT INTO audit_events (
-                    id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    event.id,
-                    event.session_id.map(|id| id.to_string()),
-                    event.entity_kind,
-                    event.entity_id,
-                    event.event_kind,
-                    event.summary,
-                    metadata_json,
-                    created_at_str,
-                ],
-            )?;
-            Ok(AuditEvent {
-                id: event.id,
-                session_id: event.session_id,
-                entity_kind: event.entity_kind,
-                entity_id: event.entity_id,
-                event_kind: event.event_kind,
-                summary: event.summary,
-                metadata: event.metadata,
-                created_at,
-            })
-        })
-        .await
+        self.with_conn(move |conn| insert_audit_event(conn, event))
+            .await
     }
 
     async fn list_audit_events(&self) -> Result<Vec<AuditEvent>, StorageError> {
@@ -136,11 +140,7 @@ mod tests {
         let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: crate::model::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..crate::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
