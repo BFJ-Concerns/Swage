@@ -129,39 +129,7 @@ pub(crate) async fn run_loop(
                 match tool_map.get(&tool_name) {
                     Some(tool) => {
                         let start = Instant::now();
-                        // Shutdown must be received while a tool is running:
-                        // dropping its future lets the tool stop its own work
-                        // before the agent acknowledges shutdown.
-                        let mut inbound = None;
-                        let result = {
-                            let execution = tool.execute(parameters, &ctx);
-                            tokio::pin!(execution);
-                            tokio::select! {
-                                result = &mut execution => Some(result),
-                                message = conn.receive_message() => {
-                                    inbound = Some(message?);
-                                    None
-                                }
-                            }
-                        };
-                        if let Some(message) = inbound {
-                            match message {
-                                IpcMessage::Shutdown => {
-                                    conn.send_shutdown_ack().await?;
-                                    break;
-                                }
-                                unexpected => {
-                                    conn.send_error(
-                                        None,
-                                        ErrorCategory::Protocol,
-                                        format!("unexpected message during tool execution: {unexpected:?}"),
-                                    )
-                                    .await?;
-                                    continue;
-                                }
-                            }
-                        }
-                        let result = result.expect("tool execution completed");
+                        let result = tool.execute(parameters, &ctx).await;
                         let duration_ms = start.elapsed().as_millis() as u64;
 
                         match result {
