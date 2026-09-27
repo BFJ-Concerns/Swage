@@ -10,4 +10,8 @@ session_id: string, title: string, created_at: string, updated_at: string, modul
  * The library entry this surface was seeded from, if any — the recorded
  * origin of its shape. Absent on a surface created blank.
  */
-library_entry_id?: string | null, seeded_at?: string | null, };
+library_entry_id?: string | null,
+/**
+ * The library entry's name when this surface was seeded.
+ */
+seeded_from_name?: string | null, seeded_at?: string | null, };

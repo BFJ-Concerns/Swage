@@ -495,11 +495,8 @@ mod tests {
         let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: agent_id.to_string(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
@@ -599,11 +596,8 @@ mod tests {
 
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-b".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
@@ -740,11 +734,8 @@ mod tests {
         // First delegation — the one we'll cancel.
         let session_a = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-b".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
@@ -754,11 +745,8 @@ mod tests {
         // Second delegation — should NOT be interrupted.
         let session_b = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-b".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();
