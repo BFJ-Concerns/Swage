@@ -628,6 +628,48 @@ four-member contract — `activeConversationId`, `checkConversationExists`,
 `clearActiveConversation`, `selectConversation` — decoupled from Svelte store
 internals.
 
+## Conversation branching
+
+A conversation can be branched from any message. The conversation's detail
+carries a `root_thread_id` — the thread it started on — and its `messages`
+are that thread's messages. A branch is a sibling thread
+(`ConversationBranchResponse`) that carries the parent's messages up to the
+message it was branched from, then diverges. A branch's messages are read
+from `GET /api/threads/{id}` (`ConversationThreadDetail`).
+
+### Routes
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/conversations/{id}/branches` | GET | List a conversation's branches (`ConversationBranchListResponse`) |
+| `/api/conversations/{id}/branches` | POST | Branch at a message (`CreateConversationBranchRequest`: `thread_id`, `from_message_id`) → `ConversationBranchResponse` (201) |
+| `/api/threads/{id}` | GET | Read one thread with its messages and, for a branch, its lineage |
+| `/api/threads/{id}/abandon` | POST | Abandon a branch: it keeps its history and lineage but takes no further turns |
+
+All four routes are in the client route manifest.
+
+### Branch listing
+
+Each `ConversationBranchResponse` carries `child_thread_id`,
+`parent_thread_id`, `branched_from_message_id`, the
+`branched_from_preview` (the opening of the branch-point message, absent
+when that message no longer exists), and the thread's `state`.
+
+### Thread states
+
+A thread's `state` is one of `idle`, `processing`, `interrupted`,
+`completed`, or `abandoned`. Abandoning is terminal: the branch keeps its
+history and lineage and refuses further turns.
+
+### Message identity
+
+Every `MessageView` carries its own `id` and `thread_id`. The `id` is what
+a branch is taken from (`from_message_id` in the branch request).
+
+### Audit
+
+Both branching and abandoning land in the session's audit trail.
+
 ## Image attachments
 
 A message may carry content parts beside its text, submitted as the
@@ -878,17 +920,56 @@ first two. A run that fails after delivery has already been attempted does
 not receive a no-delivery record — `delivery_attempted` on the failure
 controls this (`schedule.rs:1267`).
 
-## Device registration
+## Devices
 
-Remote devices register through `POST /api/devices/register`
-(`RegisterDeviceRequest` in `swage-protocol::device`). The `kind` field
-defaults to `"attached_device"` and names the device type.
+A device registers once, naming the gateway secret its credential resolves
+against and the workspace it operates in, then dials into the gateway over
+a persistent connection. Nothing listens on the device: the device opens the
+connection, advertises what it can run, and the gateway invokes operations
+back over the same socket. `swage device connect` runs a machine as a device.
 
-`remote_registration_kind` (`device.rs:156`) parses and validates the
-kind at the registration boundary. A `kind` of `"local"` is refused with
-a `ValidationError`: a local device has no remote producer to register.
-The same refusal applies to recovery imports that carry a local kind, so
-the constraint holds at every entry point into the remote-device registry.
+### Registration
+
+`POST /api/devices/register` (`RegisterDeviceRequest` in
+`swage-protocol::device`). The `kind` field defaults to `"attached_device"`
+and names the device type. A `kind` of `"local"` is refused with a
+`ValidationError`: a local device has no remote producer to register. The
+same refusal applies to recovery imports, so the remote-device registry
+never holds a local entry. What a device can run is not registered — the
+device advertises its capabilities each time it connects.
+
+### The connection
+
+The device dials `GET /api/devices/connect` (WebSocket). The handshake:
+
+1. The device sends a `Hello` frame: `device_id`, `shared_token` (resolved
+   against the secret named at registration), `label`, and `capabilities`
+   (the tools it can run).
+2. The gateway validates the credential and answers `Welcome` (with
+   `heartbeat_interval_secs`) or `Rejected` (with a message) and closes.
+
+After the welcome the connection carries two frame types in each direction:
+
+| Direction | Frame | Purpose |
+|---|---|---|
+| Gateway → device | `Operation` | Run `tool_name` with `params` in `context`; carries a `correlation_id` |
+| Gateway → device | `Cancel` | Stop the operation `correlation_id` if still running |
+| Device → gateway | `Result` | Operation `correlation_id` finished with `output` |
+| Device → gateway | `Failure` | Operation `correlation_id` failed with `message` |
+| Device → gateway | `Cancelled` | Operation `correlation_id` was stopped |
+| Device → gateway | `Heartbeat` | Sent every `heartbeat_interval_secs` (default 10 s) |
+
+All frames are tagged by `kind` (snake_case) and defined in
+`swage-protocol::device` (`DeviceFrame`, `GatewayFrame`).
+
+### Presence
+
+Presence reads a device as `connected`, `stale`, or `disconnected` from
+heartbeats alone. The device heartbeats every `heartbeat_interval_secs`
+(told in the welcome, default 10 s); the gateway marks it stale after
+3× that interval without a heartbeat, and disconnected when the WebSocket
+closes. Every connect, disconnect, invocation, and settlement lands in the
+audit trail under the device's id.
 
 ## Wire error contract
 
@@ -1065,6 +1146,32 @@ captures a scope generation before the request and hands the store a
 nor activated once the user has moved to another (it exists in the scope it
 was asked for, and the recent list finds it).
 
+## Hosted documentation
+
+The gateway compiles the agent-facing documentation set (`agent-docs/`) into
+the binary (`crate::shipped_docs`) and serves it read-only. Documents are
+addressed by name — the file stem of the source under `agent-docs/`. The set
+is flat: no subdirectories.
+
+| Route | Response |
+|---|---|
+| `GET /api/docs` | `DocumentListResponse`: each document's `name`, `title`, and `description` |
+| `GET /api/docs/{name}` | `DocumentResponse`: the document's Markdown body, front matter included |
+
+Both routes are in the client route manifest (`swage-protocol::client::docs`).
+
+The `docs_read` tool (`tool/docs_read.rs`) exposes this to agents: call with
+no arguments to list the documents with descriptions; call with a `name` to
+read one. A document longer than the tool's output limit pages by byte offset
+(`offset_bytes`), the same continuation shape `url_fetch` uses. The tool
+executes in the gateway process (`requires_device_execution: true`).
+
+The `catalogue_embeds_every_document_byte_for_byte` test
+(`swage-gateway::shipped_docs`) proves each compiled document is
+byte-identical to the repository source. The
+`every_shipped_document_carries_a_title_and_description` test verifies the
+metadata the listing returns.
+
 ## Gateway tools
 
 The gateway ships these built-in tools
@@ -1158,6 +1265,12 @@ two sandbox-eligible tools.
 |---|---|
 | `url_fetch` | `url_fetch.rs` |
 | `web_search` | `web_search.rs` |
+
+### Documentation
+
+| Tool | Source |
+|---|---|
+| `docs_read` | `docs_read.rs` — list or read the gateway's hosted documentation; see [Hosted documentation](#hosted-documentation) |
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
 configuration; their names come from the plugin manifest.
