@@ -187,17 +187,6 @@ mod tests {
     };
     use swage_tool::context::MockToolContext;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     fn context_for(
         state: AppState,
         storage: Arc<SqliteStorage>,
@@ -266,7 +255,11 @@ mod tests {
             .await
             .expect("end the run");
         let session = session_in(&storage, topic.id).await;
-        let context = context_for(state(Arc::clone(&storage)), Arc::clone(&storage), session);
+        let context = context_for(
+            crate::test_support::state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session,
+        );
 
         let result = WorkflowRunStatusTool
             .execute(json!({}), &context)
@@ -315,7 +308,11 @@ mod tests {
         let foreign = run_in(&storage, theirs.id, "build-verify").await;
         post(&storage, foreign, "decision.needed", json!({"nonce": "x"})).await;
         let session = session_in(&storage, mine.id).await;
-        let context = context_for(state(Arc::clone(&storage)), Arc::clone(&storage), session);
+        let context = context_for(
+            crate::test_support::state(Arc::clone(&storage)),
+            Arc::clone(&storage),
+            session,
+        );
 
         let listed = WorkflowRunStatusTool
             .execute(json!({}), &context)
