@@ -460,10 +460,16 @@ async fn seeded_and_manual_surfaces_record_their_actual_modules() {
         .await
         .unwrap();
     for id in [seeded_id, manual["id"].as_str().unwrap()] {
-        let event = events
+        let matches = events
             .iter()
-            .find(|event| event.event_kind == "surface_created" && event.entity_id == id)
-            .expect("each created surface has its own event");
+            .filter(|event| event.event_kind == "surface_created" && event.entity_id == id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "each surface has exactly one creation event"
+        );
+        let event = matches[0];
         assert_eq!(event.metadata["seeded_from"]["library_entry_id"], entry_id);
         assert_eq!(event.metadata["seeded_from"]["seeding"], "with_content");
         assert_eq!(
