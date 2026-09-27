@@ -3999,6 +3999,7 @@ impl ToolCallStore for MockStorage {
         call_id: &str,
         turn_id: Uuid,
         result: &str,
+        model_result: &str,
         status: &str,
         duration_ms: i64,
         truncated: bool,
@@ -4016,11 +4017,7 @@ impl ToolCallStore for MockStorage {
             .find(|tc| tc.call_id == call_id && tc.turn_id == turn_id)
         {
             tc.result = Some(result.to_string());
-            tc.model_result = Some(swage_core::compact_tool_result_for_model_with_reference(
-                result,
-                status != "success",
-                swage_core::tool_result_reference(&turn_id.to_string(), call_id),
-            ));
+            tc.model_result = Some(model_result.to_string());
             tc.status = Some(status.to_string());
             tc.duration_ms = Some(duration_ms);
             tc.truncated = truncated;
@@ -16856,5 +16853,156 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
             .any(|m| m.text_content().contains("orphaned tool row")),
         "a tool row answering no recorded call is dropped by the rebuild — \
          which is why deliveries must not use Role::Tool"
+    );
+}
+
+/// A turn killed mid-tool leaves one settled call and one started call. On
+/// real SQLite: recovery settles the started row as interrupted, and the
+/// rebuilt history replays the turn's round — the completed call with its
+/// result, the cut-off one as interrupted — although the turn never reached
+/// an assistant message, so a resumed continuation does not run the completed
+/// call again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
+    use swage_storage::sqlite::SqliteStorage;
+    use swage_storage::store::{
+        MessageStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+    };
+    use swage_storage::{NewSession, NewThread, NewToolCall, NewTurn, TurnState};
+
+    let storage = SqliteStorage::in_memory().expect("sqlite");
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            topic_id: topic.id,
+            agent_id: "gateway".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id: thread.id,
+            attachments: Vec::new(),
+            turn_id: Some(turn.id),
+            role: Role::User,
+            content: "append the marker, then run the long job".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    for (position, call_id, tool) in [(0, "call-append", "file_edit"), (1, "call-long", "shell")] {
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                call_id: call_id.into(),
+                tool: tool.into(),
+                arguments: "{}".into(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(&serde_json::json!(
+                    {}
+                )),
+                result: None,
+                model_result: None,
+                status: None,
+                duration_ms: None,
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+    }
+    storage
+        .update_tool_call_result(
+            "call-append",
+            turn.id,
+            "marker appended",
+            "marker appended",
+            "success",
+            3,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    crate::shutdown::recover_orphaned_turns(&storage, &storage)
+        .await
+        .expect("recovery");
+
+    let calls = storage.list_tool_calls_by_turn(turn.id).await.unwrap();
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+    assert_eq!(calls[0].result.as_deref(), Some("marker appended"));
+    assert_eq!(calls[1].status.as_deref(), Some("interrupted"));
+    assert_eq!(
+        calls[1].result.as_deref(),
+        Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
+    );
+
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread.id)
+        .await
+        .unwrap();
+    let replay_parts: Vec<&swage_core::ToolReplayPart> = rebuilt
+        .iter()
+        .filter_map(|message| message.tool_replay())
+        .flatten()
+        .collect();
+    let replayed_calls: Vec<&str> = replay_parts
+        .iter()
+        .filter_map(|part| match part {
+            swage_core::ToolReplayPart::ToolCall { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replayed_calls, ["call-append", "call-long"]);
+    let result_for = |wanted: &str| {
+        replay_parts
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } if call_id == wanted => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no replayed result for {wanted}"))
+    };
+    assert_eq!(result_for("call-append"), "marker appended");
+    assert_eq!(
+        result_for("call-long"),
+        swage_core::compact_tool_result_for_model_with_reference(
+            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+            true,
+            swage_core::tool_result_reference(&turn.id.to_string(), "call-long"),
+        )
+    );
+    assert_eq!(
+        rebuilt[0].role(),
+        Role::User,
+        "the round follows the turn's input"
     );
 }

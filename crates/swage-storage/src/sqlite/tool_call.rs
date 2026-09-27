@@ -5,10 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
-use swage_core::{
-    StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model,
-    compact_tool_result_for_model_with_reference, tool_result_reference,
-};
+use swage_core::{StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model};
 
 use crate::model::{NewToolCall, ToolCallRecord};
 use crate::sqlite::SqliteStorage;
@@ -195,6 +192,7 @@ impl ToolCallStore for SqliteStorage {
         call_id: &str,
         turn_id: Uuid,
         result: &str,
+        model_result: &str,
         status: &str,
         duration_ms: i64,
         truncated: bool,
@@ -203,12 +201,8 @@ impl ToolCallStore for SqliteStorage {
         let call_id = call_id.to_owned();
         let turn_id_str = turn_id.to_string();
         let result = result.to_owned();
+        let model_result = model_result.to_owned();
         let status = status.to_owned();
-        let model_result = compact_tool_result_for_model_with_reference(
-            &result,
-            status != "success",
-            tool_result_reference(&turn_id_str, &call_id),
-        );
 
         self.with_conn(move |conn| {
             conn.execute(
@@ -263,6 +257,7 @@ mod tests {
     use crate::store::{SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore};
 
     use super::*;
+    use swage_core::{compact_tool_result_for_model_with_reference, tool_result_reference};
 
     /// Set up an in-memory DB with a topic, session, thread, and turn.
     ///
@@ -393,11 +388,20 @@ mod tests {
             .await
             .unwrap();
 
+        // The raw output carries a secret; the caller's leak scan redacted it.
+        // The store keeps the raw result and settles the model-facing text the
+        // caller hands over — never one recomputed from the raw output.
+        let scanned = compact_tool_result_for_model_with_reference(
+            "file1\n[REDACTED]",
+            false,
+            tool_result_reference(&turn_id.to_string(), &record.call_id),
+        );
         storage
             .update_tool_call_result(
                 &record.call_id,
                 turn_id,
-                "file1\nfile2",
+                "file1\nsk-live-secret",
+                &scanned,
                 "success",
                 42,
                 false,
@@ -409,7 +413,16 @@ mod tests {
         let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
         assert_eq!(calls.len(), 1);
         let updated = &calls[0];
-        assert_eq!(updated.result.as_deref(), Some("file1\nfile2"));
+        assert_eq!(updated.result.as_deref(), Some("file1\nsk-live-secret"));
+        assert_eq!(updated.model_result.as_deref(), Some(scanned.as_str()));
+        assert!(
+            !updated
+                .model_result
+                .as_deref()
+                .unwrap()
+                .contains("sk-live-secret"),
+            "the model-facing result must not carry the raw secret"
+        );
         assert_eq!(updated.status.as_deref(), Some("success"));
         assert_eq!(updated.duration_ms, Some(42));
         assert!(!updated.truncated);
@@ -435,6 +448,7 @@ mod tests {
             .update_tool_call_result(
                 &record.call_id,
                 turn_id,
+                "...truncated",
                 "...truncated",
                 "success",
                 10,
@@ -646,6 +660,7 @@ mod tests {
             .update_tool_call_result(
                 &call_a.call_id,
                 turn_id,
+                "127.0.0.1 localhost",
                 "127.0.0.1 localhost",
                 "success",
                 5,

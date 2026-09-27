@@ -134,6 +134,12 @@ pub async fn recover_orphaned_turns(
                         storage.update_state(thread.id, ThreadState::Idle).await?;
                     }
 
+                    // Calls cut off mid-execution left started rows; settle
+                    // them before terminalising the turn so a failed write
+                    // leaves the turn recoverable on the next startup.
+                    storage
+                        .settle_started_tool_calls_as_interrupted(turn.id)
+                        .await?;
                     storage
                         .update_turn_state(turn.id, TurnState::Interrupted)
                         .await?;

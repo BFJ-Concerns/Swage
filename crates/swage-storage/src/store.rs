@@ -640,15 +640,19 @@ pub trait ToolCallStore: Send + Sync {
         call_id: &str,
     ) -> Result<Option<ToolCallRecord>, StorageError>;
 
-    /// Write the completed result back onto an in-progress tool call.
+    /// Settle a started tool call with its outcome.
     ///
-    /// Matched by `call_id` scoped to `turn_id` to avoid cross-turn collisions.
+    /// `result` is the raw output kept in the store; `model_result` is the
+    /// model-facing text the caller computed (leak-scanned and compacted),
+    /// which history replays to the provider. Matched by `call_id` scoped to
+    /// `turn_id` to avoid cross-turn collisions.
     #[allow(clippy::too_many_arguments)]
     async fn update_tool_call_result(
         &self,
         call_id: &str,
         turn_id: Uuid,
         result: &str,
+        model_result: &str,
         status: &str,
         duration_ms: i64,
         truncated: bool,
@@ -660,7 +664,52 @@ pub trait ToolCallStore: Send + Sync {
         &self,
         turn_id: Uuid,
     ) -> Result<Vec<ToolCallRecord>, StorageError>;
+
+    /// Settle every started (unsettled) tool call of a turn as interrupted.
+    ///
+    /// A started row is a call the model selected whose outcome was never
+    /// written — its execution was cut off. It settles through
+    /// [`update_tool_call_result`](Self::update_tool_call_result) with status
+    /// `interrupted` and an explicit interrupted result, so the record shows
+    /// the call and history replays it as interrupted instead of dropping it.
+    /// Returns how many rows were settled.
+    async fn settle_started_tool_calls_as_interrupted(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<usize, StorageError> {
+        let mut settled = 0;
+        for record in self.list_tool_calls_by_turn(turn_id).await? {
+            if record.status.is_some() {
+                continue;
+            }
+            let model_result = swage_core::compact_tool_result_for_model_with_reference(
+                INTERRUPTED_TOOL_RESULT,
+                true,
+                swage_core::tool_result_reference(&turn_id.to_string(), &record.call_id),
+            );
+            self.update_tool_call_result(
+                &record.call_id,
+                turn_id,
+                INTERRUPTED_TOOL_RESULT,
+                &model_result,
+                INTERRUPTED_TOOL_STATUS,
+                0,
+                false,
+                None,
+            )
+            .await?;
+            settled += 1;
+        }
+        Ok(settled)
+    }
 }
+
+/// Status a started tool call settles with when its execution was cut off.
+pub const INTERRUPTED_TOOL_STATUS: &str = "interrupted";
+
+/// Result a started tool call settles with when its execution was cut off.
+pub const INTERRUPTED_TOOL_RESULT: &str =
+    "tool call interrupted before it finished; its outcome is unknown";
 
 /// Store for context assembly report snapshots.
 ///
@@ -2531,6 +2580,7 @@ mod tests {
             _call_id: &str,
             _turn_id: Uuid,
             _result: &str,
+            _model_result: &str,
             _status: &str,
             _duration_ms: i64,
             _truncated: bool,
