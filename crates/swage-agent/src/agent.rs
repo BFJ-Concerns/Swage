@@ -922,17 +922,9 @@ impl Agent {
 
                     let duration_ms = start.elapsed().as_millis() as u64;
 
-                    // Emit ToolEnd — final status and result.
                     let result_value: Value = serde_json::from_str(&result_content)
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
-                    let _ = event_tx.send(AgentEvent::ToolEnd {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.name.clone(),
-                        result: result_value.clone(),
-                        status: status.clone(),
-                        duration_ms: Some(duration_ms),
-                    });
 
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
@@ -949,8 +941,12 @@ impl Agent {
                     // Settle the started row. The raw result stays in the
                     // store; the scanned model-facing text is what history
                     // replays. A settlement that fails fails the call with the
-                    // record failure named, never a result the trail omits.
+                    // record failure named, never a result the trail omits —
+                    // for the model and the client alike, so ToolEnd follows
+                    // the settlement and carries its outcome.
                     let mut safe_result = safe_result;
+                    let mut end_result = result_value;
+                    let mut end_status = status.clone();
                     if let Err(error) = self
                         .storage
                         .update_tool_call_result(
@@ -970,7 +966,16 @@ impl Agent {
                             call.name
                         );
                         is_error = true;
+                        end_result = Value::String(safe_result.clone());
+                        end_status = "error".to_string();
                     }
+                    let _ = event_tx.send(AgentEvent::ToolEnd {
+                        call_id: call.call_id.clone(),
+                        tool_name: call.name.clone(),
+                        result: end_result,
+                        status: end_status,
+                        duration_ms: Some(duration_ms),
+                    });
                     tool_position += 1;
                     total_tool_calls += 1;
 

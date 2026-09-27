@@ -1372,6 +1372,7 @@ pub(crate) struct MockStorage {
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
     fail_tool_call_settlement: AtomicBool,
+    fail_tool_call_creates: AtomicBool,
     fail_provider_round_writes: AtomicBool,
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
@@ -1860,6 +1861,7 @@ impl MockStorage {
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
             fail_tool_call_settlement: AtomicBool::new(false),
+            fail_tool_call_creates: AtomicBool::new(false),
             fail_provider_round_writes: AtomicBool::new(false),
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
@@ -1923,6 +1925,11 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse every tool-call row creation from now on.
+    pub(crate) fn fail_tool_call_creates(&self) {
+        self.fail_tool_call_creates.store(true, Ordering::SeqCst);
     }
 
     /// Refuse every tool-call settlement from now on.
@@ -3952,6 +3959,11 @@ impl ToolCallStore for MockStorage {
         &self,
         tool_call: NewToolCall,
     ) -> Result<ToolCallRecord, StorageError> {
+        if self.fail_tool_call_creates.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "tool-call creation refused by the test".into(),
+            ));
+        }
         let record = ToolCallRecord {
             id: Uuid::new_v4(),
             turn_id: tool_call.turn_id,
@@ -6971,6 +6983,13 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
 }
 
 async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
+    let (state, session_id, _) = make_state_with_tool_provider_and_storage(provider).await;
+    (state, session_id)
+}
+
+async fn make_state_with_tool_provider_and_storage(
+    provider: Arc<dyn LlmProvider>,
+) -> (AppState, Uuid, Arc<MockStorage>) {
     let storage = Arc::new(MockStorage::new());
 
     let topic = storage.general_scope().await.expect("create default topic");
@@ -7001,7 +7020,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
         ]),
         None,
     );
-    (state, session_id)
+    (state, session_id, storage)
 }
 
 pub(crate) async fn make_state_with_capturing_tools(
@@ -17004,5 +17023,127 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         rebuilt[0].role(),
         Role::User,
         "the round follows the turn's input"
+    );
+}
+
+/// One echo call followed by a closing text round, for the record-failure tests.
+fn echo_then_reply_rounds() -> Vec<Vec<StreamChunk>> {
+    vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call_1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "hello" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]
+}
+
+async fn run_echo_turn(state: &AppState, session_id: Uuid) -> Vec<ServerEvent> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let _ = process_turn(
+        state,
+        session_id,
+        None,
+        "Use echo".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await;
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+/// A tool call whose settlement cannot be written has failed: the live
+/// consumer sees it end as an error naming the record failure, never as the
+/// success the execution alone reported.
+#[tokio::test]
+async fn a_failed_tool_call_settlement_ends_the_call_as_an_error_for_the_client() {
+    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(
+        MultiRoundMockProvider::new(echo_then_reply_rounds()),
+    ))
+    .await;
+    storage.fail_tool_call_settlement();
+
+    let events = run_echo_turn(&state, session_id).await;
+
+    let ends: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ToolEnd {
+                call_id,
+                status,
+                result,
+                ..
+            } if call_id == "call_1" => Some((status.as_str(), result.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        1,
+        "exactly one ToolEnd for the call: {events:?}"
+    );
+    assert_eq!(
+        ends[0].0, "error",
+        "a call with no settled record failed: {ends:?}"
+    );
+    assert!(
+        ends[0].1.contains("record could not be settled"),
+        "the ToolEnd names the record failure: {ends:?}"
+    );
+}
+
+/// A tool call whose started row cannot be written is refused: it never
+/// runs, and the client sees it end as an error naming the record failure.
+#[tokio::test]
+async fn a_failed_tool_call_create_refuses_the_dispatch_for_the_client() {
+    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(
+        MultiRoundMockProvider::new(echo_then_reply_rounds()),
+    ))
+    .await;
+    storage.fail_tool_call_creates();
+
+    let events = run_echo_turn(&state, session_id).await;
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ServerEvent::ToolStart { call_id, .. } if call_id == "call_1"
+        )),
+        "a refused call must not start: {events:?}"
+    );
+    let ends: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ToolEnd {
+                call_id,
+                status,
+                result,
+                ..
+            } if call_id == "call_1" => Some((status.as_str(), result.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        1,
+        "exactly one ToolEnd for the call: {events:?}"
+    );
+    assert_eq!(ends[0].0, "error");
+    assert!(
+        ends[0].1.contains("record could not be written"),
+        "the ToolEnd names the record failure: {ends:?}"
     );
 }
