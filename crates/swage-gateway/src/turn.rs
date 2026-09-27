@@ -60,6 +60,7 @@ mod delegation;
 mod detached_delivery;
 mod dispatcher;
 mod history;
+mod inbound_hooks;
 mod operator_guidance;
 mod projection;
 mod provider_record;
@@ -82,6 +83,7 @@ pub(crate) use dispatcher::*;
 #[cfg(test)]
 use history::compact_tool_replay_messages;
 use history::rebuild_thread_history_messages;
+pub(crate) use inbound_hooks::*;
 pub(crate) use operator_guidance::*;
 #[cfg(test)]
 pub(crate) use projection::route_approval_agent_event;
@@ -138,61 +140,6 @@ pub(crate) fn effort_capability_for_model(
 pub(crate) enum TurnAttendance {
     Attended,
     Unattended,
-}
-
-/// Distilled view of which permission grants the topic has actually accepted
-/// across its trusted workspace attachments. Untrusted attachments contribute
-/// nothing.
-
-#[derive(Debug, Clone)]
-pub(crate) struct BeforeInboundDispatchResult {
-    pub canonical_content: String,
-    pub modified_by_hooks: Vec<String>,
-}
-
-fn map_hook_block(reason: String) -> GatewayError {
-    GatewayError::ConfigError(format!(
-        "BeforeInbound hook blocked inbound content: {reason}"
-    ))
-}
-
-pub(crate) async fn dispatch_before_inbound(
-    hook_registry: Option<&Arc<HookRegistry>>,
-    raw_content: &str,
-) -> Result<BeforeInboundDispatchResult, GatewayError> {
-    let Some(hook_registry) = hook_registry else {
-        return Ok(BeforeInboundDispatchResult {
-            canonical_content: raw_content.to_string(),
-            modified_by_hooks: Vec::new(),
-        });
-    };
-
-    let traced = hook_registry
-        .dispatch_traced(HookEvent::BeforeInbound {
-            content: raw_content.to_string(),
-        })
-        .await;
-
-    match traced.outcome {
-        HookOutcome::Continue => Ok(BeforeInboundDispatchResult {
-            canonical_content: raw_content.to_string(),
-            modified_by_hooks: traced.modified_by_hooks,
-        }),
-        HookOutcome::ContinueModified(modified) => match *modified {
-            HookEvent::BeforeInbound { content } => Ok(BeforeInboundDispatchResult {
-                canonical_content: content,
-                modified_by_hooks: traced.modified_by_hooks,
-            }),
-            _ => Ok(BeforeInboundDispatchResult {
-                canonical_content: raw_content.to_string(),
-                modified_by_hooks: traced.modified_by_hooks,
-            }),
-        },
-        HookOutcome::Block(reason) => Err(map_hook_block(reason)),
-        HookOutcome::RequestApproval { .. } => Err(GatewayError::ConfigError(
-            "BeforeInbound hooks cannot request approval".to_string(),
-        )),
-    }
 }
 
 /// Orchestrate a complete agent turn: user message → provider stream → storage.
