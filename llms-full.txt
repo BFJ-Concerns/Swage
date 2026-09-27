@@ -928,15 +928,26 @@ a persistent connection. Nothing listens on the device: the device opens the
 connection, advertises what it can run, and the gateway invokes operations
 back over the same socket. `swage device connect` runs a machine as a device.
 
-### Registration
+### Registration and pairing
 
-`POST /api/devices/register` (`RegisterDeviceRequest` in
-`swage-protocol::device`). The `kind` field defaults to `"attached_device"`
-and names the device type. A `kind` of `"local"` is refused with a
-`ValidationError`: a local device has no remote producer to register. The
-same refusal applies to recovery imports, so the remote-device registry
-never holds a local entry. What a device can run is not registered — the
-device advertises its capabilities each time it connects.
+A device can join in two ways:
+
+- **Direct registration** — `POST /api/devices/register`
+  (`RegisterDeviceRequest` in `swage-protocol::device`). The caller supplies
+  the device identity, the gateway secret its credential resolves against,
+  and the workspace it operates in.
+- **Pairing** — the gateway issues a one-time pairing code
+  (`POST /api/onboarding/devices/pairing-codes`, with an optional
+  `expires_in_seconds`; default 600 s), and the device redeems it
+  (`POST /api/onboarding/devices/redeem` with the code and its registration
+  fields) to register and trust itself in one step.
+
+In both paths the `kind` field defaults to `"attached_device"` and names the
+device type. A `kind` of `"local"` is refused with a `ValidationError`: a
+local device has no remote producer to register. The same refusal applies to
+recovery imports, so the remote-device registry never holds a local entry.
+What a device can run is not registered — the device advertises its
+capabilities each time it connects.
 
 ### The connection
 
@@ -964,12 +975,20 @@ All frames are tagged by `kind` (snake_case) and defined in
 
 ### Presence
 
-Presence reads a device as `connected`, `stale`, or `disconnected` from
-heartbeats alone. The device heartbeats every `heartbeat_interval_secs`
-(told in the welcome, default 10 s); the gateway marks it stale after
-3× that interval without a heartbeat, and disconnected when the WebSocket
-closes. Every connect, disconnect, invocation, and settlement lands in the
-audit trail under the device's id.
+Presence begins when the gateway accepts the device's hello: the gateway
+records a heartbeat at the accepted hello, marking the device `connected`
+before the welcome is sent. Subsequent heartbeats (sent every
+`heartbeat_interval_secs`, default 10 s, as the welcome tells the device)
+keep the device connected. The gateway marks a device `stale` after 3× the
+heartbeat interval without a heartbeat, and `disconnected` when the
+WebSocket closes.
+
+The operator can close a device's connection from the gateway side with
+`DELETE /api/presence/devices/{id}`, which disconnects the device and marks
+it disconnected.
+
+Every connect, disconnect, invocation, and settlement lands in the audit
+trail under the device's id.
 
 ## Wire error contract
 
