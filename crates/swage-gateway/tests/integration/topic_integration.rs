@@ -238,6 +238,8 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
     );
     assert_eq!(general[0]["message_preview"], "general user");
     assert_eq!(general[1]["message_preview"], "general assistant");
+    assert_eq!(general[0]["has_interrupted_turn"], false);
+    assert_eq!(general[1]["has_interrupted_turn"], false);
 
     let (_, topic_list) = http_json(
         &router,
@@ -256,6 +258,7 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
     assert_eq!(topic_list[1]["id"], topical_b["id"]);
     assert_eq!(topic_list[0]["message_preview"], "topic answer");
     assert_eq!(topic_list[0]["has_interrupted_turn"], true);
+    assert_eq!(topic_list[1]["has_interrupted_turn"], false);
 
     let (_, overview) = http_json(&router, "GET", "/api/operator/overview", None).await;
     let sessions = overview["sessions"].as_array().unwrap();
@@ -270,10 +273,13 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
         .unwrap();
     assert_eq!(topical["message_preview"], "topic answer");
     assert_eq!(topical["has_interrupted_turn"], true);
-
-    let (_, all_activity) =
-        http_json(&router, "GET", "/api/sessions?include_archived=true", None).await;
-    assert_eq!(all_activity["entries"].as_array().unwrap().len(), 4);
+    for uninterrupted_id in [&general_a["id"], &general_b["id"], &topical_b["id"]] {
+        let session = sessions
+            .iter()
+            .find(|item| &item["id"] == uninterrupted_id)
+            .unwrap();
+        assert_eq!(session["has_interrupted_turn"], false);
+    }
 }
 
 static LISTED_SQL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
