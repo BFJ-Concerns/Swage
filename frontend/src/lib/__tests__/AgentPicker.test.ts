@@ -3,29 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import AgentPicker from "../components/AgentPicker.svelte";
-import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+import { makeAgentDefinition } from "./fixtures/agent-definitions";
 
 type MountedComponent = ReturnType<typeof mount>;
-
-function definition(
-  id: string,
-  displayName: string,
-  isBuiltin: boolean,
-): EffectiveAgentDefinitionResponse {
-  return {
-    id,
-    display_name: displayName,
-    description: "",
-    instructions: "",
-    model_id: null,
-    tool_permissions: {},
-    skills: [],
-    output_schema: null,
-    output_max_retries: null,
-    is_builtin: isBuiltin,
-    source_scope: "global",
-  };
-}
 
 describe("AgentPicker", () => {
   let component: MountedComponent | undefined;
@@ -41,9 +21,9 @@ describe("AgentPicker", () => {
       target: document.body,
       props: {
         definitions: [
-          definition("default", "Swage default", true),
-          definition("reviewer", "Review companion", true),
-          definition("project", "Project agent", false),
+          makeAgentDefinition("default", "global", { display_name: "Swage default", is_builtin: true }),
+          makeAgentDefinition("reviewer", "global", { display_name: "Review companion", is_builtin: true }),
+          makeAgentDefinition("project", "global", { display_name: "Project agent", is_builtin: false }),
         ],
       },
     });
@@ -64,9 +44,9 @@ describe("AgentPicker", () => {
       target: document.body,
       props: {
         definitions: [
-          definition("default", "Swage default", true),
-          definition("reviewer", "Review companion", true),
-          definition("project", "Project agent", false),
+          makeAgentDefinition("default", "global", { display_name: "Swage default", is_builtin: true }),
+          makeAgentDefinition("reviewer", "global", { display_name: "Review companion", is_builtin: true }),
+          makeAgentDefinition("project", "global", { display_name: "Project agent", is_builtin: false }),
         ],
         // Getter/setter pair stands in for `bind:selectedAgentId`, so the
         // value the picker writes back is observable from the test.
