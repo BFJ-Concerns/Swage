@@ -59,6 +59,7 @@ mod context_selection;
 mod delegation;
 mod detached_delivery;
 mod dispatcher;
+mod dispatcher_settlement;
 mod history;
 mod inbound_hooks;
 mod operator_guidance;
@@ -81,6 +82,7 @@ use detached_delivery::deliver_detached_results;
 #[cfg(test)]
 use detached_delivery::render_delegation_result;
 pub(crate) use dispatcher::*;
+use dispatcher_settlement::{DispatcherSettlement, SettledDispatcher, settle_turn_dispatcher};
 #[cfg(test)]
 use history::compact_tool_replay_messages;
 use history::rebuild_thread_history_messages;
@@ -892,191 +894,27 @@ async fn process_turn_with_composition_and_focus(
     // enabled, this also spawns the per-turn sandbox and returns its cleanup
     // guard to this turn scope.
     let is_codex_turn = config.default_provider_protocol() == swage_config::Protocol::Codex;
-    let execution_context = match attendance {
-        TurnAttendance::Attended => "interactive turn",
-        TurnAttendance::Unattended => "unattended turn",
-    };
-    let dispatcher_build = match build_gateway_dispatcher(
+    let dispatcher_build = match settle_turn_dispatcher(
         state,
-        GatewayDispatcherRequest {
+        DispatcherSettlement {
             config: &config,
             agent_config: &agent_config,
             session_metadata: session.metadata.as_ref(),
-            topic_id: Some(topic_id),
+            topic_id,
             active_workspace_attachment_id: session.active_workspace_attachment_id,
-            ws_tx: ws_tx.clone(),
-            session_id: Some(session_id),
-            turn_id: Some(prepared_turn_id),
+            ws_tx: &ws_tx,
+            session_id,
+            prepared_turn_id,
+            agent_id: &session.agent_id,
+            attendance,
+            cancel_token: &cancel_token,
         },
     )
-    .await
+    .await?
     {
-        Ok(build) => build,
-        Err(error) if config.sandbox.enabled && attendance == TurnAttendance::Attended => {
-            let detected_degradation = ExecutionIsolation::Degraded {
-                reason: format!("sandbox_setup_failed: {error}"),
-            };
-            if let Err(audit_error) = record_degraded_execution(
-                state,
-                &detected_degradation,
-                execution_context,
-                Some(session_id),
-                Some(prepared_turn_id),
-            )
-            .await
-            {
-                record_terminal_state_and_release(
-                    state,
-                    session_id,
-                    prepared_turn_id,
-                    TurnState::Failed,
-                )
-                .await?;
-                return Err(audit_error);
-            }
-            let approval = record_failed_turn_and_release_on_error(
-                state,
-                session_id,
-                prepared_turn_id,
-                request_sandbox_degradation_approval(
-                    state,
-                    SandboxDegradationApprovalRequest {
-                    config: &config,
-                    ws_tx: &ws_tx,
-                    turn_id: prepared_turn_id,
-                    agent_id: &session.agent_id,
-                    prompt:
-                        "Sandbox setup failed. Approve running this turn without sandbox isolation?"
-                            .to_string(),
-                    context: serde_json::json!({
-                        "degradation": "unsandboxed_execution",
-                        "error": error.to_string(),
-                    }),
-                    cancel_token: &cancel_token,
-                    },
-                )
-                .await,
-            )
-            .await?;
-            match approval {
-                SandboxDegradationApproval::Approved => {
-                    // The approval wait temporarily marks the placeholder as
-                    // Processing. Agent::process_turn_streaming takes over
-                    // existing placeholders only while they are Pending.
-                    record_failed_turn_and_release_on_error(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        state
-                            .storage
-                            .update_turn_state(prepared_turn_id, TurnState::Pending)
-                            .await
-                            .map_err(GatewayError::from),
-                    )
-                    .await?;
-                }
-                SandboxDegradationApproval::Rejected => {
-                    record_terminal_state_and_release(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        TurnState::Failed,
-                    )
-                    .await?;
-                    return Err(GatewayError::WebSocketError(format!(
-                        "sandbox setup failed and unsandboxed execution was not approved: {error}"
-                    )));
-                }
-                SandboxDegradationApproval::Interrupted => {
-                    record_failed_turn_and_release_on_error(
-                        state,
-                        session_id,
-                        prepared_turn_id,
-                        state
-                            .storage
-                            .update_turn_state(prepared_turn_id, TurnState::Interrupted)
-                            .await
-                            .map_err(GatewayError::from),
-                    )
-                    .await?;
-                    let _ = ws_tx.send(ServerEvent::Cancelled {});
-                    // Preserve the client-visible interrupt ordering: the old turn
-                    // remains active until its cancellation event has been sent.
-                    release_active_turn(state, session_id).await;
-                    return Ok(());
-                }
-            }
-
-            let mut unsandboxed_config = config.clone();
-            unsandboxed_config.sandbox.allow_degraded_execution = true;
-            record_failed_turn_and_release_on_error(
-                state,
-                session_id,
-                prepared_turn_id,
-                build_gateway_dispatcher(
-                    state,
-                    GatewayDispatcherRequest {
-                        config: &unsandboxed_config,
-                        agent_config: &agent_config,
-                        session_metadata: session.metadata.as_ref(),
-                        topic_id: Some(topic_id),
-                        active_workspace_attachment_id: session.active_workspace_attachment_id,
-                        ws_tx: ws_tx.clone(),
-                        session_id: Some(session_id),
-                        turn_id: Some(prepared_turn_id),
-                    },
-                )
-                .await
-                .map_err(|fallback_error| GatewayError::WebSocketError(fallback_error.to_string())),
-            )
-            .await?
-        }
-        Err(error) => {
-            let isolation = ExecutionIsolation::Degraded {
-                reason: format!("sandbox_setup_failed: {error}"),
-            };
-            let _ = ws_tx.send(ServerEvent::Error {
-                code: "sandbox_unavailable".into(),
-                message: format!("Sandbox setup failed; the turn was not executed: {error}"),
-            });
-            record_terminal_state_and_release(
-                state,
-                session_id,
-                prepared_turn_id,
-                TurnState::Failed,
-            )
-            .await?;
-            record_degraded_execution(
-                state,
-                &isolation,
-                execution_context,
-                Some(session_id),
-                Some(prepared_turn_id),
-            )
-            .await?;
-            return Err(GatewayError::WebSocketError(format!(
-                "sandbox setup failed; execution was blocked: {error}"
-            )));
-        }
+        SettledDispatcher::Ready(build) => *build,
+        SettledDispatcher::Interrupted => return Ok(()),
     };
-    if let Err(error) = record_degraded_execution(
-        state,
-        &dispatcher_build.isolation,
-        execution_context,
-        Some(session_id),
-        Some(prepared_turn_id),
-    )
-    .await
-    {
-        shutdown_sandbox_guard(
-            &dispatcher_build.sandbox_guard,
-            "failed to shut down sandbox after degradation audit failure",
-        )
-        .await;
-        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
-            .await?;
-        return Err(error);
-    }
     let sandbox_guard = dispatcher_build.sandbox_guard;
     let dispatcher = dispatcher_build.dispatcher;
 
