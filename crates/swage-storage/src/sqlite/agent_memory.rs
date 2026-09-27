@@ -192,11 +192,8 @@ mod tests {
         let topic = storage.general_scope().await.unwrap();
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-a".into(),
-                origin: crate::model::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..crate::fixtures::new_session(topic.id)
             })
             .await
             .unwrap();

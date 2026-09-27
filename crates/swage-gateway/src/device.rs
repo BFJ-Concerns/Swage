@@ -885,10 +885,8 @@ async fn next_device_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::AppState;
-    use crate::turn::tests::MockProvider;
     use swage_storage::SqliteStorage;
-    use swage_storage::store::{AuditStore, Storage, TopicStore};
+    use swage_storage::store::{AuditStore, Storage};
     use swage_tool::context::MockToolContext;
 
     fn registered_device(device_id: &str, kind: DeviceKind) -> RegisteredDevice {
@@ -902,17 +900,6 @@ mod tests {
             capabilities: vec!["device_identity".into()],
             registered_at: Utc::now(),
         }
-    }
-
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
     }
 
     /// A link with no socket behind it: the test reads what the gateway
@@ -935,7 +922,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn remote_registration_rejects_a_local_kind_without_a_producer() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
-        let state = state(storage);
+        let state = crate::test_support::state(storage);
         let error = register_remote_device(
             &state,
             RegisterDeviceRequest {
@@ -1003,7 +990,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn execution_refuses_before_the_link_what_the_device_did_not_advertise_or_cannot_reach() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let device = registered_device("docker-a", DeviceKind::Docker);
         let (_link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
         let ctx = MockToolContext::new("gateway", "session");
@@ -1054,7 +1041,7 @@ mod tests {
     async fn an_operation_travels_the_link_with_one_correlation_id_and_settles_into_the_audit_trail()
      {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let device = registered_device("docker-a", DeviceKind::Docker);
         let (link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
         let ctx = MockToolContext::new("gateway", "session");
@@ -1125,7 +1112,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_future_dropped_before_its_operation_frame_is_sent_still_cancels_and_records() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let device = registered_device("docker-a", DeviceKind::Docker);
         let (link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
         let ctx = MockToolContext::new("gateway", "session");
@@ -1179,7 +1166,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dropping_an_unsettled_operation_cancels_it_on_the_device_and_records_it() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
-        let state = state(Arc::clone(&storage));
+        let state = crate::test_support::state(Arc::clone(&storage));
         let device = registered_device("docker-a", DeviceKind::Docker);
         let (link, mut inbound) = open_link(&mut *state.devices.lock().await, "docker-a");
 
@@ -1237,7 +1224,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn disconnecting_a_device_fails_its_pending_operations_as_disconnected() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
-        let state = state(storage);
+        let state = crate::test_support::state(storage);
         let device = registered_device("docker-a", DeviceKind::Docker);
         let (_link, mut inbound) = {
             let mut runtime = state.devices.lock().await;

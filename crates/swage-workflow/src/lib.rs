@@ -5,6 +5,9 @@ mod host;
 mod model;
 mod recovery;
 
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures;
+
 use sha2::{Digest, Sha256};
 
 pub use engine::{

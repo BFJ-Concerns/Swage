@@ -1294,25 +1294,7 @@ mod tests {
             .await
             .expect("second topic");
         let new_run = |topic_id| NewWorkflowRun {
-            topic_id,
-            parent_run_id: None,
-            parent_seq: None,
-            dispatching_session_id: None,
-            script_version_id: None,
-            inline_workflow_id: None,
-            inline_workflow_name: None,
-            inline_workflow_version: None,
-            carrying_skill: None,
-            task: None,
-            source: Some("return null".into()),
-            source_hash: Uuid::new_v4().to_string(),
-            args: serde_json::Value::Null,
-            budget: serde_json::json!({}),
-            engine_version: "test".into(),
-            dispatch_bound_agent_ids: vec![],
-            dispatch_bound_task_definition_ids: vec![],
-            workflow_call_tools: None,
-            inherited_worker_placement: None,
+            ..crate::fixtures::new_workflow_run(topic_id)
         };
 
         let parked_first = storage
@@ -1367,25 +1349,7 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: Uuid::new_v4().to_string(),
-                args: serde_json::Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-                task: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -1510,25 +1474,7 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: Uuid::new_v4().to_string(),
-                args: serde_json::Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-                task: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -1606,25 +1552,7 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                source: Some("return null".into()),
-                source_hash: Uuid::new_v4().to_string(),
-                args: serde_json::Value::Null,
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
-                task: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -1718,25 +1646,12 @@ mod tests {
         assert_eq!(second.version, 2);
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
                 script_version_id: Some(second.id),
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: None,
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
-                budget: serde_json::json!({}),
                 engine_version: "rquickjs-0.12.0".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -1747,25 +1662,14 @@ mod tests {
         let inline_id = Uuid::new_v4();
         let inline = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
                 inline_workflow_id: Some(inline_id),
                 inline_workflow_name: Some("compiled-workflow".into()),
                 inline_workflow_version: Some(3),
-                carrying_skill: None,
-                task: None,
                 source: Some("return 3".into()),
                 source_hash: "inline-hash".into(),
                 args: serde_json::json!({}),
-                budget: serde_json::json!({}),
                 engine_version: "rquickjs-0.12.0".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("inline workflow run");
@@ -1868,25 +1772,10 @@ mod tests {
             .expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
-                budget: serde_json::json!({}),
                 engine_version: "rquickjs-0.12.0".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");
@@ -2043,25 +1932,9 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let run = storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id: topic.id,
-                parent_run_id: None,
-                parent_seq: None,
-                dispatching_session_id: None,
-                script_version_id: None,
-                inline_workflow_id: None,
-                inline_workflow_name: None,
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
-                source: Some("return null".into()),
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
-                budget: serde_json::json!({}),
-                engine_version: "test".into(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
             .expect("run");

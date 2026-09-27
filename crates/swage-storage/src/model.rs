@@ -3069,18 +3069,10 @@ mod tests {
     fn session_includes_agent_id() {
         let id = Uuid::new_v4();
         let topic_id = Uuid::new_v4();
-        let now = Utc::now();
         let session = Session {
             id,
-            topic_id,
             agent_id: "my-agent".to_string(),
-            origin: SessionOrigin::Direct,
-            metadata: None,
-            selected_model_id: None,
-            active_workspace_attachment_id: None,
-            archived_at: None,
-            created_at: now,
-            updated_at: now,
+            ..crate::fixtures::session(topic_id)
         };
 
         let json = serde_json::to_string(&session).expect("serialisation should succeed");
@@ -3093,11 +3085,8 @@ mod tests {
     #[test]
     fn new_session_includes_agent_id() {
         let ns = NewSession {
-            topic_id: Uuid::new_v4(),
             agent_id: "config-agent".to_string(),
-            origin: SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..crate::fixtures::new_session(Uuid::new_v4())
         };
         assert_eq!(ns.agent_id, "config-agent");
     }

@@ -271,7 +271,8 @@ pub(crate) async fn resolve_create_schedule(
         ));
     }
     let parsed = ParsedSpec::parse(&request.spec)?;
-    validate_session_policy(state, &request.session).await?;
+    let session_policy = resolve_session_policy(state, request.session).await?;
+    validate_session_policy(state, &session_policy).await?;
     if let Some(gate) = &request.gate {
         validate_gate(state, gate)?;
     }
@@ -280,7 +281,7 @@ pub(crate) async fn resolve_create_schedule(
         .routing
         .unwrap_or_else(DeliveryRoutingRequest::local_only);
     // Schedules have no channel origin; reject routing that would need one.
-    validate_schedule_delivery_targets(state, &request.session, routing.clone()).await?;
+    validate_schedule_delivery_targets(state, &session_policy, routing.clone()).await?;
 
     let now = Utc::now();
     Ok(NewSchedule {
@@ -289,7 +290,7 @@ pub(crate) async fn resolve_create_schedule(
         status: ScheduleStatus::Active,
         kind: parsed.kind(),
         expression: parsed.expression(),
-        session_policy: request.session,
+        session_policy,
         creator,
         delivery_routing: routing_to_value(&routing)?,
         gate: request.gate,
@@ -300,11 +301,12 @@ pub(crate) async fn resolve_create_schedule(
 
 pub async fn list_schedules(state: &AppState) -> Result<wire::ScheduleListResponse, GatewayError> {
     let schedules = state.storage.list_schedules().await?;
+    let mut projected = Vec::with_capacity(schedules.len());
+    for schedule in schedules {
+        projected.push(map_schedule(state, schedule).await?);
+    }
     Ok(wire::ScheduleListResponse {
-        schedules: schedules
-            .into_iter()
-            .map(map_schedule)
-            .collect::<Result<Vec<_>, _>>()?,
+        schedules: projected,
     })
 }
 
@@ -535,7 +537,25 @@ pub(crate) async fn get_schedule_wire(
     state: &AppState,
     schedule_id: Uuid,
 ) -> Result<wire::Schedule, GatewayError> {
-    map_schedule(get_schedule(state, schedule_id).await?)
+    map_schedule(state, get_schedule(state, schedule_id).await?).await
+}
+
+/// Resolve a wire-level absence to the general scope before a policy reaches
+/// storage. Fresh policies in storage always name a scope row.
+async fn resolve_session_policy(
+    state: &AppState,
+    policy: SessionPolicy,
+) -> Result<SessionPolicy, GatewayError> {
+    match policy {
+        SessionPolicy::Fresh { topic_id, agent_id } => Ok(SessionPolicy::Fresh {
+            topic_id: Some(match topic_id {
+                Some(topic_id) => topic_id,
+                None => state.topic_store.general_scope().await?.id,
+            }),
+            agent_id,
+        }),
+        continuation => Ok(continuation),
+    }
 }
 
 fn validate_schedule_shape(schedule: &NewSchedule) -> Result<(), GatewayError> {
@@ -708,11 +728,12 @@ async fn validate_session_policy(
                     "fresh session policy needs a target agent".into(),
                 ));
             }
+            let topic_id = topic_id.expect("stored fresh policy has a scope id");
             state
                 .topic_store
-                .get(*topic_id)
+                .get(topic_id)
                 .await?
-                .ok_or(GatewayError::TopicNotFound { id: *topic_id })?;
+                .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
         }
         SessionPolicy::Continuation { session_id } => {
             state
@@ -1095,7 +1116,7 @@ async fn run_body(
                 ConversationService::new(state.storage.clone(), state.topic_store.clone());
             let conversation = service
                 .create_session_in_topic_for_agent(
-                    *topic_id,
+                    topic_id.expect("stored fresh policy has a scope id"),
                     agent_id,
                     swage_storage::SessionOrigin::ScheduleRun {
                         schedule_id: schedule.id,
@@ -1546,7 +1567,7 @@ async fn assemble_gate_state_digest(
     };
 
     let topic_id = match &schedule.session_policy {
-        SessionPolicy::Fresh { topic_id, .. } => Some(*topic_id),
+        SessionPolicy::Fresh { topic_id, .. } => *topic_id,
         SessionPolicy::Continuation { session_id } => storage
             .get_session(*session_id)
             .await?
@@ -1723,13 +1744,31 @@ async fn record_gate_decision(
 // Wire mapping
 // ---------------------------------------------------------------------------
 
-fn map_schedule(schedule: Schedule) -> Result<wire::Schedule, GatewayError> {
+async fn map_schedule(
+    state: &AppState,
+    schedule: Schedule,
+) -> Result<wire::Schedule, GatewayError> {
+    let session = match schedule.session_policy {
+        SessionPolicy::Fresh { topic_id, agent_id } => {
+            let scope_id = topic_id.expect("stored fresh policy has a scope id");
+            let scope = state
+                .topic_store
+                .get(scope_id)
+                .await?
+                .ok_or(GatewayError::TopicNotFound { id: scope_id })?;
+            SessionPolicy::Fresh {
+                topic_id: scope.client_topic_id(),
+                agent_id,
+            }
+        }
+        continuation => continuation,
+    };
     Ok(wire::Schedule {
         id: schedule.id,
         message: schedule.message,
         status: schedule.status,
         spec: ParsedSpec::parse_stored(schedule.kind, &schedule.expression)?.into_spec(),
-        session: schedule.session_policy,
+        session,
         creator: schedule.creator,
         routing: serde_json::from_value(schedule.delivery_routing).map_err(|error| {
             GatewayError::ValidationError(format!("invalid stored delivery routing: {error}"))
@@ -1877,11 +1916,7 @@ mod tests {
             .expect("topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -2028,25 +2063,11 @@ mod tests {
             .await
             .expect("topic");
         let new_run = |name: &str| NewWorkflowRun {
-            topic_id: topic.id,
-            parent_run_id: None,
-            parent_seq: None,
-            dispatching_session_id: None,
-            script_version_id: None,
-            inline_workflow_id: None,
             inline_workflow_name: Some(name.into()),
-            inline_workflow_version: None,
-            carrying_skill: None,
-            task: None,
             source: Some("return null;".into()),
             source_hash: "hash".into(),
-            args: serde_json::Value::Null,
             budget: serde_json::Value::Null,
-            engine_version: "test".into(),
-            dispatch_bound_agent_ids: vec![],
-            dispatch_bound_task_definition_ids: vec![],
-            workflow_call_tools: None,
-            inherited_worker_placement: None,
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
         };
         let holding = storage
             .create_workflow_run(new_run("build-verify"))
@@ -2087,7 +2108,7 @@ mod tests {
                 kind: ScheduleKind::Interval,
                 expression: "every 15 minutes".into(),
                 session_policy: SessionPolicy::Fresh {
-                    topic_id: topic.id,
+                    topic_id: Some(topic.id),
                     agent_id: "gateway".into(),
                 },
                 creator: ScheduleCreator::User,
