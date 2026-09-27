@@ -19,7 +19,7 @@
 //! context, the runtime's compactor handles it as before, and the report
 //! records the attempt.
 
-use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role};
+use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart};
 use swage_provider::LlmProvider;
 
 use crate::element::ContextElement;
@@ -173,10 +173,17 @@ pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionE
     // A tool result must stay with the call it answers: a provider refuses
     // a result whose call was summarised away. Retain the whole call and its
     // results where anything older is left to summarise, otherwise summarise
-    // them all.
+    // them all. The gateway replays results inside a user message's tool
+    // replay; the runtime's own tool messages carry a call id.
     let answers_a_call = |at: usize| {
         let message = &request.history[at];
-        message.role() == Role::Tool || message.tool_call_id().is_some()
+        message.role() == Role::Tool
+            || message.tool_call_id().is_some()
+            || message.tool_replay().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
+            })
     };
     let mut earlier = split;
     while earlier > 0 && answers_a_call(earlier) {
@@ -613,44 +620,75 @@ mod tests {
         .expect("history splits")
     }
 
-    fn call(id: &str) -> ChatMessage {
-        ChatMessage::assistant_tool_calls(
-            "",
-            vec![swage_core::tool::ToolCall {
+    /// One tool round as the gateway replays it: an assistant message
+    /// carrying the call, then a user message carrying its result.
+    fn tool_round(id: &str) -> Vec<ChatMessage> {
+        swage_core::tool::build_tool_round_messages(
+            &[swage_core::tool::ToolCall {
                 call_id: id.into(),
                 name: "file_read".into(),
-                arguments: serde_json::json!({}),
+                arguments: serde_json::json!({"path": "missing.txt"}),
             }],
+            &[swage_core::tool::ToolResult {
+                call_id: id.into(),
+                content: "no such file".into(),
+                is_error: true,
+            }],
+            "",
         )
     }
 
     #[test]
     fn a_tool_result_is_kept_with_the_call_it_answers() {
-        let history = vec![
+        let mut history = vec![
             ChatMessage::new(Role::User, "u0"),
-            ChatMessage::new(Role::User, "u1"),
-            call("x"),
-            ChatMessage::tool_result("x", "r"),
-            ChatMessage::new(Role::User, "u4"),
-            ChatMessage::new(Role::Assistant, "a5"),
+            ChatMessage::new(Role::Assistant, "a1"),
+            ChatMessage::new(Role::User, "u2"),
         ];
+        history.extend(tool_round("x"));
+        history.push(ChatMessage::new(Role::Assistant, "a5"));
+        history.push(ChatMessage::new(Role::User, "u6"));
+        history.push(ChatMessage::new(Role::Assistant, "a7"));
         assert_eq!(
             summarised_count(history.len(), None),
-            3,
+            4,
             "midpoint is the result"
         );
-        assert_eq!(split_of(&history, None), 2, "the call is retained with it");
+        assert_eq!(
+            history[4].role(),
+            Role::User,
+            "the result rides a user message"
+        );
+        assert_eq!(split_of(&history, None), 3, "the call is retained with it");
     }
 
     #[test]
     fn a_call_at_the_start_is_summarised_with_its_results() {
-        let history = vec![
-            call("x"),
-            ChatMessage::tool_result("x", "r"),
-            ChatMessage::new(Role::User, "u2"),
-        ];
+        let mut history = tool_round("x");
+        history.push(ChatMessage::new(Role::User, "u2"));
         assert_eq!(summarised_count(history.len(), Some(2)), 1);
         assert_eq!(split_of(&history, Some(2)), 2);
+    }
+
+    #[test]
+    fn a_runtime_tool_message_is_kept_with_its_call_too() {
+        let history = vec![
+            ChatMessage::new(Role::User, "u0"),
+            ChatMessage::new(Role::User, "u1"),
+            ChatMessage::assistant_tool_calls(
+                "",
+                vec![swage_core::tool::ToolCall {
+                    call_id: "x".into(),
+                    name: "file_read".into(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
+            ChatMessage::tool_result("x", "r"),
+            ChatMessage::new(Role::User, "u4"),
+            ChatMessage::new(Role::Assistant, "a5"),
+        ];
+        assert_eq!(summarised_count(history.len(), None), 3);
+        assert_eq!(split_of(&history, None), 2);
     }
 
     #[test]
