@@ -130,7 +130,10 @@ mod tests {
         assert_eq!(run.args, serde_json::Value::Null);
         assert_eq!(run.budget, serde_json::json!({}));
         assert_eq!(run.source.as_deref(), Some("return null"));
-        assert!(Uuid::parse_str(&run.source_hash).is_ok());
+        assert_eq!(
+            Uuid::parse_str(&run.source_hash).unwrap().get_version_num(),
+            4
+        );
         assert_eq!(run.engine_version, "test");
         assert!(run.inherited_worker_placement.is_none());
     }
@@ -145,6 +148,7 @@ mod tests {
         };
         let after = Utc::now();
         assert!(!record.id.is_nil());
+        assert_eq!(record.id.get_version_num(), 4);
         assert_eq!(record.topic_id, topic_id);
         assert_eq!(record.agent_id, "reviewer");
         assert_eq!(record.origin, SessionOrigin::Direct);
