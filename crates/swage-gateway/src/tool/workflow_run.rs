@@ -233,14 +233,12 @@ mod tests {
         let topic = storage.general_scope().await.expect("topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "current-agent".into(),
-                origin: swage_storage::SessionOrigin::Direct,
                 metadata: Some(json!({
                     "dispatch_bound_agent_ids": ["ancestor-agent"],
                     "dispatch_bound_task_definition_ids": ["ancestor-task"]
                 })),
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -335,11 +333,7 @@ mod tests {
             .expect("saved workflow");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");

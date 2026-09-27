@@ -271,11 +271,8 @@ mod tests {
     async fn open(storage: &SqliteStorage, topic_id: Uuid, origin: SessionOrigin) -> Uuid {
         storage
             .create_session(NewSession {
-                topic_id,
-                agent_id: "gateway".to_string(),
                 origin,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .expect("session")
@@ -314,25 +311,14 @@ mod tests {
     ) -> Uuid {
         storage
             .create_workflow_run(NewWorkflowRun {
-                topic_id,
                 parent_run_id,
                 parent_seq: parent_run_id.map(|_| 1),
                 dispatching_session_id,
-                script_version_id: None,
-                inline_workflow_id: None,
                 inline_workflow_name: Some("build-verify".to_string()),
-                inline_workflow_version: None,
-                carrying_skill: None,
-                task: None,
                 source: Some("return null;".to_string()),
                 source_hash: "hash".to_string(),
-                args: serde_json::Value::Null,
                 budget: serde_json::Value::Null,
-                engine_version: "test".to_string(),
-                dispatch_bound_agent_ids: vec![],
-                dispatch_bound_task_definition_ids: vec![],
-                workflow_call_tools: None,
-                inherited_worker_placement: None,
+                ..swage_storage::fixtures::new_workflow_run(topic_id)
             })
             .await
             .expect("run")
@@ -403,7 +389,7 @@ mod tests {
                 kind: ScheduleKind::Cron,
                 expression: "0 9 * * *".to_string(),
                 session_policy: SessionPolicy::Fresh {
-                    topic_id: topic.id,
+                    topic_id: Some(topic.id),
                     agent_id: "gateway".to_string(),
                 },
                 creator: ScheduleCreator::User,

@@ -3786,6 +3786,7 @@ dependencies = [
  "sha2 0.11.0",
  "swage-core",
  "swage-protocol",
+ "swage-storage",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
