@@ -3087,7 +3087,9 @@ mod tests {
         );
         assert!(
             request_text.contains("Topic: none — this session was started without a topic")
-                && request_text.contains("Working directory:")
+                && request_text.contains("No workspace is attached. Tool paths resolve at ")
+                && request_text.contains("/scratch/general/sessions/")
+                && !request_text.contains("Working directory:")
                 && request_text.contains("Session started:"),
             "external delegated provider request should include the child session's place: {request_text}"
         );
