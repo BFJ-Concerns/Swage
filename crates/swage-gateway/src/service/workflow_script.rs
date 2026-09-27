@@ -403,11 +403,8 @@ mod tests {
         state
             .storage
             .create_session(NewSession {
-                topic_id,
                 agent_id: "current-agent".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic_id)
             })
             .await
             .expect("session")

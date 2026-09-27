@@ -145,10 +145,8 @@ async fn setup() -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
         .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "agent-a".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .expect("session");
@@ -432,10 +430,9 @@ async fn facade_storage_round_trips_session_metadata() {
 
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "agent-a".into(),
-            origin: swage_storage::SessionOrigin::Direct,
             metadata: Some(metadata.clone()),
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .expect("session with metadata");

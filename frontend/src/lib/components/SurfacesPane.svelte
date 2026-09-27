@@ -199,11 +199,10 @@
   <section aria-label="Surface">
     {#if store.activeSurface}
       <h2>{store.activeSurface.title}</h2>
-      {#if store.activeSurface.library_entry_id}
-        {@const originId = store.activeSurface.library_entry_id}
+      {#if store.activeSurface.seeded_from_name}
         <p class="lineage">
           Added from the library entry <strong
-            >{store.entryName(originId) ?? originId}</strong
+            >{store.activeSurface.seeded_from_name}</strong
           > — this surface's modules are its own; the entry is unaffected by
           edits here.
         </p>

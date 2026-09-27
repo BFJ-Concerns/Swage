@@ -150,17 +150,6 @@ mod tests {
     };
     use swage_tool::context::MockToolContext;
 
-    fn state(storage: Arc<SqliteStorage>) -> AppState {
-        AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            storage as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        )
-    }
-
     async fn context_for(
         state: AppState,
         storage: Arc<SqliteStorage>,
@@ -313,16 +302,12 @@ mod tests {
             .expect("saved workflow");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
         let context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             session.id,
         )
@@ -377,17 +362,16 @@ mod tests {
             .expect("unconstrained workflow");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
-        let result = workflows_for_session(&state(Arc::clone(&storage)), session.id)
-            .await
-            .expect("workflow listing");
+        let result = workflows_for_session(
+            &crate::test_support::state(Arc::clone(&storage)),
+            session.id,
+        )
+        .await
+        .expect("workflow listing");
         let workflows = result["workflows"].as_array().expect("workflow array");
         let constrained = workflows
             .iter()
@@ -432,16 +416,12 @@ mod tests {
             .expect("saved workflow");
         let second_session = storage
             .create_session(NewSession {
-                topic_id: second_topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(second_topic.id)
             })
             .await
             .expect("second session");
         let context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             second_session.id,
         )
@@ -490,21 +470,15 @@ mod tests {
         );
         let first_session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-one".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("first session");
         let second_session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
                 agent_id: "agent-two".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("second session");
@@ -512,13 +486,13 @@ mod tests {
         let _second_root = crate::skill::TestSkillRootGuard::at(second_session.id, root.path());
 
         let first_context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             first_session.id,
         )
         .await;
         let second_context = context_for(
-            state(Arc::clone(&storage)),
+            crate::test_support::state(Arc::clone(&storage)),
             Arc::clone(&storage),
             second_session.id,
         )

@@ -370,11 +370,8 @@ async fn setup_conversation(agent_id: &str) -> (Arc<SqliteStorage>, Topic, Sessi
         .expect("default topic");
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: agent_id.to_string(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .expect("session");
