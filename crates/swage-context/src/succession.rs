@@ -19,7 +19,10 @@
 //! context, the runtime's compactor handles it as before, and the report
 //! records the attempt.
 
-use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart};
+use swage_core::{
+    ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart,
+    render_message_for_model_context, role_label_for_model_context,
+};
 use swage_provider::LlmProvider;
 
 use crate::element::ContextElement;
@@ -328,24 +331,17 @@ fn summary_request(
     }
 }
 
-/// Messages as labelled prose for a reader outside the conversation;
-/// non-text parts are named rather than dropped silently.
+/// Messages as labelled prose for a reader outside the conversation, tool
+/// calls and their results rendered as the model context renders them.
 pub fn transcript(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .map(|message| {
-            let label = match message.role() {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => "tool",
-            };
-            let text = message.text_content();
-            if text.trim().is_empty() {
-                format!("[{label}] (non-text content)")
-            } else {
-                format!("[{label}] {text}")
-            }
+            format!(
+                "[{}] {}",
+                role_label_for_model_context(message.role()),
+                render_message_for_model_context(message)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n\n")
