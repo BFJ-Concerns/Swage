@@ -1,6 +1,7 @@
 //! Shell execution tool — runs commands in the topic's workspace directory.
 
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,7 +24,8 @@ use super::workspace::{
 /// Executes shell commands in the turn workspace.
 ///
 /// Commands run via `sh -c` with CWD set to the active ToolContext directory.
-/// Output is capped at `max_output_bytes` and killed after `timeout`.
+/// Output is capped at `max_output_bytes`; the process group stops on timeout
+/// or when execution is cancelled.
 pub struct ShellTool {
     pub timeout: Duration,
     pub max_output_bytes: usize,
@@ -71,17 +73,22 @@ impl Tool for ShellTool {
         };
 
         // Spawn the command under sh -c so standard shell features are available.
-        let mut child = Command::new("sh")
+        let mut process = Command::new("sh");
+        process
             .arg("-c")
             .arg(&command)
             .current_dir(ctx.working_directory())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!("Failed to spawn command: {e}"),
-            })?;
+            .kill_on_drop(true);
+        // Descendants inherit this group, so dropping the executing future
+        // can stop the command's whole process tree rather than just `sh`.
+        process.as_std_mut().process_group(0);
+        let mut child = process.spawn().map_err(|e| ToolError::ExecutionFailed {
+            name: self.name().to_owned(),
+            message: format!("Failed to spawn command: {e}"),
+        })?;
+        let mut process_group = ShellProcessGroup::new(&child);
 
         // Take the piped stdout/stderr handles before starting the wait.
         let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
@@ -126,8 +133,8 @@ impl Tool for ShellTool {
 
         match read_result {
             Err(_elapsed) => {
-                // Timeout expired — kill the child to free resources.
-                let _ = kill_child(&mut child).await;
+                // Timeout expired — stop the process group to free resources.
+                kill_child(&mut child, &mut process_group).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
                     message: format!("Command timed out after {:.1}s", self.timeout.as_secs_f64()),
@@ -135,8 +142,8 @@ impl Tool for ShellTool {
             }
 
             Ok(Err(e)) => {
-                // I/O error reading output — kill the child and propagate.
-                let _ = kill_child(&mut child).await;
+                // I/O error reading output — stop the process group and propagate.
+                kill_child(&mut child, &mut process_group).await;
                 Err(e)
             }
 
@@ -146,6 +153,7 @@ impl Tool for ShellTool {
                     name: self.name().to_owned(),
                     message: format!("Failed to wait for command: {e}"),
                 })?;
+                process_group.disarm();
 
                 let stdout_str = String::from_utf8_lossy(&stdout.bytes);
                 let stderr_str = String::from_utf8_lossy(&stderr.bytes);
@@ -278,9 +286,43 @@ where
     })
 }
 
-/// Kill a child process, ignoring errors (it may have already exited).
-async fn kill_child(child: &mut Child) {
-    let _ = child.kill().await;
+/// The shell is its group's leader. A live child keeps its pid reserved until
+/// reaped, so signalling that group from Drop cannot target a reused pid.
+struct ShellProcessGroup {
+    id: libc::pid_t,
+    armed: bool,
+}
+
+impl ShellProcessGroup {
+    fn new(child: &Child) -> Self {
+        Self {
+            id: child.id().expect("a spawned shell has a process id") as libc::pid_t,
+            armed: true,
+        }
+    }
+
+    fn stop(&mut self) {
+        if self.armed {
+            // The group id is positive and belongs to the shell we spawned.
+            unsafe { libc::kill(-self.id, libc::SIGKILL) };
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ShellProcessGroup {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Kill the command's process group, then reap its shell.
+async fn kill_child(child: &mut Child, process_group: &mut ShellProcessGroup) {
+    process_group.stop();
     // Reap to avoid zombies.
     let _ = child.wait().await;
 }
@@ -332,6 +374,36 @@ mod tests {
         let val = result.expect("non-zero exit should still return tool data");
         assert_eq!(val["output"], json!(""));
         assert_eq!(val["exit_code"], json!(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_shell_execution_stops_its_child_process() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ctx_in_dir_with_ids(&workspace);
+        let ready = workspace.path().join("ready");
+        let child_marker = workspace.path().join("child_finished");
+        let command = "sh -c 'sleep 2; touch child_finished' & touch ready; wait";
+        let execution = tokio::spawn(async move {
+            tool(10)
+                .execute(json!({ "command": command }), &context)
+                .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "shell never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        execution.abort();
+        let _ = execution.await;
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        assert!(
+            !child_marker.exists(),
+            "the shell's child continued after execution was dropped"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

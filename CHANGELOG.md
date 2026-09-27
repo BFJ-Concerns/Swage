@@ -25,6 +25,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Stopping a turn stops the shell command and its child processes when it runs on a device or directly on the gateway without sandboxing.
 - Relinking a moved workspace keeps its label, permissions, trust and working-folder selection; a failed relink leaves the attachment unchanged.
 - Surfaces opened by a topic when a person starts a session now appear in the local audit trail with their library origin and module content, and notify open surface views. Saving a surface to the library records the entry and its audit event together.
 - Fresh schedule runs no longer open a topic's person-facing default surfaces; those defaults open when a person starts a session.
