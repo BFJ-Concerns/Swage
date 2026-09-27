@@ -30,7 +30,10 @@ use tracing::{info, warn};
 
 use swage_core::{ApprovalTimeoutPolicy, StorageError};
 use swage_storage::model::{ApprovalState, ThreadState, TurnState};
-use swage_storage::store::{Storage, TopicStore};
+use swage_storage::store::{
+    INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS, Storage, TOOL_RESULT_UNAVAILABLE,
+    TOOL_RESULT_UNAVAILABLE_STATUS, TopicStore,
+};
 
 use crate::state::AppState;
 
@@ -95,6 +98,7 @@ pub async fn recover_orphaned_turns(
     topic_store: &dyn TopicStore,
 ) -> Result<usize, StorageError> {
     let mut recovered_turn_ids = HashSet::new();
+    let mut seen_turn_ids = HashSet::new();
 
     for topic in topic_store.list_scopes().await? {
         for session in storage.list_by_topic(topic.id).await? {
@@ -107,12 +111,25 @@ pub async fn recover_orphaned_turns(
                     // correlation state to resume the parent turn or expose a
                     // recoverable suspended state after a gateway restart.
                     // ---
+                    if !seen_turn_ids.insert(turn.id) {
+                        continue;
+                    }
+
+                    // A settlement may have failed after a turn completed;
+                    // otherwise an outstanding call was cut off. Replay the
+                    // explanation that matches the persisted turn state.
+                    let (result, status) = if turn.state == TurnState::Completed {
+                        (TOOL_RESULT_UNAVAILABLE, TOOL_RESULT_UNAVAILABLE_STATUS)
+                    } else {
+                        (INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS)
+                    };
+                    storage
+                        .settle_started_tool_calls(turn.id, result, status)
+                        .await?;
                     if turn.state.is_terminal() {
                         continue;
                     }
-                    if !recovered_turn_ids.insert(turn.id) {
-                        continue;
-                    }
+                    recovered_turn_ids.insert(turn.id);
 
                     warn!(
                         agent_id = %turn.agent_id,
@@ -429,6 +446,80 @@ mod tests {
             .expect("recovery should not fail on empty storage");
 
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_settles_started_calls_on_terminal_turns() {
+        use swage_storage::model::NewToolCall;
+        use swage_storage::store::ToolCallStore;
+        let (storage, thread_id) = make_sqlite_with_thread().await;
+        for state in [TurnState::Completed, TurnState::Interrupted] {
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id,
+                    agent_id: "gateway".into(),
+                    state: TurnState::Processing,
+                    user_input: None,
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            storage
+                .create_tool_call(NewToolCall {
+                    turn_id: turn.id,
+                    agent_id: "gateway".into(),
+                    call_id: turn.id.to_string(),
+                    tool: "echo".into(),
+                    arguments: "{}".into(),
+                    model_arguments: "{}".into(),
+                    result: None,
+                    model_result: None,
+                    status: None,
+                    duration_ms: None,
+                    truncated: false,
+                    total_bytes: None,
+                    provider_round: 1,
+                    position: 0,
+                    parent_call_id: None,
+                    display_summary: None,
+                })
+                .await
+                .unwrap();
+            storage.update_turn_state(turn.id, state).await.unwrap();
+        }
+        assert_eq!(
+            recover_orphaned_turns(storage.as_ref(), storage.as_ref())
+                .await
+                .unwrap(),
+            0
+        );
+        for turn in storage.list_turns_by_thread(thread_id).await.unwrap() {
+            let call = storage
+                .list_tool_calls_by_turn(turn.id)
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            let (expected_result, expected_status) = if turn.state == TurnState::Completed {
+                (TOOL_RESULT_UNAVAILABLE, TOOL_RESULT_UNAVAILABLE_STATUS)
+            } else {
+                (INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS)
+            };
+            assert_eq!(
+                call.status.as_deref(),
+                Some(expected_status),
+                "terminal turn {:?} settled a call with the wrong status",
+                turn.state
+            );
+            assert_eq!(call.result.as_deref(), Some(expected_result));
+            assert!(
+                call.model_result
+                    .as_deref()
+                    .is_some_and(|result| result.contains(expected_result)),
+                "replay must explain the missing result for {:?}",
+                turn.state
+            );
+        }
     }
 
     #[tokio::test]

@@ -25,6 +25,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart or cancellation is settled as interrupted, and the resumed conversation replays those calls with their results.
 - Shared memory notes now save to the session's topic, or to general memory when no topic is selected, so later sessions in that scope can read them.
 - Stopping a turn stops the shell command and its child processes when it runs on a device or directly on the gateway without sandboxing.
 - Relinking a moved workspace keeps its label, permissions, trust and working-folder selection; a failed relink leaves the attachment unchanged.
