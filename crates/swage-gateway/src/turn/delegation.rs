@@ -422,6 +422,15 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
     }
 
     async fn record_event(&self, session_id: Uuid, event: AgentEvent) -> Result<(), AgentError> {
+        if let AgentEvent::RecordIntegrityLost { turn_id, reason } = &event {
+            // Constitutive record loss (record_durability.rs): the child has
+            // settled, so its gateway coordinator must mark the turn Failed.
+            tracing::error!(%turn_id, %reason, "delegated turn record integrity lost");
+            if let Err(error) = self.state.storage.force_turn_failure(*turn_id).await {
+                tracing::error!(%turn_id, %error, "failed to mark delegated turn failed after record loss");
+            }
+            return Ok(());
+        }
         let turn_id = match &event {
             AgentEvent::ProviderRequestPrepared { turn_id, .. }
             | AgentEvent::ProviderResponseCaptured { turn_id, .. }

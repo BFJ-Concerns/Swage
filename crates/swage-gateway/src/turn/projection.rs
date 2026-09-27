@@ -512,7 +512,7 @@ pub(super) async fn project_agent_events(
                     message,
                 });
             }
-            AgentEvent::RecordIntegrityLost { reason } => {
+            AgentEvent::RecordIntegrityLost { reason, .. } => {
                 // Constitutive record (record_durability.rs): the coordinator
                 // performs the Failed transition after the agent settles.
                 record_integrity_lost.get_or_insert(reason);

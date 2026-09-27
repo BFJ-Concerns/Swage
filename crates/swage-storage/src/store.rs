@@ -704,12 +704,12 @@ pub trait ToolCallStore: Send + Sync {
     }
 }
 
-/// Status a started tool call settles with when its execution was cut off.
+/// Status for a started call with no recorded result when its turn is interrupted.
 pub const INTERRUPTED_TOOL_STATUS: &str = "interrupted";
 
-/// Result a started tool call settles with when its execution was cut off.
+/// Result a started tool call settles with when its result was not recorded.
 pub const INTERRUPTED_TOOL_RESULT: &str =
-    "tool call interrupted before it finished; its outcome is unknown";
+    "tool call did not report a result; its outcome is unknown";
 
 /// Status for a call that ran but whose result could not be recorded.
 pub const TOOL_RESULT_UNAVAILABLE_STATUS: &str = "result_unavailable";
