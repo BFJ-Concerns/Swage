@@ -64,6 +64,7 @@ mod inbound_hooks;
 mod operator_guidance;
 mod projection;
 mod provider_record;
+mod runtime_launch;
 mod sandbox_approval;
 mod succession;
 mod turn_input;
@@ -89,6 +90,9 @@ pub(crate) use operator_guidance::*;
 pub(crate) use projection::route_approval_agent_event;
 use projection::{ProjectedTurn, TurnProjection, project_agent_events};
 pub(crate) use provider_record::*;
+#[cfg(test)]
+use runtime_launch::effort_capability_for_model;
+use runtime_launch::{RuntimeLaunch, launch_turn_runtime, requested_effort};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,
@@ -117,23 +121,6 @@ fn map_turn_creation_error(error: swage_core::StorageError, session_id: Uuid) ->
         }
         other => GatewayError::Storage(other),
     }
-}
-
-/// The effort control the effective model accepts: the catalogue's own
-/// declaration when the entry carries one, otherwise the provider adapter's
-/// account of the documented control, otherwise no control at all.
-pub(crate) fn effort_capability_for_model(
-    config: &swage_config::ResolvedConfig,
-    catalogue_entry: &str,
-    provider: &dyn swage_provider::LlmProvider,
-) -> swage_core::EffortCapability {
-    let model = config.models.entries.get(catalogue_entry);
-    model
-        .and_then(|model| model.capabilities.effort.clone())
-        .or_else(|| {
-            provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
-        })
-        .unwrap_or(swage_core::EffortCapability::None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1097,193 +1084,39 @@ async fn process_turn_with_composition_and_focus(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let activity_tracker = state.activity_tracker.clone();
     let pricing_config = state.active_config().pricing.clone();
-    let requested_effort = match effort_override {
-        Some(effort) => Some(effort),
-        None => session
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("effort"))
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| {
-                GatewayError::ConfigError(format!("session effort is invalid: {error}"))
-            })?
-            .or_else(|| {
-                match selected_model_id
-                    .as_deref()
-                    .filter(|model_id| !model_id.trim().is_empty())
-                {
-                    Some(model_id) => resolve_model_catalogue_entry(&config.models, model_id)
-                        .and_then(|(_, model)| model.default_effort),
-                    None => config
-                        .models
-                        .entries
-                        .get(&config.models.default)
-                        .and_then(|model| model.default_effort),
-                }
-            }),
-    };
+    let requested_effort = requested_effort(
+        effort_override,
+        session.metadata.as_ref(),
+        selected_model_id.as_deref(),
+        &config,
+    )?;
     let model_name = config.default_model_id().to_string();
-    let agent_handle = if is_codex_turn {
-        let effort = requested_effort.map(|requested| {
-            let capability = config
-                .models
-                .entries
-                .get(&config.models.default)
-                .and_then(|model| model.capabilities.effort.clone())
-                .or_else(|| crate::codex::effort_capability(&model_name))
-                .unwrap_or(swage_core::EffortCapability::None);
-            swage_core::resolve_effort(requested, &capability)
-        });
-        if let Some(resolved) = effort.as_ref() {
-            record_effort_snapshot(&mut report_json, resolved);
-        }
-        let resolution = WorkflowAgentCallResolution {
-            model: Some(model_name.clone()),
-            effort: effort
-                .as_ref()
-                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
-            session_id: Some(session_id),
-            thread_id: Some(thread_id),
-            turn_id: Some(prepared_turn_id),
-        };
-        record_agent_call_attempt_before_execution(
-            state,
-            session_id,
-            prepared_turn_id,
-            agent_call_scope,
-            &resolution,
-            &sandbox_guard,
-        )
-        .await?;
-        let session_approval_grants = state
-            .session_approval_grants
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let permissions = build_permission_config(
-            &config,
-            &state.config,
-            Some(topic_id),
-            Some(session_id),
-            &session_approval_grants,
-        );
-        let codex_request = crate::codex::CodexTurnRequest {
+    let agent_handle = launch_turn_runtime(
+        state,
+        RuntimeLaunch {
+            config: &config,
+            is_codex_turn,
             session_id,
             thread_id,
-            turn_id: prepared_turn_id,
-            agent_id: session.agent_id.clone(),
-            model: model_name.clone(),
-            effort,
-            user_message: before_inbound.canonical_content.clone(),
-            assembled_context: assembled_messages,
-            agent_config,
-            permissions,
-            dispatcher: Arc::new(dispatcher),
-            event_tx,
-            cancellation: cancel_token,
-        };
-        let codex_state = state.clone();
-        tokio::spawn(async move { crate::codex::run_turn(codex_state, codex_request).await })
-    } else {
-        let mut agent_builder = AgentBuilder::new()
-            .config(agent_config)
-            .provider(state.active_provider())
-            .storage(state.storage.clone())
-            .tool_dispatcher(dispatcher)
-            .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
-            .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
-            .context_transfer_config(config.communication.context_transfer.clone());
-        if let Some(hook_registry) = state.hook_registry.clone() {
-            agent_builder = agent_builder.hook_registry(hook_registry);
-        }
-        let agent = match agent_builder.build() {
-            Ok(agent) => agent,
-            Err(error) => {
-                tracing::error!(%error, "failed to build agent for turn");
-                let _ = ws_tx.send(ServerEvent::Error {
-                    code: "agent_construction_error".to_string(),
-                    message: error.to_string(),
-                });
-                if let Err(update_error) = state
-                    .storage
-                    .update_turn_state(prepared_turn_id, TurnState::Failed)
-                    .await
-                {
-                    tracing::warn!(
-                        turn_id = %prepared_turn_id,
-                        error = %update_error,
-                        "failed to mark turn failed after agent construction error"
-                    );
-                }
-                shutdown_sandbox_guard(
-                    &sandbox_guard,
-                    "failed to shut down turn sandbox after agent construction error",
-                )
-                .await;
-                state.active_turns.lock().await.remove(&session_id);
-                return Err(GatewayError::WebSocketError(format!(
-                    "agent construction failed: {error}"
-                )));
-            }
-        };
-        // The intent is resolved once, here, against the effective model's
-        // declared capability; adapters express the resolved control. The
-        // outcome is written into the turn's audit snapshot so a clamp or an
-        // unsupported `off` is reconstructable from the record.
-        let effort = requested_effort.map(|requested| {
-            let capability = effort_capability_for_model(
-                &config,
-                &config.models.default,
-                state.active_provider().as_ref(),
-            );
-            swage_core::resolve_effort(requested, &capability)
-        });
-        if let Some(resolved) = effort.as_ref() {
-            record_effort_snapshot(&mut report_json, resolved);
-        }
-        // The dispatch record names what the call *asked* for; what the
-        // turn actually resolved is only known here, so it is stamped onto
-        // the same journal entry as a second field rather than by rewriting
-        // the dispatch one. Each turn appends its own attempt, so a call
-        // replay re-dispatched keeps the interrupted attempt beside the one
-        // that follows it.
-        let resolution = WorkflowAgentCallResolution {
-            model: Some(model_name.clone()),
-            effort: effort
-                .as_ref()
-                .map(|resolved| resolved.clamped_to.unwrap_or(resolved.requested)),
-            session_id: Some(session_id),
-            thread_id: Some(thread_id),
-            turn_id: Some(prepared_turn_id),
-        };
-        record_agent_call_attempt_before_execution(
-            state,
-            session_id,
             prepared_turn_id,
+            topic_id,
+            agent_id: &session.agent_id,
+            model_name: &model_name,
+            requested_effort,
             agent_call_scope,
-            &resolution,
-            &sandbox_guard,
-        )
-        .await?;
-        let turn_request = TurnRequest {
-            execution: swage_agent::context::TurnExecutionContext {
-                session_id,
-                thread_id,
-                turn_id: prepared_turn_id,
-                topic_id: Some(topic_id),
-            },
+            sandbox_guard: &sandbox_guard,
+            report_json: &mut report_json,
+            ws_tx: &ws_tx,
             user_message: before_inbound.canonical_content.clone(),
-            assembled_context: assembled_messages,
+            assembled_messages,
+            agent_config,
+            dispatcher,
             compaction_focus,
-            parent_turn_id: None,
-            existing_turn_id: Some(prepared_turn_id),
-            effort,
-            cancellation_token: cancel_token,
-        };
-        tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
-    };
+            event_tx,
+            cancel_token,
+        },
+    )
+    .await?;
 
     // Step 11: Project every AgentEvent to the client and the record
     // (turn/projection.rs) until the agent's sender closes.
