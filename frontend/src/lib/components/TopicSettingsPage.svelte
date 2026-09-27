@@ -11,6 +11,7 @@
     detachTopicWorkspace,
     listTopicSessions,
     listTopicWorkspaces,
+    relinkTopicWorkspace,
     updateTopicWorkspaceTrust,
     updateTopic,
   } from "../api/topics";
@@ -200,24 +201,16 @@
     relinkDrafts = { ...relinkDrafts, [workspaceId]: value };
   }
 
-  // A folder that has moved is reattached at its new path with the same
-  // label, access and trust; the old attachment is released first so the
-  // working-folder role passes to the new one.
+  // Keep the attachment's identity and settings when its folder moves.
   async function relinkWorkspace(workspace: WorkspaceAttachment): Promise<void> {
     if (!topic) return;
     const replacementPath = relinkDrafts[workspace.id]?.trim();
     if (!replacementPath) return;
     relinkingWorkspaceId = workspace.id;
     isMutating = true;
+    error = null;
     try {
-      await detachTopicWorkspace(topic.id, workspace.id);
-      await attachTopicWorkspace(topic.id, {
-        path: replacementPath,
-        label: workspace.label,
-        permissions: workspace.permissions,
-        is_trusted: workspace.is_trusted,
-        set_as_default: workspace.is_default,
-      });
+      await relinkTopicWorkspace(topic.id, workspace.id, replacementPath);
       setRelinkDraft(workspace.id, "");
       await loadTopicSettings();
     } catch (err) {
