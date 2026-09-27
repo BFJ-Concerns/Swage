@@ -59,9 +59,9 @@ use crate::{
         ConversationBranchListResponse, ConversationDetail, ConversationResponse,
         ConversationService, ConversationSummary, ConversationThreadDetail,
         CreateConversationBranchRequest, CreateTopicRequest, CreateWorkspaceAttachmentRequest,
-        TopicListResponse, TopicResponse, TopicService, UpdateTopicRequest,
-        UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
-        WorkspaceAttachmentService,
+        RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse, TopicService,
+        UpdateTopicRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
+        WorkspaceAttachmentResponse, WorkspaceAttachmentService,
     },
     settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
     state::AppState,
@@ -1125,6 +1125,18 @@ pub async fn update_topic_workspace_trust(
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
     let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.set_trust(topic_id, workspace_id, req).await?))
+}
+
+/// `PUT /api/topics/:topic_id/workspaces/:workspace_id/relink` — change an attachment's path.
+pub async fn relink_topic_workspace(
+    State(state): State<AppState>,
+    Path((topic_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<RelinkWorkspaceAttachmentRequest>,
+) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
+    let svc = WorkspaceAttachmentService::from_state(state);
+    Ok(Json(
+        svc.relink_workspace(topic_id, workspace_id, req).await?,
+    ))
 }
 
 /// `DELETE /api/topics/:topic_id/workspaces/:workspace_id` — detach a workspace.
