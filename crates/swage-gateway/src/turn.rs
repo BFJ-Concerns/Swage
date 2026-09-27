@@ -56,6 +56,7 @@ use crate::{state::AppState, subscription::SubscriptionState, websocket::ServerE
 mod configuration;
 mod context;
 mod delegation;
+mod detached_delivery;
 mod dispatcher;
 mod history;
 mod operator_guidance;
@@ -68,6 +69,9 @@ mod workspace;
 pub(crate) use configuration::*;
 pub(crate) use context::*;
 pub(crate) use delegation::*;
+use detached_delivery::deliver_detached_results;
+#[cfg(test)]
+use detached_delivery::render_delegation_result;
 pub(crate) use dispatcher::*;
 #[cfg(test)]
 use history::compact_tool_replay_messages;
@@ -325,35 +329,6 @@ pub(crate) async fn dispatch_before_inbound(
             "BeforeInbound hooks cannot request approval".to_string(),
         )),
     }
-}
-
-/// Render a completed delegation's Result message as thread content.
-///
-/// Reads the payload the delegation path writes — `response` with optional
-/// `structured_output`, or `error` for a failed child — and falls back to
-/// the raw JSON for any other shape, so an unrecognised payload is still
-/// delivered rather than dropped.
-fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
-    let sender = &result.sender_agent_id;
-    let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
-        Some(response) => format!("Delegated agent {sender} completed:\n{response}"),
-        None => match result.payload.get("error").and_then(|v| v.as_str()) {
-            Some(error) => format!("Delegated agent {sender} failed: {error}"),
-            None => format!(
-                "Delegated agent {sender} finished:\n{}",
-                serde_json::to_string_pretty(&result.payload)
-                    .unwrap_or_else(|_| result.payload.to_string())
-            ),
-        },
-    };
-    if let Some(structured) = result.payload.get("structured_output") {
-        let rendered =
-            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string());
-        text.push_str("\n\nStructured output:\n```json\n");
-        text.push_str(&rendered);
-        text.push_str("\n```");
-    }
-    text
 }
 
 async fn release_active_turn(state: &AppState, session_id: Uuid) {
@@ -990,45 +965,12 @@ async fn process_turn_with_composition_and_focus(
         .await?;
     }
 
-    // Step 7: Deliver completed detached delegations. A detached child's
-    // Result waits in this agent's mailbox until its parent next turns;
-    // each is appended as a durable User-role message *before* history is
-    // rebuilt, so the result enters the thread record — visible in the
-    // UI, part of the audit trail, and carried to the model as ordinary
-    // history content, never as instructions. User role, deliberately:
-    // the history rebuild carries Tool-role rows only when they answer a
-    // recorded tool call (providers reject orphaned tool results), so a
-    // platform-delivered notification rides the same role a channel or
-    // scheduled message would, with the rendering naming its real sender.
-    // Append-before-claim: a failure between the two re-delivers next
-    // turn rather than losing the result, and a lost claim race leaves a
-    // duplicate row, not a gap. A storage failure here fails the turn —
-    // with the same explicit cleanup as the surrounding error paths, so
-    // the thread is not left guarded by a stale Pending turn.
-    let delivery_result: Result<(), GatewayError> = async {
-        let pending_results =
-            swage_agent::mailbox::pending_results(&state.storage, &session.agent_id)
-                .await
-                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-        for result in &pending_results {
-            state
-                .storage
-                .append_message(AppendMessage {
-                    thread_id,
-                    attachments: Vec::new(),
-                    turn_id: Some(prepared_turn_id),
-                    role: Role::User,
-                    content: render_delegation_result(result),
-                    agent_id: session.agent_id.clone(),
-                })
-                .await?;
-            swage_agent::mailbox::claim_result(&state.storage, result.id)
-                .await
-                .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-        }
-        Ok(())
-    }
-    .await;
+    // Step 7: Deliver completed detached delegations (turn/detached_delivery.rs).
+    // A storage failure here fails the turn — with the same explicit cleanup
+    // as the surrounding error paths, so the thread is not left guarded by a
+    // stale Pending turn.
+    let delivery_result =
+        deliver_detached_results(state, &session.agent_id, thread_id, prepared_turn_id).await;
     if let Err(error) = delivery_result {
         record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;
