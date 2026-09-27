@@ -171,6 +171,15 @@ impl NestedToolRuntime {
         duration_ms: u64,
     ) -> Result<(), swage_core::StorageError> {
         let result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
+        // A nested call's output returns to the calling script, not straight
+        // to the provider, so no leak scan runs here; the model-facing text is
+        // the compacted result, settled through the same parameter the agent's
+        // scanned text takes.
+        let model_result = swage_core::compact_tool_result_for_model_with_reference(
+            &result_text,
+            status != "success",
+            swage_core::tool_result_reference(&self.turn_id.to_string(), call_id),
+        );
         let metadata = extract_tool_result_metadata(result);
         let event_total_bytes = metadata
             .total_bytes
@@ -181,6 +190,7 @@ impl NestedToolRuntime {
                 call_id,
                 self.turn_id,
                 &result_text,
+                &model_result,
                 status,
                 duration_ms as i64,
                 metadata.truncated,

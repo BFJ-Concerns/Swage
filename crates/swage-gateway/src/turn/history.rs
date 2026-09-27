@@ -11,11 +11,28 @@ pub(super) async fn rebuild_thread_history_messages(
     let mut rebuilt = Vec::new();
     let mut replay_inserted_for_turn = HashSet::new();
 
+    // A turn's durable tool rounds replay before its assistant message. A turn
+    // that never reached one — interrupted mid-tool — still replays its
+    // rounds, anchored after its first stored message, so a resumed
+    // continuation sees the calls that already ran (and those cut off) instead
+    // of selecting them again.
+    let turns_with_assistant_message: HashSet<Uuid> = stored_history
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .filter_map(|message| message.turn_id)
+        .collect();
+
     for message in stored_history {
-        if message.role == Role::Assistant
-            && let Some(turn_id) = message.turn_id
-            && replay_inserted_for_turn.insert(turn_id)
-        {
+        let replay_turn = message.turn_id.filter(|turn_id| {
+            !replay_inserted_for_turn.contains(turn_id)
+                && (message.role == Role::Assistant
+                    || !turns_with_assistant_message.contains(turn_id))
+        });
+        let replay_before = replay_turn.filter(|_| message.role == Role::Assistant);
+        let replay_after = replay_turn.filter(|_| message.role != Role::Assistant);
+
+        if let Some(turn_id) = replay_before {
+            replay_inserted_for_turn.insert(turn_id);
             let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
             rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
         }
@@ -33,6 +50,12 @@ pub(super) async fn rebuild_thread_history_messages(
                     super::content_parts(message.content, &attachments),
                 ));
             }
+        }
+
+        if let Some(turn_id) = replay_after {
+            replay_inserted_for_turn.insert(turn_id);
+            let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
+            rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
         }
     }
 
