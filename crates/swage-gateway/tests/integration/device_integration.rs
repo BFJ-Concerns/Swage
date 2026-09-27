@@ -19,6 +19,7 @@ use swage_core::{
 use swage_device::{DeviceConnection, DeviceError, RegisterDeviceRequest};
 use swage_gateway::{
     device::DeviceKind, secret::CreateSecretRequest, server::build_router, state::AppState,
+    tool::shell::ShellTool,
 };
 use swage_provider::LlmProvider;
 use swage_storage::SqliteStorage;
@@ -484,6 +485,105 @@ async fn a_paired_device_dials_in_advertises_and_serves_operations_over_its_conn
     device_shutdown.cancel();
     device_task.await.unwrap().unwrap();
     wait_for_device_state(addr, "remote-device-a", "disconnected").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_device_shell_operation_stops_its_child_process() {
+    let _guard = with_secret_env();
+    let workspace = tempfile::tempdir().unwrap();
+    let provider = ChannelProvider::new(vec![]);
+    let gateway_dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![]);
+    let (addr, state) = start_test_server(provider, gateway_dispatcher).await;
+    let shared_token_secret_ref =
+        create_secret_ref(&state, "Shell device token", "shell-secret").await;
+    DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: "shell-device".to_string(),
+            label: Some("Shell device".to_string()),
+            kind: "attached_device".to_string(),
+            shared_token_secret_ref,
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let (device_shutdown, device_task) = dial_device(
+        addr,
+        "shell-device",
+        "shell-secret",
+        vec![Arc::new(ShellTool {
+            timeout: Duration::from_secs(10),
+            max_output_bytes: 1024,
+        })],
+        workspace.path(),
+    );
+    wait_for_device_state(addr, "shell-device", "connected").await;
+    let device = swage_gateway::device::resolve_device(
+        &state,
+        Some(&json!({ "device_id": "shell-device" })),
+    )
+    .await
+    .expect("connected device");
+    let mut context = MockToolContext::new("agent-test", "session-test");
+    context.working_directory = workspace.path().to_path_buf();
+    let command = json!({ "command": "sh -c 'sleep 2; touch child_finished' & touch ready; wait" });
+    let ready = workspace.path().join("ready");
+    let child_marker = workspace.path().join("child_finished");
+
+    // The same command must reach its child-owned side effect without Stop.
+    swage_gateway::device::execute_on_remote_device(&state, &device, "shell", &command, &context)
+        .await
+        .expect("control command completes");
+    assert!(child_marker.exists(), "control command did not finish");
+    std::fs::remove_file(&ready).unwrap();
+    std::fs::remove_file(&child_marker).unwrap();
+
+    let invocation = tokio::spawn({
+        let state = state.clone();
+        let device = device.clone();
+        async move {
+            swage_gateway::device::execute_on_remote_device(
+                &state, &device, "shell", &command, &context,
+            )
+            .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !ready.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "device shell never started"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    invocation.abort();
+    let _ = invocation.await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = swage_storage::store::AuditStore::list_audit_events(state.storage.as_ref())
+            .await
+            .unwrap();
+        if events.iter().any(|event| {
+            event.event_kind == "device_operation_settled"
+                && event.metadata["outcome"] == "cancelled"
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "gateway did not settle cancellation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2300)).await;
+    assert!(
+        !child_marker.exists(),
+        "the device shell's child continued after cancellation"
+    );
+    device_shutdown.cancel();
+    device_task.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
