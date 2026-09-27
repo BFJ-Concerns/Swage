@@ -2921,6 +2921,17 @@
         ],
         "type": "object"
       },
+      "RelinkWorkspaceAttachmentRequest": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
       "RequireApprovalEntry": {
         "anyOf": [
           {
@@ -9540,6 +9551,57 @@
           }
         },
         "summary": "Create a conversation in a topic."
+      }
+    },
+    "/api/topics/{topic_id}/workspaces/{workspace_id}/relink": {
+      "put": {
+        "operationId": "relink_topic_workspace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelinkWorkspaceAttachmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceAttachmentResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Relink a topic workspace attachment to a moved folder."
       }
     },
     "/api/turns/{id}/context": {
