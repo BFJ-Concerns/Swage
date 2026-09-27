@@ -1,12 +1,13 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DELEGATED_CHILDREN_METADATA_KEY,
     DelegationExecutor, DelegationHandler, DispatchContextComposition, GatewayDispatcherRequest,
-    MessageRouter, NewAgentMessage, Uuid, WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY,
-    WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY, WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY,
-    WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
-    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
-    apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
-    build_agent_config_for_topic_workspace, build_approval_registrar, build_assembly_elements,
+    MessageRouter, NewAgentMessage, ResolvedToolRoot, Uuid,
+    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
+    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
+    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
+    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
+    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_topic_workspace,
+    build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
@@ -14,7 +15,7 @@ use super::{
     load_session_config, load_topic_memory, load_trusted_workspace_policy, mpsc,
     operator_guidance_rules, resolve_authorised_worker_directory,
     resolve_requested_skills_for_agent, resolve_swage_root, select_context_assembly,
-    shutdown_sandbox_guard,
+    shutdown_sandbox_guard, worker_placement_path,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -206,7 +207,7 @@ struct GatewayDelegatedContextAssembler {
     topic: swage_storage::Topic,
     config: swage_config::ResolvedConfig,
     agent_id: String,
-    working_directory: String,
+    tool_root: ResolvedToolRoot,
     swage_root: std::path::PathBuf,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
@@ -218,7 +219,7 @@ pub(crate) fn delegated_context_assembler(
     topic: swage_storage::Topic,
     config: swage_config::ResolvedConfig,
     agent_id: String,
-    working_directory: String,
+    tool_root: ResolvedToolRoot,
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
@@ -229,7 +230,7 @@ pub(crate) fn delegated_context_assembler(
         topic,
         config,
         agent_id,
-        working_directory,
+        tool_root,
         swage_root,
         context_event_tx,
         effective_tool_permissions,
@@ -281,22 +282,21 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             .map(|variable| (variable.name, variable.value))
             .collect();
         session_variables.extend(self.composition.variables.clone().unwrap_or_default());
-        let environment =
-            build_session_environment(&self.topic, Some(self.working_directory.clone()), session);
-        let available_skills = available_skills_for_agent(
-            &self.topic.location(),
-            &self.agent_id,
-            Some(&self.swage_root),
-        );
         // Delegated children read the same operator-guidance sources as
         // foreground turns: the trust policy is re-derived here because the
-        // assembler holds only the working directory, not the policy.
+        // assembler retains the resolved tool root, not the policy.
         let workspace_policy = load_trusted_workspace_policy(
             &self.state.storage,
             self.topic.id,
             session.active_workspace_attachment_id,
         )
         .await;
+        let environment = build_session_environment(&self.topic, &self.tool_root, session);
+        let available_skills = available_skills_for_agent(
+            &self.topic.location(),
+            &self.agent_id,
+            Some(&self.swage_root),
+        );
         let operator_guidance = operator_guidance_rules(Some(&self.swage_root), &workspace_policy);
         let hierarchy = configuration_hierarchy(
             &self.swage_root,
@@ -691,12 +691,12 @@ impl DelegationHandler for GatewayDelegationHandler {
             session_metadata = existing.metadata.clone();
         }
         let existing_child = existing_named_child.map(|child| child.continuation);
-        let mut target_agent_config = build_agent_config_for_topic_workspace(
+        let (mut target_agent_config, mut tool_root) = build_agent_config_for_topic_workspace(
             &self.state,
             target_agent_id.to_string(),
             &target_resolved,
             None,
-            topic_id,
+            &topic,
             sender_turn_id,
             active_workspace_attachment_id,
         )
@@ -769,6 +769,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(placement) = placement.as_ref() {
             target_agent_config = target_agent_config
                 .with_workspace(placement.path.clone(), vec![placement.path.clone()]);
+            tool_root = ResolvedToolRoot::worker_placement(placement.path.clone());
         }
         target_agent_config.approval_prompts_enabled = false;
         let target_context_transfer_config = target_resolved.communication.context_transfer.clone();
@@ -827,7 +828,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 topic.clone(),
                 target_resolved.clone(),
                 target_agent_id.to_string(),
-                target_agent_config.working_directory.display().to_string(),
+                tool_root,
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
@@ -1078,16 +1079,12 @@ impl GatewayDelegationHandler {
             .get_session(thread.session_id)
             .await?
             .ok_or(AgentError::SessionNotFound(thread.session_id))?;
-        let placement = match session
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY))
-            .and_then(serde_json::Value::as_str)
-        {
+        let placement = match worker_placement_path(session.metadata.as_ref()) {
             Some(path) => {
-                let path = tokio::fs::canonicalize(path).await.map_err(|error| {
+                let path = tokio::fs::canonicalize(&path).await.map_err(|error| {
                     AgentError::InvalidConfig(format!(
-                        "cannot resolve dispatching worker placement {path:?}: {error}"
+                        "cannot resolve dispatching worker placement {}: {error}",
+                        path.display()
                     ))
                 })?;
                 let authority_path = session

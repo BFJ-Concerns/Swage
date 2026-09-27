@@ -323,63 +323,127 @@ pub(crate) async fn build_agent_config_for_topic_workspace(
     agent_id: String,
     config: &swage_config::ResolvedConfig,
     output_schema_override: Option<serde_json::Value>,
-    topic_id: Uuid,
+    topic: &swage_storage::model::Topic,
     session_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
-) -> AgentConfig {
+) -> (AgentConfig, ResolvedToolRoot) {
     let workspace_policy =
-        load_trusted_workspace_policy(&state.storage, topic_id, active_workspace_attachment_id)
+        load_trusted_workspace_policy(&state.storage, topic.id, active_workspace_attachment_id)
             .await;
-    let (workspace_root, allowed_paths) =
-        agent_workspace_from_policy(&state.config_root, &workspace_policy, topic_id, session_id);
-    build_agent_config_with_workspace(
+    let (tool_root, allowed_paths) = resolve_agent_tool_root_from_policy(
+        &state.config_root,
+        &workspace_policy,
+        &topic.location(),
+        session_id,
+    );
+    let agent_config = build_agent_config_with_workspace(
         agent_id,
         config,
         output_schema_override,
-        &workspace_root,
+        &tool_root.path,
         allowed_paths,
-    )
+    );
+    (agent_config, tool_root)
 }
 
 pub(super) fn managed_scratch_workspace(
     config_root: &Path,
-    topic_id: Uuid,
+    scope: &ScopeLocation,
     session_id: Uuid,
 ) -> PathBuf {
-    config_root
-        .join("scratch")
-        .join("topics")
-        .join(topic_id.to_string())
+    scope
+        .scratch_dir(config_root)
         .join("sessions")
         .join(session_id.to_string())
 }
 
-pub(super) fn agent_workspace_from_policy(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolRootSource {
+    WorkerPlacement,
+    AttachedWorkspace,
+    ManagedScratch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedToolRoot {
+    pub(crate) path: PathBuf,
+    pub(crate) source: ToolRootSource,
+}
+
+impl ResolvedToolRoot {
+    pub(crate) fn worker_placement(path: PathBuf) -> Self {
+        Self {
+            path,
+            source: ToolRootSource::WorkerPlacement,
+        }
+    }
+}
+
+pub(super) fn resolve_turn_tool_root(
     config_root: &Path,
     policy: &TrustedWorkspacePolicy,
-    topic_id: Uuid,
+    scope: &ScopeLocation,
     session_id: Uuid,
-) -> (PathBuf, Vec<PathBuf>) {
-    let workspace_root = policy
-        .active_workspace
-        .as_ref()
-        .map(|grant| grant.path.clone())
-        .unwrap_or_else(|| managed_scratch_workspace(config_root, topic_id, session_id));
-    if let Err(error) = std::fs::create_dir_all(&workspace_root) {
+    worker_placement: Option<PathBuf>,
+) -> (ResolvedToolRoot, Vec<PathBuf>) {
+    if let Some(path) = worker_placement {
+        return (ResolvedToolRoot::worker_placement(path.clone()), vec![path]);
+    }
+    resolve_agent_tool_root_from_policy(config_root, policy, scope, session_id)
+}
+
+pub(super) fn worker_placement_path(
+    session_metadata: Option<&serde_json::Value>,
+) -> Option<PathBuf> {
+    session_metadata
+        .and_then(|metadata| metadata.get(WORKER_PLACEMENT_CWD_METADATA_KEY))
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+}
+
+pub(super) fn resolve_agent_tool_root_from_policy(
+    config_root: &Path,
+    policy: &TrustedWorkspacePolicy,
+    scope: &ScopeLocation,
+    session_id: Uuid,
+) -> (ResolvedToolRoot, Vec<PathBuf>) {
+    let tool_root = match &policy.active_workspace {
+        Some(grant) => ResolvedToolRoot {
+            path: grant.path.clone(),
+            source: ToolRootSource::AttachedWorkspace,
+        },
+        None => ResolvedToolRoot {
+            path: managed_scratch_workspace(config_root, scope, session_id),
+            source: ToolRootSource::ManagedScratch,
+        },
+    };
+    if let Err(error) = std::fs::create_dir_all(&tool_root.path) {
         tracing::warn!(
-            path = %workspace_root.display(),
+            path = %tool_root.path.display(),
             %error,
             "failed to create managed turn workspace"
         );
     }
 
-    let mut allowed_paths = vec![workspace_root.clone()];
+    let mut allowed_paths = vec![tool_root.path.clone()];
     for grant in &policy.attachments {
         if grant.can_read || grant.can_write {
             allowed_paths.push(grant.path.clone());
         }
     }
-    (workspace_root, allowed_paths)
+    (tool_root, allowed_paths)
+}
+
+#[cfg(test)]
+pub(super) fn agent_workspace_from_policy(
+    config_root: &Path,
+    policy: &TrustedWorkspacePolicy,
+    scope: &ScopeLocation,
+    session_id: Uuid,
+) -> (PathBuf, Vec<PathBuf>) {
+    let (tool_root, allowed_paths) =
+        resolve_agent_tool_root_from_policy(config_root, policy, scope, session_id);
+    (tool_root.path, allowed_paths)
 }
 
 pub(super) fn append_approved_location_paths(
