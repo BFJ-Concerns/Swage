@@ -46,6 +46,20 @@ mod tests {
         assert!(request.model.is_none());
         assert!(request.tools.is_none());
         assert!(request.skills.is_none());
+        assert!(request.fallback_model.is_none());
+        assert!(request.effort.is_none());
+        assert!(request.timeout_ms.is_none());
+        assert!(request.cwd.is_none());
+        assert!(request.isolation.is_none());
+        assert!(request.schema.is_none());
         assert_eq!(request.max_attempts, 1);
+        assert!(request.label.is_none());
+        assert!(request.phase.is_none());
+        assert!(request.identity.is_none());
+        assert!(request.session.is_none());
+        assert!(request.worker.is_none());
+        assert!(request.elements.is_none());
+        assert!(request.variables.is_none());
+        assert!(request.assembly.is_none());
     }
 }
