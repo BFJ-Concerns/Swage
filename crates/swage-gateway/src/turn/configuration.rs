@@ -284,7 +284,9 @@ pub(crate) fn compaction_threshold(
     use swage_agent::config::CompactionThreshold;
     use swage_protocol::client::settings::CompactionThresholdConfig;
     match config.context.compaction_threshold {
-        Some(CompactionThresholdConfig::Messages(count)) => CompactionThreshold::MessageCount(count),
+        Some(CompactionThresholdConfig::Messages(count)) => {
+            CompactionThreshold::MessageCount(count)
+        }
         Some(CompactionThresholdConfig::Tokens(count)) => CompactionThreshold::TokenCount(count),
         None => CompactionThreshold::MessageCount(100),
     }

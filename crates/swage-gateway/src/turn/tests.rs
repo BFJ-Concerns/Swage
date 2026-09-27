@@ -736,7 +736,13 @@ async fn rejected_and_interrupted_calls_are_not_walls() {
         make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
     let thread_id = seed_history(&storage, session_id, 2).await;
     let missing = serde_json::json!({"path": "notes/missing.md"});
-    for status in ["rejected", "interrupted", "rejected", "interrupted", "success"] {
+    for status in [
+        "rejected",
+        "interrupted",
+        "rejected",
+        "interrupted",
+        "success",
+    ] {
         seed_finished_turn(
             &storage,
             thread_id,

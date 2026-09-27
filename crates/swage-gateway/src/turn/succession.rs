@@ -23,7 +23,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use swage_core::{CompletionRequest, Role};
 use swage_protocol::client::workflow::WorkflowProviderRoundOutcome;
-use swage_storage::{ContextSnapshotStore, ProviderRoundStore, ToolCallStore, TurnState, TurnStore};
+use swage_storage::{
+    ContextSnapshotStore, ProviderRoundStore, ToolCallStore, TurnState, TurnStore,
+};
 use uuid::Uuid;
 
 use swage_agent::compaction::exceeds_threshold_with_model;
@@ -185,7 +187,6 @@ fn reassemble(
     output
 }
 
-
 fn history_of(elements: &[Box<dyn ContextElement>]) -> Option<Vec<ChatMessage>> {
     elements
         .iter()
@@ -263,7 +264,9 @@ pub(super) fn detect_walls(turns: &[TurnWalls]) -> Option<WallSignal> {
     let mut repeats: HashMap<(&str, String), usize> = HashMap::new();
     for (tool, arguments) in turns.iter().flat_map(|turn| &turn.failed_calls) {
         // serde_json's map is ordered, so equal arguments print equally.
-        *repeats.entry((tool.as_str(), arguments.to_string())).or_default() += 1;
+        *repeats
+            .entry((tool.as_str(), arguments.to_string()))
+            .or_default() += 1;
     }
     if let Some(((tool, _), failures)) = repeats
         .into_iter()
@@ -430,7 +433,9 @@ async fn succeed_on_degradation(
     }
     let focus = site
         .focus
-        .map(|focus| format!("The assistant asked that the notes attend to the following:\n{focus}\n\n"))
+        .map(|focus| {
+            format!("The assistant asked that the notes attend to the following:\n{focus}\n\n")
+        })
         .unwrap_or_default();
     let reports = findings
         .iter()
@@ -573,7 +578,8 @@ mod tests {
         fn stream(
             &self,
             _request: CompletionRequest,
-        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
             Box::pin(futures::stream::empty())
         }
     }
@@ -606,25 +612,40 @@ mod tests {
             .expect("the diagnosis runs");
 
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), LOCATOR_COUNT + 1, "three readers and one synthesis");
+        assert_eq!(
+            requests.len(),
+            LOCATOR_COUNT + 1,
+            "three readers and one synthesis"
+        );
         let shown = |request: &CompletionRequest| request.messages[1].text_content();
         let readers: Vec<String> = requests[..LOCATOR_COUNT].iter().map(shown).collect();
         for index in 0..6 {
             let message = format!("history message {index}");
             assert_eq!(
-                readers.iter().filter(|text| text.contains(&message)).count(),
+                readers
+                    .iter()
+                    .filter(|text| text.contains(&message))
+                    .count(),
                 1,
                 "each summarised message goes to exactly one reader: {readers:?}"
             );
         }
         assert!(
-            readers.iter().all(|text| !text.contains("history message 6")),
+            readers
+                .iter()
+                .all(|text| !text.contains("history message 6")),
             "the newest message is kept, not diagnosed"
         );
         let synthesis = shown(&requests[LOCATOR_COUNT]);
         assert!(synthesis.contains("`file_read` tool was called 3 times"));
-        assert!(!synthesis.contains("history message"), "the synthesis reads the readers, not the history");
-        assert_eq!(succession.record.requested_strategy, "succession-degradation");
+        assert!(
+            !synthesis.contains("history message"),
+            "the synthesis reads the readers, not the history"
+        );
+        assert_eq!(
+            succession.record.requested_strategy,
+            "succession-degradation"
+        );
         assert_eq!(succession.retained_history.len(), 1);
     }
 }

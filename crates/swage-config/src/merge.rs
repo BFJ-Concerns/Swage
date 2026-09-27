@@ -832,9 +832,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 timeout: c.timeout.unwrap_or(dc.timeout),
                 // Double-option: outer None → inherit default (None), Some(x) → use x.
                 budget: c.budget.unwrap_or(dc.budget),
-                compaction_threshold: c
-                    .compaction_threshold
-                    .unwrap_or(dc.compaction_threshold),
+                compaction_threshold: c.compaction_threshold.unwrap_or(dc.compaction_threshold),
             }
         },
         pricing: {
