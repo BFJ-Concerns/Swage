@@ -58,7 +58,9 @@ chromiumoxide = "0.9.1"
 jsonschema = { workspace = true }
 
 [dev-dependencies]
+swage-agent = { path = "../swage-agent", features = ["test-fixtures"] }
 swage-storage = { path = "../swage-storage", features = ["test-fixtures"] }
+swage-workflow = { path = "../swage-workflow", features = ["test-fixtures"] }
 swage-safety = { path = "../swage-safety" }
 swage-hook = { path = "../swage-hook" }
 tower = { version = "0.5", features = ["util"] }

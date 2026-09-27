@@ -141,11 +141,8 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
     let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "assistant".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .unwrap();
@@ -233,11 +230,8 @@ async fn saving_to_the_library_signals_open_catalogues_by_identity_only() {
     let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
-            topic_id: topic.id,
             agent_id: "assistant".into(),
-            origin: swage_storage::SessionOrigin::Direct,
-            metadata: None,
-            active_workspace_attachment_id: None,
+            ..swage_storage::fixtures::new_session(topic.id)
         })
         .await
         .unwrap();

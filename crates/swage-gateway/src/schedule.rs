@@ -1916,11 +1916,7 @@ mod tests {
             .expect("topic");
         let session = storage
             .create_session(NewSession {
-                topic_id: topic.id,
-                agent_id: "gateway".into(),
-                origin: swage_storage::SessionOrigin::Direct,
-                metadata: None,
-                active_workspace_attachment_id: None,
+                ..swage_storage::fixtures::new_session(topic.id)
             })
             .await
             .expect("session");
@@ -2067,25 +2063,11 @@ mod tests {
             .await
             .expect("topic");
         let new_run = |name: &str| NewWorkflowRun {
-            topic_id: topic.id,
-            parent_run_id: None,
-            parent_seq: None,
-            dispatching_session_id: None,
-            script_version_id: None,
-            inline_workflow_id: None,
             inline_workflow_name: Some(name.into()),
-            inline_workflow_version: None,
-            carrying_skill: None,
-            task: None,
             source: Some("return null;".into()),
             source_hash: "hash".into(),
-            args: serde_json::Value::Null,
             budget: serde_json::Value::Null,
-            engine_version: "test".into(),
-            dispatch_bound_agent_ids: vec![],
-            dispatch_bound_task_definition_ids: vec![],
-            workflow_call_tools: None,
-            inherited_worker_placement: None,
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
         };
         let holding = storage
             .create_workflow_run(new_run("build-verify"))
