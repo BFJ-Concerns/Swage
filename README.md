@@ -154,6 +154,9 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
   keeps its memory, knowledge-base bodies and `agents/<agent>/` overlays. It
   has no scope-level `config.toml` or `instructions/` — its cascade is
   Global → Agent.
+- `scratch/` — scoped scratch directories for sessions without an attached
+  workspace. `scratch/general/sessions/<session_id>` for topicless sessions;
+  `scratch/topics/<topic>/sessions/<session_id>` for topic sessions.
 - `topics/<topic>/` — each topic's world: its own `instructions/`,
   `skills/`, `agents/<agent>/` (per-agent `instructions/` and `skills/`),
   memory, and knowledge-base bodies. The agent directory name
