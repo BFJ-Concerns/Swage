@@ -65,6 +65,8 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "timeout",
             "budget",
             "compaction_threshold",
+            "diagnosis_reader_model",
+            "diagnosis_synthesis_model",
         ],
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
@@ -165,6 +167,9 @@ fn check_field_type(
         ("context", "timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
         ("context", "compaction_threshold") => ("table", matches!(value, Value::Table(_))),
+        ("context", "diagnosis_reader_model" | "diagnosis_synthesis_model") => {
+            ("string", matches!(value, Value::String(_)))
+        }
         // pricing.models is a dynamic map — validate only that it is a table.
         ("pricing", "models") => ("table", matches!(value, Value::Table(_))),
         // generation.presets is a dynamic map of preset name → preset config.
@@ -976,6 +981,33 @@ pub fn validate_resolved_catalog_references(
                 Some(format!("models.entries.{model_id}.capabilities.effort")),
                 ConfigProblemKind::SemanticError {
                     message: format!("model '{model_id}' declares an effort capability that cannot be honoured: {message}"),
+                },
+            ));
+        }
+    }
+
+    for (field, model) in [
+        (
+            "diagnosis_reader_model",
+            &config.context.diagnosis_reader_model,
+        ),
+        (
+            "diagnosis_synthesis_model",
+            &config.context.diagnosis_synthesis_model,
+        ),
+    ] {
+        if let Some(model) = model
+            && !config.models.entries.iter().any(|(model_id, entry)| {
+                model_id == model || entry.aliases.iter().any(|alias| alias == model)
+            })
+        {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("context.{field}")),
+                ConfigProblemKind::SemanticError {
+                    message: format!(
+                        "context.{field} references '{model}', which is neither a model entry nor an alias of one"
+                    ),
                 },
             ));
         }
@@ -2160,6 +2192,46 @@ message_ttl_secs = 86400
                 .iter()
                 .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for tools.search should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn diagnosis_models_pass_the_loader_and_must_name_a_catalogue_entry() {
+        let config = parse_and_validate(
+            "[context]\ndiagnosis_reader_model = \"quick\"\ndiagnosis_synthesis_model = \"deep\"\n",
+            &path("config.toml"),
+        )
+        .expect("the diagnosis models are known [context] fields");
+        let context = config.context.expect("context");
+        assert_eq!(context.diagnosis_reader_model, Some(Some("quick".into())));
+        assert_eq!(context.diagnosis_synthesis_model, Some(Some("deep".into())));
+
+        let mut config = ResolvedConfig::default();
+        config.models.default = "m".into();
+        config.models.entries.insert(
+            "m".into(),
+            crate::ModelEndpointConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+                aliases: vec!["quick".into()],
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
+        config.context.diagnosis_reader_model = Some("quick".into());
+        config.context.diagnosis_synthesis_model = Some("deep".into());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        let fields: Vec<_> = problems
+            .iter()
+            .filter_map(|problem| problem.field_path.as_deref())
+            .collect();
+        assert_eq!(
+            fields,
+            ["context.diagnosis_synthesis_model"],
+            "an alias resolves; an unknown name does not: {problems:?}"
         );
     }
 

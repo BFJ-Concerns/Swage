@@ -320,6 +320,7 @@ fn compaction_record(
         budget: None,
         failure_reason: None,
         focus: focus.map(str::to_owned),
+        diagnosis: None,
     }
 }
 

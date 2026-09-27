@@ -13,15 +13,22 @@
 //!
 //! A session that keeps hitting walls succeeds too, whatever its size: the
 //! agent's own recorded failures across the thread's recent turns
-//! (`recent_walls`, `detect_walls`) trigger a pass whose summary is a
+//! (`recent_degradation`, `detect_walls`) trigger a pass whose summary is a
 //! diagnosis written from outside the session — blind readers each locate
 //! where things went wrong in a slice of the history, and a synthesis over
 //! their findings names the problems. The successor keeps only the newest
-//! message verbatim, so the failing attempts do not follow it in.
+//! message verbatim, so the failing attempts do not follow it in. Every turn
+//! runs on such a successor while the walls are still in the window; a turn
+//! whose window holds the same walls its predecessor's diagnosis answered
+//! carries that diagnosis again rather than writing a new one, and a turn
+//! whose window no longer shows a wall gets its full history back.
 
 use std::collections::{BTreeMap, HashMap};
 
 use swage_core::{CompletionRequest, Role};
+use swage_protocol::client::context::{
+    CompactionRecord, DiagnosisCall, DiagnosisRecord, DiagnosisStage,
+};
 use swage_protocol::client::workflow::WorkflowProviderRoundOutcome;
 use swage_storage::{
     ContextSnapshotStore, ProviderRoundRecord, ProviderRoundStore, ToolCallStore, TurnState,
@@ -61,7 +68,44 @@ pub(super) struct SuccessionSite<'a> {
     pub tokeniser: &'a TiktokenTokeniser,
     /// The wall the thread's recent turns ran into, when they ran into one:
     /// the pass runs on a diagnosis, whatever the context's size.
-    pub walls: Option<WallSignal>,
+    pub degradation: Option<Degradation>,
+    /// The models the diagnosis's readers and synthesis are sent to, or why
+    /// they could not be resolved.
+    pub diagnosis_models: Result<DiagnosisModels, String>,
+}
+
+/// The provider-facing model ids a diagnosis is sent to; `None` sends a
+/// call to the provider's own default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DiagnosisModels {
+    pub reader: Option<String>,
+    pub synthesis: Option<String>,
+}
+
+/// The diagnosis models `config` names (`context.diagnosis_reader_model`,
+/// `context.diagnosis_synthesis_model`), each a catalogue entry or an alias
+/// of one, and each the session's model when unset.
+pub(crate) fn diagnosis_models(
+    config: &swage_config::ResolvedConfig,
+) -> Result<DiagnosisModels, String> {
+    let resolve = |field: &str, named: &Option<String>| match named {
+        Some(name) => crate::turn::resolve_model_catalogue_entry(&config.models, name)
+            .map(|(_, model)| Some(model.model_id.clone()))
+            .ok_or_else(|| {
+                format!("context.{field} names '{name}', which is not in the model catalogue")
+            }),
+        None => Ok(Some(config.default_model_id().to_string()).filter(|model| !model.is_empty())),
+    };
+    Ok(DiagnosisModels {
+        reader: resolve(
+            "diagnosis_reader_model",
+            &config.context.diagnosis_reader_model,
+        )?,
+        synthesis: resolve(
+            "diagnosis_synthesis_model",
+            &config.context.diagnosis_synthesis_model,
+        )?,
+    })
 }
 
 /// Return `output` unchanged when the thread ran into no wall and the
@@ -77,23 +121,26 @@ pub(super) async fn succeed_over_threshold(
     assemble: impl Fn(&[Box<dyn ContextElement>]) -> AssemblyOutput,
 ) -> AssemblyOutput {
     let mut output = output;
-    if let Some(walls) = &site.walls
+    if let Some(degradation) = &site.degradation
         && let Some(history) = history_of(&elements)
     {
-        match succeed_on_degradation(&site, walls, &history).await {
-            Ok(succession) => return reassemble(elements, succession, &assemble),
+        let (outcome, diagnosis) = succeed_on_degradation(&site, degradation, &history).await;
+        match outcome {
+            Ok(mut succession) => {
+                succession.record.diagnosis = Some(diagnosis);
+                return reassemble(elements, succession, &assemble);
+            }
             Err(error) => {
                 tracing::warn!(%error, "the degradation diagnosis did not run");
-                output
-                    .report
-                    .compaction_applied
-                    .push(succession::failure_record(
-                        &history,
-                        site.tokeniser,
-                        site.focus,
-                        DEGRADATION_STRATEGY,
-                        &error,
-                    ));
+                let mut record = succession::failure_record(
+                    &history,
+                    site.tokeniser,
+                    site.focus,
+                    DEGRADATION_STRATEGY,
+                    &error,
+                );
+                record.diagnosis = Some(diagnosis);
+                output.report.compaction_applied.push(record);
             }
         }
     }
@@ -218,12 +265,39 @@ pub(super) const FAILED_TOOL_CALL_STATUS: &str = "error";
 /// records alone — never from what the conversation said.
 #[derive(Debug, Clone, Default)]
 pub(super) struct TurnWalls {
+    pub turn_id: Uuid,
     /// The turn ended failed for a reason other than its provider, as
     /// `ended_on_its_own` reads its last provider round.
     pub agent_failed: bool,
     /// The turn's tool calls whose recorded status is
-    /// `FAILED_TOOL_CALL_STATUS`, as tool name and arguments.
-    pub failed_calls: Vec<(String, serde_json::Value)>,
+    /// `FAILED_TOOL_CALL_STATUS`.
+    pub failed_calls: Vec<FailedCall>,
+}
+
+/// A tool call recorded as failed, by its record id.
+#[derive(Debug, Clone)]
+pub(super) struct FailedCall {
+    pub id: Uuid,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Every wall in `turns`, by the record it was read from: `tool_call:<id>`
+/// for a failed call, `turn:<id>` for a turn that failed on its own. Sorted,
+/// so equal sets compare equal.
+pub(super) fn wall_set(turns: &[TurnWalls]) -> Vec<String> {
+    let mut walls: Vec<String> = turns
+        .iter()
+        .flat_map(|turn| {
+            let calls = turn
+                .failed_calls
+                .iter()
+                .map(|call| format!("tool_call:{}", call.id));
+            calls.chain(turn.agent_failed.then(|| format!("turn:{}", turn.turn_id)))
+        })
+        .collect();
+    walls.sort();
+    walls
 }
 
 /// Which wall the recent turns ran into.
@@ -264,10 +338,10 @@ impl WallSignal {
 /// total reaching `WALL_THRESHOLD`.
 pub(super) fn detect_walls(turns: &[TurnWalls]) -> Option<WallSignal> {
     let mut repeats: HashMap<(&str, String), usize> = HashMap::new();
-    for (tool, arguments) in turns.iter().flat_map(|turn| &turn.failed_calls) {
+    for call in turns.iter().flat_map(|turn| &turn.failed_calls) {
         // serde_json's map is ordered, so equal arguments print equally.
         *repeats
-            .entry((tool.as_str(), arguments.to_string()))
+            .entry((call.tool.as_str(), call.arguments.to_string()))
             .or_default() += 1;
     }
     if let Some(((tool, _), failures)) = repeats
@@ -288,12 +362,47 @@ pub(super) fn detect_walls(turns: &[TurnWalls]) -> Option<WallSignal> {
     })
 }
 
+/// A wall the thread's recent turns ran into, with what the pass needs to
+/// answer it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Degradation {
+    pub signal: WallSignal,
+    /// Every wall in the window the signal was read over (`wall_set`).
+    pub walls: Vec<String>,
+    /// The diagnosis the thread's newest finished turn ran on, when it ran
+    /// on one.
+    pub previous: Option<PriorDiagnosis>,
+}
+
+/// A diagnosis a finished turn's successor carried, read back from that
+/// turn's assembly report.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PriorDiagnosis {
+    /// The turn whose model calls wrote the diagnosis.
+    pub written_in: Uuid,
+    /// The walls it answered.
+    pub walls: Vec<String>,
+    pub synthesis: String,
+    /// How many of the history's oldest messages it replaced.
+    pub summarised: usize,
+}
+
+impl Degradation {
+    /// The previous turn's diagnosis, when it answered exactly these walls.
+    fn reusable(&self) -> Option<&PriorDiagnosis> {
+        self.previous
+            .as_ref()
+            .filter(|previous| previous.walls == self.walls)
+    }
+}
+
 /// The wall signal over `thread_id`'s recent finished turns, read from the
-/// store: turn states, provider-round outcomes, tool-call statuses. Turns up
-/// to and including the last one that already ran on a degradation
-/// successor are not read again, so one streak of walls triggers one pass.
-/// A read that fails leaves the signal absent; the threshold still applies.
-pub(super) async fn recent_walls<S>(storage: &S, thread_id: Uuid) -> Option<WallSignal>
+/// store: turn states, provider-round outcomes, tool-call statuses — with
+/// the diagnosis the newest of them ran on, from its assembly report. Absent
+/// when the window shows no wall, including after a diagnosis, once the
+/// walls it answered have left the window. A read that fails leaves the
+/// signal absent; the threshold still applies.
+pub(super) async fn recent_degradation<S>(storage: &S, thread_id: Uuid) -> Option<Degradation>
 where
     S: TurnStore + ToolCallStore + ProviderRoundStore + ContextSnapshotStore + ?Sized,
 {
@@ -313,14 +422,46 @@ where
         .collect();
     let window = &finished[finished.len().saturating_sub(DEGRADATION_WINDOW_TURNS)..];
     let mut walls = Vec::with_capacity(window.len());
-    for turn in window.iter().rev() {
-        if ran_on_degradation_successor(storage, turn.id).await {
-            break;
-        }
+    for turn in window {
         walls.push(turn_walls(storage, turn.id, turn.state == TurnState::Failed).await?);
     }
-    walls.reverse();
-    detect_walls(&walls)
+    let signal = detect_walls(&walls)?;
+    let previous = match window.last() {
+        Some(turn) => prior_diagnosis(storage, turn.id).await,
+        None => None,
+    };
+    Some(Degradation {
+        signal,
+        walls: wall_set(&walls),
+        previous,
+    })
+}
+
+/// The diagnosis `turn_id`'s successor carried, when its assembly report
+/// records a degradation pass that ran.
+async fn prior_diagnosis<S>(storage: &S, turn_id: Uuid) -> Option<PriorDiagnosis>
+where
+    S: ContextSnapshotStore + ?Sized,
+{
+    let report = storage
+        .get_snapshot(turn_id)
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "wall signal: report unreadable"))
+        .ok()??;
+    let report: serde_json::Value = serde_json::from_str(&report).ok()?;
+    let records: Vec<CompactionRecord> =
+        serde_json::from_value(report.get("compaction_applied")?.clone()).ok()?;
+    records.into_iter().find_map(|record| {
+        let ran = record.requested_strategy == DEGRADATION_STRATEGY
+            && record.actual_strategy == THRESHOLD_STRATEGY;
+        let diagnosis = record.diagnosis.filter(|_| ran)?;
+        Some(PriorDiagnosis {
+            written_in: diagnosis.reused_from_turn.unwrap_or(turn_id),
+            walls: diagnosis.walls,
+            synthesis: diagnosis.synthesis?,
+            summarised: record.messages_removed,
+        })
+    })
 }
 
 async fn turn_walls<S>(storage: &S, turn_id: Uuid, failed: bool) -> Option<TurnWalls>
@@ -342,13 +483,15 @@ where
         .ok()?
         .into_iter()
         .filter(|call| call.status.as_deref() == Some(FAILED_TOOL_CALL_STATUS))
-        .map(|call| {
-            let arguments = serde_json::from_str(&call.arguments)
-                .unwrap_or(serde_json::Value::String(call.arguments));
-            (call.tool, arguments)
+        .map(|call| FailedCall {
+            id: call.id,
+            tool: call.tool,
+            arguments: serde_json::from_str(&call.arguments)
+                .unwrap_or(serde_json::Value::String(call.arguments)),
         })
         .collect();
     Some(TurnWalls {
+        turn_id,
         agent_failed,
         failed_calls,
     })
@@ -395,24 +538,6 @@ pub(super) fn ended_on_its_own(rounds: &[ProviderRoundRecord]) -> bool {
     }
 }
 
-async fn ran_on_degradation_successor<S>(storage: &S, turn_id: Uuid) -> bool
-where
-    S: ContextSnapshotStore + ?Sized,
-{
-    let Ok(Some(report)) = storage.get_snapshot(turn_id).await else {
-        return false;
-    };
-    serde_json::from_str::<serde_json::Value>(&report)
-        .ok()
-        .and_then(|report| report["compaction_applied"].as_array().cloned())
-        .is_some_and(|records| {
-            records.iter().any(|record| {
-                record["requested_strategy"] == DEGRADATION_STRATEGY
-                    && record["actual_strategy"] == THRESHOLD_STRATEGY
-            })
-        })
-}
-
 /// How many blind readers share the history between them.
 const LOCATOR_COUNT: usize = 3;
 
@@ -428,14 +553,67 @@ examined part of the conversation. Name the problems plainly — what kept faili
 what to avoid repeating — then state what the conversation was trying to achieve and what is still open. \
 Write as notes to the assistant, in plain prose without headings.";
 
-/// The degradation-triggered pass: blind readers locate where the history
-/// went wrong, a synthesis names the problems, and the synthesis becomes
-/// the successor's summary; only the newest message is kept verbatim.
+/// The degradation-triggered pass. When the previous turn's diagnosis
+/// answered these same walls, the successor carries it again over the same
+/// split. Otherwise blind readers locate where the history went wrong, a
+/// synthesis names the problems, and the synthesis becomes the successor's
+/// summary; only the newest message is kept verbatim. The diagnosis record
+/// comes back whether or not a successor did, with every model call made.
 async fn succeed_on_degradation(
     site: &SuccessionSite<'_>,
-    walls: &WallSignal,
+    degradation: &Degradation,
     history: &[ChatMessage],
+) -> (
+    Result<succession::Succession, SuccessionError>,
+    DiagnosisRecord,
+) {
+    let mut diagnosis = DiagnosisRecord {
+        signal: degradation.signal.describe(),
+        walls: degradation.walls.clone(),
+        calls: Vec::new(),
+        synthesis: None,
+        reused_from_turn: None,
+    };
+    if let Some(previous) = degradation.reusable() {
+        let request = SuccessionRequest {
+            carried: &[],
+            history,
+            focus: site.focus,
+            retain_at_most: None,
+        };
+        match succession::successor_after(
+            &request,
+            previous.summarised,
+            previous.synthesis.clone(),
+            DEGRADATION_STRATEGY,
+            site.tokeniser,
+        ) {
+            Ok(succession) => {
+                diagnosis.synthesis = Some(previous.synthesis.clone());
+                diagnosis.reused_from_turn = Some(previous.written_in);
+                return (Ok(succession), diagnosis);
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                "the previous diagnosis no longer fits the history; diagnosing afresh"
+            ),
+        }
+    }
+    let outcome = diagnose(site, degradation, history, &mut diagnosis).await;
+    (outcome, diagnosis)
+}
+
+/// A fresh diagnosis of `history`, each model call appended to `diagnosis`.
+async fn diagnose(
+    site: &SuccessionSite<'_>,
+    degradation: &Degradation,
+    history: &[ChatMessage],
+    diagnosis: &mut DiagnosisRecord,
 ) -> Result<succession::Succession, SuccessionError> {
+    let models = site
+        .diagnosis_models
+        .as_ref()
+        .map_err(|error| SuccessionError::Diagnosis(error.clone()))?;
     let request = SuccessionRequest {
         carried: &[],
         history,
@@ -445,24 +623,29 @@ async fn succeed_on_degradation(
     let summarised = succession::split_point(&request)?;
     let older = &history[..summarised];
     let slice_len = older.len().div_ceil(LOCATOR_COUNT).max(1);
+    let reader_model = models.reader.as_deref();
     let findings = futures::future::join_all(older.chunks(slice_len).map(|slice| {
-        site.provider.complete(reader_request(
+        site.provider.complete(diagnosis_request(
             LOCATOR_INSTRUCTIONS,
             succession::transcript(slice),
+            reader_model,
         ))
     }))
     .await;
-    let findings: Vec<String> = findings
-        .into_iter()
-        .filter_map(|finding| {
-            finding
-                .inspect_err(|error| tracing::warn!(%error, "a blind reader failed"))
-                .ok()
-        })
-        .map(|response| response.content)
-        .filter(|content| !content.trim().is_empty())
-        .collect();
-    if findings.is_empty() {
+    let mut reports = Vec::new();
+    for finding in findings {
+        let mut call = diagnosis_call(site, DiagnosisStage::Reader, reader_model, &finding);
+        match finding {
+            Ok(response) if !response.content.trim().is_empty() => {
+                call.report = Some(response.content.clone());
+                reports.push(response.content);
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "a blind reader failed"),
+        }
+        diagnosis.calls.push(call);
+    }
+    if reports.is_empty() {
         return Err(SuccessionError::Diagnosis(
             "no reader located anything".to_string(),
         ));
@@ -473,38 +656,84 @@ async fn succeed_on_degradation(
             format!("The assistant asked that the notes attend to the following:\n{focus}\n\n")
         })
         .unwrap_or_default();
-    let reports = findings
+    let reports = reports
         .iter()
         .enumerate()
-        .map(|(index, finding)| format!("### Reader {}\n\n{}", index + 1, finding.trim()))
+        .map(|(index, report)| format!("### Reader {}\n\n{}", index + 1, report.trim()))
         .collect::<Vec<_>>()
         .join("\n\n");
+    let synthesis_model = models.synthesis.as_deref();
     let synthesis = site
         .provider
-        .complete(reader_request(
+        .complete(diagnosis_request(
             SYNTHESIS_INSTRUCTIONS,
             format!(
                 "{focus}## What the record shows\n\n{}\n\n## Readers' reports\n\n{reports}",
-                walls.describe()
+                degradation.signal.describe()
             ),
+            synthesis_model,
         ))
-        .await?;
-    succession::successor(
+        .await;
+    diagnosis.calls.push(diagnosis_call(
+        site,
+        DiagnosisStage::Synthesis,
+        synthesis_model,
+        &synthesis,
+    ));
+    let synthesis = synthesis?.content;
+    let succession = succession::successor(
         &request,
-        synthesis.content,
+        synthesis.clone(),
         DEGRADATION_STRATEGY,
         site.tokeniser,
-    )
+    )?;
+    diagnosis.synthesis = Some(synthesis);
+    Ok(succession)
 }
 
-fn reader_request(instructions: &str, material: String) -> CompletionRequest {
+/// The record of one diagnosis call: where it went, what it cost, and why
+/// it failed if it did. A reader's report is filled in by the caller.
+fn diagnosis_call(
+    site: &SuccessionSite<'_>,
+    stage: DiagnosisStage,
+    model: Option<&str>,
+    outcome: &Result<swage_core::CompletionResponse, swage_core::ProviderError>,
+) -> DiagnosisCall {
+    let model = model.unwrap_or(site.provider.model_id()).to_string();
+    match outcome {
+        Ok(response) => DiagnosisCall {
+            stage,
+            model,
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cost: response.cost,
+            report: None,
+            failure_reason: None,
+        },
+        Err(error) => DiagnosisCall {
+            stage,
+            model,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: None,
+            report: None,
+            failure_reason: Some(error.to_string()),
+        },
+    }
+}
+
+fn diagnosis_request(
+    instructions: &str,
+    material: String,
+    model: Option<&str>,
+) -> CompletionRequest {
     CompletionRequest {
         effort: None,
         messages: vec![
             ChatMessage::new(Role::System, instructions),
             ChatMessage::new(Role::User, material),
         ],
-        model: None,
+        model: model.map(str::to_owned),
         max_tokens: Some(1024),
         temperature: Some(0.3),
         stop_sequences: None,
@@ -598,12 +827,17 @@ mod tests {
         }
     }
 
-    fn failing(tool: &str, arguments: serde_json::Value) -> (String, serde_json::Value) {
-        (tool.to_string(), arguments)
+    fn failing(tool: &str, arguments: serde_json::Value) -> FailedCall {
+        FailedCall {
+            id: Uuid::new_v4(),
+            tool: tool.to_string(),
+            arguments,
+        }
     }
 
-    fn turn(failed_calls: Vec<(String, serde_json::Value)>) -> TurnWalls {
+    fn turn(failed_calls: Vec<FailedCall>) -> TurnWalls {
         TurnWalls {
+            turn_id: Uuid::new_v4(),
             agent_failed: false,
             failed_calls,
         }
@@ -641,12 +875,12 @@ mod tests {
         ];
         turns.push(TurnWalls {
             agent_failed: true,
-            failed_calls: vec![],
+            ..turn(vec![])
         });
         assert_eq!(detect_walls(&turns), None, "four is under the threshold");
         turns.push(TurnWalls {
             agent_failed: true,
-            failed_calls: vec![],
+            ..turn(vec![])
         });
         assert_eq!(
             detect_walls(&turns),
@@ -677,10 +911,10 @@ mod tests {
             self.requests.lock().expect("requests").push(request);
             Ok(swage_core::CompletionResponse {
                 content: "The read of notes/missing.md kept failing.".to_string(),
-                input_tokens: 1,
-                output_tokens: 1,
+                input_tokens: 11,
+                output_tokens: 7,
                 finish_reason: swage_core::FinishReason::Stop,
-                cost: None,
+                cost: Some(0.25),
             })
         }
 
@@ -713,19 +947,26 @@ mod tests {
             focus: None,
             variables: &variables,
             tokeniser: &tokeniser,
-            walls: None,
+            degradation: None,
+            diagnosis_models: Ok(DiagnosisModels {
+                reader: Some("reader-model".to_string()),
+                synthesis: Some("synthesis-model".to_string()),
+            }),
         };
         let history: Vec<ChatMessage> = (0..7)
             .map(|index| ChatMessage::new(Role::User, format!("history message {index}")))
             .collect();
-        let walls = WallSignal::RepeatedFailingCall {
-            tool: "file_read".to_string(),
-            failures: 3,
+        let degradation = Degradation {
+            signal: WallSignal::RepeatedFailingCall {
+                tool: "file_read".to_string(),
+                failures: 3,
+            },
+            walls: vec!["tool_call:a".to_string()],
+            previous: None,
         };
 
-        let succession = succeed_on_degradation(&site, &walls, &history)
-            .await
-            .expect("the diagnosis runs");
+        let (outcome, diagnosis) = succeed_on_degradation(&site, &degradation, &history).await;
+        let succession = outcome.expect("the diagnosis runs");
 
         let requests = provider.requests.lock().expect("requests");
         assert_eq!(
@@ -763,5 +1004,110 @@ mod tests {
             "succession-degradation"
         );
         assert_eq!(succession.retained_history.len(), 1);
+
+        let models: Vec<Option<&str>> = requests
+            .iter()
+            .map(|request| request.model.as_deref())
+            .collect();
+        assert_eq!(
+            models,
+            [
+                Some("reader-model"),
+                Some("reader-model"),
+                Some("reader-model"),
+                Some("synthesis-model")
+            ],
+            "each stage goes to its configured model"
+        );
+        let reply = "The read of notes/missing.md kept failing.";
+        let call = |stage, model: &str, report: Option<&str>| DiagnosisCall {
+            stage,
+            model: model.to_string(),
+            input_tokens: 11,
+            output_tokens: 7,
+            cost: Some(0.25),
+            report: report.map(str::to_owned),
+            failure_reason: None,
+        };
+        let reader = call(DiagnosisStage::Reader, "reader-model", Some(reply));
+        assert_eq!(
+            diagnosis.calls,
+            [
+                reader.clone(),
+                reader.clone(),
+                reader,
+                call(DiagnosisStage::Synthesis, "synthesis-model", None),
+            ],
+            "every call is recorded with its model, usage and report"
+        );
+        assert_eq!(diagnosis.synthesis.as_deref(), Some(reply));
+        assert_eq!(diagnosis.walls, ["tool_call:a"]);
+        assert_eq!(diagnosis.reused_from_turn, None);
+    }
+
+    #[test]
+    fn diagnosis_models_resolve_through_the_catalogue_and_default_to_the_session_s() {
+        let mut config = swage_config::ResolvedConfig::default();
+        for (key, model_id, alias) in [
+            ("session", "vendor/session-1", "main"),
+            ("cheap", "vendor/cheap-1", "reader"),
+        ] {
+            config.models.entries.insert(
+                key.to_string(),
+                swage_config::ModelEndpointConfig {
+                    model_id: model_id.to_string(),
+                    aliases: vec![alias.to_string()],
+                    ..Default::default()
+                },
+            );
+        }
+        config.models.default = "session".to_string();
+        assert_eq!(
+            diagnosis_models(&config),
+            Ok(DiagnosisModels {
+                reader: Some("vendor/session-1".to_string()),
+                synthesis: Some("vendor/session-1".to_string()),
+            }),
+            "unset, both are the session's model"
+        );
+        config.context.diagnosis_reader_model = Some("reader".to_string());
+        config.context.diagnosis_synthesis_model = Some("cheap".to_string());
+        assert_eq!(
+            diagnosis_models(&config),
+            Ok(DiagnosisModels {
+                reader: Some("vendor/cheap-1".to_string()),
+                synthesis: Some("vendor/cheap-1".to_string()),
+            }),
+            "by alias or by entry key"
+        );
+        config.context.diagnosis_synthesis_model = Some("absent".to_string());
+        assert!(diagnosis_models(&config).is_err());
+    }
+
+    #[test]
+    fn the_wall_set_names_each_failed_call_and_each_turn_that_failed_on_its_own() {
+        let call = failing("file_read", json!({"path": "a.md"}));
+        let failed_turn = TurnWalls {
+            agent_failed: true,
+            ..turn(vec![])
+        };
+        let calling_turn = turn(vec![call.clone()]);
+        let expected = {
+            let mut walls = vec![
+                format!("tool_call:{}", call.id),
+                format!("turn:{}", failed_turn.turn_id),
+            ];
+            walls.sort();
+            walls
+        };
+        assert_eq!(
+            wall_set(&[failed_turn.clone(), calling_turn.clone(), turn(vec![])]),
+            expected
+        );
+        assert_eq!(
+            wall_set(&[calling_turn, failed_turn]),
+            expected,
+            "the set, not the order it was read in"
+        );
     }
 }

@@ -198,6 +198,7 @@ mod tests {
             budget: None,
             failure_reason: None,
             focus: None,
+            diagnosis: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -241,6 +242,7 @@ mod tests {
             budget: Some(700),
             failure_reason: Some("LLM timeout".to_string()),
             focus: None,
+            diagnosis: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -266,6 +268,7 @@ mod tests {
             budget: None,
             failure_reason: None,
             focus: None,
+            diagnosis: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -287,6 +290,7 @@ mod tests {
             budget: None,
             failure_reason: None,
             focus: Some("Preserve dates and named decisions".to_string()),
+            diagnosis: None,
         };
 
         let persisted = serde_json::to_string(&record).expect("record should serialise");

@@ -361,6 +361,18 @@ pub struct ContextConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub compaction_threshold: Option<CompactionThresholdConfig>,
+    /// The model entry (a catalogue name or alias) that reads the history
+    /// for where things went wrong when a session keeps hitting walls.
+    /// Unset, the session's own model reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnosis_reader_model: Option<String>,
+    /// The model entry (a catalogue name or alias) that writes the diagnosis
+    /// a stalled session continues from, out of the readers' reports. Unset,
+    /// the session's own model writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnosis_synthesis_model: Option<String>,
 }
 impl Default for ContextConfig {
     fn default() -> Self {
@@ -370,6 +382,8 @@ impl Default for ContextConfig {
             timeout: 5,
             budget: None,
             compaction_threshold: None,
+            diagnosis_reader_model: None,
+            diagnosis_synthesis_model: None,
         }
     }
 }

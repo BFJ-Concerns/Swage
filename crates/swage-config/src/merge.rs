@@ -66,6 +66,8 @@ pub struct PartialContextConfig {
     pub budget: Option<Option<usize>>,
     pub compaction_threshold:
         Option<Option<swage_protocol::client::settings::CompactionThresholdConfig>>,
+    pub diagnosis_reader_model: Option<Option<String>>,
+    pub diagnosis_synthesis_model: Option<Option<String>>,
 }
 
 /// Partial mirror of `PricingConfig`.
@@ -308,6 +310,8 @@ impl From<ResolvedConfig> for PartialConfig {
                 timeout: Some(r.context.timeout),
                 budget: Some(r.context.budget),
                 compaction_threshold: Some(r.context.compaction_threshold),
+                diagnosis_reader_model: Some(r.context.diagnosis_reader_model),
+                diagnosis_synthesis_model: Some(r.context.diagnosis_synthesis_model),
             }),
             pricing: Some(PartialPricingConfig {
                 models: if r.pricing.models.is_empty() {
@@ -485,6 +489,8 @@ impl_merge_overlay!(PartialContextConfig {
     timeout,
     budget,
     compaction_threshold,
+    diagnosis_reader_model,
+    diagnosis_synthesis_model,
 });
 impl_merge_overlay!(PartialObservabilityConfig { force_on });
 impl_merge_overlay!(PartialPythonExecuteToolConfig {
@@ -833,6 +839,12 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 // Double-option: outer None → inherit default (None), Some(x) → use x.
                 budget: c.budget.unwrap_or(dc.budget),
                 compaction_threshold: c.compaction_threshold.unwrap_or(dc.compaction_threshold),
+                diagnosis_reader_model: c
+                    .diagnosis_reader_model
+                    .unwrap_or(dc.diagnosis_reader_model),
+                diagnosis_synthesis_model: c
+                    .diagnosis_synthesis_model
+                    .unwrap_or(dc.diagnosis_synthesis_model),
             }
         },
         pricing: {
@@ -1394,6 +1406,8 @@ mod tests {
                 timeout: Some(15),
                 budget: Some(Some(8192)),
                 compaction_threshold: None,
+                diagnosis_reader_model: None,
+                diagnosis_synthesis_model: None,
             }),
             ..Default::default()
         };
