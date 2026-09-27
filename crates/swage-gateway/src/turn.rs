@@ -64,6 +64,7 @@ mod projection;
 mod provider_record;
 mod sandbox_approval;
 mod succession;
+mod turn_release;
 mod workspace;
 
 pub(crate) use configuration::*;
@@ -84,6 +85,10 @@ pub(crate) use provider_record::*;
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,
+};
+use turn_release::{
+    record_agent_call_attempt_before_execution, record_failed_turn_and_release_on_error,
+    record_terminal_state_and_release, release_active_turn,
 };
 pub(crate) use workspace::*;
 
@@ -328,95 +333,6 @@ pub(crate) async fn dispatch_before_inbound(
         HookOutcome::RequestApproval { .. } => Err(GatewayError::ConfigError(
             "BeforeInbound hooks cannot request approval".to_string(),
         )),
-    }
-}
-
-async fn release_active_turn(state: &AppState, session_id: Uuid) {
-    state.active_turns.lock().await.remove(&session_id);
-}
-
-async fn release_active_turn_on_error<T, E>(
-    state: &AppState,
-    session_id: Uuid,
-    result: Result<T, E>,
-) -> Result<T, E> {
-    if result.is_err() {
-        release_active_turn(state, session_id).await;
-    }
-    result
-}
-
-async fn record_terminal_state_and_release(
-    state: &AppState,
-    session_id: Uuid,
-    turn_id: Uuid,
-    turn_state: TurnState,
-) -> Result<(), GatewayError> {
-    release_active_turn_on_error(
-        state,
-        session_id,
-        state.storage.update_turn_state(turn_id, turn_state).await,
-    )
-    .await?;
-    release_active_turn(state, session_id).await;
-    Ok(())
-}
-
-/// Persist the resolved dispatch before a provider can execute it.
-///
-/// Both provider runtimes share this refusal path so neither can make a call
-/// whose workflow attempt cannot be reconstructed from the durable record.
-async fn record_agent_call_attempt_before_execution(
-    state: &AppState,
-    session_id: Uuid,
-    prepared_turn_id: Uuid,
-    agent_call_scope: Option<Uuid>,
-    resolution: &WorkflowAgentCallResolution,
-    sandbox_guard: &Option<SandboxGuard>,
-) -> Result<(), GatewayError> {
-    let Some(agent_call_scope) = agent_call_scope else {
-        return Ok(());
-    };
-    let result = match serde_json::to_value(resolution) {
-        Ok(resolution) => crate::workflow::record_agent_call_attempt(
-            state.storage.as_ref(),
-            agent_call_scope,
-            resolution,
-        )
-        .await
-        .map_err(|error| {
-            GatewayError::WebSocketError(format!("failed to record agent call attempt: {error}"))
-        }),
-        Err(error) => Err(GatewayError::WebSocketError(format!(
-            "agent call attempt could not be serialised: {error}"
-        ))),
-    };
-    if let Err(error) = result {
-        shutdown_sandbox_guard(
-            sandbox_guard,
-            "failed to shut down sandbox after agent call attempt recording failure",
-        )
-        .await;
-        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
-            .await?;
-        return Err(error);
-    }
-    Ok(())
-}
-
-async fn record_failed_turn_and_release_on_error<T>(
-    state: &AppState,
-    session_id: Uuid,
-    turn_id: Uuid,
-    result: Result<T, GatewayError>,
-) -> Result<T, GatewayError> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            record_terminal_state_and_release(state, session_id, turn_id, TurnState::Failed)
-                .await?;
-            Err(error)
-        }
     }
 }
 
