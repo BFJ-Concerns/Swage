@@ -284,13 +284,14 @@ async fn ensure_session_for_origin(
                 active_workspace_attachment_id: None,
             })
             .await?;
-        crate::surface::open_default_surfaces(state.storage.as_ref(), session.id).await?;
         state
             .storage
             .create(swage_storage::model::NewThread {
                 session_id: session.id,
                 agent_id: link.agent_id.clone(),
             })
+            .await?;
+        crate::surface::open_default_surfaces(state.storage.as_ref(), &state.broadcast, session.id)
             .await?;
         state
             .storage
@@ -338,13 +339,14 @@ async fn ensure_session_for_origin(
             active_workspace_attachment_id: None,
         })
         .await?;
-    crate::surface::open_default_surfaces(state.storage.as_ref(), session.id).await?;
     state
         .storage
         .create(swage_storage::model::NewThread {
             session_id: session.id,
             agent_id: "gateway".to_string(),
         })
+        .await?;
+    crate::surface::open_default_surfaces(state.storage.as_ref(), &state.broadcast, session.id)
         .await?;
 
     state
@@ -807,7 +809,9 @@ mod tests {
     use super::*;
     use crate::turn::tests::make_state_with_session;
     use swage_core::{FinishReason, StreamChunk};
-    use swage_storage::{SessionStore, TopicStore};
+    use swage_storage::{
+        AuditStore, ChannelLinkStore, SessionStore, SurfaceStore, ThreadStore, TopicStore,
+    };
     use tokio::net::TcpListener;
 
     #[test]
@@ -825,6 +829,111 @@ mod tests {
                 account: "ops".into(),
                 conversation: "room/thread".into(),
             }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_channel_default_is_recorded_after_its_root_thread_exists() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = TopicStore::create(
+            storage.as_ref(),
+            swage_storage::NewTopic {
+                name: "Channel defaults".into(),
+                slug: "channel-defaults".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let owner = storage
+            .create_session(NewSession {
+                topic_id: topic.id,
+                agent_id: "gateway".into(),
+                origin: swage_storage::SessionOrigin::Direct,
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        let surface = crate::surface::create_surface(
+            &state,
+            owner.id,
+            swage_protocol::client::surface::CreateSurfaceRequest {
+                title: "Channel board".into(),
+                library_entry_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let entry = crate::surface::save_surface_to_library(
+            &state,
+            surface.id,
+            swage_protocol::client::surface::SaveSurfaceToLibraryRequest {
+                name: "Channel board".into(),
+                description: "A board opened for channel sessions".into(),
+                tags: vec![],
+            },
+            "user",
+        )
+        .await
+        .unwrap();
+        storage
+            .add_topic_default_entry(topic.id, entry.id)
+            .await
+            .unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER require_root_for_seed_audit BEFORE INSERT ON audit_events
+             WHEN NEW.event_kind = 'surface_created' AND NOT EXISTS
+               (SELECT 1 FROM threads WHERE session_id = NEW.session_id)
+             BEGIN SELECT RAISE(ABORT, 'root thread missing at surface audit'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let origin = ChannelOrigin {
+            integration: ExternalChannelIntegration::DevDm,
+            account: "workspace".into(),
+            conversation: "channel-board".into(),
+        };
+        storage
+            .upsert_channel_link(swage_storage::NewChannelLink {
+                integration: origin.integration.as_metadata_value().into(),
+                account: origin.account.clone(),
+                conversation: origin.conversation.clone(),
+                topic_id: topic.id,
+                agent_id: "gateway".into(),
+                session_id: None,
+                home_target: None,
+            })
+            .await
+            .unwrap();
+
+        let session_id =
+            ensure_session_for_origin(&state, &origin, SessionResolutionPolicy::LinkedOnly)
+                .await
+                .unwrap();
+        assert_eq!(storage.list_by_session(session_id).await.unwrap().len(), 1);
+        let surfaces = storage.list_surfaces_by_session(session_id).await.unwrap();
+        assert_eq!(surfaces.len(), 1);
+        let events = storage
+            .list_audit_events_by_session(session_id)
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_kind == "surface_created"
+                    && event.entity_id == surfaces[0].id.to_string()),
+            "the channel seed has a creation event after its root thread"
         );
     }
 
