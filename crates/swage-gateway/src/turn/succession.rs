@@ -527,6 +527,8 @@ const TRANSPORT_FAILURE_MARKERS: &[&str] = &[
     "failed to parse openai sse payload",
     "failed to parse anthropic sse payload",
     "failed to parse responses sse payload",
+    "failed to parse gemini sse payload",
+    "invalid utf-8",
     "provider response anomaly",
     "http error 5",
 ];
@@ -931,6 +933,14 @@ mod tests {
             ),
             (
                 "failed to parse Responses SSE payload: expected value at line 1 column 1",
+                false,
+            ),
+            (
+                "failed to parse Gemini SSE payload: expected value at line 1 column 1",
+                false,
+            ),
+            (
+                "invalid UTF-8: invalid utf-8 sequence of 1 bytes from index 0",
                 false,
             ),
             ("provider response anomaly", false),

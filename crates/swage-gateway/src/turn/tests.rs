@@ -558,7 +558,7 @@ async fn token_threshold_triggers_succession_for_a_turn() {
     let (state, session_id) =
         make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
             .await;
-    seed_history(&storage, session_id, 101).await;
+    seed_history(&storage, session_id, 90).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
         &state,
