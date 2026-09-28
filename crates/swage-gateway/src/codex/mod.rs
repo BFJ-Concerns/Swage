@@ -292,6 +292,7 @@ async fn run_turn_inner(
                             0,
                             swage_agent::ProviderRoundOutcome::Failed {
                                 message: error.to_string(),
+                                kind: None,
                             },
                         );
                         return Err(error);
@@ -330,6 +331,7 @@ async fn run_turn_inner(
                             0,
                             swage_agent::ProviderRoundOutcome::Failed {
                                 message: error.to_string(),
+                                kind: None,
                             },
                         );
                         return Err(error);
@@ -407,6 +409,7 @@ async fn run_turn_inner(
                     round,
                     swage_agent::ProviderRoundOutcome::Failed {
                         message: error.to_string(),
+                        kind: None,
                     },
                 );
                 return Err(error);
@@ -449,7 +452,7 @@ async fn run_turn_inner(
                             settle_provider_round(
                                 &request,
                                 round,
-                                swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                                swage_agent::ProviderRoundOutcome::Failed { message: error.to_string(), kind: None },
                             );
                             return Err(error);
                         }
@@ -487,7 +490,7 @@ async fn run_turn_inner(
                             settle_provider_round(
                                 &request,
                                 round,
-                                swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                                swage_agent::ProviderRoundOutcome::Failed { message: error.to_string(), kind: None },
                             );
                             return Err(error);
                         }
@@ -552,7 +555,7 @@ async fn run_turn_inner(
                                 settle_provider_round(
                                     &request,
                                     round,
-                                    swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                                    swage_agent::ProviderRoundOutcome::Failed { message: error.to_string(), kind: None },
                                 );
                                 return Err(error);
                             }
@@ -573,7 +576,7 @@ async fn run_turn_inner(
                     settle_provider_round(
                         &request,
                         round,
-                        swage_agent::ProviderRoundOutcome::Failed { message: error.to_string() },
+                        swage_agent::ProviderRoundOutcome::Failed { message: error.to_string(), kind: None },
                     );
                     return Err(error);
                 }

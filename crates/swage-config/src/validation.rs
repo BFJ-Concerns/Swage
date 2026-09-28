@@ -4,6 +4,19 @@ use crate::model::ResolvedConfig;
 use std::path::Path;
 use toml::{Table, Value};
 
+/// The threshold's unit and count rule, shared by file loading and settings saves.
+pub fn valid_compaction_threshold(unit: &str, count: i64) -> bool {
+    matches!(unit, "messages" | "tokens") && count > 0
+}
+
+/// A diagnosis model may name either a catalogue entry or one of its aliases.
+pub fn model_catalogue_contains(catalogue: &crate::model::ModelCatalogConfig, name: &str) -> bool {
+    catalogue
+        .entries
+        .iter()
+        .any(|(id, entry)| id == name || entry.aliases.iter().any(|alias| alias == name))
+}
+
 // ---------------------------------------------------------------------------
 // Schema constants
 // ---------------------------------------------------------------------------
@@ -308,7 +321,7 @@ fn check_field_semantics(
             let well_formed = matches!(
                 value.as_table().map(|t| t.iter().collect::<Vec<_>>()).as_deref(),
                 Some([(unit, Value::Integer(n))])
-                    if matches!(unit.as_str(), "messages" | "tokens") && *n >= 1
+                    if valid_compaction_threshold(unit, *n)
             );
             if !well_formed {
                 problems.push(make_problem(
@@ -997,9 +1010,7 @@ pub fn validate_resolved_catalog_references(
         ),
     ] {
         if let Some(model) = model
-            && !config.models.entries.iter().any(|(model_id, entry)| {
-                model_id == model || entry.aliases.iter().any(|alias| alias == model)
-            })
+            && !model_catalogue_contains(&config.models, model)
         {
             problems.push(make_problem(
                 file_path,

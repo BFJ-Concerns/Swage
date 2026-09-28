@@ -1315,7 +1315,10 @@ impl Agent {
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
                                 round,
-                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                                outcome: ProviderRoundOutcome::Failed {
+                                    message: message.clone(),
+                                    kind: Some(swage_protocol::client::workflow::ProviderFailureKind::StreamError),
+                                },
                             });
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: message.clone(),
@@ -1330,7 +1333,10 @@ impl Agent {
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
                                 round,
-                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                                outcome: ProviderRoundOutcome::Failed {
+                                    message: message.clone(),
+                                    kind: Some(swage_protocol::client::workflow::ProviderFailureKind::ProviderAnomaly),
+                                },
                             });
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: message.clone(),

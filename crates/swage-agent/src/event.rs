@@ -227,7 +227,10 @@ pub enum ProviderRoundOutcome {
     /// model answered rather than calling tools.
     Responded { tool_calls: u32 },
     /// The round ended without a usable response.
-    Failed { message: String },
+    Failed {
+        message: String,
+        kind: Option<swage_protocol::client::workflow::ProviderFailureKind>,
+    },
     /// The caller stopped the round before a response could arrive.
     Interrupted,
 }
