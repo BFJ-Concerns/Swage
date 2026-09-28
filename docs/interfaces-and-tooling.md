@@ -78,12 +78,15 @@ to show):
 - **Elements** — a table listing each context element by name, its source, and
   its token count.
 - **Compaction** — when the assembly compacted any element to fit the budget:
-  which element, the strategy used, and the token count before and after. When
-  the strategy is `succession-degradation` (wall-triggered succession), the
-  record also shows the diagnosis: which walls were answered, each model call's
-  stage and usage, the synthesis text, and the turn a reused diagnosis was
-  written for. The report retains compaction decisions from the first assembly
-  and the successor in pass order, even when their names match.
+  which element, the strategy used, and the token count before and after.
+
+When a compaction record carries strategy `succession-degradation`
+(wall-triggered succession), the full diagnosis details — which walls were
+answered, each model call's stage and usage, the synthesis text, and the turn
+a reused diagnosis was written for — are held in the turn's recorded context
+report, which `GET /api/turns/{id}/context` returns, but are not shown in the
+inspector panel. The report retains compaction decisions from the first
+assembly and the successor in pass order, even when their names match.
 - **Fallbacks** — errors that occurred during assembly, including which fallback
   assembly was used.
 - **Warnings** — anything else the assembly flagged.
