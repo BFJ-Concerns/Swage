@@ -1315,7 +1315,9 @@ impl Agent {
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
                                 round,
-                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                                outcome: ProviderRoundOutcome::Failed {
+                                    message: message.clone(),
+                                },
                             });
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: message.clone(),
@@ -1330,7 +1332,9 @@ impl Agent {
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
                                 round,
-                                outcome: ProviderRoundOutcome::Failed { message: message.clone() },
+                                outcome: ProviderRoundOutcome::Failed {
+                                    message: format!("provider response anomaly: {message}"),
+                                },
                             });
                             let _ = event_tx.send(AgentEvent::Error {
                                 message: message.clone(),

@@ -579,9 +579,10 @@ pub(super) async fn process_turn_with_composition_and_focus(
         )
     };
     let output = assemble(&elements);
-    // Over the compaction threshold the turn runs on a successor: the same
-    // elements rendered afresh, the older history summarised against them
-    // (turn/succession.rs). Within it, the first assembly stands.
+    // Over the compaction threshold, or after the thread's recent turns kept
+    // hitting walls, the turn runs on a successor: the same elements rendered
+    // afresh, the older history summarised against them or diagnosed from
+    // outside (turn/succession.rs). Otherwise the first assembly stands.
     let output = succession::succeed_over_threshold(
         succession::SuccessionSite {
             provider: state.provider.as_ref(),
@@ -590,6 +591,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
             focus: compaction_focus.as_deref(),
             variables: &session_variables,
             tokeniser: &tokeniser,
+            degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
+            diagnosis_models: succession::diagnosis_models(&config),
         },
         elements,
         output,

@@ -1118,6 +1118,11 @@ mod tests {
             alternatives: vec!["alternate".to_string()],
             timeout: 10,
             budget: Some(4096),
+            compaction_threshold: Some(
+                swage_protocol::client::settings::CompactionThresholdConfig::Messages(12),
+            ),
+            diagnosis_reader_model: Some("reader".to_string()),
+            diagnosis_synthesis_model: Some("synthesis".to_string()),
         };
         let serialised = toml::to_string(&original).expect("serialise failed");
         let restored: ContextConfig = toml::from_str(&serialised).expect("deserialise failed");

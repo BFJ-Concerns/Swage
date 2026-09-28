@@ -276,12 +276,20 @@ pub(crate) async fn apply_dispatch_task_bounds(
 /// The threshold at which a turn's context is succeeded before the model
 /// call (turn/succession.rs) and, failing that, compacted by the agent
 /// runtime. One reader for both, so the two can never disagree about when a
-/// context is too large. Configuration does not yet expose it; this is the
-/// runtime's default.
+/// context is too large: `context.compaction_threshold` from the resolved
+/// configuration, or the runtime's default of 100 messages when unset.
 pub(crate) fn compaction_threshold(
-    _config: &swage_config::ResolvedConfig,
+    config: &swage_config::ResolvedConfig,
 ) -> swage_agent::config::CompactionThreshold {
-    swage_agent::config::CompactionThreshold::MessageCount(100)
+    use swage_agent::config::CompactionThreshold;
+    use swage_protocol::client::settings::CompactionThresholdConfig;
+    match config.context.compaction_threshold {
+        Some(CompactionThresholdConfig::Messages(count)) => {
+            CompactionThreshold::MessageCount(count)
+        }
+        Some(CompactionThresholdConfig::Tokens(count)) => CompactionThreshold::TokenCount(count),
+        None => CompactionThreshold::MessageCount(100),
+    }
 }
 
 pub(crate) fn build_agent_config_with_workspace(

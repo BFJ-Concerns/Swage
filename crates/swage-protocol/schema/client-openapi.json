@@ -506,6 +506,17 @@
               "null"
             ]
           },
+          "diagnosis": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosisRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How a successor built for a stalled session got its summary: the\nwalls it answers and the model calls that diagnosed them."
+          },
           "element": {
             "type": "string"
           },
@@ -570,6 +581,39 @@
         ],
         "type": "object"
       },
+      "CompactionThresholdConfig": {
+        "description": "The size past which a turn's context is compacted, counted in messages or\nin tokens.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "messages": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "messages"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tokens": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "tokens"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "ContextConfig": {
         "additionalProperties": false,
         "properties": {
@@ -588,6 +632,31 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "compaction_threshold": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompactionThresholdConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When a turn's context is too large and the turn continues on a\nsuccessor: a message count or a token count. Unset, a turn compacts\nonce its thread holds more than 100 messages."
+          },
+          "diagnosis_reader_model": {
+            "description": "The model entry (a catalogue name or alias) that reads the history\nfor where things went wrong when a session keeps hitting walls.\nUnset, the session's own model reads it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "diagnosis_synthesis_model": {
+            "description": "The model entry (a catalogue name or alias) that writes the diagnosis\na stalled session continues from, out of the readers' reports. Unset,\nthe session's own model writes it.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -1400,6 +1469,115 @@
               "url"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "DiagnosisCall": {
+        "description": "One model call a diagnosis made.",
+        "properties": {
+          "cost": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "failure_reason": {
+            "description": "Why the call failed, when it did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "model": {
+            "description": "The provider-facing model id the call was sent to.",
+            "type": "string"
+          },
+          "output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "report": {
+            "description": "What a reader reported. A synthesis's output is the record's\n`synthesis`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "$ref": "#/components/schemas/DiagnosisStage"
+          }
+        },
+        "required": [
+          "stage",
+          "model",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      },
+      "DiagnosisRecord": {
+        "description": "The diagnosis behind a degradation-triggered successor, recorded so the\nassembly report alone reconstructs the pass.",
+        "properties": {
+          "calls": {
+            "description": "The model calls this turn made for the diagnosis, readers first and\nthe synthesis last; empty when an earlier turn's diagnosis was reused.",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosisCall"
+            },
+            "type": "array"
+          },
+          "reused_from_turn": {
+            "description": "The turn whose recorded diagnosis this successor carries again,\nwhen the walls had not changed since.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signal": {
+            "description": "The wall the thread's recent turns ran into, as the synthesis was\ntold it.",
+            "type": "string"
+          },
+          "synthesis": {
+            "description": "The notes the successor carries in place of the summarised history;\nabsent when the diagnosis could not be written.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "walls": {
+            "description": "Every wall in the window the signal was read over, by the record it\nwas read from (`tool_call:<id>`, `turn:<id>`). A later turn reuses\nthis diagnosis while its window's walls are the same set.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "signal",
+          "walls",
+          "calls"
+        ],
+        "type": "object"
+      },
+      "DiagnosisStage": {
+        "description": "Which part of a diagnosis a model call was.",
+        "oneOf": [
+          {
+            "const": "reader",
+            "description": "A blind reader locating where one slice of the history went wrong.",
+            "type": "string"
+          },
+          {
+            "const": "synthesis",
+            "description": "The synthesis naming the problems from the readers' reports.",
+            "type": "string"
           }
         ]
       },

@@ -4,6 +4,19 @@ use crate::model::ResolvedConfig;
 use std::path::Path;
 use toml::{Table, Value};
 
+/// The threshold's unit and count rule, shared by file loading and settings saves.
+pub fn valid_compaction_threshold(unit: &str, count: i64) -> bool {
+    matches!(unit, "messages" | "tokens") && count > 0
+}
+
+/// A diagnosis model may name either a catalogue entry or one of its aliases.
+pub fn model_catalogue_contains(catalogue: &crate::model::ModelCatalogConfig, name: &str) -> bool {
+    catalogue
+        .entries
+        .iter()
+        .any(|(id, entry)| id == name || entry.aliases.iter().any(|alias| alias == name))
+}
+
 // ---------------------------------------------------------------------------
 // Schema constants
 // ---------------------------------------------------------------------------
@@ -59,7 +72,15 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "bundles",
             "require_approval",
         ],
-        "context" => &["assembly", "alternatives", "timeout", "budget"],
+        "context" => &[
+            "assembly",
+            "alternatives",
+            "timeout",
+            "budget",
+            "compaction_threshold",
+            "diagnosis_reader_model",
+            "diagnosis_synthesis_model",
+        ],
         // pricing.models is a dynamic table of model-name → pricing entry;
         // field-level validation is skipped for the per-model sub-tables.
         "pricing" => &["models"],
@@ -158,6 +179,10 @@ fn check_field_type(
         ("context", "alternatives") => ("array", matches!(value, Value::Array(_))),
         ("context", "timeout") => ("integer", matches!(value, Value::Integer(_))),
         ("context", "budget") => ("integer", matches!(value, Value::Integer(_))),
+        ("context", "compaction_threshold") => ("table", matches!(value, Value::Table(_))),
+        ("context", "diagnosis_reader_model" | "diagnosis_synthesis_model") => {
+            ("string", matches!(value, Value::String(_)))
+        }
         // pricing.models is a dynamic map — validate only that it is a table.
         ("pricing", "models") => ("table", matches!(value, Value::Table(_))),
         // generation.presets is a dynamic map of preset name → preset config.
@@ -287,6 +312,25 @@ fn check_field_semantics(
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
                         message: format!("context.budget must be a positive integer, got {b}"),
+                    },
+                ));
+            }
+        }
+        ("context", "compaction_threshold") => {
+            // Exactly one of `messages` or `tokens`, a positive integer.
+            let well_formed = matches!(
+                value.as_table().map(|t| t.iter().collect::<Vec<_>>()).as_deref(),
+                Some([(unit, Value::Integer(n))])
+                    if valid_compaction_threshold(unit, *n)
+            );
+            if !well_formed {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: "context.compaction_threshold must be { messages = N } or \
+                                  { tokens = N } with N a positive integer"
+                            .to_string(),
                     },
                 ));
             }
@@ -955,6 +999,31 @@ pub fn validate_resolved_catalog_references(
         }
     }
 
+    for (field, model) in [
+        (
+            "diagnosis_reader_model",
+            &config.context.diagnosis_reader_model,
+        ),
+        (
+            "diagnosis_synthesis_model",
+            &config.context.diagnosis_synthesis_model,
+        ),
+    ] {
+        if let Some(model) = model
+            && !model_catalogue_contains(&config.models, model)
+        {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("context.{field}")),
+                ConfigProblemKind::SemanticError {
+                    message: format!(
+                        "context.{field} references '{model}', which is neither a model entry nor an alias of one"
+                    ),
+                },
+            ));
+        }
+    }
+
     if config.models.default.is_empty() && config.models.entries.is_empty() {
         return problems;
     }
@@ -1265,6 +1334,46 @@ max_tokens = 1024
             .any(|p| matches!(&p.kind, ConfigProblemKind::UnknownSection { .. }));
         assert!(has_type_err, "should report TypeError");
         assert!(has_unknown, "should report UnknownSection");
+    }
+
+    #[test]
+    fn a_compaction_threshold_passes_the_loader_and_reaches_the_config() {
+        let config = parse_and_validate(
+            "[context]\ncompaction_threshold = { messages = 8 }\n",
+            &path("config.toml"),
+        )
+        .expect("the threshold is a known [context] field");
+        assert_eq!(
+            config
+                .context
+                .and_then(|c| c.compaction_threshold)
+                .flatten(),
+            Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(8))
+        );
+    }
+
+    #[test]
+    fn a_compaction_threshold_needs_one_positive_unit() {
+        for bad in [
+            "{ messages = 0 }",
+            "{ lines = 5 }",
+            "{ messages = 3, tokens = 9 }",
+        ] {
+            let problems = validate_toml_string(
+                &format!("[context]\ncompaction_threshold = {bad}\n"),
+                &path("config.toml"),
+            );
+            assert!(
+                matches!(
+                    problems.as_slice(),
+                    [ConfigProblem {
+                        kind: ConfigProblemKind::SemanticError { .. },
+                        ..
+                    }]
+                ),
+                "{bad}: {problems:?}"
+            );
+        }
     }
 
     #[test]
@@ -2094,6 +2203,46 @@ message_ttl_secs = 86400
                 .iter()
                 .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for tools.search should produce TypeError"
+        );
+    }
+
+    #[test]
+    fn diagnosis_models_pass_the_loader_and_must_name_a_catalogue_entry() {
+        let config = parse_and_validate(
+            "[context]\ndiagnosis_reader_model = \"quick\"\ndiagnosis_synthesis_model = \"deep\"\n",
+            &path("config.toml"),
+        )
+        .expect("the diagnosis models are known [context] fields");
+        let context = config.context.expect("context");
+        assert_eq!(context.diagnosis_reader_model, Some(Some("quick".into())));
+        assert_eq!(context.diagnosis_synthesis_model, Some(Some("deep".into())));
+
+        let mut config = ResolvedConfig::default();
+        config.models.default = "m".into();
+        config.models.entries.insert(
+            "m".into(),
+            crate::ModelEndpointConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+                aliases: vec!["quick".into()],
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
+        config.context.diagnosis_reader_model = Some("quick".into());
+        config.context.diagnosis_synthesis_model = Some("deep".into());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        let fields: Vec<_> = problems
+            .iter()
+            .filter_map(|problem| problem.field_path.as_deref())
+            .collect();
+        assert_eq!(
+            fields,
+            ["context.diagnosis_synthesis_model"],
+            "an alias resolves; an unknown name does not: {problems:?}"
         );
     }
 
