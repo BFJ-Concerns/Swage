@@ -80,7 +80,6 @@ type CooldownMap = Arc<Mutex<Vec<Option<Instant>>>>;
 /// Arc, so concurrent requests see a consistent view without data races.
 pub struct FailoverProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
-    route_keys: Vec<Option<String>>,
     cooldowns: CooldownMap,
     config: FailoverConfig,
 }
@@ -94,19 +93,9 @@ impl FailoverProvider {
         let n = providers.len();
         Self {
             providers,
-            route_keys: vec![None; n],
             cooldowns: Arc::new(Mutex::new(vec![None; n])),
             config,
         }
-    }
-
-    /// Bind catalogue entry keys to provider candidates. A request carrying
-    /// `swage_model_entry` selects exactly that candidate, even when another
-    /// provider serves the same wire model id.
-    pub fn with_route_keys(mut self, route_keys: Vec<Option<String>>) -> Self {
-        assert_eq!(self.providers.len(), route_keys.len());
-        self.route_keys = route_keys;
-        self
     }
 
     /// Construct with the default configuration (60 s cooldown).
@@ -231,25 +220,7 @@ impl LlmProvider for FailoverProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        let route = request
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("swage_model_entry"))
-            .and_then(serde_json::Value::as_str);
-        let order = if let Some(route) = route {
-            vec![
-                self.route_keys
-                    .iter()
-                    .position(|key| key.as_deref() == Some(route))
-                    .ok_or_else(|| ProviderError::InvalidConfig {
-                        message: format!(
-                            "model catalogue entry '{route}' has no completion provider"
-                        ),
-                    })?,
-            ]
-        } else {
-            self.compute_try_order(request.model.as_deref())
-        };
+        let order = self.compute_try_order(request.model.as_deref());
 
         if order.is_empty() {
             return Err(ProviderError::InvalidConfig {

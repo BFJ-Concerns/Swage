@@ -79,9 +79,7 @@ pub(super) struct SuccessionSite<'a> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DiagnosisModels {
     pub reader: Option<String>,
-    pub reader_route: Option<String>,
     pub synthesis: Option<String>,
-    pub synthesis_route: Option<String>,
 }
 
 /// The diagnosis models `config` names (`context.diagnosis_reader_model`,
@@ -92,28 +90,21 @@ pub(crate) fn diagnosis_models(
 ) -> Result<DiagnosisModels, String> {
     let resolve = |field: &str, named: &Option<String>| match named {
         Some(name) => crate::turn::resolve_model_catalogue_entry(&config.models, name)
-            .map(|(key, model)| (Some(model.model_id.clone()), Some(key.to_string())))
+            .map(|(_, model)| Some(model.model_id.clone()))
             .ok_or_else(|| {
                 format!("context.{field} names '{name}', which is not in the model catalogue")
             }),
-        None => Ok((
-            Some(config.default_model_id().to_string()).filter(|model| !model.is_empty()),
-            Some(config.models.default.clone()).filter(|key| !key.is_empty()),
-        )),
+        None => Ok(Some(config.default_model_id().to_string()).filter(|model| !model.is_empty())),
     };
-    let (reader, reader_route) = resolve(
-        "diagnosis_reader_model",
-        &config.context.diagnosis_reader_model,
-    )?;
-    let (synthesis, synthesis_route) = resolve(
-        "diagnosis_synthesis_model",
-        &config.context.diagnosis_synthesis_model,
-    )?;
     Ok(DiagnosisModels {
-        reader,
-        reader_route,
-        synthesis,
-        synthesis_route,
+        reader: resolve(
+            "diagnosis_reader_model",
+            &config.context.diagnosis_reader_model,
+        )?,
+        synthesis: resolve(
+            "diagnosis_synthesis_model",
+            &config.context.diagnosis_synthesis_model,
+        )?,
     })
 }
 
@@ -658,7 +649,6 @@ async fn diagnose(
             LOCATOR_INSTRUCTIONS,
             succession::transcript(slice),
             reader_model,
-            models.reader_route.as_deref(),
         ))
     }))
     .await;
@@ -714,7 +704,6 @@ async fn diagnose(
                 degradation.signal.describe()
             ),
             synthesis_model,
-            models.synthesis_route.as_deref(),
         ))
         .await;
     diagnosis.calls.push(diagnosis_call(
@@ -810,7 +799,6 @@ fn diagnosis_request(
     instructions: &str,
     material: String,
     model: Option<&str>,
-    route: Option<&str>,
 ) -> CompletionRequest {
     CompletionRequest {
         effort: None,
@@ -822,7 +810,7 @@ fn diagnosis_request(
         max_tokens: Some(1024),
         temperature: Some(0.3),
         stop_sequences: None,
-        metadata: route.map(|key| serde_json::json!({"swage_model_entry": key})),
+        metadata: None,
         tool_definitions: vec![],
     }
 }
@@ -1162,9 +1150,7 @@ mod tests {
             degradation: None,
             diagnosis_models: Ok(DiagnosisModels {
                 reader: Some("reader-model".to_string()),
-                reader_route: None,
                 synthesis: Some("synthesis-model".to_string()),
-                synthesis_route: None,
             }),
         };
         // A failed call as the gateway replays it: an assistant message
@@ -1509,9 +1495,7 @@ mod tests {
             diagnosis_models(&config),
             Ok(DiagnosisModels {
                 reader: Some("vendor/session-1".to_string()),
-                reader_route: Some("session".to_string()),
                 synthesis: Some("vendor/session-1".to_string()),
-                synthesis_route: Some("session".to_string()),
             }),
             "unset, both are the session's model"
         );
@@ -1521,75 +1505,12 @@ mod tests {
             diagnosis_models(&config),
             Ok(DiagnosisModels {
                 reader: Some("vendor/cheap-1".to_string()),
-                reader_route: Some("cheap".to_string()),
                 synthesis: Some("vendor/cheap-1".to_string()),
-                synthesis_route: Some("cheap".to_string()),
             }),
             "by alias or by entry key"
         );
         config.context.diagnosis_synthesis_model = Some("absent".to_string());
         assert!(diagnosis_models(&config).is_err());
-    }
-
-    #[tokio::test]
-    async fn diagnosis_routes_same_wire_model_to_its_catalogue_provider() {
-        use std::sync::Arc;
-        let mut config = swage_config::ResolvedConfig::default();
-        for (key, provider_id) in [("reader", "provider-a"), ("synthesis", "provider-b")] {
-            config.models.entries.insert(
-                key.into(),
-                swage_config::ModelEndpointConfig {
-                    provider_id: provider_id.into(),
-                    model_id: "shared-wire-id".into(),
-                    ..Default::default()
-                },
-            );
-        }
-        config.models.default = "reader".into();
-        config.context.diagnosis_reader_model = Some("reader".into());
-        config.context.diagnosis_synthesis_model = Some("synthesis".into());
-        let models = diagnosis_models(&config).expect("catalogue models");
-        let first = Arc::new(RecordingProvider::default());
-        let second = Arc::new(RecordingProvider::default());
-        let provider = swage_provider::builder::ProviderChainBuilder::new()
-            .provider_boxed_routed(
-                "reader".into(),
-                Box::new(first.clone() as Arc<dyn LlmProvider>),
-            )
-            .provider_boxed_routed(
-                "synthesis".into(),
-                Box::new(second.clone() as Arc<dyn LlmProvider>),
-            )
-            .with_failover(swage_provider::failover::FailoverConfig::default())
-            .build();
-        provider
-            .complete(diagnosis_request(
-                "read",
-                "history".into(),
-                models.reader.as_deref(),
-                models.reader_route.as_deref(),
-            ))
-            .await
-            .expect("reader route");
-        provider
-            .complete(diagnosis_request(
-                "write",
-                "reports".into(),
-                models.synthesis.as_deref(),
-                models.synthesis_route.as_deref(),
-            ))
-            .await
-            .expect("synthesis route");
-        assert_eq!(first.requests.lock().unwrap().len(), 1);
-        assert_eq!(second.requests.lock().unwrap().len(), 1);
-        assert_eq!(
-            first.requests.lock().unwrap()[0].model.as_deref(),
-            Some("shared-wire-id")
-        );
-        assert_eq!(
-            second.requests.lock().unwrap()[0].model.as_deref(),
-            Some("shared-wire-id")
-        );
     }
 
     #[test]
