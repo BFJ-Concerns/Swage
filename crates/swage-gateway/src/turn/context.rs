@@ -1,11 +1,12 @@
 use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
-    MemoryElement, Path, PathBuf, PromptRule, PromptsElement, SkillManager, SkillsElement, Uuid,
+    MemoryElement, Path, PathBuf, PromptRule, PromptsElement, ResolvedToolRoot, SkillManager,
+    SkillsElement, ToolRootSource, Uuid,
 };
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
-    AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment,
+    AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment, ToolRoot,
 };
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
 use swage_core::ScopeLocation;
@@ -147,11 +148,11 @@ pub(crate) fn is_default_context_assembly(assembly_name: &str) -> bool {
 }
 
 /// Build the session-environment half of orientation from what the turn
-/// already resolved: the topic row, the sandbox workspace root, and the
+/// already resolved: the topic row, the tool root and its source, and the
 /// session's channel origin when it speaks through one.
 pub(crate) fn build_session_environment(
     topic: &swage_storage::Topic,
-    working_directory: Option<String>,
+    tool_root: &ResolvedToolRoot,
     session: &swage_storage::Session,
 ) -> SessionEnvironment {
     let session_metadata = session.metadata.as_ref();
@@ -189,7 +190,14 @@ pub(crate) fn build_session_environment(
         } else {
             topic.description.clone()
         },
-        working_directory,
+        tool_root: match tool_root.source {
+            ToolRootSource::WorkerPlacement | ToolRootSource::AttachedWorkspace => {
+                ToolRoot::WorkingDirectory(tool_root.path.display().to_string())
+            }
+            ToolRootSource::ManagedScratch => {
+                ToolRoot::ManagedScratch(tool_root.path.display().to_string())
+            }
+        },
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the
         // assembled prefix stable.

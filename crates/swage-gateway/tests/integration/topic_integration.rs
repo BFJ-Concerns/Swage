@@ -28,11 +28,15 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
+use swage_core::Role;
 use tower::ServiceExt;
 
 use swage_gateway::server::build_router;
 use swage_gateway::state::AppState;
-use swage_storage::{AuditStore, SqliteStorage, TopicStore};
+use swage_storage::{
+    AuditStore, MessageStore, NewMessage, NewTurn, SqliteStorage, ThreadStore, TopicStore,
+    TurnState, TurnStore, WorkspaceAttachmentStore,
+};
 use uuid::Uuid;
 
 use crate::support::{ProcessEnvGuard, start_live_server};
@@ -118,6 +122,257 @@ async fn http_json(
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json_body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json_body)
+}
+
+async fn say_in_session(storage: &SqliteStorage, session_id: Uuid, role: Role, text: &str) {
+    let thread = storage.list_by_session(session_id).await.unwrap()[0].id;
+    let position = storage.list_messages_by_thread(thread).await.unwrap().len() as i32;
+    storage
+        .create_message(NewMessage {
+            thread_id: thread,
+            turn_id: None,
+            role,
+            content: text.into(),
+            attachments: vec![],
+            position,
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_lists_share_message_and_interruption_facts_without_changing_their_order() {
+    let (router, storage) = make_test_router();
+    let (_, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Alpha"})),
+    )
+    .await;
+    let topic_id = topic["id"].as_str().unwrap();
+    let (_, general_a) = http_json(&router, "POST", "/api/conversations", None).await;
+    let (_, general_b) = http_json(&router, "POST", "/api/conversations", None).await;
+    let (_, topical) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let (_, topical_b) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let a: Uuid = general_a["id"].as_str().unwrap().parse().unwrap();
+    let b: Uuid = general_b["id"].as_str().unwrap().parse().unwrap();
+    let t: Uuid = topical["id"].as_str().unwrap().parse().unwrap();
+    let t2: Uuid = topical_b["id"].as_str().unwrap().parse().unwrap();
+
+    say_in_session(&storage, a, Role::User, "general user").await;
+    say_in_session(&storage, a, Role::Tool, "tool noise").await;
+    say_in_session(&storage, b, Role::Assistant, "general assistant").await;
+    say_in_session(&storage, t, Role::Assistant, "topic answer").await;
+    say_in_session(&storage, t, Role::System, "system noise").await;
+    say_in_session(&storage, t2, Role::User, "newer topic message").await;
+    let thread = storage.list_by_session(t).await.unwrap()[0].id;
+    storage
+        .create_turn(NewTurn {
+            thread_id: thread,
+            agent_id: "gateway".into(),
+            state: TurnState::Interrupted,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+
+    // The recent projection has a different order. These routes retain the
+    // older updated_at order and continue to show archived sessions.
+    let now = chrono::Utc::now();
+    storage
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (
+                    (now + chrono::Duration::days(3)).to_rfc3339(),
+                    a.to_string(),
+                ),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (now.to_rfc3339(), b.to_string()),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (
+                    (now + chrono::Duration::days(2)).to_rfc3339(),
+                    t.to_string(),
+                ),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                (
+                    (now + chrono::Duration::days(1)).to_rfc3339(),
+                    t2.to_string(),
+                ),
+            )?;
+            conn.execute(
+                "UPDATE sessions SET archived_at = created_at WHERE id = ?1",
+                [t.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let (_, general) = http_json(&router, "GET", "/api/conversations", None).await;
+    let general = general["conversations"].as_array().unwrap();
+    assert_eq!(
+        general.iter().map(|item| &item["id"]).collect::<Vec<_>>(),
+        vec![&general_a["id"], &general_b["id"]]
+    );
+    assert_eq!(general[0]["message_preview"], "general user");
+    assert_eq!(general[1]["message_preview"], "general assistant");
+    assert_eq!(general[0]["has_interrupted_turn"], false);
+    assert_eq!(general[1]["has_interrupted_turn"], false);
+
+    let (_, topic_list) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{topic_id}/sessions"),
+        None,
+    )
+    .await;
+    let topic_list = topic_list["conversations"].as_array().unwrap();
+    assert_eq!(
+        topic_list.len(),
+        2,
+        "archived topic session remains visible"
+    );
+    assert_eq!(topic_list[0]["id"], topical["id"]);
+    assert_eq!(topic_list[1]["id"], topical_b["id"]);
+    assert_eq!(topic_list[0]["message_preview"], "topic answer");
+    assert_eq!(topic_list[0]["has_interrupted_turn"], true);
+    assert_eq!(topic_list[1]["has_interrupted_turn"], false);
+
+    let (_, overview) = http_json(&router, "GET", "/api/operator/overview", None).await;
+    let sessions = overview["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 4);
+    assert_eq!(sessions[0]["id"], general_a["id"]);
+    assert_eq!(sessions[1]["id"], topical["id"]);
+    assert_eq!(sessions[2]["id"], topical_b["id"]);
+    assert_eq!(sessions[3]["id"], general_b["id"]);
+    let topical = sessions
+        .iter()
+        .find(|item| item["id"] == topical["id"])
+        .unwrap();
+    assert_eq!(topical["message_preview"], "topic answer");
+    assert_eq!(topical["has_interrupted_turn"], true);
+    for uninterrupted_id in [&general_a["id"], &general_b["id"], &topical_b["id"]] {
+        let session = sessions
+            .iter()
+            .find(|item| &item["id"] == uninterrupted_id)
+            .unwrap();
+        assert_eq!(session["has_interrupted_turn"], false);
+    }
+}
+
+static LISTED_SQL: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn record_list_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event
+        && (sql.contains("FROM sessions")
+            || sql.contains("FROM messages")
+            || sql.contains("FROM threads")
+            || sql.contains("FROM turns"))
+    {
+        LISTED_SQL.lock().unwrap().push(sql.to_owned());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_session_list_uses_one_activity_statement_for_multiple_sessions() {
+    let (router, storage) = make_test_router();
+    let (_, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Counted"})),
+    )
+    .await;
+    let topic_id = topic["id"].as_str().unwrap();
+    for _ in 0..3 {
+        http_json(
+            &router,
+            "POST",
+            &format!("/api/topics/{topic_id}/sessions"),
+            None,
+        )
+        .await;
+    }
+    for _ in 0..2 {
+        http_json(&router, "POST", "/api/conversations", None).await;
+    }
+
+    LISTED_SQL.lock().unwrap().clear();
+    storage
+        .with_conn(|conn| {
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(record_list_sql),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut counts = Vec::new();
+    for (path, expected) in [
+        (format!("/api/topics/{topic_id}/sessions"), 3),
+        ("/api/conversations".to_owned(), 2),
+        ("/api/operator/overview".to_owned(), 5),
+    ] {
+        LISTED_SQL.lock().unwrap().clear();
+        let (status, listed) = http_json(&router, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        let sessions = if path == "/api/operator/overview" {
+            &listed["sessions"]
+        } else {
+            &listed["conversations"]
+        };
+        assert_eq!(sessions.as_array().unwrap().len(), expected, "{path}");
+        let statements = LISTED_SQL.lock().unwrap();
+        counts.push((
+            path,
+            statements.len(),
+            ["sessions", "messages", "threads", "turns"].map(|table| {
+                statements
+                    .iter()
+                    .filter(|sql| sql.contains(&format!("FROM {table}")))
+                    .count()
+            }),
+            statements
+                .iter()
+                .any(|sql| sql.contains("latest.content") && sql.contains("has_interrupted_turn")),
+        ));
+    }
+    storage
+        .with_conn(|conn| {
+            conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        counts
+            .iter()
+            .all(|(_, count, _, shape)| *count == 1 && *shape),
+        "session-related statement counts (sessions/messages/threads/turns) and activity shape: {counts:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +578,143 @@ async fn workspace_attachment_mutations_record_whole_state_audit_events() {
         .expect("detach audit event");
     assert_eq!(detached_event.metadata["prior_state"]["is_trusted"], true);
     assert!(detached_event.metadata["new_state"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relinking_a_moved_workspace_preserves_its_settings_and_records_one_change() {
+    let (router, storage) = make_test_router();
+    let (status, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({ "name": "Relink" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let topic_id = topic["id"].as_str().expect("topic id");
+    let root = tempfile::tempdir().expect("workspace parent");
+    let original = root.path().join("original");
+    let moved = root.path().join("moved");
+    std::fs::create_dir(&original).expect("original folder");
+
+    let (status, attached) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        Some(json!({
+            "path": original,
+            "label": "Reference files",
+            "permissions": ["read", "write"],
+            "is_trusted": true,
+            "set_as_default": true,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let workspace_id = attached["id"].as_str().expect("workspace id");
+    let workspace_uuid = Uuid::parse_str(workspace_id).expect("workspace uuid");
+    let before = serde_json::to_value(
+        storage
+            .get_workspace_attachment(workspace_uuid)
+            .await
+            .expect("read attached workspace")
+            .expect("attached workspace"),
+    )
+    .expect("serialise attached workspace");
+    std::fs::rename(&original, &moved).expect("move folder");
+    let route = format!("/api/topics/{topic_id}/workspaces/{workspace_id}/relink");
+    let (status, relinked) =
+        http_json(&router, "PUT", &route, Some(json!({ "path": moved }))).await;
+    assert_eq!(status, StatusCode::OK, "{relinked}");
+    assert_eq!(relinked["id"], attached["id"]);
+    assert_eq!(relinked["label"], "Reference files");
+    assert_eq!(relinked["permissions"], json!(["read", "write"]));
+    assert_eq!(relinked["is_trusted"], true);
+    assert_eq!(relinked["is_default"], true);
+    assert_eq!(relinked["path"], moved.to_string_lossy().as_ref());
+    assert_eq!(relinked["is_missing"], false);
+
+    let (status, listing) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listing["workspaces"], json!([relinked]));
+    let after = serde_json::to_value(
+        storage
+            .get_workspace_attachment(workspace_uuid)
+            .await
+            .expect("read relinked workspace")
+            .expect("relinked workspace"),
+    )
+    .expect("serialise relinked workspace");
+
+    let events = storage.list_audit_events().await.expect("audit events");
+    let relink_events = events
+        .iter()
+        .filter(|event| {
+            event.entity_id == workspace_id && event.metadata["action"] == "relink_workspace"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relink_events.len(), 1);
+    let event = relink_events[0];
+    assert_eq!(event.event_kind, "configuration_change");
+    assert_eq!(event.metadata["prior_state"], before);
+    assert_eq!(event.metadata["new_state"], after);
+    for field in [
+        "id",
+        "topic_id",
+        "label",
+        "permissions",
+        "is_trusted",
+        "is_default",
+        "created_at",
+    ] {
+        assert_eq!(
+            event.metadata["prior_state"][field], event.metadata["new_state"][field],
+            "{field} changed"
+        );
+    }
+
+    let (status, _) = http_json(
+        &router,
+        "PUT",
+        &route,
+        Some(json!({ "path": root.path().join("absent") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, after_refusal) = http_json(
+        &router,
+        "GET",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after_refusal["workspaces"], json!([relinked]));
+    assert_eq!(
+        serde_json::to_value(
+            storage
+                .get_workspace_attachment(workspace_uuid)
+                .await
+                .expect("read after refusal")
+                .expect("workspace survives refusal")
+        )
+        .expect("serialise workspace after refusal"),
+        after,
+    );
+    assert_eq!(
+        storage
+            .list_audit_events()
+            .await
+            .expect("audit events")
+            .len(),
+        events.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -178,6 +178,35 @@ impl WorkspaceAttachmentStore for SqliteStorage {
             })
     }
 
+    async fn relink_workspace_attachment(
+        &self,
+        id: Uuid,
+        path: String,
+    ) -> Result<WorkspaceAttachment, StorageError> {
+        let affected = self
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE workspace_attachments
+                     SET path = ?2, canonical_path = ?2, is_missing = 0, updated_at = ?3
+                     WHERE id = ?1",
+                    params![id.to_string(), path, Utc::now().to_rfc3339()],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "workspace_attachment".to_string(),
+                id: id.to_string(),
+            });
+        }
+        self.get_workspace_attachment(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "workspace_attachment".to_string(),
+                id: id.to_string(),
+            })
+    }
+
     async fn set_workspace_missing_state(
         &self,
         id: Uuid,

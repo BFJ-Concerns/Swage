@@ -85,6 +85,44 @@ fn provider_response_witness_is_appended_without_content_fields() {
 }
 
 #[tokio::test]
+async fn delegated_record_integrity_loss_fails_cancelled_child_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let thread_id = storage.list_by_session(session_id).await.unwrap()[0].id;
+    let child = storage
+        .create_turn(NewTurn {
+            thread_id,
+            agent_id: "delegate".into(),
+            state: TurnState::Pending,
+            user_input: Some("Run a tool".into()),
+            parent_turn_id: Some(Uuid::new_v4()),
+        })
+        .await
+        .unwrap();
+    storage
+        .update_turn_state(child.id, TurnState::Interrupted)
+        .await
+        .unwrap();
+
+    delegation_snapshot_recorder_for_state(state)
+        .record_event(
+            session_id,
+            AgentEvent::RecordIntegrityLost {
+                turn_id: child.id,
+                reason: "cancelled tool call's record could not be settled".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage.get_turn(child.id).await.unwrap().unwrap().state,
+        TurnState::Failed,
+        "delegated record loss must remain visible after cancellation"
+    );
+}
+
+#[tokio::test]
 async fn ordinary_and_delegated_snapshot_paths_record_provider_events_identically() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
@@ -2089,6 +2127,7 @@ pub(crate) struct MockStorage {
     fail_audit_writes: AtomicBool,
     fail_snapshot_writes: AtomicBool,
     fail_tool_call_settlement: AtomicBool,
+    fail_tool_call_creates: AtomicBool,
     fail_provider_round_writes: AtomicBool,
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
@@ -2586,6 +2625,7 @@ impl MockStorage {
             fail_audit_writes: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
             fail_tool_call_settlement: AtomicBool::new(false),
+            fail_tool_call_creates: AtomicBool::new(false),
             fail_provider_round_writes: AtomicBool::new(false),
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
@@ -2649,6 +2689,11 @@ impl MockStorage {
 
     fn fail_snapshot_writes(&self) {
         self.fail_snapshot_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuse every tool-call row creation from now on.
+    pub(crate) fn fail_tool_call_creates(&self) {
+        self.fail_tool_call_creates.store(true, Ordering::SeqCst);
     }
 
     /// Refuse every tool-call settlement from now on.
@@ -2850,7 +2895,9 @@ impl SessionStore for MockStorage {
                     .topic_id
                     .is_none_or(|topic| session.topic_id == topic)
             })
-            .filter(|session| session.archived_at.is_some() == listing.archived)
+            .filter(|session| {
+                listing.include_archived || session.archived_at.is_some() == listing.archived
+            })
             .map(|session| {
                 let thread_ids: Vec<Uuid> = db
                     .threads
@@ -2901,6 +2948,7 @@ impl SessionStore for MockStorage {
             .list_recent_sessions(swage_storage::SessionListing {
                 topic_id: None,
                 archived,
+                include_archived: false,
             })
             .await?
             .into_iter()
@@ -3130,6 +3178,26 @@ impl WorkspaceAttachmentStore for MockStorage {
                     id: id.to_string(),
                 })?;
         workspace.is_trusted = is_trusted;
+        workspace.updated_at = chrono::Utc::now();
+        Ok(workspace.clone())
+    }
+
+    async fn relink_workspace_attachment(
+        &self,
+        id: Uuid,
+        path: String,
+    ) -> Result<WorkspaceAttachment, StorageError> {
+        let mut db = self.db.lock().await;
+        let workspace =
+            db.workspace_attachments
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "workspace_attachment".to_string(),
+                    id: id.to_string(),
+                })?;
+        workspace.path = path.clone();
+        workspace.canonical_path = path;
+        workspace.is_missing = false;
         workspace.updated_at = chrono::Utc::now();
         Ok(workspace.clone())
     }
@@ -4679,6 +4747,11 @@ impl ToolCallStore for MockStorage {
         &self,
         tool_call: NewToolCall,
     ) -> Result<ToolCallRecord, StorageError> {
+        if self.fail_tool_call_creates.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "tool-call creation refused by the test".into(),
+            ));
+        }
         let record = ToolCallRecord {
             id: Uuid::new_v4(),
             turn_id: tool_call.turn_id,
@@ -4723,9 +4796,9 @@ impl ToolCallStore for MockStorage {
 
     async fn update_tool_call_result(
         &self,
-        call_id: &str,
-        turn_id: Uuid,
+        id: Uuid,
         result: &str,
+        model_result: &str,
         status: &str,
         duration_ms: i64,
         truncated: bool,
@@ -4737,17 +4810,9 @@ impl ToolCallStore for MockStorage {
             ));
         }
         let mut db = self.db.lock().await;
-        if let Some(tc) = db
-            .tool_calls
-            .iter_mut()
-            .find(|tc| tc.call_id == call_id && tc.turn_id == turn_id)
-        {
+        if let Some(tc) = db.tool_calls.iter_mut().find(|tc| tc.id == id) {
             tc.result = Some(result.to_string());
-            tc.model_result = Some(swage_core::compact_tool_result_for_model_with_reference(
-                result,
-                status != "success",
-                swage_core::tool_result_reference(&turn_id.to_string(), call_id),
-            ));
+            tc.model_result = Some(model_result.to_string());
             tc.status = Some(status.to_string());
             tc.duration_ms = Some(duration_ms);
             tc.truncated = truncated;
@@ -7701,6 +7766,13 @@ async fn make_state_with_tools(rounds: Vec<Vec<StreamChunk>>) -> (AppState, Uuid
 }
 
 async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppState, Uuid) {
+    let (state, session_id, _) = make_state_with_tool_provider_and_storage(provider).await;
+    (state, session_id)
+}
+
+async fn make_state_with_tool_provider_and_storage(
+    provider: Arc<dyn LlmProvider>,
+) -> (AppState, Uuid, Arc<MockStorage>) {
     let storage = Arc::new(MockStorage::new());
 
     let topic = storage.general_scope().await.expect("create default topic");
@@ -7731,7 +7803,7 @@ async fn make_state_with_tool_provider(provider: Arc<dyn LlmProvider>) -> (AppSt
         ]),
         None,
     );
-    (state, session_id)
+    (state, session_id, storage)
 }
 
 pub(crate) async fn make_state_with_capturing_tools(
@@ -8103,6 +8175,110 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
         .unwrap();
     assert_eq!(thread.state, ThreadState::Idle);
 
+    release.notify_waiters();
+}
+
+#[tokio::test]
+async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_failed() {
+    let round_1 = vec![
+        StreamChunk::Delta {
+            content: COMPLETED_ROUND_PARTIAL.into(),
+        },
+        StreamChunk::ToolUse {
+            call_id: "call_block".into(),
+            name: "block".into(),
+            arguments: serde_json::json!({}),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(BlockingMockTool {
+            started: started.clone(),
+            release: release.clone(),
+        }) as Arc<dyn crate::tool::Tool>]),
+        None,
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let state = Arc::new(state);
+    let worker_state = state.clone();
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &worker_state,
+            session_id,
+            None,
+            "Run block".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+
+    started.notified().await;
+    storage.fail_tool_call_settlement();
+    cancel_turn(&state, session_id)
+        .await
+        .expect("cancel should succeed while tool is running");
+
+    handle
+        .await
+        .expect("task should not panic")
+        .expect("process_turn ok");
+
+    let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::Cancelled {})),
+        "expected Cancelled event, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ServerEvent::ToolEnd { tool, call_id, status, .. }
+            if tool == "block" && call_id == "call_block" && status == "cancelled"
+        )),
+        "expected cancelled ToolEnd event, got: {events:?}"
+    );
+
+    let threads = state.storage.list_by_session(session_id).await.unwrap();
+    let thread_id = threads[0].id;
+    let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+    assert_eq!(
+        turns[0].state,
+        TurnState::Failed,
+        "record failure must remain visible on a cancelled turn"
+    );
+    assert!(events.iter().any(|event| matches!(event, ServerEvent::Error { message, .. } if message.contains("tool-call settlement refused"))), "record failure must reach the client: {events:?}");
     release.notify_waiters();
 }
 
@@ -9288,6 +9464,24 @@ fn replay_omits_calls_without_model_safe_results() {
 }
 
 #[test]
+fn replay_includes_started_call_with_unknown_outcome() {
+    let mut record = complete_replay_record("started-call");
+    record.result = None;
+    record.model_result = None;
+    record.status = None;
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let parts: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(parts.iter().any(
+        |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "started-call")
+    ));
+    assert!(parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "started-call" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))));
+}
+
+#[test]
 fn corrupt_replay_arguments_are_rejected() {
     let mut record = complete_replay_record("corrupt-call");
     record.model_arguments = "{not-json".into();
@@ -10229,7 +10423,8 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
     );
     assert!(
         child_request_text.contains("Topic: none — this session was started without a topic")
-            && child_request_text.contains("Working directory:")
+            && child_request_text.contains("No workspace is attached.")
+            && child_request_text.contains("Tool paths resolve at")
             && child_request_text.contains("Session started:"),
         "delegated provider request should include the child session's place: {child_request_text}"
     );
@@ -14923,12 +15118,184 @@ fn agent_workspace_uses_active_workspace_and_attachment_grants() {
     let (workspace_root, allowed_paths) = agent_workspace_from_policy(
         std::path::Path::new(".swage"),
         &policy,
-        Uuid::new_v4(),
+        &ScopeLocation::General,
         Uuid::new_v4(),
     );
 
     assert_eq!(workspace_root, active_workspace);
     assert_eq!(allowed_paths, vec![active_workspace, attachment_workspace]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unattached_session_environment_identifies_resolved_scratch_root() {
+    let root = tempfile::tempdir().expect("root");
+    let storage = swage_storage::SqliteStorage::in_memory().expect("storage");
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("session");
+    let policy = TrustedWorkspacePolicy::default();
+    let (tool_root, _) =
+        resolve_agent_tool_root_from_policy(root.path(), &policy, &topic.location(), session.id);
+
+    let environment = build_session_environment(&topic, &tool_root, &session);
+    assert_eq!(
+        environment.tool_root,
+        swage_context::orientation::ToolRoot::ManagedScratch(tool_root.path.display().to_string())
+    );
+    assert_eq!(tool_root.source, ToolRootSource::ManagedScratch);
+    assert_eq!(
+        tool_root.path,
+        managed_scratch_workspace(root.path(), &topic.location(), session.id)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn placed_worker_orientation_keeps_its_working_directory() {
+    let root = tempfile::tempdir().expect("root");
+    let placed = root.path().join("placed-worker");
+    std::fs::create_dir_all(&placed).expect("placed directory");
+    let storage = swage_storage::SqliteStorage::in_memory().expect("storage");
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(NewSession {
+            metadata: Some(serde_json::json!({
+                "worker_placement_cwd": placed.display().to_string(),
+            })),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("placed worker");
+    let policy = TrustedWorkspacePolicy::default();
+    let (tool_root, _) = resolve_turn_tool_root(
+        root.path(),
+        &policy,
+        &topic.location(),
+        session.id,
+        worker_placement_path(session.metadata.as_ref()),
+    );
+    let environment = build_session_environment(&topic, &tool_root, &session);
+    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
+        [0]
+    .text_content();
+    assert!(text.contains(&format!("Working directory: {}", placed.display())));
+    assert!(!text.contains("No workspace is attached"));
+    assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_child_names_parent_selected_non_default_workspace() {
+    let root = tempfile::tempdir().expect("root");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("general scope");
+    let other = root.path().join("other-workspace");
+    let selected = root.path().join("selected-workspace");
+    std::fs::create_dir_all(&other).expect("other workspace");
+    std::fs::create_dir_all(&selected).expect("selected workspace");
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            topic_id: topic.id,
+            label: "other".into(),
+            path: other.display().to_string(),
+            permissions: vec!["read".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("other attachment");
+    let selected_attachment = storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            topic_id: topic.id,
+            label: "selected".into(),
+            path: selected.display().to_string(),
+            permissions: vec!["read".into(), "write".into()],
+            is_trusted: true,
+        })
+        .await
+        .expect("selected attachment");
+    assert!(!selected_attachment.is_default);
+    let parent = storage
+        .create_session(NewSession {
+            active_workspace_attachment_id: Some(selected_attachment.id),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("parent session");
+    let parent_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: parent.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .expect("parent thread");
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: parent_thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate from the selected workspace".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("parent turn");
+    let (provider, requests) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::Delta {
+            content: "delegated work complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let outcome = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "delegate",
+            "work in the selected workspace",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "selected-workspace-delegate",
+            "gateway",
+            parent_turn.id,
+            topic.id,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .expect("delegation completes");
+    assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+    let child = storage
+        .list_sessions_by_agent_id("delegate")
+        .await
+        .expect("child sessions")
+        .into_iter()
+        .next()
+        .expect("delegated child session");
+    assert_eq!(child.active_workspace_attachment_id, None);
+    let requests = requests.lock().expect("captured provider requests");
+    assert_eq!(requests.len(), 1, "one child request");
+    let text = requests[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(text.contains(&format!("Working directory: {}", selected.display())));
+    assert!(!text.contains("No workspace is attached"));
 }
 
 #[test]
@@ -14940,6 +15307,57 @@ fn permission_config_inherits_global_defaults_when_workspace_grants_are_missing(
         policy.deny.is_empty(),
         "missing topic workspace grants must inherit global permissions rather than denying"
     );
+}
+
+#[test]
+fn general_session_fallback_uses_general_scratch_without_a_topics_segment() {
+    let root = tempfile::tempdir().expect("scratch root");
+    let session_id = Uuid::new_v4();
+    let policy = TrustedWorkspacePolicy::default();
+    let (workspace, allowed) =
+        agent_workspace_from_policy(root.path(), &policy, &ScopeLocation::General, session_id);
+    let expected = root
+        .path()
+        .join("scratch/general/sessions")
+        .join(session_id.to_string());
+    assert_eq!(workspace, expected);
+    assert_eq!(allowed, vec![expected]);
+    assert!(!workspace.to_string_lossy().contains("/topics/"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn general_scratch_authorises_worker_placement() {
+    let root = tempfile::tempdir().expect("scratch root");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
+    let general = storage.general_scope().await.expect("general scope");
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let context_id = Uuid::new_v4();
+    let permitted = root
+        .path()
+        .join("scratch/general/sessions")
+        .join(context_id.to_string());
+    std::fs::create_dir_all(&permitted).expect("create prospective worker directory");
+    let placement = resolve_authorised_worker_directory(
+        &state,
+        general.id,
+        context_id,
+        None,
+        None,
+        None,
+        permitted.to_str().expect("UTF-8 scratch path"),
+    )
+    .await
+    .expect("general scratch is authorised");
+    assert_eq!(placement.path, permitted);
+    assert!(placement.can_write);
 }
 
 #[test]
@@ -14963,7 +15381,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
     swage_context::orientation::SessionEnvironment {
         topic_name: String::new(),
         topic_description: String::new(),
-        working_directory: None,
+        tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
         started_at: chrono::Utc::now(),
         channel: None,
     }
@@ -15197,7 +15615,10 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
         topic,
         config,
         "delegate".into(),
-        "/workspace".into(),
+        ResolvedToolRoot {
+            path: "/workspace".into(),
+            source: ToolRootSource::AttachedWorkspace,
+        },
         context_event_tx,
         serde_json::json!({}),
         DispatchContextComposition {
@@ -15486,8 +15907,12 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
         assert_eq!(stored.permissions, vec!["read", "write"]);
         for selected in [None, Some(attachment.id)] {
             let policy = load_trusted_workspace_policy(&storage, topic_id, selected).await;
-            let (root, paths) =
-                agent_workspace_from_policy(config_root.path(), &policy, topic_id, session_id);
+            let (root, paths) = agent_workspace_from_policy(
+                config_root.path(),
+                &policy,
+                &ScopeLocation::General,
+                session_id,
+            );
             let mut context =
                 swage_tool::context::MockToolContext::new("reader", session_id.to_string());
             context.working_directory = root;
@@ -15796,22 +16221,16 @@ async fn context_assembled_precedes_first_token() {
                 !report.elements.is_empty(),
                 "report should contain elements key"
             );
-            let session = state
-                .storage
-                .get_session(session_id)
-                .await
-                .expect("session lookup")
-                .expect("session");
+            let expected = state
+                .config_root
+                .join("scratch/general/sessions")
+                .join(session_id.to_string());
             assert_eq!(
                 report
                     .tool_scope
                     .as_ref()
                     .and_then(|scope| scope.get("effective_root")),
-                Some(&serde_json::json!(managed_scratch_workspace(
-                    &state.config_root,
-                    session.topic_id,
-                    session_id
-                ))),
+                Some(&serde_json::json!(expected)),
                 "live turn diagnostics must report the root passed to tools"
             );
         }
@@ -15871,19 +16290,13 @@ async fn assembly_report_persisted_as_context_snapshot() {
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
     );
-    let session = state
-        .storage
-        .get_session(session_id)
-        .await
-        .expect("session lookup")
-        .expect("session");
+    let expected = state
+        .config_root
+        .join("scratch/general/sessions")
+        .join(session_id.to_string());
     assert_eq!(
         parsed["tool_scope"]["effective_root"],
-        serde_json::json!(managed_scratch_workspace(
-            &state.config_root,
-            session.topic_id,
-            session_id
-        )),
+        serde_json::json!(expected),
         "turn diagnostics must record the root passed to tools"
     );
     let provider_request = &parsed["provider_visible"]["requests"][0];
@@ -17586,5 +17999,419 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
             .any(|m| m.text_content().contains("orphaned tool row")),
         "a tool row answering no recorded call is dropped by the rebuild — \
          which is why deliveries must not use Role::Tool"
+    );
+}
+
+/// A turn killed mid-tool leaves one settled call and one started call. On
+/// real SQLite: recovery settles the started row as interrupted, and the
+/// rebuilt history replays the turn's round — the completed call with its
+/// result, the cut-off one as interrupted — although the turn never reached
+/// an assistant message, so a resumed continuation does not run the completed
+/// call again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
+    use swage_storage::sqlite::SqliteStorage;
+    use swage_storage::store::{
+        MessageStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+    };
+    use swage_storage::{NewSession, NewThread, NewToolCall, NewTurn, TurnState};
+
+    let storage = SqliteStorage::in_memory().expect("sqlite");
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            topic_id: topic.id,
+            agent_id: "gateway".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id: thread.id,
+            attachments: Vec::new(),
+            turn_id: Some(turn.id),
+            role: Role::User,
+            content: "append the marker, then run the long job".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    let mut append_call_id = None;
+    for (position, call_id, tool) in [(0, "call-append", "file_edit"), (1, "call-long", "shell")] {
+        let created = storage
+            .create_tool_call(NewToolCall {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                call_id: call_id.into(),
+                tool: tool.into(),
+                arguments: "{}".into(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(&serde_json::json!(
+                    {}
+                )),
+                result: None,
+                model_result: None,
+                status: None,
+                duration_ms: None,
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+        if call_id == "call-append" {
+            append_call_id = Some(created.id);
+        }
+    }
+    storage
+        .update_tool_call_result(
+            append_call_id.unwrap(),
+            "marker appended",
+            "marker appended",
+            "success",
+            3,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    crate::shutdown::recover_orphaned_turns(&storage, &storage)
+        .await
+        .expect("recovery");
+
+    let calls = storage.list_tool_calls_by_turn(turn.id).await.unwrap();
+    assert_eq!(calls[0].status.as_deref(), Some("success"));
+    assert_eq!(calls[0].result.as_deref(), Some("marker appended"));
+    assert_eq!(calls[1].status.as_deref(), Some("interrupted"));
+    assert_eq!(
+        calls[1].result.as_deref(),
+        Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
+    );
+
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread.id)
+        .await
+        .unwrap();
+    let replay_parts: Vec<&swage_core::ToolReplayPart> = rebuilt
+        .iter()
+        .filter_map(|message| message.tool_replay())
+        .flatten()
+        .collect();
+    let replayed_calls: Vec<&str> = replay_parts
+        .iter()
+        .filter_map(|part| match part {
+            swage_core::ToolReplayPart::ToolCall { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replayed_calls, ["call-append", "call-long"]);
+    let result_for = |wanted: &str| {
+        replay_parts
+            .iter()
+            .find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult {
+                    call_id, content, ..
+                } if call_id == wanted => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no replayed result for {wanted}"))
+    };
+    assert_eq!(result_for("call-append"), "marker appended");
+    assert_eq!(
+        result_for("call-long"),
+        swage_core::compact_tool_result_for_model_with_reference(
+            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+            true,
+            swage_core::tool_result_reference(&turn.id.to_string(), "call-long"),
+        )
+    );
+    assert_eq!(
+        rebuilt[0].role(),
+        Role::User,
+        "the round follows the turn's input"
+    );
+}
+
+#[tokio::test]
+async fn assistantless_delegated_round_follows_the_delegated_task() {
+    let storage = MockStorage::new();
+    let thread_id = Uuid::new_v4();
+    let turn_id = Uuid::new_v4();
+    for content in ["Inherited Background Context", "Delegated Task"] {
+        storage
+            .append_message(AppendMessage {
+                thread_id,
+                attachments: Vec::new(),
+                turn_id: Some(turn_id),
+                role: Role::User,
+                content: content.into(),
+                agent_id: "child".into(),
+            })
+            .await
+            .unwrap();
+    }
+    storage
+        .create_tool_call(NewToolCall {
+            turn_id,
+            agent_id: "child".into(),
+            call_id: "child-call".into(),
+            tool: "echo".into(),
+            arguments: "{}".into(),
+            model_arguments: "{}".into(),
+            result: Some("done".into()),
+            model_result: Some("done".into()),
+            status: Some("success".into()),
+            duration_ms: Some(1),
+            truncated: false,
+            total_bytes: None,
+            provider_round: 1,
+            position: 0,
+            parent_call_id: None,
+            display_summary: None,
+        })
+        .await
+        .unwrap();
+    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread_id)
+        .await
+        .unwrap();
+    let task_index = rebuilt
+        .iter()
+        .position(|message| message.text_content().contains("Delegated Task"))
+        .unwrap();
+    let round_index = rebuilt
+        .iter()
+        .position(|message| message.tool_replay().is_some())
+        .unwrap();
+    assert!(
+        round_index > task_index,
+        "tool round at {round_index} precedes delegated task at {task_index}"
+    );
+}
+
+/// One echo call followed by a closing text round, for the record-failure tests.
+fn echo_then_reply_rounds() -> Vec<Vec<StreamChunk>> {
+    vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call_1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": "hello" }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]
+}
+
+async fn run_echo_turn(state: &AppState, session_id: Uuid) -> Vec<ServerEvent> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let _ = process_turn(
+        state,
+        session_id,
+        None,
+        "Use echo".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await;
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+/// A tool call whose settlement cannot be written has failed: the live
+/// consumer sees it end as an error naming the record failure, never as the
+/// success the execution alone reported.
+#[tokio::test]
+async fn a_failed_tool_call_settlement_ends_the_call_as_an_error_for_the_client() {
+    let mut rounds = echo_then_reply_rounds();
+    rounds.push(vec![
+        StreamChunk::Delta {
+            content: "follow-up".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    storage.fail_tool_call_settlement();
+
+    let events = run_echo_turn(&state, session_id).await;
+
+    let ends: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ToolEnd {
+                call_id,
+                status,
+                result,
+                ..
+            } if call_id == "call_1" => Some((status.as_str(), result.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        1,
+        "exactly one ToolEnd for the call: {events:?}"
+    );
+    assert_eq!(
+        ends[0].0, "error",
+        "a call with no settled record failed: {ends:?}"
+    );
+    assert!(
+        ends[0].1.contains("record could not be settled"),
+        "the ToolEnd names the record failure: {ends:?}"
+    );
+    let requests = captured.lock().unwrap();
+    let next = requests
+        .get(1)
+        .expect("provider continuation after the tool");
+    let results: Vec<_> = next
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .filter_map(|part| match part {
+            ToolReplayPart::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.contains("record could not be settled")),
+        "model received record failure: {results:?}"
+    );
+    assert!(
+        !results.iter().any(|result| result.contains("hello")),
+        "model must not receive the executed output: {results:?}"
+    );
+    drop(requests);
+    let turn = storage
+        .db
+        .lock()
+        .await
+        .turns
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        turn.state,
+        TurnState::Failed,
+        "settlement loss must fail the turn"
+    );
+
+    run_echo_turn(&state, session_id).await;
+    let requests = captured.lock().unwrap();
+    let next_turn = requests.get(2).expect("next turn provider request");
+    let next_turn_parts: Vec<_> = next_turn
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        next_turn_parts.iter().any(
+            |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "call_1")
+        ),
+        "next turn provider must see the call: {next_turn_parts:?}"
+    );
+    assert!(next_turn_parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "call_1" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))), "next turn provider must see the unknown outcome: {next_turn_parts:?}");
+    drop(requests);
+
+    let thread_id = turn.thread_id;
+    let replay = super::history::rebuild_thread_history_messages(&*storage, thread_id)
+        .await
+        .unwrap();
+    let replay_parts: Vec<_> = replay
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        replay_parts.iter().any(
+            |part| matches!(part, ToolReplayPart::ToolCall { call_id, .. } if call_id == "call_1")
+        ),
+        "next turn must see the call: {replay_parts:?}"
+    );
+    assert!(replay_parts.iter().any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, .. } if call_id == "call_1" && content.contains(swage_storage::store::INTERRUPTED_TOOL_RESULT))), "next turn must see unknown outcome: {replay_parts:?}");
+}
+
+/// A tool call whose started row cannot be written is refused: it never
+/// runs, and the client sees it end as an error naming the record failure.
+#[tokio::test]
+async fn a_failed_tool_call_create_refuses_the_dispatch_for_the_client() {
+    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(
+        MultiRoundMockProvider::new(echo_then_reply_rounds()),
+    ))
+    .await;
+    storage.fail_tool_call_creates();
+
+    let events = run_echo_turn(&state, session_id).await;
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ServerEvent::ToolStart { call_id, .. } if call_id == "call_1"
+        )),
+        "a refused call must not start: {events:?}"
+    );
+    let ends: Vec<(&str, String)> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ToolEnd {
+                call_id,
+                status,
+                result,
+                ..
+            } if call_id == "call_1" => Some((status.as_str(), result.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ends.len(),
+        1,
+        "exactly one ToolEnd for the call: {events:?}"
+    );
+    assert_eq!(ends[0].0, "error");
+    assert!(
+        ends[0].1.contains("record could not be written"),
+        "the ToolEnd names the record failure: {ends:?}"
     );
 }

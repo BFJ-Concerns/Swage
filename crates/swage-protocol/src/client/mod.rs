@@ -61,6 +61,7 @@ pub struct ClientSurface {
     topic_list: topic::TopicListResponse,
     create_workspace_attachment_request: topic::CreateWorkspaceAttachmentRequest,
     update_workspace_trust_request: topic::UpdateWorkspaceTrustRequest,
+    relink_workspace_attachment_request: topic::RelinkWorkspaceAttachmentRequest,
     workspace_attachment_list: topic::WorkspaceAttachmentListResponse,
     channel_link_code_response: channel::ChannelLinkCodeResponse,
     create_conversation_request: conversation::CreateConversationRequest,

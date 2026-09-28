@@ -907,7 +907,9 @@ mod tests {
                 SessionEnvironment {
                     topic_name: String::new(),
                     topic_description: String::new(),
-                    working_directory: None,
+                    tool_root: crate::orientation::ToolRoot::ManagedScratch(
+                        "/scratch/session".into(),
+                    ),
                     started_at: chrono::Utc::now(),
                     channel: None,
                 },
@@ -1038,7 +1040,9 @@ mod tests {
                 SessionEnvironment {
                     topic_name: "Atelier".into(),
                     topic_description: String::new(),
-                    working_directory: None,
+                    tool_root: crate::orientation::ToolRoot::ManagedScratch(
+                        "/scratch/session".into(),
+                    ),
                     started_at: chrono::Utc::now(),
                     channel: None,
                 },

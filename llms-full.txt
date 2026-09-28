@@ -480,9 +480,11 @@ project guidance, but a conversation can start without any of them.
 
 The web UI opens to the recent-sessions list (`GET /api/sessions`): every
 scope's sessions ordered by their latest user or assistant message, with
-automated sessions grouped beneath their source (`entries[].automated`
-under a `conversation`, `schedule` or `workflow_run` source). `?topic_id=`
-narrows the list to a topic; `?archived=true` lists the sessions the
+each entry's preview showing the latest user or assistant message (tool and
+system messages never replace the preview). Automated sessions are grouped
+beneath their source (`entries[].automated` under a `conversation`,
+`schedule` or `workflow_run` source). `?topic_id=`
+narrows the list to a topic; `?archived=` (boolean) lists the sessions the
 inactivity sweep has hidden (`[sessions] archive_after_days`, default 7;
 a turn on an archived session unarchives it). Every session records its
 origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`).
@@ -504,7 +506,17 @@ workspaces, configuration — for the sessions started in it. A session
 started without one runs in the general scope: general memory, the general
 knowledge base, no inherited files or context from any topic, and no
 `topic_id` on the wire. `GET /api/topics` never lists the general scope,
-and it cannot be opened or deleted.
+and it cannot be opened or deleted. Schedules can run in the general scope:
+a schedule created without a topic resolves to the general scope.
+
+A session without a topic sees a built-in orientation element at every
+turn, describing its environment: no topic is selected, general memory and
+the general knowledge base are in scope, and tool paths resolve at a
+scratch directory for the session
+(`scratch/general/sessions/<session_id>` under the data root). A session
+in a topic whose workspace is attached sees its working directory instead;
+the scratch layout for topic sessions is
+`scratch/topics/<topic>/sessions/<session_id>`.
 
 The top bar names the session's scope; a topic's name links to its settings
 page (`/settings/topic/{slug}/{overview|workspaces|surfaces|sessions}`),
@@ -835,17 +847,29 @@ names, descriptions, tags, origin; no module content);
 `DELETE` removes it, leaving surfaces added from it untouched.
 
 Creating a surface with `library_entry_id` set seeds it from the entry
-(`library_entry_id` and `seeded_at` on `SurfaceResponse`). Seeding carries
-the saved content only when the session's topic is the entry's origin
-(`LibrarySeeding::WithContent`); any other topic or the general scope receives
-the shape with empty modules (`ShapeOnly`). The audit event `surface_created`
-records which under `seeded_from.seeding`.
+(`library_entry_id`, `seeded_at`, and `seeded_from_name` on
+`SurfaceResponse`). Seeding carries the saved content only when the
+session's topic is the entry's origin (`LibrarySeeding::WithContent`); any
+other topic or the general scope receives the shape with empty modules
+(`ShapeOnly`). The audit event `surface_created` records which under
+`seeded_from.seeding`. The `seeded_from_name` persists even after the
+library entry it was seeded from is deleted.
 
 `GET/POST /api/topics/{topic_id}/default-surfaces` and
 `DELETE /api/topics/{topic_id}/default-surfaces/{entry_id}` manage a topic's
-default entries; `ConversationService` opens them in every new session of the
-topic. `topics.tags` (`UpdateTopicRequest.tags`) are the labels the
-`surface_library` tool narrows the catalogue by for a topic's sessions.
+default entries; the gateway opens them in every person-opened session of
+the topic (sessions with origin `direct`). Schedule runs and other
+automated sessions do not open default surfaces, and the general scope
+designates no defaults. `topics.tags` (`UpdateTopicRequest.tags`) are the
+labels the `surface_library` tool narrows the catalogue by for a topic's
+sessions.
+
+Library entries carry an `origin_topic_deleted` boolean, set when the entry's
+origin topic is deleted. Deleting a topic keeps the entries saved from it
+and other topics' default designations of those entries intact — the
+catalogue marks the origin as deleted (`origin_topic_deleted: true`), and a
+surface seeded from such an entry carries its shape only, because the
+entry's content travels to no session once its origin topic is gone.
 
 A save or delete broadcasts `ServerEvent::LibraryUpdated { entry_id }` on
 the work-surface channel (`/api/work-surface/ws`), delivered like
@@ -883,6 +907,15 @@ When a WebSocket connection to a surface's work surface drops and reconnects,
 the frontend refetches the surface state to pick up any writes that landed
 while disconnected. `library_updated` rides the same channel and refetches
 the catalogue.
+
+## Workspace relinking
+
+When a workspace directory moves on disk, the attachment can be relinked to
+its new path without detaching and re-attaching:
+`PUT /api/topics/{topic_id}/workspaces/{workspace_id}/relink`
+(`RelinkWorkspaceAttachmentRequest`: `path`). Relinking updates only the
+path and clears the missing flag; the attachment's label, configured
+permissions, trust state, and default status are preserved.
 
 ## Delivery targets
 
@@ -972,6 +1005,13 @@ After the welcome the connection carries two frame types in each direction:
 
 All frames are tagged by `kind` (snake_case) and defined in
 `swage-protocol::device` (`DeviceFrame`, `GatewayFrame`).
+
+### Cancellation
+
+When a turn is cancelled, the gateway sends `Cancel` for each in-flight
+device operation. For local shell commands (`shell` tool), cancellation
+kills the entire process group (`SIGKILL` to `-pid`), stopping the command
+and all its descendants.
 
 ### Presence
 
@@ -1165,6 +1205,30 @@ captures a scope generation before the request and hands the store a
 nor activated once the user has moved to another (it exists in the scope it
 was asked for, and the recent list finds it).
 
+## Tool-call recording and replay
+
+Tool calls are recorded in two phases. A record is created when the model
+selects the tool call (`create_tool_call`), before execution begins. Once
+execution completes, the record is settled with the result
+(`update_tool_call_result`). This means a tool call that was selected but
+never finished — interrupted by cancellation, a crash, or a turn that ended
+before the result could be recorded — has a record with no result.
+
+At turn startup, unsettled tool calls from a prior interrupted turn are
+replayed into the conversation history so the model sees what happened.
+Completed tool calls replay with their recorded results. A tool call that
+was interrupted or whose result could not be recorded replays with an
+explicit unknown-outcome text rather than replaying as though it returned
+successfully:
+
+- An interrupted call (no result, no status): `"tool call did not report a
+  result; its outcome is unknown"` with status `"interrupted"`.
+- A call that ran but whose result could not be recorded: `"tool call ran,
+  but its result could not be recorded"` with status `"result_unavailable"`.
+
+When a tool-call result cannot be recorded (the settlement write fails),
+the turn ends as `Failed` — the result is not silently dropped.
+
 ## Hosted documentation
 
 The gateway compiles the agent-facing documentation set (`agent-docs/`) into
@@ -1268,7 +1332,7 @@ two sandbox-eligible tools.
 |---|---|
 | `session_values` | `session_variable.rs` |
 | `agent_memory` | `agent_memory.rs` |
-| `memory` | `memory.rs` — sandbox-eligible |
+| `memory` | `memory.rs` — sandbox-eligible; reads and writes the shared memory files of the session's scope — the topic's memory when a topic is selected, the general memory otherwise |
 | `tool_result_read` | `tool_result_read.rs` |
 | `task_definition` | `task_definition.rs` |
 

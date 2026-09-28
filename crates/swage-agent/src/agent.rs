@@ -733,10 +733,62 @@ impl Agent {
                         return Err(AgentError::Cancelled);
                     }
 
+                    // The call's record opens when the model selects it and is
+                    // settled when execution finishes — both writes
+                    // constitutive (record_durability.rs, class 1), so a turn
+                    // killed mid-execution leaves a started row that recovery
+                    // settles as interrupted rather than no row at all. A
+                    // failed open refuses the dispatch: a call the record
+                    // cannot show must not run.
+                    let record = match self
+                        .storage
+                        .create_tool_call(NewToolCall {
+                            turn_id: turn.id,
+                            agent_id: self.config.agent_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.name.clone(),
+                            arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
+                            model_arguments: compact_tool_arguments_for_model(&call.arguments),
+                            result: None,
+                            model_result: None,
+                            status: None,
+                            duration_ms: None,
+                            truncated: false,
+                            total_bytes: None,
+                            provider_round: round as i32,
+                            position: tool_position,
+                            parent_call_id: None,
+                            display_summary: self.tool_display_summary(call),
+                        })
+                        .await
+                    {
+                        Ok(record) => record,
+                        Err(error) => {
+                            let refusal = format!(
+                                "tool call refused: its record could not be written: {error}"
+                            );
+                            let _ = event_tx.send(AgentEvent::ToolEnd {
+                                call_id: call.call_id.clone(),
+                                tool_name: call.name.clone(),
+                                result: Value::String(refusal.clone()),
+                                status: "error".to_string(),
+                                duration_ms: Some(0),
+                            });
+                            tool_position += 1;
+                            total_tool_calls += 1;
+                            tool_results.push(ToolResult {
+                                call_id: call.call_id.clone(),
+                                content: refusal,
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                    };
+
                     let start = std::time::Instant::now();
 
                     // PreToolUse hook — may block, request approval, or proceed.
-                    let (result_content, is_error, status) = match self
+                    let (result_content, mut is_error, status) = match self
                         .dispatch_pre_tool_use(&call.name, &call.arguments)
                         .await
                     {
@@ -822,17 +874,9 @@ impl Agent {
 
                     let duration_ms = start.elapsed().as_millis() as u64;
 
-                    // Emit ToolEnd — final status and result.
                     let result_value: Value = serde_json::from_str(&result_content)
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
-                    let _ = event_tx.send(AgentEvent::ToolEnd {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.name.clone(),
-                        result: result_value.clone(),
-                        status: status.clone(),
-                        duration_ms: Some(duration_ms),
-                    });
 
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
@@ -840,34 +884,54 @@ impl Agent {
 
                     // Leak detection on tool result before feeding back to the model.
                     let safe_result = self.scan_output(&result_content);
-                    let model_arguments = compact_tool_arguments_for_model(&call.arguments);
                     let model_result = compact_tool_result_for_model_with_reference(
                         &safe_result,
                         is_error,
                         tool_result_reference(&turn.id.to_string(), &call.call_id),
                     );
 
-                    let _ = self
+                    // Settle the started row. The raw result stays in the
+                    // store; the scanned model-facing text is what history
+                    // replays. A settlement that fails fails the call with the
+                    // record failure named, never a result the trail omits —
+                    // for the model and the client alike, so ToolEnd follows
+                    // the settlement and carries its outcome.
+                    let mut safe_result = safe_result;
+                    let mut end_result = result_value;
+                    let mut end_status = status.clone();
+                    if let Err(error) = self
                         .storage
-                        .create_tool_call(NewToolCall {
+                        .update_tool_call_result(
+                            record.id,
+                            &result_content,
+                            &model_result,
+                            &status,
+                            duration_ms as i64,
+                            result_metadata.truncated,
+                            result_metadata.total_bytes,
+                        )
+                        .await
+                    {
+                        let reason = format!(
+                            "tool '{}' ran but its record could not be settled: {error}",
+                            call.name
+                        );
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
                             turn_id: turn.id,
-                            agent_id: self.config.agent_id.clone(),
-                            call_id: call.call_id.clone(),
-                            tool: call.name.clone(),
-                            arguments: serde_json::to_string(&call.arguments).unwrap_or_default(),
-                            model_arguments,
-                            result: Some(result_content.clone()),
-                            model_result: Some(model_result),
-                            status: Some(status),
-                            duration_ms: Some(duration_ms as i64),
-                            truncated: result_metadata.truncated,
-                            total_bytes: result_metadata.total_bytes,
-                            provider_round: round as i32,
-                            position: tool_position,
-                            parent_call_id: None,
-                            display_summary: self.tool_display_summary(call),
-                        })
-                        .await;
+                            reason: reason.clone(),
+                        });
+                        safe_result = reason;
+                        is_error = true;
+                        end_result = Value::String(safe_result.clone());
+                        end_status = "error".to_string();
+                    }
+                    let _ = event_tx.send(AgentEvent::ToolEnd {
+                        call_id: call.call_id.clone(),
+                        tool_name: call.name.clone(),
+                        result: end_result,
+                        status: end_status,
+                        duration_ms: Some(duration_ms),
+                    });
                     tool_position += 1;
                     total_tool_calls += 1;
 
@@ -888,9 +952,42 @@ impl Agent {
                     // from tool dispatch may leave without persisting it here.
                     self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
                         .await;
+                    // Settle every started row without a recorded result so
+                    // history replay can explain the unknown outcome.
+                    if let Err(error) = self
+                        .storage
+                        .settle_started_tool_calls(
+                            turn.id,
+                            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                            swage_storage::store::INTERRUPTED_TOOL_STATUS,
+                        )
+                        .await
+                    {
+                        tracing::error!(turn_id = %turn.id, %error,
+                            "cancelled tool call's record could not be settled");
+                        let reason =
+                            format!("cancelled tool call's record could not be settled: {error}");
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: turn.id,
+                            reason: reason.clone(),
+                        });
+                        let _ = event_tx.send(AgentEvent::Error {
+                            message: reason,
+                            provider_failure: false,
+                        });
+                    }
                     return Err(AgentError::Cancelled);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.storage
+                        .settle_started_tool_calls(
+                            turn.id,
+                            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                            swage_storage::store::INTERRUPTED_TOOL_STATUS,
+                        )
+                        .await?;
+                    return Err(error);
+                }
             };
 
             // Build tool round messages and extend context for the next LLM call.
