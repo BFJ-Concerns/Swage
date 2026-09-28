@@ -495,11 +495,16 @@ prompts, briefings, skills — is rendered afresh from its sources.
 
 ### Wall-triggered succession
 
-A session that keeps hitting walls — the same tool call failing in every recent
-turn, or failed tool calls and failed turns accumulating across its recent
-turns — continues on a successor built from a blind diagnosis, regardless of
-the context's size. The diagnosis runs when at least 5 combined failures appear
-within the 6 most recent finished turns.
+A session that keeps hitting walls continues on a successor built from a blind
+diagnosis, regardless of the context's size. Two triggers are checked within the
+6 most recent finished turns:
+
+- 3 failures of the identical tool call (same tool, same arguments) anywhere in
+  that window, or
+- at least 5 failed tool calls and failed turns combined.
+
+The first trigger is checked first; when both are present, the repeated-call
+signal is reported.
 
 The successor carries diagnosis notes in place of the summarised history. Each
 turn runs on such a successor while the walls remain among its recent turns:
