@@ -29,7 +29,7 @@ use swage_core::{CompletionRequest, Role};
 use swage_protocol::client::context::{
     CompactionRecord, DiagnosisCall, DiagnosisRecord, DiagnosisStage,
 };
-use swage_protocol::client::workflow::WorkflowProviderRoundOutcome;
+use swage_protocol::client::workflow::{ProviderFailureKind, WorkflowProviderRoundOutcome};
 use swage_storage::{
     ContextSnapshotStore, ProviderRoundRecord, ProviderRoundStore, ToolCallStore, TurnState,
     TurnStore,
@@ -128,7 +128,12 @@ pub(super) async fn succeed_over_threshold(
         match outcome {
             Ok(mut succession) => {
                 succession.record.diagnosis = Some(diagnosis);
-                return reassemble(elements, succession, &assemble);
+                return reassemble(
+                    elements,
+                    succession,
+                    &assemble,
+                    std::mem::take(&mut output.report.compaction_applied),
+                );
             }
             Err(error) => {
                 tracing::warn!(%error, "the degradation diagnosis did not run");
@@ -195,7 +200,12 @@ pub(super) async fn succeed_over_threshold(
         retain_at_most,
     };
     match succession::succeed(request, site.provider, site.tokeniser).await {
-        Ok(succession) => reassemble(elements, succession, &assemble),
+        Ok(succession) => reassemble(
+            elements,
+            succession,
+            &assemble,
+            output.report.compaction_applied,
+        ),
         Err(error) => {
             tracing::warn!(
                 %error,
@@ -223,6 +233,7 @@ fn reassemble(
     elements: Vec<Box<dyn ContextElement>>,
     succession: succession::Succession,
     assemble: &impl Fn(&[Box<dyn ContextElement>]) -> AssemblyOutput,
+    prior_records: Vec<CompactionRecord>,
 ) -> AssemblyOutput {
     let mut successor: Vec<Box<dyn ContextElement>> = elements
         .into_iter()
@@ -231,6 +242,7 @@ fn reassemble(
     successor.push(Box::new(succession.element));
     successor.push(Box::new(HistoryElement::new(succession.retained_history)));
     let mut output = assemble(&successor);
+    output.report.compaction_applied.extend(prior_records);
     output.report.compaction_applied.push(succession.record);
     output
 }
@@ -497,10 +509,7 @@ where
     })
 }
 
-/// Words in a failed round's recorded provider error that mark transport
-/// trouble. They match `ProviderError`'s own renderings: "rate limited by
-/// provider", "HTTP error 429", "request … timed out", "network error …",
-/// and the stream's connection and retry failures.
+/// Text fallback for rounds recorded without a provider failure kind.
 const TRANSPORT_FAILURE_MARKERS: &[&str] = &[
     "rate limit",
     "429",
@@ -510,6 +519,9 @@ const TRANSPORT_FAILURE_MARKERS: &[&str] = &[
     "connection",
     "retry",
     "retries",
+    "stream error",
+    "provider response anomaly",
+    "http error 5",
 ];
 
 /// Whether a failed turn, by its provider rounds, failed on its own rather
@@ -525,11 +537,25 @@ pub(super) fn ended_on_its_own(rounds: &[ProviderRoundRecord]) -> bool {
     };
     match serde_json::from_value::<WorkflowProviderRoundOutcome>(last.outcome.clone()) {
         Ok(WorkflowProviderRoundOutcome::Responded { .. }) => true,
-        Ok(WorkflowProviderRoundOutcome::Failed { message }) => {
-            let message = message.to_lowercase();
-            !TRANSPORT_FAILURE_MARKERS
-                .iter()
-                .any(|marker| message.contains(marker))
+        Ok(WorkflowProviderRoundOutcome::Failed { message, kind }) => {
+            if let Some(kind) = kind {
+                !matches!(
+                    kind,
+                    ProviderFailureKind::RateLimited
+                        | ProviderFailureKind::Timeout
+                        | ProviderFailureKind::Network
+                        | ProviderFailureKind::StreamError
+                        | ProviderFailureKind::ProviderAnomaly
+                        | ProviderFailureKind::HttpError {
+                            status: 429 | 500..=599
+                        }
+                )
+            } else {
+                let message = message.to_lowercase();
+                !TRANSPORT_FAILURE_MARKERS
+                    .iter()
+                    .any(|marker| message.contains(marker))
+            }
         }
         Ok(
             WorkflowProviderRoundOutcome::Interrupted | WorkflowProviderRoundOutcome::Outstanding,
@@ -624,7 +650,8 @@ async fn diagnose(
     let older = &history[..summarised];
     let slice_len = older.len().div_ceil(LOCATOR_COUNT).max(1);
     let reader_model = models.reader.as_deref();
-    let findings = futures::future::join_all(older.chunks(slice_len).map(|slice| {
+    let slices = reader_slices(older, slice_len)?;
+    let findings = futures::future::join_all(slices.iter().map(|slice| {
         site.provider.complete(diagnosis_request(
             LOCATOR_INSTRUCTIONS,
             succession::transcript(slice),
@@ -633,6 +660,7 @@ async fn diagnose(
     }))
     .await;
     let mut reports = Vec::new();
+    let mut failed_reader = false;
     for finding in findings {
         let mut call = diagnosis_call(site, DiagnosisStage::Reader, reader_model, &finding);
         match finding {
@@ -640,10 +668,21 @@ async fn diagnose(
                 call.report = Some(response.content.clone());
                 reports.push(response.content);
             }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "a blind reader failed"),
+            Ok(_) => {
+                call.failure_reason = Some("the reader returned an empty report".to_string());
+                failed_reader = true;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "a blind reader failed");
+                failed_reader = true;
+            }
         }
         diagnosis.calls.push(call);
+    }
+    if failed_reader {
+        return Err(SuccessionError::Diagnosis(
+            "one or more readers failed to examine their history".to_string(),
+        ));
     }
     if reports.is_empty() {
         return Err(SuccessionError::Diagnosis(
@@ -689,6 +728,35 @@ async fn diagnose(
     )?;
     diagnosis.synthesis = Some(synthesis);
     Ok(succession)
+}
+
+fn reader_slices(
+    history: &[ChatMessage],
+    slice_len: usize,
+) -> Result<Vec<&[ChatMessage]>, SuccessionError> {
+    let mut slices = Vec::new();
+    let mut start = 0;
+    while start < history.len() {
+        let proposed = (start + slice_len).min(history.len());
+        let end = if proposed == history.len() {
+            proposed
+        } else {
+            let boundary = succession::split_boundary(history, proposed)?;
+            if boundary > start {
+                boundary
+            } else {
+                // A pair can fill the preceding slice; move it together to
+                // the following one rather than create an empty reader.
+                ((proposed + 1)..history.len())
+                    .filter_map(|candidate| succession::split_boundary(history, candidate).ok())
+                    .find(|boundary| *boundary > start)
+                    .unwrap_or(history.len())
+            }
+        };
+        slices.push(&history[start..end]);
+        start = end;
+    }
+    Ok(slices)
 }
 
 /// The record of one diagnosis call: where it went, what it cost, and why
@@ -805,6 +873,35 @@ mod tests {
                 "network",
             ),
             (
+                vec![json!({"outcome":"failed","message":"HTTP error 503: unavailable"})],
+                false,
+                "HTTP 5xx",
+            ),
+            (
+                vec![json!({"outcome":"failed","message":"stream error: malformed SSE"})],
+                false,
+                "stream error",
+            ),
+            (
+                vec![json!({"outcome":"failed","message":"provider response anomaly"})],
+                false,
+                "response anomaly",
+            ),
+            (
+                vec![
+                    json!({"outcome":"failed","message":"unrecognisable text","kind":"stream_error"}),
+                ],
+                false,
+                "structured stream kind",
+            ),
+            (
+                vec![
+                    json!({"outcome":"failed","message":"HTTP error 400: misleading text","kind":{"http_error":{"status":503}}}),
+                ],
+                false,
+                "structured HTTP status",
+            ),
+            (
                 vec![responded.clone(), json!({"outcome": "interrupted"})],
                 false,
                 "interrupted",
@@ -825,6 +922,42 @@ mod tests {
         for (outcomes, expected, case) in cases {
             assert_eq!(ended_on_its_own(&rounds(&outcomes)), expected, "{case}");
         }
+    }
+
+    #[test]
+    fn reader_chunks_keep_a_call_with_its_result() {
+        let mut history = vec![
+            ChatMessage::new(Role::User, "message 0"),
+            ChatMessage::new(Role::User, "message 1"),
+        ];
+        history.extend(swage_core::tool::build_tool_round_messages(
+            &[swage_core::tool::ToolCall {
+                call_id: "call-1".into(),
+                name: "file_read".into(),
+                arguments: json!({"path":"notes/a"}),
+            }],
+            &[swage_core::tool::ToolResult {
+                call_id: "call-1".into(),
+                content: "result from notes/a".into(),
+                is_error: false,
+            }],
+            "",
+        ));
+        history
+            .extend((4..8).map(|index| ChatMessage::new(Role::User, format!("message {index}"))));
+        let slices = reader_slices(&history, 3).expect("history can be chunked");
+        assert_eq!(slices.iter().map(|slice| slice.len()).sum::<usize>(), 8);
+        assert_eq!(
+            slices
+                .iter()
+                .filter(|slice| {
+                    let transcript = succession::transcript(slice);
+                    transcript.contains("file_read") && transcript.contains("result from notes/a")
+                })
+                .count(),
+            1,
+            "one reader sees both sides of the tool round"
+        );
     }
 
     fn failing(tool: &str, arguments: serde_json::Value) -> FailedCall {
@@ -896,6 +1029,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingProvider {
         requests: std::sync::Mutex<Vec<CompletionRequest>>,
+        failing_reader: Option<usize>,
+        blank_reader: Option<usize>,
     }
 
     #[async_trait::async_trait]
@@ -908,9 +1043,23 @@ mod tests {
             &self,
             request: CompletionRequest,
         ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
-            self.requests.lock().expect("requests").push(request);
+            let index = {
+                let mut requests = self.requests.lock().expect("requests");
+                let index = requests.len();
+                requests.push(request);
+                index
+            };
+            if self.failing_reader == Some(index) {
+                return Err(swage_core::ProviderError::StreamError(
+                    "reader unavailable".into(),
+                ));
+            }
             Ok(swage_core::CompletionResponse {
-                content: "The read of notes/missing.md kept failing.".to_string(),
+                content: if self.blank_reader == Some(index) {
+                    "  ".to_string()
+                } else {
+                    "The read of notes/missing.md kept failing.".to_string()
+                },
                 input_tokens: 11,
                 output_tokens: 7,
                 finish_reason: swage_core::FinishReason::Stop,
@@ -1069,6 +1218,119 @@ mod tests {
         assert_eq!(diagnosis.synthesis.as_deref(), Some(reply));
         assert_eq!(diagnosis.walls, ["tool_call:a"]);
         assert_eq!(diagnosis.reused_from_turn, None);
+    }
+
+    #[tokio::test]
+    async fn a_missing_reader_report_fails_the_diagnosis_and_records_the_failure() {
+        for blank in [false, true] {
+            let provider = RecordingProvider {
+                failing_reader: (!blank).then_some(1),
+                blank_reader: blank.then_some(1),
+                ..Default::default()
+            };
+            let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+            let variables = BTreeMap::new();
+            let threshold = CompactionThreshold::MessageCount(100);
+            let site = SuccessionSite {
+                provider: &provider,
+                threshold: &threshold,
+                model: None,
+                focus: None,
+                variables: &variables,
+                tokeniser: &tokeniser,
+                degradation: None,
+                diagnosis_models: Ok(DiagnosisModels::default()),
+            };
+            let history: Vec<_> = (0..8)
+                .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+                .collect();
+            let degradation = Degradation {
+                signal: WallSignal::RepeatedFailures {
+                    failed_calls: 5,
+                    failed_turns: 0,
+                },
+                walls: vec!["tool_call:a".into()],
+                previous: None,
+            };
+            let (result, diagnosis) = succeed_on_degradation(&site, &degradation, &history).await;
+            assert!(
+                result.is_err(),
+                "an incomplete read cannot replace all older history"
+            );
+            assert_eq!(diagnosis.calls.len(), 3);
+            assert!(
+                diagnosis.calls[1].failure_reason.is_some(),
+                "the missing reader is recorded"
+            );
+            assert_eq!(
+                provider.requests.lock().unwrap().len(),
+                3,
+                "synthesis must not run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn threshold_success_keeps_the_failed_diagnosis_record() {
+        let provider = RecordingProvider {
+            failing_reader: Some(1),
+            ..Default::default()
+        };
+        let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+        let variables = BTreeMap::new();
+        let threshold = CompactionThreshold::MessageCount(3);
+        let history: Vec<_> = (0..8)
+            .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+            .collect();
+        let assemble = |elements: &[Box<dyn ContextElement>]| {
+            AssemblyOutput::new_unchecked(
+                elements
+                    .iter()
+                    .flat_map(|element| element.content())
+                    .collect(),
+                swage_context::report::AssemblyReport::default(),
+            )
+        };
+        let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
+        let site = SuccessionSite {
+            provider: &provider,
+            threshold: &threshold,
+            model: None,
+            focus: None,
+            variables: &variables,
+            tokeniser: &tokeniser,
+            degradation: Some(Degradation {
+                signal: WallSignal::RepeatedFailures {
+                    failed_calls: 5,
+                    failed_turns: 0,
+                },
+                walls: vec!["tool_call:a".into()],
+                previous: None,
+            }),
+            diagnosis_models: Ok(DiagnosisModels::default()),
+        };
+        let result = succeed_over_threshold(
+            site,
+            vec![Box::new(HistoryElement::new(history))],
+            output,
+            assemble,
+        )
+        .await;
+        let records = &result.report.compaction_applied;
+        assert_eq!(
+            records.len(),
+            2,
+            "the failed diagnosis and threshold pass are both retained"
+        );
+        assert_eq!(records[0].requested_strategy, DEGRADATION_STRATEGY);
+        assert_eq!(records[0].actual_strategy, "none");
+        assert!(
+            records[0].diagnosis.as_ref().unwrap().calls[1]
+                .failure_reason
+                .is_some()
+        );
+        assert_eq!(records[1].requested_strategy, THRESHOLD_STRATEGY);
+        assert_eq!(records[1].actual_strategy, THRESHOLD_STRATEGY);
     }
 
     #[test]

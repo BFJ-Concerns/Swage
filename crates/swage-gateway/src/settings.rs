@@ -696,6 +696,51 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
                 "context budget must be positive when set".to_string(),
             ));
         }
+        if let Some(threshold) = context.compaction_threshold {
+            use swage_protocol::client::settings::CompactionThresholdConfig;
+            let (unit, count) = match threshold {
+                CompactionThresholdConfig::Messages(count) => ("messages", i64::from(count)),
+                CompactionThresholdConfig::Tokens(count) => {
+                    ("tokens", i64::try_from(count).unwrap_or(0))
+                }
+            };
+            if !swage_config::validation::valid_compaction_threshold(unit, count) {
+                return Err(ApiError::validation(
+                    "context.compaction_threshold must have a positive count".to_string(),
+                ));
+            }
+        }
+        let catalogue = swage_config::ModelCatalogConfig {
+            default: request.default_model.clone(),
+            entries: request
+                .models
+                .iter()
+                .map(|(id, model)| {
+                    (
+                        id.clone(),
+                        swage_config::ModelEndpointConfig {
+                            aliases: model.aliases.clone(),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+        };
+        for (field, name) in [
+            ("diagnosis_reader_model", &context.diagnosis_reader_model),
+            (
+                "diagnosis_synthesis_model",
+                &context.diagnosis_synthesis_model,
+            ),
+        ] {
+            if let Some(name) = name
+                && !swage_config::validation::model_catalogue_contains(&catalogue, name)
+            {
+                return Err(ApiError::validation(format!(
+                    "context.{field} references '{name}', which is neither a model entry nor an alias of one"
+                )));
+            }
+        }
     }
     if let Some(communication) = &request.communication
         && (communication.message_ttl_secs == 0 || communication.expiry_interval_secs == 0)
@@ -1150,6 +1195,50 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 #[cfg(test)]
 mod tests {
     use crate::test_support::SwageHomeGuard;
+
+    #[tokio::test]
+    async fn invalid_succession_settings_are_rejected_before_any_config_write() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, "# unchanged\n").expect("seed config");
+        for (context, field) in [
+            (
+                serde_json::json!({"assembly":"default", "timeout":5, "compaction_threshold":{"messages":0}}),
+                "compaction_threshold",
+            ),
+            (
+                serde_json::json!({"assembly":"default", "timeout":5, "diagnosis_reader_model":"absent"}),
+                "diagnosis_reader_model",
+            ),
+            (
+                serde_json::json!({"assembly":"default", "timeout":5, "diagnosis_synthesis_model":"absent"}),
+                "diagnosis_synthesis_model",
+            ),
+        ] {
+            let request: SaveSettingsRequest = serde_json::from_value(serde_json::json!({
+                "default_provider":"", "providers":{}, "default_model":"", "models":{}, "context":context
+            })).expect("settings request");
+            let error = save_settings(&state, request)
+                .await
+                .expect_err("invalid context setting");
+            assert!(error.message().contains(field), "{error:?}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "# unchanged\n",
+                "the rejected request must not write config.toml"
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn atomic_config_write_never_exposes_partial_content() {

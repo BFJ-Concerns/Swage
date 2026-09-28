@@ -219,8 +219,8 @@ pub(super) async fn project_agent_events(
                     swage_agent::ProviderRoundOutcome::Responded { tool_calls } => {
                         WorkflowProviderRoundOutcome::Responded { tool_calls }
                     }
-                    swage_agent::ProviderRoundOutcome::Failed { message } => {
-                        WorkflowProviderRoundOutcome::Failed { message }
+                    swage_agent::ProviderRoundOutcome::Failed { message, kind } => {
+                        WorkflowProviderRoundOutcome::Failed { message, kind }
                     }
                     swage_agent::ProviderRoundOutcome::Interrupted => {
                         WorkflowProviderRoundOutcome::Interrupted

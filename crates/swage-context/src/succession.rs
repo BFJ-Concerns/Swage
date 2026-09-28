@@ -175,11 +175,21 @@ pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionE
         return Err(SuccessionError::TooShort(history_len));
     }
     let split = summarised_count(history_len, request.retain_at_most);
+    split_boundary(request.history, split)
+}
+
+/// Move a proposed boundary so a tool result remains with the call it answers.
+/// The earlier boundary wins when it leaves a non-empty preceding slice.
+pub fn split_boundary(history: &[ChatMessage], split: usize) -> Result<usize, SuccessionError> {
+    let history_len = history.len();
+    if split == 0 || split >= history_len {
+        return Err(SuccessionError::SplitUnavailable(split));
+    }
     // A tool result must stay with the call it answers: a provider refuses
     // a result whose call was summarised away. Retain the whole call and its
     // results where anything older is left to summarise, otherwise summarise
     // them all.
-    let answers_a_call = |at: usize| answers_a_call(&request.history[at]);
+    let answers_a_call = |at: usize| answers_a_call(&history[at]);
     let mut earlier = split;
     while earlier > 0 && answers_a_call(earlier) {
         earlier -= 1;
