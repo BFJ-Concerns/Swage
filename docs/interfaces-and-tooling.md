@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
+description: Network binding, the web UI's context inspector (including succession-degradation diagnosis view), conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -78,7 +78,12 @@ to show):
 - **Elements** — a table listing each context element by name, its source, and
   its token count.
 - **Compaction** — when the assembly compacted any element to fit the budget:
-  which element, the strategy used, and the token count before and after.
+  which element, the strategy used, and the token count before and after. When
+  the strategy is `succession-degradation` (wall-triggered succession), the
+  record also shows the diagnosis: which walls were answered, each model call's
+  stage and usage, the synthesis text, and the turn a reused diagnosis was
+  written for. The report retains compaction decisions from the first assembly
+  and the successor in pass order, even when their names match.
 - **Fallbacks** — errors that occurred during assembly, including which fallback
   assembly was used.
 - **Warnings** — anything else the assembly flagged.
