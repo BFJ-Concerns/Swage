@@ -2674,48 +2674,6 @@
         },
         "type": "object"
       },
-      "ProviderFailureKind": {
-        "oneOf": [
-          {
-            "enum": [
-              "rate_limited",
-              "timeout",
-              "network",
-              "auth",
-              "invalid_config",
-              "invalid_request",
-              "model_error",
-              "stream_error",
-              "provider_anomaly",
-              "invalid_response"
-            ],
-            "type": "string"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "http_error": {
-                "properties": {
-                  "status": {
-                    "format": "uint16",
-                    "maximum": 65535,
-                    "minimum": 0,
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "status"
-                ],
-                "type": "object"
-              }
-            },
-            "required": [
-              "http_error"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "ProviderProtocol": {
         "oneOf": [
           {
@@ -7311,17 +7269,6 @@
           },
           {
             "properties": {
-              "kind": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/ProviderFailureKind"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The provider failure category, when the caller retained it."
-              },
               "message": {
                 "type": "string"
               },

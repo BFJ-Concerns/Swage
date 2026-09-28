@@ -1317,7 +1317,6 @@ impl Agent {
                                 round,
                                 outcome: ProviderRoundOutcome::Failed {
                                     message: message.clone(),
-                                    kind: Some(swage_protocol::client::workflow::ProviderFailureKind::StreamError),
                                 },
                             });
                             let _ = event_tx.send(AgentEvent::Error {
@@ -1334,8 +1333,7 @@ impl Agent {
                                 turn_id: execution.turn_id,
                                 round,
                                 outcome: ProviderRoundOutcome::Failed {
-                                    message: message.clone(),
-                                    kind: Some(swage_protocol::client::workflow::ProviderFailureKind::ProviderAnomaly),
+                                    message: format!("provider response anomaly: {message}"),
                                 },
                             });
                             let _ = event_tx.send(AgentEvent::Error {

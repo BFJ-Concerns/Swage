@@ -29,7 +29,7 @@ use swage_core::{CompletionRequest, Role};
 use swage_protocol::client::context::{
     CompactionRecord, DiagnosisCall, DiagnosisRecord, DiagnosisStage,
 };
-use swage_protocol::client::workflow::{ProviderFailureKind, WorkflowProviderRoundOutcome};
+use swage_protocol::client::workflow::WorkflowProviderRoundOutcome;
 use swage_storage::{
     ContextSnapshotStore, ProviderRoundRecord, ProviderRoundStore, ToolCallStore, TurnState,
     TurnStore,
@@ -242,7 +242,20 @@ fn reassemble(
     successor.push(Box::new(succession.element));
     successor.push(Box::new(HistoryElement::new(succession.retained_history)));
     let mut output = assemble(&successor);
-    output.report.compaction_applied.extend(prior_records);
+    let successor_records = std::mem::take(&mut output.report.compaction_applied);
+    let mut records = prior_records;
+    let new_records: Vec<_> = successor_records
+        .into_iter()
+        .filter(|current| {
+            !records.iter().any(|prior| {
+                prior.element == current.element
+                    && prior.requested_strategy == current.requested_strategy
+                    && prior.actual_strategy == current.actual_strategy
+            })
+        })
+        .collect();
+    records.extend(new_records);
+    output.report.compaction_applied = records;
     output.report.compaction_applied.push(succession.record);
     output
 }
@@ -509,7 +522,7 @@ where
     })
 }
 
-/// Text fallback for rounds recorded without a provider failure kind.
+/// Failure text that identifies a transient provider or transport problem.
 const TRANSPORT_FAILURE_MARKERS: &[&str] = &[
     "rate limit",
     "429",
@@ -537,25 +550,11 @@ pub(super) fn ended_on_its_own(rounds: &[ProviderRoundRecord]) -> bool {
     };
     match serde_json::from_value::<WorkflowProviderRoundOutcome>(last.outcome.clone()) {
         Ok(WorkflowProviderRoundOutcome::Responded { .. }) => true,
-        Ok(WorkflowProviderRoundOutcome::Failed { message, kind }) => {
-            if let Some(kind) = kind {
-                !matches!(
-                    kind,
-                    ProviderFailureKind::RateLimited
-                        | ProviderFailureKind::Timeout
-                        | ProviderFailureKind::Network
-                        | ProviderFailureKind::StreamError
-                        | ProviderFailureKind::ProviderAnomaly
-                        | ProviderFailureKind::HttpError {
-                            status: 429 | 500..=599
-                        }
-                )
-            } else {
-                let message = message.to_lowercase();
-                !TRANSPORT_FAILURE_MARKERS
-                    .iter()
-                    .any(|marker| message.contains(marker))
-            }
+        Ok(WorkflowProviderRoundOutcome::Failed { message }) => {
+            let message = message.to_lowercase();
+            !TRANSPORT_FAILURE_MARKERS
+                .iter()
+                .any(|marker| message.contains(marker))
         }
         Ok(
             WorkflowProviderRoundOutcome::Interrupted | WorkflowProviderRoundOutcome::Outstanding,
@@ -737,6 +736,10 @@ fn reader_slices(
     let mut slices = Vec::new();
     let mut start = 0;
     while start < history.len() {
+        if slices.len() == LOCATOR_COUNT - 1 {
+            slices.push(&history[start..]);
+            break;
+        }
         let proposed = (start + slice_len).min(history.len());
         let end = if proposed == history.len() {
             proposed
@@ -888,20 +891,6 @@ mod tests {
                 "response anomaly",
             ),
             (
-                vec![
-                    json!({"outcome":"failed","message":"unrecognisable text","kind":"stream_error"}),
-                ],
-                false,
-                "structured stream kind",
-            ),
-            (
-                vec![
-                    json!({"outcome":"failed","message":"HTTP error 400: misleading text","kind":{"http_error":{"status":503}}}),
-                ],
-                false,
-                "structured HTTP status",
-            ),
-            (
                 vec![responded.clone(), json!({"outcome": "interrupted"})],
                 false,
                 "interrupted",
@@ -921,6 +910,19 @@ mod tests {
         ];
         for (outcomes, expected, case) in cases {
             assert_eq!(ended_on_its_own(&rounds(&outcomes)), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn provider_refusal_counts_as_a_wall_but_transient_failures_do_not() {
+        for (message, expected) in [
+            ("HTTP error 400: unexpected tool_use_id", true),
+            ("HTTP error 503: unavailable", false),
+            ("stream error: malformed SSE", false),
+            ("provider response anomaly", false),
+        ] {
+            let outcome = json!({"outcome": "failed", "message": message});
+            assert_eq!(ended_on_its_own(&rounds(&[outcome])), expected, "{message}");
         }
     }
 
@@ -958,6 +960,35 @@ mod tests {
             1,
             "one reader sees both sides of the tool round"
         );
+    }
+
+    #[test]
+    fn reader_boundary_shift_does_not_add_a_fourth_reader() {
+        let mut history: Vec<_> = (0..5)
+            .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+            .collect();
+        history.extend(swage_core::tool::build_tool_round_messages(
+            &[swage_core::tool::ToolCall {
+                call_id: "call-2".into(),
+                name: "file_read".into(),
+                arguments: json!({"path":"notes/b"}),
+            }],
+            &[swage_core::tool::ToolResult {
+                call_id: "call-2".into(),
+                content: "result from notes/b".into(),
+                is_error: false,
+            }],
+            "",
+        ));
+        history
+            .extend((7..9).map(|index| ChatMessage::new(Role::User, format!("message {index}"))));
+        let slices = reader_slices(&history, 3).expect("history can be chunked");
+        assert_eq!(slices.len(), LOCATOR_COUNT);
+        assert_eq!(slices.iter().map(|slice| slice.len()).sum::<usize>(), 9);
+        assert!(slices.iter().any(|slice| {
+            let transcript = succession::transcript(slice);
+            transcript.contains("file_read") && transcript.contains("result from notes/b")
+        }));
     }
 
     fn failing(tool: &str, arguments: serde_json::Value) -> FailedCall {
@@ -1283,12 +1314,26 @@ mod tests {
             .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
             .collect();
         let assemble = |elements: &[Box<dyn ContextElement>]| {
+            let mut report = swage_context::report::AssemblyReport::default();
+            report.compaction_applied.push(CompactionRecord {
+                element: "history".into(),
+                requested_strategy: "scripted".into(),
+                actual_strategy: "truncation".into(),
+                messages_removed: 1,
+                tokens_before: 10,
+                tokens_after: 8,
+                source_message_range: None,
+                budget: Some(8),
+                failure_reason: None,
+                focus: None,
+                diagnosis: None,
+            });
             AssemblyOutput::new_unchecked(
                 elements
                     .iter()
                     .flat_map(|element| element.content())
                     .collect(),
-                swage_context::report::AssemblyReport::default(),
+                report,
             )
         };
         let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
@@ -1319,18 +1364,19 @@ mod tests {
         let records = &result.report.compaction_applied;
         assert_eq!(
             records.len(),
-            2,
-            "the failed diagnosis and threshold pass are both retained"
+            3,
+            "the named assembly pass is not duplicated and both succession attempts are retained"
         );
-        assert_eq!(records[0].requested_strategy, DEGRADATION_STRATEGY);
-        assert_eq!(records[0].actual_strategy, "none");
+        assert_eq!(records[0].requested_strategy, "scripted");
+        assert_eq!(records[1].requested_strategy, DEGRADATION_STRATEGY);
+        assert_eq!(records[1].actual_strategy, "none");
         assert!(
-            records[0].diagnosis.as_ref().unwrap().calls[1]
+            records[1].diagnosis.as_ref().unwrap().calls[1]
                 .failure_reason
                 .is_some()
         );
-        assert_eq!(records[1].requested_strategy, THRESHOLD_STRATEGY);
-        assert_eq!(records[1].actual_strategy, THRESHOLD_STRATEGY);
+        assert_eq!(records[2].requested_strategy, THRESHOLD_STRATEGY);
+        assert_eq!(records[2].actual_strategy, THRESHOLD_STRATEGY);
     }
 
     #[test]

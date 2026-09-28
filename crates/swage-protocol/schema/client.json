@@ -3017,48 +3017,6 @@
         }
       }
     },
-    "ProviderFailureKind": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "rate_limited",
-            "timeout",
-            "network",
-            "auth",
-            "invalid_config",
-            "invalid_request",
-            "model_error",
-            "stream_error",
-            "provider_anomaly",
-            "invalid_response"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "http_error": {
-              "type": "object",
-              "properties": {
-                "status": {
-                  "type": "integer",
-                  "format": "uint16",
-                  "maximum": 65535,
-                  "minimum": 0
-                }
-              },
-              "required": [
-                "status"
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "http_error"
-          ]
-        }
-      ]
-    },
     "ProviderProtocol": {
       "oneOf": [
         {
@@ -7655,17 +7613,6 @@
         {
           "type": "object",
           "properties": {
-            "kind": {
-              "description": "The provider failure category, when the caller retained it.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ProviderFailureKind"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "message": {
               "type": "string"
             },
