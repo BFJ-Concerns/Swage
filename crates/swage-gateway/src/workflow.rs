@@ -27749,7 +27749,6 @@ protocol = "openai"
             rounds[0].outcome,
             swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Failed {
                 message: "scripted provider failure".into(),
-                kind: Some(swage_protocol::client::workflow::ProviderFailureKind::StreamError),
             }
         );
     }

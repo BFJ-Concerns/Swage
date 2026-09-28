@@ -621,12 +621,11 @@ pub enum WorkflowProviderRoundOutcome {
     Outstanding,
     /// A response arrived, asking for this many tool calls (zero when the
     /// model answered instead of calling tools).
-    Responded { tool_calls: u32 },
+    Responded {
+        tool_calls: u32,
+    },
     Failed {
         message: String,
-        /// The provider failure category, when the caller retained it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        kind: Option<ProviderFailureKind>,
     },
     /// The request went out and nothing can answer it any more: the attempt
     /// that made it stopped, because the call was re-dispatched under a later
@@ -635,22 +634,6 @@ pub enum WorkflowProviderRoundOutcome {
     /// round's end time is when that became true, not when a response
     /// arrived — none did.
     Interrupted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderFailureKind {
-    RateLimited,
-    Timeout,
-    Network,
-    Auth,
-    InvalidConfig,
-    InvalidRequest,
-    ModelError,
-    HttpError { status: u16 },
-    StreamError,
-    ProviderAnomaly,
-    InvalidResponse,
 }
 
 /// What a worker was asked to do, recorded when it was dispatched.
