@@ -512,6 +512,11 @@ pub(super) async fn project_agent_events(
                     message,
                 });
             }
+            AgentEvent::RecordIntegrityLost { reason, .. } => {
+                // Constitutive record (record_durability.rs): the coordinator
+                // performs the Failed transition after the agent settles.
+                record_integrity_lost.get_or_insert(reason);
+            }
             // Approval lifecycle events — route to the session-scoped ws_tx
             // so only the client connected to this agent sees the event.
             AgentEvent::DelegationStarted {

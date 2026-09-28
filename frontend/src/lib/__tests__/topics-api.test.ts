@@ -17,6 +17,7 @@ import {
   listTopicWorkspaces,
   attachTopicWorkspace,
   updateTopicWorkspaceTrust,
+  relinkTopicWorkspace,
   detachTopicWorkspace,
   listTopicSessions,
   createTopicSession,
@@ -266,6 +267,18 @@ describe("topic workspaces", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/topics/proj-1/workspaces/workspace-1",
       { method: "DELETE" },
+    );
+  });
+
+  it("sends a relink through the projected route with only the new path", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(mockResponse({ ...sampleWorkspace, path: "/home/user/moved" }));
+
+    await relinkTopicWorkspace("proj-1", "workspace-1", "/home/user/moved");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/topics/proj-1/workspaces/workspace-1/relink",
+      expect.objectContaining({ method: "PUT", body: JSON.stringify({ path: "/home/user/moved" }) }),
     );
   });
 });

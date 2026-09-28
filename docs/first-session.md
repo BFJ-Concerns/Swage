@@ -14,13 +14,16 @@ guidance, but a conversation can start without any of them.
 ## The front door
 
 Opening the web UI presents the recent-sessions list — every session across
-every topic and the general scope, newest message first. **All sessions** is
-the default view; the topic buttons narrow the list to one topic without
-changing anything else, and **Archived** shows the sessions the inactivity
-sweep has hidden. Automated sessions (a schedule's runs, a workflow's
-workers, delegated children) sit beneath the conversation or schedule that
-caused them, each still its own session. Select any entry to resume it with
-its conversation and surfaces; **All sessions** in the top bar returns here.
+every topic and the general scope, newest message first. Each entry's
+preview shows the latest user or assistant message; tool and system messages
+never replace the preview. **All sessions** is the default view; the topic
+buttons narrow the list to one topic without changing anything else, and
+**Archived** (the `archived` boolean query parameter on the sessions route)
+shows the sessions the inactivity sweep has hidden. Automated sessions (a
+schedule's runs, a workflow's workers, delegated children) sit beneath the
+conversation or schedule that caused them, each still its own session.
+Select any entry to resume it with its conversation and surfaces; **All
+sessions** in the top bar returns here.
 
 Beneath the list is the **New session** control. Choose a topic from its
 selector, or leave it at **No topic — general assistant**; choose the agent
@@ -44,7 +47,16 @@ in it. A session started without one is a fully usable general assistant in
 the general scope — general memory, the general knowledge base, the ordinary
 granted tools — and inherits nothing from any topic, least of all the last
 one used. The general scope is not a topic: it is never listed, and cannot
-be opened or deleted.
+be opened or deleted. Schedules can run in the general scope: a schedule
+created without a topic resolves to the general scope.
+
+A session without a topic receives a built-in orientation at every turn,
+describing its environment: no topic is selected, general memory and the
+general knowledge base are in scope, and tool paths resolve at a scratch
+directory for the session. A session in a topic with an attached workspace
+sees its working directory instead. The scratch layout under the data root
+is `scratch/general/sessions/<session_id>` for topicless sessions and
+`scratch/topics/<topic>/sessions/<session_id>` for topic sessions.
 
 The top bar names the session's topic (or **General**). Clicking a topic's
 name opens its settings page, where its description, workspaces, default

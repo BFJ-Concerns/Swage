@@ -758,7 +758,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(crate::tool::workflow_run_account::WorkflowRunAccountTool),
         Arc::new(crate::tool::workflow_run_status::WorkflowRunStatusTool),
         Arc::new(crate::tool::workflow_save::WorkflowSaveTool),
-        // MemoryTool derives the memory path from ctx.working_directory() at runtime.
+        // Shared memory follows the calling session's scope on the gateway host.
         Arc::new(MemoryTool),
         Arc::new(AgentMemoryTool),
         // Schedule tools reach the gateway's schedule service through the host

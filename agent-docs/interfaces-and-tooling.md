@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, delivery targets, devices (registration, the dial-in connection, and presence), hosted documentation and the docs_read tool, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
+description: Turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation and the docs_read tool, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -265,17 +265,29 @@ names, descriptions, tags, origin; no module content);
 `DELETE` removes it, leaving surfaces added from it untouched.
 
 Creating a surface with `library_entry_id` set seeds it from the entry
-(`library_entry_id` and `seeded_at` on `SurfaceResponse`). Seeding carries
-the saved content only when the session's topic is the entry's origin
-(`LibrarySeeding::WithContent`); any other topic or the general scope receives
-the shape with empty modules (`ShapeOnly`). The audit event `surface_created`
-records which under `seeded_from.seeding`.
+(`library_entry_id`, `seeded_at`, and `seeded_from_name` on
+`SurfaceResponse`). Seeding carries the saved content only when the
+session's topic is the entry's origin (`LibrarySeeding::WithContent`); any
+other topic or the general scope receives the shape with empty modules
+(`ShapeOnly`). The audit event `surface_created` records which under
+`seeded_from.seeding`. The `seeded_from_name` persists even after the
+library entry it was seeded from is deleted.
 
 `GET/POST /api/topics/{topic_id}/default-surfaces` and
 `DELETE /api/topics/{topic_id}/default-surfaces/{entry_id}` manage a topic's
-default entries; `ConversationService` opens them in every new session of the
-topic. `topics.tags` (`UpdateTopicRequest.tags`) are the labels the
-`surface_library` tool narrows the catalogue by for a topic's sessions.
+default entries; the gateway opens them in every person-opened session of
+the topic (sessions with origin `direct`). Schedule runs and other
+automated sessions do not open default surfaces, and the general scope
+designates no defaults. `topics.tags` (`UpdateTopicRequest.tags`) are the
+labels the `surface_library` tool narrows the catalogue by for a topic's
+sessions.
+
+Library entries carry an `origin_topic_deleted` boolean, set when the entry's
+origin topic is deleted. Deleting a topic keeps the entries saved from it
+and other topics' default designations of those entries intact — the
+catalogue marks the origin as deleted (`origin_topic_deleted: true`), and a
+surface seeded from such an entry carries its shape only, because the
+entry's content travels to no session once its origin topic is gone.
 
 A save or delete broadcasts `ServerEvent::LibraryUpdated { entry_id }` on
 the work-surface channel (`/api/work-surface/ws`), delivered like
@@ -313,6 +325,15 @@ When a WebSocket connection to a surface's work surface drops and reconnects,
 the frontend refetches the surface state to pick up any writes that landed
 while disconnected. `library_updated` rides the same channel and refetches
 the catalogue.
+
+## Workspace relinking
+
+When a workspace directory moves on disk, the attachment can be relinked to
+its new path without detaching and re-attaching:
+`PUT /api/topics/{topic_id}/workspaces/{workspace_id}/relink`
+(`RelinkWorkspaceAttachmentRequest`: `path`). Relinking updates only the
+path and clears the missing flag; the attachment's label, configured
+permissions, trust state, and default status are preserved.
 
 ## Delivery targets
 
@@ -402,6 +423,13 @@ After the welcome the connection carries two frame types in each direction:
 
 All frames are tagged by `kind` (snake_case) and defined in
 `swage-protocol::device` (`DeviceFrame`, `GatewayFrame`).
+
+### Cancellation
+
+When a turn is cancelled, the gateway sends `Cancel` for each in-flight
+device operation. For local shell commands (`shell` tool), cancellation
+kills the entire process group (`SIGKILL` to `-pid`), stopping the command
+and all its descendants.
 
 ### Presence
 
@@ -595,6 +623,30 @@ captures a scope generation before the request and hands the store a
 nor activated once the user has moved to another (it exists in the scope it
 was asked for, and the recent list finds it).
 
+## Tool-call recording and replay
+
+Tool calls are recorded in two phases. A record is created when the model
+selects the tool call (`create_tool_call`), before execution begins. Once
+execution completes, the record is settled with the result
+(`update_tool_call_result`). This means a tool call that was selected but
+never finished — interrupted by cancellation, a crash, or a turn that ended
+before the result could be recorded — has a record with no result.
+
+At turn startup, unsettled tool calls from a prior interrupted turn are
+replayed into the conversation history so the model sees what happened.
+Completed tool calls replay with their recorded results. A tool call that
+was interrupted or whose result could not be recorded replays with an
+explicit unknown-outcome text rather than replaying as though it returned
+successfully:
+
+- An interrupted call (no result, no status): `"tool call did not report a
+  result; its outcome is unknown"` with status `"interrupted"`.
+- A call that ran but whose result could not be recorded: `"tool call ran,
+  but its result could not be recorded"` with status `"result_unavailable"`.
+
+When a tool-call result cannot be recorded (the settlement write fails),
+the turn ends as `Failed` — the result is not silently dropped.
+
 ## Hosted documentation
 
 The gateway compiles the agent-facing documentation set (`agent-docs/`) into
@@ -698,7 +750,7 @@ two sandbox-eligible tools.
 |---|---|
 | `session_values` | `session_variable.rs` |
 | `agent_memory` | `agent_memory.rs` |
-| `memory` | `memory.rs` — sandbox-eligible |
+| `memory` | `memory.rs` — sandbox-eligible; reads and writes the shared memory files of the session's scope — the topic's memory when a topic is selected, the general memory otherwise |
 | `tool_result_read` | `tool_result_read.rs` |
 | `task_definition` | `task_definition.rs` |
 

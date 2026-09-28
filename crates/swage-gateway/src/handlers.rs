@@ -59,9 +59,9 @@ use crate::{
         ConversationBranchListResponse, ConversationDetail, ConversationResponse,
         ConversationService, ConversationSummary, ConversationThreadDetail,
         CreateConversationBranchRequest, CreateTopicRequest, CreateWorkspaceAttachmentRequest,
-        TopicListResponse, TopicResponse, TopicService, UpdateTopicRequest,
-        UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse, WorkspaceAttachmentResponse,
-        WorkspaceAttachmentService,
+        RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse, TopicService,
+        UpdateTopicRequest, UpdateWorkspaceTrustRequest, WorkspaceAttachmentListResponse,
+        WorkspaceAttachmentResponse, WorkspaceAttachmentService,
     },
     settings::{SaveProviderSettings, SaveSettingsRequest, SettingsResponse},
     state::AppState,
@@ -968,6 +968,7 @@ pub async fn list_recent_sessions(
         swage_storage::SessionListing {
             topic_id: query.topic_id,
             archived: query.archived,
+            include_archived: false,
         },
     )
     .await?;
@@ -1124,6 +1125,18 @@ pub async fn update_topic_workspace_trust(
 ) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
     let svc = WorkspaceAttachmentService::from_state(state);
     Ok(Json(svc.set_trust(topic_id, workspace_id, req).await?))
+}
+
+/// `PUT /api/topics/:topic_id/workspaces/:workspace_id/relink` — change an attachment's path.
+pub async fn relink_topic_workspace(
+    State(state): State<AppState>,
+    Path((topic_id, workspace_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<RelinkWorkspaceAttachmentRequest>,
+) -> Result<Json<WorkspaceAttachmentResponse>, ApiError> {
+    let svc = WorkspaceAttachmentService::from_state(state);
+    Ok(Json(
+        svc.relink_workspace(topic_id, workspace_id, req).await?,
+    ))
 }
 
 /// `DELETE /api/topics/:topic_id/workspaces/:workspace_id` — detach a workspace.
@@ -1680,12 +1693,12 @@ async fn execute_external_delegate_message(
     );
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
-    let mut target_agent_config = crate::turn::build_agent_config_for_topic_workspace(
+    let (mut target_agent_config, tool_root) = crate::turn::build_agent_config_for_topic_workspace(
         &state,
         delegate_msg.recipient_agent_id.clone(),
         &target_resolved,
         None,
-        topic_id,
+        &topic,
         sender_turn_id.unwrap_or_else(Uuid::new_v4),
         active_workspace_attachment_id,
     )
@@ -1736,7 +1749,7 @@ async fn execute_external_delegate_message(
             topic.clone(),
             target_resolved.clone(),
             delegate_msg.recipient_agent_id.clone(),
-            target_agent_config.working_directory.display().to_string(),
+            tool_root,
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
@@ -3089,7 +3102,9 @@ mod tests {
         );
         assert!(
             request_text.contains("Topic: none — this session was started without a topic")
-                && request_text.contains("Working directory:")
+                && request_text.contains("No workspace is attached. Tool paths resolve at ")
+                && request_text.contains("/scratch/general/sessions/")
+                && !request_text.contains("Working directory:")
                 && request_text.contains("Session started:"),
             "external delegated provider request should include the child session's place: {request_text}"
         );
