@@ -79,7 +79,9 @@ pub(super) struct SuccessionSite<'a> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DiagnosisModels {
     pub reader: Option<String>,
+    pub reader_route: Option<String>,
     pub synthesis: Option<String>,
+    pub synthesis_route: Option<String>,
 }
 
 /// The diagnosis models `config` names (`context.diagnosis_reader_model`,
@@ -90,21 +92,28 @@ pub(crate) fn diagnosis_models(
 ) -> Result<DiagnosisModels, String> {
     let resolve = |field: &str, named: &Option<String>| match named {
         Some(name) => crate::turn::resolve_model_catalogue_entry(&config.models, name)
-            .map(|(_, model)| Some(model.model_id.clone()))
+            .map(|(key, model)| (Some(model.model_id.clone()), Some(key.to_string())))
             .ok_or_else(|| {
                 format!("context.{field} names '{name}', which is not in the model catalogue")
             }),
-        None => Ok(Some(config.default_model_id().to_string()).filter(|model| !model.is_empty())),
+        None => Ok((
+            Some(config.default_model_id().to_string()).filter(|model| !model.is_empty()),
+            Some(config.models.default.clone()).filter(|key| !key.is_empty()),
+        )),
     };
+    let (reader, reader_route) = resolve(
+        "diagnosis_reader_model",
+        &config.context.diagnosis_reader_model,
+    )?;
+    let (synthesis, synthesis_route) = resolve(
+        "diagnosis_synthesis_model",
+        &config.context.diagnosis_synthesis_model,
+    )?;
     Ok(DiagnosisModels {
-        reader: resolve(
-            "diagnosis_reader_model",
-            &config.context.diagnosis_reader_model,
-        )?,
-        synthesis: resolve(
-            "diagnosis_synthesis_model",
-            &config.context.diagnosis_synthesis_model,
-        )?,
+        reader,
+        reader_route,
+        synthesis,
+        synthesis_route,
     })
 }
 
@@ -242,21 +251,12 @@ fn reassemble(
     successor.push(Box::new(succession.element));
     successor.push(Box::new(HistoryElement::new(succession.retained_history)));
     let mut output = assemble(&successor);
-    let successor_records = std::mem::take(&mut output.report.compaction_applied);
     let mut records = prior_records;
-    let new_records: Vec<_> = successor_records
-        .into_iter()
-        .filter(|current| {
-            !records.iter().any(|prior| {
-                prior.element == current.element
-                    && prior.requested_strategy == current.requested_strategy
-                    && prior.actual_strategy == current.actual_strategy
-            })
-        })
-        .collect();
-    records.extend(new_records);
+    // This record separates the first assembly's decisions from those made
+    // while assembling the successor, even when their names are identical.
+    records.push(succession.record);
+    records.append(&mut output.report.compaction_applied);
     output.report.compaction_applied = records;
-    output.report.compaction_applied.push(succession.record);
     output
 }
 
@@ -533,6 +533,9 @@ const TRANSPORT_FAILURE_MARKERS: &[&str] = &[
     "retry",
     "retries",
     "stream error",
+    "failed to parse openai sse payload",
+    "failed to parse anthropic sse payload",
+    "failed to parse responses sse payload",
     "provider response anomaly",
     "http error 5",
 ];
@@ -655,6 +658,7 @@ async fn diagnose(
             LOCATOR_INSTRUCTIONS,
             succession::transcript(slice),
             reader_model,
+            models.reader_route.as_deref(),
         ))
     }))
     .await;
@@ -710,6 +714,7 @@ async fn diagnose(
                 degradation.signal.describe()
             ),
             synthesis_model,
+            models.synthesis_route.as_deref(),
         ))
         .await;
     diagnosis.calls.push(diagnosis_call(
@@ -719,6 +724,14 @@ async fn diagnose(
         &synthesis,
     ));
     let synthesis = synthesis?.content;
+    if synthesis.trim().is_empty() {
+        diagnosis
+            .calls
+            .last_mut()
+            .expect("synthesis call was recorded")
+            .failure_reason = Some(SuccessionError::EmptySummary.to_string());
+        return Err(SuccessionError::EmptySummary);
+    }
     let succession = succession::successor(
         &request,
         synthesis.clone(),
@@ -797,6 +810,7 @@ fn diagnosis_request(
     instructions: &str,
     material: String,
     model: Option<&str>,
+    route: Option<&str>,
 ) -> CompletionRequest {
     CompletionRequest {
         effort: None,
@@ -808,7 +822,7 @@ fn diagnosis_request(
         max_tokens: Some(1024),
         temperature: Some(0.3),
         stop_sequences: None,
-        metadata: None,
+        metadata: route.map(|key| serde_json::json!({"swage_model_entry": key})),
         tool_definitions: vec![],
     }
 }
@@ -919,6 +933,18 @@ mod tests {
             ("HTTP error 400: unexpected tool_use_id", true),
             ("HTTP error 503: unavailable", false),
             ("stream error: malformed SSE", false),
+            (
+                "failed to parse OpenAI SSE payload: expected value at line 1 column 1",
+                false,
+            ),
+            (
+                "failed to parse Anthropic SSE payload: expected value at line 1 column 1",
+                false,
+            ),
+            (
+                "failed to parse Responses SSE payload: expected value at line 1 column 1",
+                false,
+            ),
             ("provider response anomaly", false),
         ] {
             let outcome = json!({"outcome": "failed", "message": message});
@@ -1062,6 +1088,8 @@ mod tests {
         requests: std::sync::Mutex<Vec<CompletionRequest>>,
         failing_reader: Option<usize>,
         blank_reader: Option<usize>,
+        failing_synthesis: bool,
+        blank_synthesis: bool,
     }
 
     #[async_trait::async_trait]
@@ -1080,13 +1108,17 @@ mod tests {
                 requests.push(request);
                 index
             };
-            if self.failing_reader == Some(index) {
+            if self.failing_reader == Some(index)
+                || (self.failing_synthesis && index == LOCATOR_COUNT)
+            {
                 return Err(swage_core::ProviderError::StreamError(
-                    "reader unavailable".into(),
+                    "diagnosis provider unavailable".into(),
                 ));
             }
             Ok(swage_core::CompletionResponse {
-                content: if self.blank_reader == Some(index) {
+                content: if self.blank_reader == Some(index)
+                    || (self.blank_synthesis && index == LOCATOR_COUNT)
+                {
                     "  ".to_string()
                 } else {
                     "The read of notes/missing.md kept failing.".to_string()
@@ -1130,7 +1162,9 @@ mod tests {
             degradation: None,
             diagnosis_models: Ok(DiagnosisModels {
                 reader: Some("reader-model".to_string()),
+                reader_route: None,
                 synthesis: Some("synthesis-model".to_string()),
+                synthesis_route: None,
             }),
         };
         // A failed call as the gateway replays it: an assistant message
@@ -1302,7 +1336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn threshold_success_keeps_the_failed_diagnosis_record() {
+    async fn threshold_success_keeps_both_assembly_passes_and_the_failed_diagnosis() {
         let provider = RecordingProvider {
             failing_reader: Some(1),
             ..Default::default()
@@ -1315,11 +1349,17 @@ mod tests {
             .collect();
         let assemble = |elements: &[Box<dyn ContextElement>]| {
             let mut report = swage_context::report::AssemblyReport::default();
+            let history_len = elements
+                .iter()
+                .find(|element| element.name() == HISTORY_ELEMENT)
+                .expect("history element")
+                .content()
+                .len();
             report.compaction_applied.push(CompactionRecord {
                 element: "history".into(),
                 requested_strategy: "scripted".into(),
                 actual_strategy: "truncation".into(),
-                messages_removed: 1,
+                messages_removed: if history_len > 3 { 1 } else { 2 },
                 tokens_before: 10,
                 tokens_after: 8,
                 source_message_range: None,
@@ -1364,10 +1404,11 @@ mod tests {
         let records = &result.report.compaction_applied;
         assert_eq!(
             records.len(),
-            3,
-            "the named assembly pass is not duplicated and both succession attempts are retained"
+            4,
+            "both assembly passes and both succession decisions are retained"
         );
         assert_eq!(records[0].requested_strategy, "scripted");
+        assert_eq!(records[0].messages_removed, 1);
         assert_eq!(records[1].requested_strategy, DEGRADATION_STRATEGY);
         assert_eq!(records[1].actual_strategy, "none");
         assert!(
@@ -1377,6 +1418,74 @@ mod tests {
         );
         assert_eq!(records[2].requested_strategy, THRESHOLD_STRATEGY);
         assert_eq!(records[2].actual_strategy, THRESHOLD_STRATEGY);
+        assert_eq!(records[3].requested_strategy, "scripted");
+        assert_eq!(records[3].messages_removed, 2);
+    }
+
+    #[tokio::test]
+    async fn failed_or_blank_synthesis_records_the_call_and_uses_threshold_succession() {
+        for blank in [false, true] {
+            let provider = RecordingProvider {
+                failing_synthesis: !blank,
+                blank_synthesis: blank,
+                ..Default::default()
+            };
+            let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+            let variables = BTreeMap::new();
+            let threshold = CompactionThreshold::MessageCount(3);
+            let history: Vec<_> = (0..8)
+                .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+                .collect();
+            let assemble = |elements: &[Box<dyn ContextElement>]| {
+                AssemblyOutput::new_unchecked(
+                    elements
+                        .iter()
+                        .flat_map(|element| element.content())
+                        .collect(),
+                    swage_context::report::AssemblyReport::default(),
+                )
+            };
+            let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
+            let result = succeed_over_threshold(
+                SuccessionSite {
+                    provider: &provider,
+                    threshold: &threshold,
+                    model: None,
+                    focus: None,
+                    variables: &variables,
+                    tokeniser: &tokeniser,
+                    degradation: Some(Degradation {
+                        signal: WallSignal::RepeatedFailures {
+                            failed_calls: 5,
+                            failed_turns: 0,
+                        },
+                        walls: vec!["tool_call:a".into()],
+                        previous: None,
+                    }),
+                    diagnosis_models: Ok(DiagnosisModels::default()),
+                },
+                vec![Box::new(HistoryElement::new(history))],
+                output,
+                assemble,
+            )
+            .await;
+            let records = &result.report.compaction_applied;
+            assert_eq!(
+                records.len(),
+                2,
+                "failed diagnosis then threshold succession"
+            );
+            assert_eq!(records[0].requested_strategy, DEGRADATION_STRATEGY);
+            assert_eq!(records[0].actual_strategy, "none");
+            let calls = &records[0].diagnosis.as_ref().expect("diagnosis").calls;
+            assert_eq!(calls.len(), LOCATOR_COUNT + 1);
+            assert_eq!(calls.last().unwrap().stage, DiagnosisStage::Synthesis);
+            assert!(
+                calls.last().unwrap().failure_reason.is_some(),
+                "synthesis failure recorded"
+            );
+            assert_eq!(records[1].actual_strategy, THRESHOLD_STRATEGY);
+        }
     }
 
     #[test]
@@ -1400,7 +1509,9 @@ mod tests {
             diagnosis_models(&config),
             Ok(DiagnosisModels {
                 reader: Some("vendor/session-1".to_string()),
+                reader_route: Some("session".to_string()),
                 synthesis: Some("vendor/session-1".to_string()),
+                synthesis_route: Some("session".to_string()),
             }),
             "unset, both are the session's model"
         );
@@ -1410,12 +1521,75 @@ mod tests {
             diagnosis_models(&config),
             Ok(DiagnosisModels {
                 reader: Some("vendor/cheap-1".to_string()),
+                reader_route: Some("cheap".to_string()),
                 synthesis: Some("vendor/cheap-1".to_string()),
+                synthesis_route: Some("cheap".to_string()),
             }),
             "by alias or by entry key"
         );
         config.context.diagnosis_synthesis_model = Some("absent".to_string());
         assert!(diagnosis_models(&config).is_err());
+    }
+
+    #[tokio::test]
+    async fn diagnosis_routes_same_wire_model_to_its_catalogue_provider() {
+        use std::sync::Arc;
+        let mut config = swage_config::ResolvedConfig::default();
+        for (key, provider_id) in [("reader", "provider-a"), ("synthesis", "provider-b")] {
+            config.models.entries.insert(
+                key.into(),
+                swage_config::ModelEndpointConfig {
+                    provider_id: provider_id.into(),
+                    model_id: "shared-wire-id".into(),
+                    ..Default::default()
+                },
+            );
+        }
+        config.models.default = "reader".into();
+        config.context.diagnosis_reader_model = Some("reader".into());
+        config.context.diagnosis_synthesis_model = Some("synthesis".into());
+        let models = diagnosis_models(&config).expect("catalogue models");
+        let first = Arc::new(RecordingProvider::default());
+        let second = Arc::new(RecordingProvider::default());
+        let provider = swage_provider::builder::ProviderChainBuilder::new()
+            .provider_boxed_routed(
+                "reader".into(),
+                Box::new(first.clone() as Arc<dyn LlmProvider>),
+            )
+            .provider_boxed_routed(
+                "synthesis".into(),
+                Box::new(second.clone() as Arc<dyn LlmProvider>),
+            )
+            .with_failover(swage_provider::failover::FailoverConfig::default())
+            .build();
+        provider
+            .complete(diagnosis_request(
+                "read",
+                "history".into(),
+                models.reader.as_deref(),
+                models.reader_route.as_deref(),
+            ))
+            .await
+            .expect("reader route");
+        provider
+            .complete(diagnosis_request(
+                "write",
+                "reports".into(),
+                models.synthesis.as_deref(),
+                models.synthesis_route.as_deref(),
+            ))
+            .await
+            .expect("synthesis route");
+        assert_eq!(first.requests.lock().unwrap().len(), 1);
+        assert_eq!(second.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            first.requests.lock().unwrap()[0].model.as_deref(),
+            Some("shared-wire-id")
+        );
+        assert_eq!(
+            second.requests.lock().unwrap()[0].model.as_deref(),
+            Some("shared-wire-id")
+        );
     }
 
     #[test]

@@ -550,6 +550,41 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
 }
 
 #[tokio::test]
+async fn token_threshold_triggers_succession_for_a_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.compaction_threshold =
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(600));
+    let (state, session_id) =
+        make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
+            .await;
+    seed_history(&storage, session_id, 101).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn completes after token-triggered succession");
+    let db = storage.db.lock().await;
+    let (report_json, _) = db.snapshots.values().next().expect("context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    assert!(
+        report["compaction_applied"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .any(|record| { record["actual_strategy"] == "succession" }),
+        "token threshold should cause succession: {report}"
+    );
+}
+
+#[tokio::test]
 async fn a_long_thread_s_successor_is_sized_to_the_threshold_so_the_runtime_stays_idle() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =

@@ -172,18 +172,17 @@ pub async fn save_settings(
     let sessions: Option<swage_config::SessionsConfig> = config_from_wire(sessions)?;
 
     let mut providers = HashMap::new();
-    for (provider_id, provider) in requested_providers {
-        let secret_ref = persist_provider_key(state, &provider_id, &provider).await?;
+    for (provider_id, provider) in &requested_providers {
         providers.insert(
-            provider_id,
+            provider_id.clone(),
             swage_config::ProviderEndpointConfig {
                 worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
-                protocol: config_from_wire(provider.protocol)?,
-                api_key_secret_ref: secret_ref.or(provider.api_key_secret_ref),
-                api_key_env: provider.api_key_env,
-                base_url: provider.base_url,
-                command: provider.command,
-                state_dir: provider.state_dir,
+                protocol: config_from_wire(provider.protocol.clone())?,
+                api_key_secret_ref: provider.api_key_secret_ref.clone(),
+                api_key_env: provider.api_key_env.clone(),
+                base_url: provider.base_url.clone(),
+                command: provider.command.clone(),
+                state_dir: provider.state_dir.clone(),
             },
         );
     }
@@ -207,11 +206,6 @@ pub async fn save_settings(
         .collect::<Result<_, _>>()?;
 
     let path = global_config_path(&state.config_root);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
-            ApiError::validation(format!("failed to create config directory: {error}"))
-        })?;
-    }
     let mut partial = read_partial_config(&path).await?;
     partial.providers = Some(swage_config::merge::PartialProviderCatalogConfig {
         default: Some(default_provider.clone()),
@@ -241,6 +235,37 @@ pub async fn save_settings(
         communication.clone(),
         sessions.clone(),
     )?;
+    let body = toml::to_string_pretty(&partial)
+        .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
+    let validated = swage_config::validation::parse_and_validate(&body, &path)
+        .map_err(|problems| ApiError::validation(format!("invalid settings: {problems:?}")))?;
+    let problems = swage_config::validation::validate_resolved_catalog_references(
+        &swage_config::merge::resolve(validated),
+        &path,
+    );
+    if !problems.is_empty() {
+        return Err(ApiError::validation(format!(
+            "invalid settings: {problems:?}"
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            ApiError::validation(format!("failed to create config directory: {error}"))
+        })?;
+    }
+    for (provider_id, provider) in &requested_providers {
+        let secret_ref = persist_provider_key(state, provider_id, provider).await?;
+        if let Some(secret_ref) = secret_ref {
+            partial
+                .providers
+                .as_mut()
+                .and_then(|catalogue| catalogue.entries.as_mut())
+                .expect("settings save always writes provider entries")
+                .get_mut(provider_id)
+                .expect("requested provider was collected")
+                .api_key_secret_ref = Some(secret_ref);
+        }
+    }
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     write_config_atomically(&path, &body).await?;
@@ -1195,6 +1220,93 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 #[cfg(test)]
 mod tests {
     use crate::test_support::SwageHomeGuard;
+
+    fn succession_settings_request(context: Option<serde_json::Value>) -> SaveSettingsRequest {
+        let mut value = serde_json::json!({
+            "default_provider": "local",
+            "providers": {"local": {
+                "protocol": "openai", "base_url": "http://127.0.0.1:65535/v1",
+                "api_key_secret_ref": null, "api_key_env": null
+            }},
+            "default_model": "kept",
+            "models": {"kept": {
+                "provider_id": "local", "model_id": "kept-wire", "aliases": [],
+                "context_window": null, "generation_preset": null
+            }}
+        });
+        if let Some(context) = context {
+            value["context"] = context;
+        }
+        serde_json::from_value(value).expect("settings request")
+    }
+
+    #[tokio::test]
+    async fn removing_a_model_retained_by_context_is_rejected_without_writing() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let path = home.path().join("config.toml");
+        let original = "[context]\ndiagnosis_reader_model = 'removed'\n";
+        std::fs::write(&path, original).expect("seed retained context");
+        let error = save_settings(&state, succession_settings_request(None))
+            .await
+            .expect_err("retained context names a removed model");
+        assert!(
+            error.message().contains("diagnosis_reader_model"),
+            "{error:?}"
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn valid_succession_settings_are_written_and_reload() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let context = serde_json::json!({
+            "assembly": "default", "timeout": 5,
+            "compaction_threshold": {"tokens": 1000},
+            "diagnosis_reader_model": "kept",
+            "diagnosis_synthesis_model": "kept"
+        });
+        save_settings(&state, succession_settings_request(Some(context)))
+            .await
+            .expect("valid settings save");
+        let loaded = swage_config::load_resolved_config_from(
+            home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("saved config reloads");
+        assert_eq!(
+            loaded.context.diagnosis_reader_model.as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            loaded.context.diagnosis_synthesis_model.as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            loaded.context.compaction_threshold,
+            Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(1000))
+        );
+    }
 
     #[tokio::test]
     async fn invalid_succession_settings_are_rejected_before_any_config_write() {
