@@ -106,6 +106,71 @@ pub struct CompactionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, as = "Option<_>")]
     pub focus: Option<String>,
+    /// How a successor built for a stalled session got its summary: the
+    /// walls it answers and the model calls that diagnosed them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub diagnosis: Option<DiagnosisRecord>,
+}
+
+/// The diagnosis behind a degradation-triggered successor, recorded so the
+/// assembly report alone reconstructs the pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
+pub struct DiagnosisRecord {
+    /// The wall the thread's recent turns ran into, as the synthesis was
+    /// told it.
+    pub signal: String,
+    /// Every wall in the window the signal was read over, by the record it
+    /// was read from (`tool_call:<id>`, `turn:<id>`). A later turn reuses
+    /// this diagnosis while its window's walls are the same set.
+    pub walls: Vec<String>,
+    /// The model calls this turn made for the diagnosis, readers first and
+    /// the synthesis last; empty when an earlier turn's diagnosis was reused.
+    pub calls: Vec<DiagnosisCall>,
+    /// The notes the successor carries in place of the summarised history;
+    /// absent when the diagnosis could not be written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub synthesis: Option<String>,
+    /// The turn whose recorded diagnosis this successor carries again,
+    /// when the walls had not changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub reused_from_turn: Option<Uuid>,
+}
+
+/// One model call a diagnosis made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
+pub struct DiagnosisCall {
+    pub stage: DiagnosisStage,
+    /// The provider-facing model id the call was sent to.
+    pub model: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub cost: Option<f64>,
+    /// What a reader reported. A synthesis's output is the record's
+    /// `synthesis`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub report: Option<String>,
+    /// Why the call failed, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub failure_reason: Option<String>,
+}
+
+/// Which part of a diagnosis a model call was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosisStage {
+    /// A blind reader locating where one slice of the history went wrong.
+    Reader,
+    /// The synthesis naming the problems from the readers' reports.
+    Synthesis,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

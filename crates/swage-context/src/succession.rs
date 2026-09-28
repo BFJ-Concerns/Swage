@@ -19,7 +19,10 @@
 //! context, the runtime's compactor handles it as before, and the report
 //! records the attempt.
 
-use swage_core::{ChatMessage, CompletionRequest, ProviderError, Role};
+use swage_core::{
+    ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart,
+    render_message_for_model_context, role_label_for_model_context,
+};
 use swage_provider::LlmProvider;
 
 use crate::element::ContextElement;
@@ -28,6 +31,13 @@ use crate::tokeniser::Tokeniser;
 
 /// The element name the successor's summary is carried under.
 pub const SUCCESSION_ELEMENT: &str = "succession";
+
+/// The strategy a threshold-triggered pass records.
+pub const THRESHOLD_STRATEGY: &str = "succession";
+
+/// The strategy a degradation-triggered pass records: the summary is a
+/// diagnosis of where the session went wrong, written by readers outside it.
+pub const DEGRADATION_STRATEGY: &str = "succession-degradation";
 
 /// Directly above history (0) and below everything rendered from sources:
 /// the summary reads as the conversation's own opening.
@@ -67,6 +77,10 @@ pub enum SuccessionError {
     Provider(#[from] ProviderError),
     #[error("the summarising provider returned an empty summary")]
     EmptySummary,
+    #[error("the diagnosis could not be written: {0}")]
+    Diagnosis(String),
+    #[error("history cannot be split after message {0}")]
+    SplitUnavailable(usize),
 }
 
 /// The summary of the conversation's earlier part, as an element.
@@ -142,28 +156,112 @@ pub async fn succeed(
     provider: &dyn LlmProvider,
     tokeniser: &dyn Tokeniser,
 ) -> Result<Succession, SuccessionError> {
+    let summarised = split_point(&request)?;
+    let response = provider
+        .complete(summary_request(
+            request.carried,
+            &request.history[..summarised],
+            request.focus,
+        ))
+        .await?;
+    successor(&request, response.content, THRESHOLD_STRATEGY, tokeniser)
+}
+
+/// Where `request`'s history splits into the summarised part and the part
+/// kept as it was; history too short to split refuses the pass.
+pub fn split_point(request: &SuccessionRequest<'_>) -> Result<usize, SuccessionError> {
     let history_len = request.history.len();
     if history_len < 2 {
         return Err(SuccessionError::TooShort(history_len));
     }
-    let summarised = summarised_count(history_len, request.retain_at_most);
-    let (older, newer) = request.history.split_at(summarised);
-    let tokens_before = tokeniser.count_messages(request.history);
+    let split = summarised_count(history_len, request.retain_at_most);
+    split_boundary(request.history, split)
+}
 
-    let response = provider
-        .complete(summary_request(request.carried, older, request.focus))
-        .await?;
+/// Move a proposed boundary so a tool result remains with the call it answers.
+/// The earlier boundary wins when it leaves a non-empty preceding slice.
+pub fn split_boundary(history: &[ChatMessage], split: usize) -> Result<usize, SuccessionError> {
+    let history_len = history.len();
+    if split == 0 || split >= history_len {
+        return Err(SuccessionError::SplitUnavailable(split));
+    }
+    // A tool result must stay with the call it answers: a provider refuses
+    // a result whose call was summarised away. Retain the whole call and its
+    // results where anything older is left to summarise, otherwise summarise
+    // them all.
+    let answers_a_call = |at: usize| answers_a_call(&history[at]);
+    let mut earlier = split;
+    while earlier > 0 && answers_a_call(earlier) {
+        earlier -= 1;
+    }
+    if earlier > 0 {
+        return Ok(earlier);
+    }
+    let mut later = split;
+    while later < history_len && answers_a_call(later) {
+        later += 1;
+    }
+    if later == history_len {
+        return Err(SuccessionError::TooShort(history_len));
+    }
+    Ok(later)
+}
 
-    if response.content.trim().is_empty() {
+/// Whether `message` carries a tool result. The gateway replays results
+/// inside a user message's tool replay; the runtime's own tool messages carry
+/// a call id.
+fn answers_a_call(message: &ChatMessage) -> bool {
+    message.role() == Role::Tool
+        || message.tool_call_id().is_some()
+        || message.tool_replay().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| matches!(part, ToolReplayPart::ToolResult { .. }))
+        })
+}
+
+/// The successor's parts from a summary of `request`'s older history,
+/// whoever wrote it, recorded under `strategy`.
+pub fn successor(
+    request: &SuccessionRequest<'_>,
+    summary: String,
+    strategy: &str,
+    tokeniser: &dyn Tokeniser,
+) -> Result<Succession, SuccessionError> {
+    let summarised = split_point(request)?;
+    successor_after(request, summarised, summary, strategy, tokeniser)
+}
+
+/// The successor's parts when `summary` replaces the first `summarised`
+/// messages of `request`'s history — a split an earlier pass chose, taken
+/// again over the history as it has since grown. A split that summarises
+/// nothing, retains nothing, or leaves the retained history opening on a
+/// tool result is refused.
+pub fn successor_after(
+    request: &SuccessionRequest<'_>,
+    summarised: usize,
+    summary: String,
+    strategy: &str,
+    tokeniser: &dyn Tokeniser,
+) -> Result<Succession, SuccessionError> {
+    if summarised == 0
+        || summarised >= request.history.len()
+        || answers_a_call(&request.history[summarised])
+    {
+        return Err(SuccessionError::SplitUnavailable(summarised));
+    }
+    if summary.trim().is_empty() {
         return Err(SuccessionError::EmptySummary);
     }
-    let element = SuccessionElement::new(response.content, summarised, newer.len());
+    let newer = &request.history[summarised..];
+    let tokens_before = tokeniser.count_messages(request.history);
+    let element = SuccessionElement::new(summary, summarised, newer.len());
     let retained_history = newer.to_vec();
     let tokens_after = element.token_count(tokeniser) + tokeniser.count_messages(&retained_history);
     let record = CompactionRecord {
         element: "history".to_string(),
-        requested_strategy: "succession".to_string(),
-        actual_strategy: "succession".to_string(),
+        requested_strategy: strategy.to_string(),
+        actual_strategy: THRESHOLD_STRATEGY.to_string(),
         messages_removed: summarised,
         tokens_before,
         tokens_after,
@@ -171,6 +269,7 @@ pub async fn succeed(
         budget: None,
         failure_reason: None,
         focus: request.focus.map(str::to_owned),
+        diagnosis: None,
     };
     Ok(Succession {
         element,
@@ -185,12 +284,13 @@ pub fn failure_record(
     history: &[ChatMessage],
     tokeniser: &dyn Tokeniser,
     focus: Option<&str>,
+    strategy: &str,
     error: &SuccessionError,
 ) -> CompactionRecord {
     let tokens = tokeniser.count_messages(history);
     CompactionRecord {
         element: "history".to_string(),
-        requested_strategy: "succession".to_string(),
+        requested_strategy: strategy.to_string(),
         actual_strategy: "none".to_string(),
         messages_removed: 0,
         tokens_before: tokens,
@@ -199,6 +299,7 @@ pub fn failure_record(
         budget: None,
         failure_reason: Some(error.to_string()),
         focus: focus.map(str::to_owned),
+        diagnosis: None,
     }
 }
 
@@ -240,24 +341,17 @@ fn summary_request(
     }
 }
 
-/// Messages as labelled prose for the summariser; non-text parts are
-/// named rather than dropped silently.
-fn transcript(messages: &[ChatMessage]) -> String {
+/// Messages as labelled prose for a reader outside the conversation, tool
+/// calls and their results rendered as the model context renders them.
+pub fn transcript(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .map(|message| {
-            let label = match message.role() {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => "tool",
-            };
-            let text = message.text_content();
-            if text.trim().is_empty() {
-                format!("[{label}] (non-text content)")
-            } else {
-                format!("[{label}] {text}")
-            }
+            format!(
+                "[{}] {}",
+                role_label_for_model_context(message.role()),
+                render_message_for_model_context(message)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -428,6 +522,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_diagnosis_becomes_the_successor_s_summary_under_its_trigger_s_strategy() {
+        let history = history(6);
+        let succession = successor(
+            &SuccessionRequest {
+                carried: &[],
+                history: &history,
+                focus: None,
+                retain_at_most: Some(1),
+            },
+            "The build kept failing on a missing file.".to_string(),
+            DEGRADATION_STRATEGY,
+            &CharTokeniser,
+        )
+        .expect("a diagnosis makes a successor");
+        assert_eq!(
+            succession.record.requested_strategy,
+            "succession-degradation"
+        );
+        assert_eq!(succession.record.actual_strategy, "succession");
+        assert_eq!(succession.record.messages_removed, 5);
+        assert_eq!(
+            succession
+                .retained_history
+                .iter()
+                .map(|m| m.text_content())
+                .collect::<Vec<_>>(),
+            ["message 5"]
+        );
+        assert!(
+            succession.element.content()[0]
+                .text_content()
+                .contains("The build kept failing on a missing file.")
+        );
+    }
+
     #[tokio::test]
     async fn a_failed_summariser_is_an_error_the_caller_records() {
         let provider = RecordingProvider::failing();
@@ -446,7 +576,7 @@ mod tests {
         .expect_err("the provider failed");
         assert!(matches!(error, SuccessionError::Provider(_)));
 
-        let record = failure_record(&history, &CharTokeniser, None, &error);
+        let record = failure_record(&history, &CharTokeniser, None, THRESHOLD_STRATEGY, &error);
         assert_eq!(record.actual_strategy, "none");
         assert_eq!(record.messages_removed, 0);
         assert_eq!(record.tokens_before, record.tokens_after);
@@ -512,6 +642,133 @@ mod tests {
             9,
             "the newest message is always kept"
         );
+    }
+
+    fn split_of(history: &[ChatMessage], retain_at_most: Option<usize>) -> usize {
+        split_point(&SuccessionRequest {
+            carried: &[],
+            history,
+            focus: None,
+            retain_at_most,
+        })
+        .expect("history splits")
+    }
+
+    /// One tool round as the gateway replays it: an assistant message
+    /// carrying the call, then a user message carrying its result.
+    fn tool_round(id: &str) -> Vec<ChatMessage> {
+        swage_core::tool::build_tool_round_messages(
+            &[swage_core::tool::ToolCall {
+                call_id: id.into(),
+                name: "file_read".into(),
+                arguments: serde_json::json!({"path": "missing.txt"}),
+            }],
+            &[swage_core::tool::ToolResult {
+                call_id: id.into(),
+                content: "no such file".into(),
+                is_error: true,
+            }],
+            "",
+        )
+    }
+
+    #[test]
+    fn a_tool_result_is_kept_with_the_call_it_answers() {
+        let mut history = vec![
+            ChatMessage::new(Role::User, "u0"),
+            ChatMessage::new(Role::Assistant, "a1"),
+            ChatMessage::new(Role::User, "u2"),
+        ];
+        history.extend(tool_round("x"));
+        history.push(ChatMessage::new(Role::Assistant, "a5"));
+        history.push(ChatMessage::new(Role::User, "u6"));
+        history.push(ChatMessage::new(Role::Assistant, "a7"));
+        assert_eq!(
+            summarised_count(history.len(), None),
+            4,
+            "midpoint is the result"
+        );
+        assert_eq!(
+            history[4].role(),
+            Role::User,
+            "the result rides a user message"
+        );
+        assert_eq!(split_of(&history, None), 3, "the call is retained with it");
+    }
+
+    #[test]
+    fn a_call_at_the_start_is_summarised_with_its_results() {
+        let mut history = tool_round("x");
+        history.push(ChatMessage::new(Role::User, "u2"));
+        assert_eq!(summarised_count(history.len(), Some(2)), 1);
+        assert_eq!(split_of(&history, Some(2)), 2);
+    }
+
+    #[test]
+    fn a_runtime_tool_message_is_kept_with_its_call_too() {
+        let history = vec![
+            ChatMessage::new(Role::User, "u0"),
+            ChatMessage::new(Role::User, "u1"),
+            ChatMessage::assistant_tool_calls(
+                "",
+                vec![swage_core::tool::ToolCall {
+                    call_id: "x".into(),
+                    name: "file_read".into(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
+            ChatMessage::tool_result("x", "r"),
+            ChatMessage::new(Role::User, "u4"),
+            ChatMessage::new(Role::Assistant, "a5"),
+        ];
+        assert_eq!(
+            summarised_count(history.len(), None),
+            3,
+            "midpoint is the result"
+        );
+        assert_eq!(
+            split_of(&history, None),
+            2,
+            "the call is retained with its result"
+        );
+    }
+
+    #[test]
+    fn an_earlier_split_is_taken_again_over_the_grown_history() {
+        let mut history = history(4);
+        history.extend(tool_round("x"));
+        history.push(ChatMessage::new(Role::User, "u6"));
+        let request = SuccessionRequest {
+            carried: &[],
+            history: &history,
+            focus: None,
+            retain_at_most: None,
+        };
+        let succession = successor_after(
+            &request,
+            3,
+            "The earlier diagnosis.".to_string(),
+            DEGRADATION_STRATEGY,
+            &CharTokeniser,
+        )
+        .expect("the earlier split still holds");
+        assert_eq!(succession.record.messages_removed, 3);
+        assert_eq!(succession.retained_history.len(), 4);
+        for refused in [0, 5, history.len()] {
+            assert!(
+                matches!(
+                    successor_after(
+                        &request,
+                        refused,
+                        "notes".to_string(),
+                        DEGRADATION_STRATEGY,
+                        &CharTokeniser
+                    ),
+                    Err(SuccessionError::SplitUnavailable(at)) if at == refused
+                ),
+                "split after {refused}"
+            );
+        }
     }
 
     #[test]

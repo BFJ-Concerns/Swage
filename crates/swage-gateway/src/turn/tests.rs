@@ -550,6 +550,41 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
 }
 
 #[tokio::test]
+async fn token_threshold_triggers_succession_for_a_turn() {
+    let storage = Arc::new(MockStorage::new());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.compaction_threshold =
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Tokens(600));
+    let (state, session_id) =
+        make_state_with_config_and_storage(provider_witness_chunks(), config, Arc::clone(&storage))
+            .await;
+    seed_history(&storage, session_id, 90).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn completes after token-triggered succession");
+    let db = storage.db.lock().await;
+    let (report_json, _) = db.snapshots.values().next().expect("context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    assert!(
+        report["compaction_applied"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .any(|record| { record["actual_strategy"] == "succession" }),
+        "token threshold should cause succession: {report}"
+    );
+}
+
+#[tokio::test]
 async fn a_long_thread_s_successor_is_sized_to_the_threshold_so_the_runtime_stays_idle() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
@@ -659,6 +694,761 @@ async fn a_failed_summariser_leaves_the_runtime_record_beside_the_attempt() {
         strategies.get(1).map(|(element, _)| *element),
         Some("agent_history"),
         "the runtime's own pass follows: {strategies:?}"
+    );
+}
+
+/// A finished earlier turn in `thread_id`, its tool calls recorded with the
+/// given status and, when `provider_failed`, a provider round that failed.
+/// Returns the turn's id and its tool calls' record ids.
+async fn seed_finished_turn(
+    storage: &MockStorage,
+    thread_id: Uuid,
+    state: swage_storage::TurnState,
+    calls: &[(&str, serde_json::Value, &str)],
+    provider_failed: bool,
+) -> (Uuid, Vec<Uuid>) {
+    use swage_storage::{ProviderRoundStore, ToolCallStore, TurnStore};
+    let turn = storage
+        .create_turn(swage_storage::NewTurn {
+            thread_id,
+            agent_id: "gateway".to_string(),
+            state,
+            user_input: Some("try again".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("seed an earlier turn");
+    let mut call_ids = Vec::new();
+    for (position, (tool, arguments, status)) in calls.iter().enumerate() {
+        let call = storage
+            .create_tool_call(swage_storage::NewToolCall {
+                turn_id: turn.id,
+                agent_id: "gateway".to_string(),
+                call_id: format!("call-{position}"),
+                tool: tool.to_string(),
+                arguments: arguments.to_string(),
+                model_arguments: arguments.to_string(),
+                result: Some("no such file".to_string()),
+                model_result: None,
+                status: Some(status.to_string()),
+                duration_ms: Some(1),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position: position as i32,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .expect("seed a tool call");
+        call_ids.push(call.id);
+    }
+    let outcome = if provider_failed {
+        serde_json::json!({"outcome": "failed", "message": "rate limited"})
+    } else {
+        serde_json::json!({"outcome": "responded", "tool_calls": calls.len()})
+    };
+    storage
+        .open_provider_round(turn.id, 1, outcome)
+        .await
+        .expect("seed a provider round");
+    (turn.id, call_ids)
+}
+
+fn only_snapshot_records(db: &InMemoryDb) -> Vec<serde_json::Value> {
+    let (report_json, _) = db
+        .snapshots
+        .values()
+        .next()
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    report["compaction_applied"]
+        .as_array()
+        .expect("compaction records")
+        .clone()
+}
+
+#[tokio::test]
+async fn rejected_and_interrupted_calls_are_not_walls() {
+    let storage = Arc::new(MockStorage::new());
+    let (_state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let thread_id = seed_history(&storage, session_id, 2).await;
+    let missing = serde_json::json!({"path": "notes/missing.md"});
+    for status in [
+        "rejected",
+        "interrupted",
+        "rejected",
+        "interrupted",
+        "success",
+    ] {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            swage_storage::TurnState::Completed,
+            &[
+                ("file_read", missing.clone(), status),
+                ("file_read", missing.clone(), status),
+            ],
+            false,
+        )
+        .await;
+    }
+    assert_eq!(
+        succession::recent_degradation(storage.as_ref(), thread_id)
+            .await
+            .map(|degradation| degradation.signal),
+        None,
+        "the user's rejections and the host's interruptions are not the agent stuck"
+    );
+    seed_finished_turn(
+        &storage,
+        thread_id,
+        swage_storage::TurnState::Completed,
+        &[
+            ("file_read", missing.clone(), "error"),
+            ("file_read", missing.clone(), "error"),
+            ("file_read", missing.clone(), "error"),
+        ],
+        false,
+    )
+    .await;
+    assert_eq!(
+        succession::recent_degradation(storage.as_ref(), thread_id)
+            .await
+            .map(|degradation| degradation.signal),
+        Some(succession::WallSignal::RepeatedFailingCall {
+            tool: "file_read".to_string(),
+            failures: 3,
+        }),
+        "failed executions of the same call are"
+    );
+}
+
+/// Three turns that each failed the same read, so the detector fires;
+/// returns the walls they recorded, as the diagnosis names them.
+async fn seed_three_failed_reads(storage: &MockStorage, thread_id: Uuid) -> Vec<String> {
+    let missing = serde_json::json!({"path": "notes/missing.md"});
+    let mut walls = Vec::new();
+    for _ in 0..3 {
+        let (_, calls) = seed_finished_turn(
+            storage,
+            thread_id,
+            swage_storage::TurnState::Completed,
+            &[("file_read", missing.clone(), "error")],
+            false,
+        )
+        .await;
+        walls.extend(calls.iter().map(|id| format!("tool_call:{id}")));
+    }
+    walls.sort();
+    walls
+}
+
+const PRIOR_DIAGNOSIS: &str = "Reading notes/missing.md fails because the file does not exist.";
+
+/// Record in `turn_id`'s assembly report that it ran on a degradation
+/// successor answering `walls` with `PRIOR_DIAGNOSIS`, over the first
+/// `summarised` messages.
+async fn seed_diagnosed_report(
+    storage: &MockStorage,
+    turn_id: Uuid,
+    walls: Vec<String>,
+    summarised: usize,
+) {
+    use swage_protocol::client::context::{CompactionRecord, DiagnosisRecord};
+    use swage_storage::ContextSnapshotStore;
+    let record = CompactionRecord {
+        element: "history".to_string(),
+        requested_strategy: "succession-degradation".to_string(),
+        actual_strategy: "succession".to_string(),
+        messages_removed: summarised,
+        tokens_before: 100,
+        tokens_after: 40,
+        source_message_range: Some((0, summarised)),
+        budget: None,
+        failure_reason: None,
+        focus: None,
+        diagnosis: Some(DiagnosisRecord {
+            signal: "The `file_read` tool failed three times.".to_string(),
+            walls,
+            calls: Vec::new(),
+            synthesis: Some(PRIOR_DIAGNOSIS.to_string()),
+            reused_from_turn: None,
+        }),
+    };
+    storage
+        .store_snapshot(
+            turn_id,
+            &serde_json::json!({ "compaction_applied": [record] }).to_string(),
+        )
+        .await
+        .expect("seed the diagnosed turn's report");
+}
+
+/// The compaction records of the one snapshot not seeded as `earlier`'s.
+fn records_of_the_turn_after(db: &InMemoryDb, earlier: Uuid) -> Vec<serde_json::Value> {
+    let (report_json, _) = db
+        .snapshots
+        .iter()
+        .find(|(turn_id, _)| **turn_id != earlier)
+        .map(|(_, snapshot)| snapshot)
+        .expect("the turn's context snapshot");
+    let report: serde_json::Value = serde_json::from_str(report_json).expect("report JSON");
+    report["compaction_applied"]
+        .as_array()
+        .expect("compaction records")
+        .clone()
+}
+
+fn streamed_text(provider: &SummarisingCapturingProvider) -> String {
+    provider.streamed.lock().expect("streamed requests")[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn run_continue_turn(state: &AppState, session_id: Uuid) {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+}
+
+#[tokio::test]
+async fn a_turn_whose_walls_are_unchanged_carries_the_previous_diagnosis_again() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(SummarisingCapturingProvider::default());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    let walls = seed_three_failed_reads(&storage, thread_id).await;
+    // The previous turn ran on a diagnosis of these walls and hit none.
+    let (diagnosed, _) = seed_finished_turn(
+        &storage,
+        thread_id,
+        swage_storage::TurnState::Completed,
+        &[],
+        false,
+    )
+    .await;
+    seed_diagnosed_report(&storage, diagnosed, walls.clone(), 7).await;
+
+    run_continue_turn(&state, session_id).await;
+
+    assert_eq!(
+        provider.completions.load(Ordering::SeqCst),
+        0,
+        "no reader or synthesis runs"
+    );
+    let records = records_of_the_turn_after(&*storage.db.lock().await, diagnosed);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["requested_strategy"], "succession-degradation");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    assert_eq!(records[0]["messages_removed"], 7, "the previous split");
+    let diagnosis = &records[0]["diagnosis"];
+    assert_eq!(diagnosis["reused_from_turn"], diagnosed.to_string());
+    assert_eq!(diagnosis["synthesis"], PRIOR_DIAGNOSIS);
+    assert_eq!(diagnosis["calls"], serde_json::json!([]));
+    assert_eq!(diagnosis["walls"], serde_json::json!(walls));
+    let text = streamed_text(&provider);
+    assert!(text.contains(PRIOR_DIAGNOSIS), "the successor: {text}");
+    assert!(
+        text.contains("history message 7") && !text.contains("history message 6"),
+        "everything since the previous split is kept: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_whose_walls_changed_is_diagnosed_afresh_on_the_configured_models() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(SummarisingCapturingProvider::default());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    let mut config = state.active_config();
+    config.models.entries.insert(
+        "cheap-reader".to_string(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "mock".to_string(),
+            model_id: "vendor/cheap-reader-1".to_string(),
+            aliases: vec!["reader".to_string()],
+            ..Default::default()
+        },
+    );
+    config.context.diagnosis_reader_model = Some("reader".to_string());
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+    );
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    let walls = seed_three_failed_reads(&storage, thread_id).await;
+    // The previous turn ran on a diagnosis of those walls, then failed the
+    // same read again: a wall the diagnosis never saw.
+    let (diagnosed, again) = seed_finished_turn(
+        &storage,
+        thread_id,
+        swage_storage::TurnState::Completed,
+        &[(
+            "file_read",
+            serde_json::json!({"path": "notes/missing.md"}),
+            "error",
+        )],
+        false,
+    )
+    .await;
+    seed_diagnosed_report(&storage, diagnosed, walls.clone(), 7).await;
+
+    run_continue_turn(&state, session_id).await;
+
+    let records = records_of_the_turn_after(&*storage.db.lock().await, diagnosed);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    assert_eq!(
+        records[0]["messages_removed"], 8,
+        "a fresh diagnosis keeps only the newest message"
+    );
+    let diagnosis = &records[0]["diagnosis"];
+    assert_eq!(diagnosis["reused_from_turn"], serde_json::Value::Null);
+    assert_eq!(diagnosis["synthesis"], SUCCESSOR_SUMMARY);
+    let mut now = walls;
+    now.push(format!("tool_call:{}", again[0]));
+    now.sort();
+    assert_eq!(diagnosis["walls"], serde_json::json!(now));
+    let calls: Vec<(&str, &str)> = diagnosis["calls"]
+        .as_array()
+        .expect("the diagnosis calls")
+        .iter()
+        .map(|call| {
+            (
+                call["stage"].as_str().expect("stage"),
+                call["model"].as_str().expect("model"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("reader", "vendor/cheap-reader-1"),
+            ("reader", "vendor/cheap-reader-1"),
+            ("reader", "vendor/cheap-reader-1"),
+            ("synthesis", "mock-summarising-capturing"),
+        ],
+        "the readers go to the configured alias's model, the synthesis to the session's"
+    );
+    let text = streamed_text(&provider);
+    assert!(text.contains(SUCCESSOR_SUMMARY) && !text.contains(PRIOR_DIAGNOSIS));
+}
+
+#[tokio::test]
+async fn a_turn_whose_window_no_longer_shows_a_wall_gets_its_full_history() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(SummarisingCapturingProvider::default());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    let walls = seed_three_failed_reads(&storage, thread_id).await;
+    let (diagnosed, _) = seed_finished_turn(
+        &storage,
+        thread_id,
+        swage_storage::TurnState::Completed,
+        &[],
+        false,
+    )
+    .await;
+    seed_diagnosed_report(&storage, diagnosed, walls, 7).await;
+    // Three clean turns later the first failed read has left the window of
+    // six, and two identical failures are not a wall.
+    for _ in 0..3 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            swage_storage::TurnState::Completed,
+            &[],
+            false,
+        )
+        .await;
+    }
+    let unsuccessed: Vec<(swage_core::Role, String)> = storage
+        .list_messages_by_thread(thread_id)
+        .await
+        .expect("the thread's history")
+        .into_iter()
+        .map(|message| (message.role, message.content))
+        .chain([(swage_core::Role::User, "continue".to_string())])
+        .collect();
+
+    run_continue_turn(&state, session_id).await;
+
+    let records = records_of_the_turn_after(&*storage.db.lock().await, diagnosed);
+    assert!(records.is_empty(), "{records:?}");
+    let conversation: Vec<(swage_core::Role, String)> =
+        provider.streamed.lock().expect("streamed requests")[0]
+            .messages
+            .iter()
+            .filter(|message| message.role() != swage_core::Role::System)
+            .map(|message| (message.role(), message.text_content()))
+            .collect();
+    assert_eq!(
+        conversation, unsuccessed,
+        "every history message returns, in order and verbatim, then the new input"
+    );
+    let text = streamed_text(&provider);
+    assert!(
+        !text.contains(PRIOR_DIAGNOSIS),
+        "without the diagnosis: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_that_keeps_failing_the_same_call_continues_on_a_diagnosed_successor() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    let missing = serde_json::json!({"path": "notes/missing.md"});
+    for _ in 0..3 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            swage_storage::TurnState::Completed,
+            &[("file_read", missing.clone(), "error")],
+            false,
+        )
+        .await;
+    }
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let db = storage.db.lock().await;
+    let records = only_snapshot_records(&db);
+    assert_eq!(records.len(), 1, "one degradation pass: {records:?}");
+    assert_eq!(records[0]["requested_strategy"], "succession-degradation");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    // 8 seeded messages plus the turn's own: all but the newest summarised.
+    assert_eq!(records[0]["messages_removed"], 8);
+}
+
+#[tokio::test]
+async fn a_diagnosis_that_cannot_be_written_is_recorded_and_the_turn_goes_on() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(MockProvider::with_failing_completions(
+            provider_witness_chunks(),
+        )),
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    let missing = serde_json::json!({"path": "notes/missing.md"});
+    for _ in 0..3 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            swage_storage::TurnState::Completed,
+            &[("file_read", missing.clone(), "error")],
+            false,
+        )
+        .await;
+    }
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its first assembly");
+
+    let db = storage.db.lock().await;
+    let records = only_snapshot_records(&db);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["requested_strategy"], "succession-degradation");
+    assert_eq!(records[0]["actual_strategy"], "none");
+    assert_eq!(records[0]["messages_removed"], 0);
+    let diagnosis = &records[0]["diagnosis"];
+    assert_eq!(diagnosis["synthesis"], serde_json::Value::Null);
+    let calls = diagnosis["calls"].as_array().expect("the diagnosis calls");
+    assert_eq!(calls.len(), 3, "every reader that was sent: {calls:?}");
+    assert!(
+        calls
+            .iter()
+            .all(|call| call["stage"] == "reader" && call["failure_reason"].is_string()),
+        "each with why it failed: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn provider_failures_are_not_walls_so_no_diagnosis_runs() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    for _ in 0..5 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            swage_storage::TurnState::Failed,
+            &[],
+            true,
+        )
+        .await;
+    }
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+
+    let db = storage.db.lock().await;
+    let records = only_snapshot_records(&db);
+    assert!(
+        records.is_empty(),
+        "five turns failed at the provider, which is transport trouble: {records:?}"
+    );
+}
+
+#[tokio::test]
+async fn turns_that_failed_on_their_own_are_walls() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    for _ in 0..5 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            swage_storage::TurnState::Failed,
+            &[],
+            false,
+        )
+        .await;
+    }
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let db = storage.db.lock().await;
+    let records = only_snapshot_records(&db);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["requested_strategy"], "succession-degradation");
+}
+
+#[tokio::test]
+async fn a_configured_message_threshold_succeeds_a_short_thread() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    let mut config = state.active_config();
+    config.context.compaction_threshold =
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+    );
+    seed_history(&storage, session_id, 12).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let db = storage.db.lock().await;
+    let records = only_snapshot_records(&db);
+    assert_eq!(
+        records.len(),
+        1,
+        "thirteen messages are over a threshold of six, far under the default of 100: {records:?}"
+    );
+    assert_eq!(records[0]["requested_strategy"], "succession");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+}
+
+/// Summarises every plain completion as `SUCCESSOR_SUMMARY`, counting
+/// them, and records each streamed turn request.
+#[derive(Default)]
+struct SummarisingCapturingProvider {
+    completions: AtomicUsize,
+    streamed: std::sync::Mutex<Vec<CompletionRequest>>,
+}
+
+const SUCCESSOR_SUMMARY: &str = "The plot is twelve metres by eight.";
+
+#[async_trait]
+impl LlmProvider for SummarisingCapturingProvider {
+    fn model_id(&self) -> &str {
+        "mock-summarising-capturing"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.completions.fetch_add(1, Ordering::SeqCst);
+        Ok(CompletionResponse {
+            content: SUCCESSOR_SUMMARY.into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unimplemented!("turns stream")
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.streamed
+            .lock()
+            .expect("streamed requests")
+            .push(request);
+        Box::pin(stream::iter(provider_witness_chunks()))
+    }
+}
+
+#[tokio::test]
+async fn the_successor_s_briefing_carries_a_session_variable_from_the_store() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(SummarisingCapturingProvider::default());
+    let root = tempfile::tempdir().expect("config root");
+    std::fs::create_dir_all(root.path().join("elements")).expect("elements directory");
+    std::fs::write(
+        root.path().join("elements/current-work.md"),
+        "Project codename: {{codename}}",
+    )
+    .expect("write the operator's briefing");
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let mut config = state.active_config();
+    config.context.compaction_threshold =
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+    );
+    seed_history(&storage, session_id, 12).await;
+    storage
+        .db
+        .lock()
+        .await
+        .session_variables
+        .push(swage_storage::SessionVariable {
+            session_id,
+            name: "codename".into(),
+            value: "HEXAGON-MARIGOLD-77".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs on its successor");
+
+    let records = only_snapshot_records(&*storage.db.lock().await);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    let streamed = provider.streamed.lock().expect("streamed requests");
+    let text = streamed[0]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains(SUCCESSOR_SUMMARY), "the successor: {text}");
+    assert!(
+        text.contains("Project codename: HEXAGON-MARIGOLD-77"),
+        "the operator's briefing, rendered from the variable store: {text}"
+    );
+    assert!(
+        !text.contains("message 0"),
+        "the summarised messages are gone, so the value came from the store: {text}"
     );
 }
 
@@ -1798,14 +2588,22 @@ impl swage_storage::SessionVariableStore for MockStorage {
 
     async fn list_session_variables(
         &self,
-        _: Uuid,
+        session_id: Uuid,
     ) -> Result<Vec<swage_storage::SessionVariable>, StorageError> {
         if self.fail_session_variable_lists.load(Ordering::SeqCst) {
             return Err(StorageError::QueryFailed(
                 "injected session variable list failure".into(),
             ));
         }
-        Ok(Vec::new())
+        Ok(self
+            .db
+            .lock()
+            .await
+            .session_variables
+            .iter()
+            .filter(|variable| variable.session_id == session_id)
+            .cloned()
+            .collect())
     }
 
     async fn delete_session_variable(&self, _: Uuid, _: &str) -> Result<bool, StorageError> {
@@ -1841,6 +2639,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) secrets: HashMap<Uuid, swage_storage::SecretRecord>,
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
     pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
+    pub(crate) session_variables: Vec<swage_storage::SessionVariable>,
 }
 
 impl MockStorage {
@@ -12513,6 +13312,9 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
             alternatives: Vec::new(),
             timeout: 7,
             budget: Some(2048),
+            compaction_threshold: None,
+            diagnosis_reader_model: None,
+            diagnosis_synthesis_model: None,
         },
         ..Default::default()
     };
