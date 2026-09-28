@@ -1027,9 +1027,9 @@ async fn create_provider_with_retry(
                 )
             }
         };
-        providers.push(concrete_provider(
-            provider_endpoint.protocol.clone(),
-            provider_config,
+        providers.push((
+            model_id,
+            concrete_provider(provider_endpoint.protocol.clone(), provider_config),
         ));
     }
 
@@ -1084,23 +1084,25 @@ fn concrete_provider(
 }
 
 fn build_provider_chain(
-    providers: Vec<Box<dyn swage_provider::LlmProvider>>,
+    providers: Vec<(String, Box<dyn swage_provider::LlmProvider>)>,
     retry: swage_provider::retry::RetryConfig,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::builder::ProviderChainBuilder;
     use swage_provider::failover::FailoverConfig;
 
     let mut providers = providers.into_iter();
-    let first = providers
+    let (first_key, first) = providers
         .next()
         .expect("provider chain is non-empty after default provider validation");
 
     let mut chain = ProviderChainBuilder::new()
-        .provider_boxed(first)
+        .provider_boxed_routed(first_key, first)
         .with_retry(retry.clone());
     let mut count = 1usize;
-    for provider in providers {
-        chain = chain.provider_boxed(provider).with_retry(retry.clone());
+    for (route_key, provider) in providers {
+        chain = chain
+            .provider_boxed_routed(route_key, provider)
+            .with_retry(retry.clone());
         count += 1;
     }
 
