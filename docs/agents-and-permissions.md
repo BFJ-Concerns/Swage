@@ -464,11 +464,15 @@ established rather than restating what the context already says.
 
 ### Wall-triggered succession
 
-A session that keeps hitting walls — the same tool call failing in every
-recent turn, or a mix of failed tool calls and failed turns piling up —
-continues on a successor built from a blind diagnosis, regardless of how
-large the context is. The diagnosis fires when at least five combined failures
-appear within the six most recent finished turns.
+A session that keeps hitting walls continues on a successor built from a
+blind diagnosis, regardless of how large the context is. Two triggers are
+checked within the six most recent finished turns:
+
+- Three failures of the identical tool call (same tool, same arguments)
+  anywhere in that window, or
+- at least five failed tool calls and failed turns combined.
+
+The first trigger takes precedence when both are present.
 
 When walls trigger succession, separate readers each examine part of the
 history to locate what went wrong, and a synthesis combines their reports into
