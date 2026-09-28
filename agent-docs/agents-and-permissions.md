@@ -1,5 +1,5 @@
 ---
-description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, and topic-targeted session creation
+description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, and succession compaction
 ---
 
 # Agents and permissions
@@ -464,3 +464,67 @@ Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_pol
   turn continues.
 - `Interrupt` — mark the turn as Interrupted; no further tool calls or
   completions are issued.
+
+## Context configuration
+
+The `[context]` section of the configuration cascade (Global → Topic → Agent
+`.toml` files) governs context assembly and compaction.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `assembly` | string | `"default"` | Named context assembly to use |
+| `alternatives` | array of strings | `[]` | Named assemblies registered as hidden alternatives; selection records the chosen name locally |
+| `timeout` | integer (1–60) | `5` | Assembly timeout in seconds |
+| `budget` | integer or absent | absent | Context token budget; must be positive when set |
+| `compaction_threshold` | `{ messages = N }` or `{ tokens = N }`, or absent | absent (100 messages) | Size past which a turn's context is compacted; `N` must be positive |
+| `diagnosis_reader_model` | string or absent | absent (session's own model) | Model entry or alias for the diagnosis readers during wall succession |
+| `diagnosis_synthesis_model` | string or absent | absent (session's own model) | Model entry or alias for the diagnosis synthesis during wall succession |
+
+Every key cascades: a topic file overrides the global, an agent file overrides
+the topic. Settings saves reject an invalid `compaction_threshold` (non-positive
+count) and a `diagnosis_reader_model` or `diagnosis_synthesis_model` that names
+neither a model entry nor an alias in the configuration being saved.
+
+## Succession compaction
+
+When a turn's thread holds more history than the configured
+`compaction_threshold` (default: 100 messages), the turn runs on a successor:
+the older part of the conversation history is replaced by a summary, the newer
+part is kept verbatim, and every other context element — orientation, norms,
+prompts, briefings, skills — is rendered afresh from its sources.
+
+### Wall-triggered succession
+
+A session that keeps hitting walls — the same tool call failing in every recent
+turn, or failed tool calls and failed turns accumulating across its recent
+turns — continues on a successor built from a blind diagnosis, regardless of
+the context's size. The diagnosis runs when at least 5 combined failures appear
+within the 6 most recent finished turns.
+
+The successor carries diagnosis notes in place of the summarised history. Each
+turn runs on such a successor while the walls remain among its recent turns:
+
+- **Reuse:** a turn whose recent walls match the set its predecessor's
+  diagnosis answered carries that diagnosis again rather than writing a new
+  one.
+- **Restoration:** a turn with no wall left in the recent window gets its full
+  history back.
+
+The diagnosis readers and the synthesis are selected by model catalogue entry
+or alias, resolved as ordinary turns resolve a model. When unset, the session's
+own model is used.
+
+If any diagnosis reader or the synthesis fails or returns an empty report, the
+turn falls back to threshold-only compaction and compacts only when its context
+exceeds the threshold.
+
+Transient provider failures — rate limits, timeouts, HTTP 5xx responses,
+malformed streams, and connection errors — do not trigger wall succession.
+Provider refusals of the agent's request count as walls.
+
+The compaction record carries strategy `succession-degradation` and includes a
+diagnosis record with the walls answered and each model call's stage, model,
+usage, report, and any failure reason. A reused diagnosis names the turn it
+was originally written for. The assembly report retains compaction decisions
+from the first assembly and the successor in pass order, even when their names
+match.
