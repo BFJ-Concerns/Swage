@@ -56,7 +56,6 @@ use crate::retry::{RetryConfig, RetryProvider};
 pub struct ProviderChainBuilder {
     /// Providers that have been fully configured and type-erased.
     finalized: Vec<Arc<dyn LlmProvider>>,
-    route_keys: Vec<Option<String>>,
     /// Optional failover config to apply across all finalized providers.
     failover_config: Option<FailoverConfig>,
 }
@@ -84,18 +83,9 @@ impl ProviderChainBuilder {
         ProviderBuilder {
             chain: self,
             current: p,
-            route_key: None,
             retry_config: None,
             cb_config: None,
         }
-    }
-
-    pub fn provider_boxed_routed(
-        self,
-        route_key: String,
-        p: Box<dyn LlmProvider>,
-    ) -> ProviderBuilder {
-        self.provider_boxed(p).with_route_key(route_key)
     }
 
     /// Finalize the chain and produce a single `Box<dyn LlmProvider>`.
@@ -106,7 +96,7 @@ impl ProviderChainBuilder {
             !self.finalized.is_empty(),
             "ProviderChainBuilder::build called with no providers"
         );
-        Self::assemble(self.finalized, self.route_keys, self.failover_config)
+        Self::assemble(self.finalized, self.failover_config)
     }
 
     // -----------------------------------------------------------------------
@@ -145,10 +135,9 @@ impl ProviderChainBuilder {
     /// to a plain value. The `ArcProvider` wrapper adds a negligible indirection.
     fn assemble(
         providers: Vec<Arc<dyn LlmProvider>>,
-        route_keys: Vec<Option<String>>,
         failover_config: Option<FailoverConfig>,
     ) -> Box<dyn LlmProvider> {
-        if providers.len() == 1 && failover_config.is_none() && route_keys[0].is_none() {
+        if providers.len() == 1 && failover_config.is_none() {
             let arc = providers
                 .into_iter()
                 .next()
@@ -156,7 +145,7 @@ impl ProviderChainBuilder {
             Box::new(ArcProvider(arc))
         } else {
             let config = failover_config.unwrap_or_default();
-            Box::new(FailoverProvider::new(providers, config).with_route_keys(route_keys))
+            Box::new(FailoverProvider::new(providers, config))
         }
     }
 }
@@ -175,16 +164,11 @@ impl ProviderChainBuilder {
 pub struct ProviderBuilder {
     chain: ProviderChainBuilder,
     current: Box<dyn LlmProvider>,
-    route_key: Option<String>,
     retry_config: Option<RetryConfig>,
     cb_config: Option<CircuitBreakerConfig>,
 }
 
 impl ProviderBuilder {
-    pub fn with_route_key(mut self, route_key: String) -> Self {
-        self.route_key = Some(route_key);
-        self
-    }
     /// Attach a retry decorator to the current provider entry.
     pub fn with_retry(mut self, config: RetryConfig) -> Self {
         self.retry_config = Some(config);
@@ -209,18 +193,9 @@ impl ProviderBuilder {
         ProviderBuilder {
             chain,
             current: p,
-            route_key: None,
             retry_config: None,
             cb_config: None,
         }
-    }
-
-    pub fn provider_boxed_routed(
-        self,
-        route_key: String,
-        p: Box<dyn LlmProvider>,
-    ) -> ProviderBuilder {
-        self.provider_boxed(p).with_route_key(route_key)
     }
 
     /// Finalize the current provider and set the failover configuration that
@@ -247,7 +222,6 @@ impl ProviderBuilder {
             ProviderChainBuilder::finalize_entry(self.current, self.retry_config, self.cb_config);
         let mut chain = self.chain;
         chain.finalized.push(entry);
-        chain.route_keys.push(self.route_key);
         chain
     }
 }
