@@ -49,11 +49,16 @@ pub fn validate_search_provider_type(provider_type: &str) -> Result<(), String> 
     if SUPPORTED_SEARCH_PROVIDERS.contains(&provider_type) {
         Ok(())
     } else {
-        Err(format!(
-            "unsupported search provider '{provider_type}'; expected one of: {}",
-            SUPPORTED_SEARCH_PROVIDERS.join(", ")
-        ))
+        Err(unsupported_search_provider_message(provider_type))
     }
+}
+
+/// Describe a refused search backend independently of configuration admission.
+pub fn unsupported_search_provider_message(provider_type: &str) -> String {
+    format!(
+        "unsupported search provider '{provider_type}'; expected one of: {}",
+        SUPPORTED_SEARCH_PROVIDERS.join(", ")
+    )
 }
 
 /// The longest inactivity delay a session archive may be configured with —
