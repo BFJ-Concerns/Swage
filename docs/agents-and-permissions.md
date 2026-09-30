@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, and handles wall-triggered succession
+description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, handles wall-triggered succession, and configures voice transcription and synthesis
 ---
 
 # Agents and permissions
@@ -451,6 +451,30 @@ The Settings page validates these values before saving: a
 `compaction_threshold` with a non-positive count is rejected, and a diagnosis
 model name that does not match any model entry or alias in the configuration
 being saved is rejected.
+
+## Voice configuration
+
+Speech transcription and synthesis are optional capabilities that use the
+default provider's OpenAI-protocol audio endpoints — they never route through
+the chat model.
+
+Two keys in the `[voice]` section control which models are requested:
+
+```toml
+[voice]
+transcription_model = "whisper-1"   # sent to /audio/transcriptions
+speech_model = "tts-1"              # sent to /audio/speech
+```
+
+Each key names a model id the provider serves for that audio task. With a
+key unset, the corresponding capability is off: `GET /api/voice/capabilities`
+reports it unavailable and its `unavailable_reason` field names what to
+configure (see
+[Interfaces and tooling — Voice capabilities](interfaces-and-tooling.md#voice-capabilities)).
+
+Both ids can be edited in the web UI under **Settings → Voice**, which also
+states the prerequisite (an OpenAI-protocol default provider plus the two
+model ids). A save applies without restarting the gateway.
 
 ## Succession compaction
 
