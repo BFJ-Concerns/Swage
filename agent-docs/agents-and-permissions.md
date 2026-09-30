@@ -1,5 +1,5 @@
 ---
-description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, and succession compaction
+description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, succession compaction, and voice configuration
 ---
 
 # Agents and permissions
@@ -484,6 +484,32 @@ Every key cascades: a topic file overrides the global, an agent file overrides
 the topic. Settings saves reject an invalid `compaction_threshold` (non-positive
 count) and a `diagnosis_reader_model` or `diagnosis_synthesis_model` that names
 neither a model entry nor an alias in the configuration being saved.
+
+## Voice configuration
+
+The `[voice]` section configures speech transcription and synthesis.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `transcription_model` | string or absent | absent | Model id sent to the default provider's `/audio/transcriptions` endpoint |
+| `speech_model` | string or absent | absent | Model id sent to the default provider's `/audio/speech` endpoint |
+
+Voice uses the default provider's OpenAI-protocol audio endpoints. It never
+uses the chat model. With a model unset, that capability reports itself
+unavailable — `GET /api/voice/capabilities` returns an `unavailable_reason`
+naming what to configure
+(see [Interfaces and tooling — Voice capabilities](interfaces-and-tooling.md#voice-capabilities)).
+
+Config example:
+
+```toml
+[voice]
+transcription_model = "whisper-1"
+speech_model = "tts-1"
+```
+
+Both ids can be edited in the web UI under **Settings → Voice**; a save
+applies without a gateway restart.
 
 ## Succession compaction
 
