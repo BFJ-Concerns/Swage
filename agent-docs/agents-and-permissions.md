@@ -502,9 +502,10 @@ The `[voice]` section configures speech transcription and synthesis.
 | `speech_model` | string or absent | absent | Model id sent to the default provider's `/audio/speech` endpoint |
 
 Voice uses the default provider's OpenAI-protocol audio endpoints. It never
-uses the chat model. With a model unset, that capability reports itself
-unavailable — `GET /api/voice/capabilities` returns an `unavailable_reason`
-naming what to configure
+uses the chat model. When a capability is unavailable — because the default
+provider is absent, its credentials are unavailable, its protocol has no
+audio API, or a model id is unset — `GET /api/voice/capabilities` returns an
+`unavailable_reason` naming what to address
 (see [Interfaces and tooling — Voice capabilities](interfaces-and-tooling.md#voice-capabilities)).
 
 Config example:
