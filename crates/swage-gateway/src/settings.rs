@@ -931,12 +931,10 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
     }
 
     if let Some(search) = &runtime.search
-        && search.provider_type != "searxng"
+        && let Err(message) =
+            swage_config::validation::validate_search_provider_type(&search.provider_type)
     {
-        return Err(ApiError::validation(format!(
-            "unsupported search provider '{}'; expected one of: searxng",
-            search.provider_type
-        )));
+        return Err(ApiError::validation(message));
     }
 
     let python = &runtime.python_execute;
