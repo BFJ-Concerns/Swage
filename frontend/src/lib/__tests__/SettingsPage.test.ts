@@ -149,6 +149,7 @@ function emptySettings(): SettingsResponse {
       expiry_interval_secs: 60,
     },
     sessions: { archive_after_days: 7 },
+    voice: {},
     restart_required: false,
     can_restart: false,
   };
@@ -184,6 +185,7 @@ describe("SettingsPage", () => {
       observability: payload.observability ?? emptySettings().observability,
       communication: payload.communication ?? emptySettings().communication,
       sessions: payload.sessions ?? emptySettings().sessions,
+      voice: payload.voice ?? emptySettings().voice,
       restart_required: true,
       can_restart: false,
     }));
@@ -516,6 +518,31 @@ describe("SettingsPage", () => {
 
     const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
     expect(payload.sessions).toEqual({ archive_after_days: 14 });
+  });
+
+  it("saves the voice model routes from the voice tab", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "voice", topicId: null },
+    });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("OpenAI protocol");
+    expect(document.body.textContent).not.toContain("Non-functional");
+    const transcription = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Transcription model"]',
+    );
+    const speech = document.querySelector<HTMLInputElement>('input[aria-label="Speech model"]');
+    if (!transcription || !speech) throw new Error("Voice model inputs were not rendered");
+    expect(transcription.value).toBe("");
+    transcription.value = " whisper-1 ";
+    transcription.dispatchEvent(new Event("input", { bubbles: true }));
+    speech.value = "tts-1";
+    speech.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+
+    const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
+    expect(payload.voice).toEqual({ transcription_model: "whisper-1", speech_model: "tts-1" });
   });
 
   it("creates a fresh schedule in the general scope when no topic is selected", async () => {

@@ -31,5 +31,6 @@ pub use provider::{LlmProvider, ProviderConfig, UnsupportedLlmProvider};
 pub use registry::{Registry, RegistryError, ResolvedModel};
 pub use voice::{
     OpenAiVoiceProvider, SpeechRequest, SpeechResponse, TranscriptionRequest,
-    TranscriptionResponse, UnsupportedVoiceProvider, VoiceCapabilities, VoiceProvider,
+    TranscriptionResponse, UnsupportedVoiceProvider, VoiceCapabilities, VoiceModelRoutes,
+    VoiceProvider,
 };

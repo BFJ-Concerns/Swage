@@ -51,8 +51,8 @@ pub struct AppState {
     pub topic_store: Arc<dyn TopicStore>,
     /// LLM provider for streaming message generation.
     pub provider: Arc<dyn LlmProvider>,
-    /// Voice provider for speech-to-text and text-to-speech.
-    pub voice_provider: Arc<dyn VoiceProvider>,
+    /// Hot-swapped voice provider for speech-to-text and text-to-speech.
+    pub voice_provider: Arc<RwLock<Arc<dyn VoiceProvider>>>,
     /// Resolved configuration (server, provider, workspace, etc.).
     pub config: ResolvedConfig,
     /// Maps session_id → CancellationToken for turns currently being processed.
@@ -319,9 +319,9 @@ impl AppState {
             storage: storage.clone(),
             topic_store,
             provider: provider.clone(),
-            voice_provider: Arc::new(UnsupportedVoiceProvider::new(
+            voice_provider: Arc::new(RwLock::new(Arc::new(UnsupportedVoiceProvider::new(
                 "voice is unavailable for the configured runtime",
-            )),
+            )))),
             config: config.clone(),
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_workflow_runs: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -418,6 +418,20 @@ impl AppState {
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+
+    pub fn active_voice_provider(&self) -> Arc<dyn VoiceProvider> {
+        self.voice_provider
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn replace_voice_provider(&self, voice_provider: Arc<dyn VoiceProvider>) {
+        *self
+            .voice_provider
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = voice_provider;
     }
 
     pub fn active_tool_dispatcher(&self) -> Arc<ToolDispatcher> {

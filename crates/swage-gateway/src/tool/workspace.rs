@@ -10,6 +10,8 @@ use std::path::{Component, Path, PathBuf};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
+const TOOL_OUTPUT_ROOT: &str = ".swage/tool-output";
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -39,18 +41,35 @@ pub fn tool_output_artifact_path(ctx: &dyn ToolContext, filename: &str) -> ToolO
         .call_id()
         .map(sanitise_path_segment)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let relative = format!(".swage/tool-output/{turn_id}/{call_id}/{filename}");
-    let absolute = ctx.working_directory().join(&relative);
+    let artifact = format!("{turn_id}/{call_id}/{filename}");
+    let relative = format!("{TOOL_OUTPUT_ROOT}/{artifact}");
+    let absolute = tool_output_root(ctx).join(artifact);
 
     ToolOutputArtifactPath { absolute, relative }
 }
 
-/// Creates a tool-output artefact file and any missing parent directories.
-pub async fn create_tool_output_artifact(path: &Path) -> io::Result<tokio::fs::File> {
+/// Creates an artefact at `<tool-output root>/<turn>/<call>/<file>`.
+///
+/// The root ignores itself so tool output does not dirty a workspace repository.
+pub async fn create_tool_output_artifact(
+    ctx: &dyn ToolContext,
+    path: &Path,
+) -> io::Result<tokio::fs::File> {
+    create_self_ignoring_directory(&tool_output_root(ctx)).await?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::File::create(path).await
+}
+
+fn tool_output_root(ctx: &dyn ToolContext) -> PathBuf {
+    ctx.working_directory().join(TOOL_OUTPUT_ROOT)
+}
+
+/// Creates runtime storage whose contents, including the ignore file, stay out of Git.
+async fn create_self_ignoring_directory(path: &Path) -> io::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    tokio::fs::write(path.join(".gitignore"), b"*\n").await
 }
 
 pub fn location_approval_error(
@@ -431,6 +450,56 @@ mod tests {
 
     fn tmp_workspace() -> tempfile::TempDir {
         tempfile::TempDir::new().expect("create temp dir")
+    }
+
+    #[tokio::test]
+    async fn tool_output_artifact_is_readable_without_untracked_git_changes() {
+        use std::process::Command;
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tmp_workspace();
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .expect("run git init");
+        assert!(init.status.success(), "git init failed: {init:?}");
+
+        let ctx = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: dir.path().to_path_buf(),
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: Some("test-call".into()),
+            turn_id: None,
+        };
+        let artifact = tool_output_artifact_path(&ctx, "stdout.txt");
+        let mut file = create_tool_output_artifact(&ctx, &artifact.absolute)
+            .await
+            .expect("create artefact");
+        file.write_all(b"full tool output").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        let resolved =
+            resolve_context_path(&ctx, &artifact.relative).expect("resolve reported relative path");
+        assert_eq!(
+            tokio::fs::read(resolved.path).await.unwrap(),
+            b"full tool output"
+        );
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .current_dir(dir.path())
+            .output()
+            .expect("run git status");
+        assert!(status.status.success(), "git status failed: {status:?}");
+        assert_eq!(
+            String::from_utf8(status.stdout).unwrap(),
+            "",
+            "tool output must not dirty the workspace repository"
+        );
     }
 
     // --- validate_path ---

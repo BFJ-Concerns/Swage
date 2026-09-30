@@ -73,6 +73,7 @@ impl VoiceProvider for MockVoiceProvider {
             synthesis: true,
             default_voice: Some("nova".to_string()),
             supported_voices: vec!["nova".to_string()],
+            unavailable_reason: None,
         }
     }
 
@@ -106,7 +107,7 @@ async fn start_test_server(
     voice_provider: Option<Arc<dyn VoiceProvider>>,
 ) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let mut state = AppState::new(
+    let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -115,7 +116,7 @@ async fn start_test_server(
         None,
     );
     if let Some(voice_provider) = voice_provider {
-        state.voice_provider = voice_provider;
+        state.replace_voice_provider(voice_provider);
     }
     let router: Router = build_router(state);
 

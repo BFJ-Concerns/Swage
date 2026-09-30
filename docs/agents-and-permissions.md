@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, and resolves effort per model
+description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, and handles wall-triggered succession
 ---
 
 # Agents and permissions
@@ -444,3 +444,69 @@ issued.
 Per-tool overrides are possible through the `WithOptions` variant of a
 `require_approval` entry, which can set a custom `timeout` and
 `timeout_policy` for individual tools.
+
+## Context configuration
+
+The `[context]` section of the configuration file controls how the gateway
+assembles and compacts conversation context. Every key cascades through the
+file hierarchy (Global → Topic → Agent), so a topic-level file can override
+the global setting, and an agent-level file can override the topic's.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `assembly` | `"default"` | Which named context assembly to use |
+| `alternatives` | `[]` | Hidden alternative assemblies available for local selection |
+| `timeout` | `5` (seconds, 1–60) | How long assembly may take before timing out |
+| `budget` | unset | Token budget for the assembled context; must be positive when set |
+| `compaction_threshold` | unset (100 messages) | When to compact — `{ messages = N }` or `{ tokens = N }` |
+| `diagnosis_reader_model` | unset (session's model) | Model for the diagnosis readers during wall succession |
+| `diagnosis_synthesis_model` | unset (session's model) | Model for the diagnosis synthesis during wall succession |
+
+The Settings page validates these values before saving: a
+`compaction_threshold` with a non-positive count is rejected, and a diagnosis
+model name that does not match any model entry or alias in the configuration
+being saved is rejected.
+
+## Succession compaction
+
+When the turn's assembled message list exceeds the compaction threshold
+(default: 100 messages), the turn runs on a **successor** — a fresh context where the
+older part of the conversation history is replaced by a summary, the newer
+part is kept verbatim, and every other context element (orientation, norms,
+prompts, briefings, skills) is rendered afresh from its sources. The summary
+is written against the carried elements, so it records what the conversation
+established rather than restating what the context already says.
+
+### Wall-triggered succession
+
+A session that keeps hitting walls continues on a successor built from a
+blind diagnosis, regardless of how large the context is. Two triggers are
+checked within the six most recent finished turns:
+
+- Three failures of the identical tool call (same tool, same arguments)
+  anywhere in that window, or
+- at least five failed tool calls and failed turns combined.
+
+The first trigger takes precedence when both are present.
+
+When walls trigger succession, separate readers each examine part of the
+history to locate what went wrong, and a synthesis combines their reports into
+the notes the successor carries. While the walls remain in the recent window:
+
+- A turn whose walls match the set the previous diagnosis answered carries
+  that same diagnosis again, without repeating the model calls.
+- A turn whose recent window no longer shows any wall gets its full history
+  back.
+
+The diagnosis models are selected by model catalogue entry or alias, resolved
+the same way as ordinary turns resolve a model. When neither key is set, the
+session's own model handles both stages.
+
+If a diagnosis reader or the synthesis fails or returns an empty report, the
+turn falls back to threshold-only compaction — it compacts only when the
+context exceeds the threshold — and the failed attempt is retained in the
+context record.
+
+Transient provider failures (rate limits, timeouts, HTTP 5xx responses,
+malformed streams, and connection errors) do not trigger wall succession.
+Provider refusals of the agent's request do count.

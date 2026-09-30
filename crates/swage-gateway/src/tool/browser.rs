@@ -350,7 +350,7 @@ async fn write_full_snapshot(
         return Ok(None);
     };
     let path = tool_output_artifact_path(ctx, "snapshot.txt");
-    let mut file = create_tool_output_artifact(&path.absolute)
+    let mut file = create_tool_output_artifact(ctx, &path.absolute)
         .await
         .map_err(|error| artifact_error("snapshot", error))?;
     file.write_all(full.as_bytes())
@@ -375,7 +375,7 @@ async fn write_screenshot(
         return Ok(None);
     };
     let path = tool_output_artifact_path(ctx, "screenshot.jpg");
-    let mut file = create_tool_output_artifact(&path.absolute)
+    let mut file = create_tool_output_artifact(ctx, &path.absolute)
         .await
         .map_err(|error| artifact_error("screenshot", error))?;
     file.write_all(&bytes)
