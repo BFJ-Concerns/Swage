@@ -137,6 +137,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         observability: config.observability.clone(),
         communication: try_wire_from_config(config.communication)?,
         sessions: try_wire_from_config(config.sessions)?,
+        voice: try_wire_from_config(config.voice)?,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
     })
@@ -163,6 +164,7 @@ pub async fn save_settings(
         observability,
         communication,
         sessions,
+        voice,
     } = request;
 
     let tool_permissions: Option<swage_config::ToolPermissionConfig> =
@@ -170,6 +172,7 @@ pub async fn save_settings(
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
     let sessions: Option<swage_config::SessionsConfig> = config_from_wire(sessions)?;
+    let voice: Option<swage_config::VoiceConfig> = config_from_wire(voice)?;
 
     let mut providers = HashMap::new();
     for (provider_id, provider) in &requested_providers {
@@ -234,6 +237,7 @@ pub async fn save_settings(
         observability.clone(),
         communication.clone(),
         sessions.clone(),
+        voice.clone(),
     )?;
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
@@ -311,6 +315,7 @@ pub async fn save_settings(
     runtime_config.communication =
         communication.unwrap_or_else(|| runtime_config.communication.clone());
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
+    runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
     let tool_dispatcher = crate::startup::build_tool_dispatcher(
@@ -318,7 +323,10 @@ pub async fn save_settings(
         state.storage.clone(),
         &state.config_root,
     );
+    let voice_provider =
+        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await;
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
+    state.replace_voice_provider(voice_provider);
     let response = load_settings(state).await?;
     let new_settings = settings_audit_snapshot(&response)?;
     crate::config_change::record_config_change(
@@ -615,6 +623,7 @@ fn settings_response_from_saved_config(
         observability: wire_from_config(active_config.observability),
         communication: wire_from_config(active_config.communication),
         sessions: wire_from_config(active_config.sessions),
+        voice: wire_from_config(active_config.voice),
         restart_required: true,
         can_restart: state.managed_gateway,
     }
@@ -783,6 +792,17 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
             swage_config::validation::MAX_ARCHIVE_AFTER_DAYS
         )));
     }
+    if let Some(voice) = &request.voice
+        && [&voice.transcription_model, &voice.speech_model]
+            .into_iter()
+            .flatten()
+            .any(|model| model.trim().is_empty())
+    {
+        return Err(ApiError::validation(
+            "voice model ids must not be blank; leave a model unset to turn its capability off"
+                .to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -797,10 +817,17 @@ fn apply_runtime_settings_to_partial(
     observability: Option<swage_config::ObservabilityConfig>,
     communication: Option<swage_config::CommunicationConfig>,
     sessions: Option<swage_config::SessionsConfig>,
+    voice: Option<swage_config::VoiceConfig>,
 ) -> Result<(), ApiError> {
     if let Some(sessions) = sessions {
         partial.sessions = Some(swage_config::merge::PartialSessionsConfig {
             archive_after_days: Some(sessions.archive_after_days),
+        });
+    }
+    if let Some(voice) = voice {
+        partial.voice = Some(swage_config::merge::PartialVoiceConfig {
+            transcription_model: voice.transcription_model,
+            speech_model: voice.speech_model,
         });
     }
     if let Some(tool_runtime) = tool_runtime {
@@ -1697,6 +1724,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            voice: None,
         };
 
         let response = save_settings(&state, request)
@@ -1751,6 +1779,121 @@ mod tests {
             reloaded.models.entries["local:fast"].default_effort,
             Some(swage_protocol::client::settings::Effort::High)
         );
+    }
+
+    fn voice_settings_request(
+        voice: Option<swage_protocol::client::settings::VoiceConfig>,
+    ) -> SaveSettingsRequest {
+        SaveSettingsRequest {
+            default_provider: "local".to_string(),
+            providers: [(
+                "local".to_string(),
+                SaveProviderSettings {
+                    protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
+                    worker_staleness_threshold_ms: None,
+                    base_url: Some("http://127.0.0.1:65535/v1".to_string()),
+                    api_key_secret_ref: None,
+                    api_key_env: None,
+                    api_key: None,
+                    command: None,
+                    state_dir: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            default_model: "local:chat".to_string(),
+            models: [(
+                "local:chat".to_string(),
+                ModelSettings {
+                    provider_id: "local".to_string(),
+                    model_id: "chat-wire".to_string(),
+                    aliases: vec![],
+                    context_window: None,
+                    generation_preset: None,
+                    default_effort: None,
+                    capabilities: Default::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            generation_presets: HashMap::new(),
+            tool_runtime: None,
+            tool_permissions: None,
+            hitl: None,
+            sandbox: None,
+            context: None,
+            pricing: None,
+            observability: None,
+            communication: None,
+            sessions: None,
+            voice,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_settings_hot_applies_voice_model_routes() {
+        let swage_home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        save_settings(&state, voice_settings_request(None))
+            .await
+            .expect("settings without [voice] should save");
+        let unset = crate::voice::voice_capabilities(&state).await;
+        assert!(!unset.transcription && !unset.synthesis);
+        let reason = unset
+            .unavailable_reason
+            .expect("unset voice explains itself");
+        assert!(
+            reason.contains("[voice]")
+                && reason.contains("transcription_model")
+                && reason.contains("speech_model"),
+            "{reason}"
+        );
+
+        let response = save_settings(
+            &state,
+            voice_settings_request(Some(swage_protocol::client::settings::VoiceConfig {
+                transcription_model: Some("whisper-1".to_string()),
+                speech_model: Some("tts-1".to_string()),
+            })),
+        )
+        .await
+        .expect("voice routes should save and hot-apply");
+        assert_eq!(response.voice.speech_model.as_deref(), Some("tts-1"));
+        let configured = crate::voice::voice_capabilities(&state).await;
+        assert!(configured.transcription && configured.synthesis);
+        assert_eq!(configured.unavailable_reason, None);
+        assert!(!state.restart_required());
+
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("saved voice routes should reload");
+        assert_eq!(
+            reloaded.voice.transcription_model.as_deref(),
+            Some("whisper-1")
+        );
+
+        let blank = save_settings(
+            &state,
+            voice_settings_request(Some(swage_protocol::client::settings::VoiceConfig {
+                transcription_model: Some(" ".to_string()),
+                speech_model: None,
+            })),
+        )
+        .await;
+        assert!(blank.is_err(), "a blank voice model id is refused");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1829,6 +1972,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            voice: None,
         };
         save_settings(&state, request)
             .await
@@ -1972,6 +2116,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            voice: None,
         };
 
         let response = save_settings(&state, request)
@@ -2095,6 +2240,7 @@ mod tests {
             observability: Some(wire_from_config(observability)),
             communication: Some(wire_from_config(communication.clone())),
             sessions: None,
+            voice: None,
         };
 
         let response = save_settings(&state, request)
@@ -2140,6 +2286,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            voice: None,
         };
 
         let error = validate_settings_request(&request).expect_err("empty deny rule is invalid");
@@ -2242,6 +2389,7 @@ mod tests {
                 diagnosis_reader_model: None,
                 diagnosis_synthesis_model: None,
             }),
+            None,
             None,
             None,
             None,

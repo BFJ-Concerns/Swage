@@ -8,6 +8,7 @@ use crate::model::{
     ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SchedulingConfig, SearchProviderConfig,
     ServerConfig, SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
+    VoiceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -238,6 +239,13 @@ pub struct PartialSessionsConfig {
     pub archive_after_days: Option<u64>,
 }
 
+/// Partial mirror of `VoiceConfig`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PartialVoiceConfig {
+    pub transcription_model: Option<String>,
+    pub speech_model: Option<String>,
+}
+
 /// A single hierarchy level's config contribution — every section and field
 /// is optional so a level need only specify what it wants to override.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -257,6 +265,7 @@ pub struct PartialConfig {
     pub communication: Option<PartialCommunicationConfig>,
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
+    pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
     /// Top-level bypass for the permission and approval system.
@@ -419,6 +428,10 @@ impl From<ResolvedConfig> for PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(r.sessions.archive_after_days),
             }),
+            voice: Some(PartialVoiceConfig {
+                transcription_model: r.voice.transcription_model.clone(),
+                speech_model: r.voice.speech_model.clone(),
+            }),
             generation: Some(PartialGenerationConfig {
                 presets: if r.generation.presets.is_empty() {
                     None
@@ -525,6 +538,10 @@ impl_merge_overlay!(PartialSchedulingConfig {
     run_history_max_per_schedule,
 });
 impl_merge_overlay!(PartialSessionsConfig { archive_after_days });
+impl_merge_overlay!(PartialVoiceConfig {
+    transcription_model,
+    speech_model,
+});
 impl_merge_overlay!(PartialTelegramChannelConfig {
     bot_token_secret_ref,
     bot_token_env,
@@ -685,6 +702,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
         }),
         scheduling: merge_overlay_section(base.scheduling, overlay.scheduling),
         sessions: merge_overlay_section(base.sessions, overlay.sessions),
+        voice: merge_overlay_section(base.voice, overlay.voice),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
             if let Some(overlay_presets) = o.presets {
@@ -973,6 +991,13 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                 archive_after_days: s
                     .archive_after_days
                     .unwrap_or_else(|| SessionsConfig::default().archive_after_days),
+            }
+        },
+        voice: {
+            let v = partial.voice.unwrap_or_default();
+            VoiceConfig {
+                transcription_model: v.transcription_model,
+                speech_model: v.speech_model,
             }
         },
         // Instructions are assembled separately by the instructions module
@@ -1945,6 +1970,39 @@ mod tests {
         assert_eq!(restored.server.port, 8080);
         assert_eq!(restored.default_model_id(), "test-model");
         assert_eq!(restored.tools.shell_timeout_secs, 120);
+    }
+
+    #[test]
+    fn voice_model_routes_default_unset_and_overlay_per_field() {
+        let unset = resolve(PartialConfig::default()).voice;
+        assert_eq!(unset.transcription_model, None);
+        assert_eq!(unset.speech_model, None);
+
+        let base = PartialConfig {
+            voice: Some(PartialVoiceConfig {
+                transcription_model: Some("whisper-1".into()),
+                speech_model: Some("tts-1".into()),
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            voice: Some(PartialVoiceConfig {
+                transcription_model: None,
+                speech_model: Some("gpt-4o-mini-tts".into()),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(
+            resolved.voice.transcription_model.as_deref(),
+            Some("whisper-1")
+        );
+        assert_eq!(
+            resolved.voice.speech_model.as_deref(),
+            Some("gpt-4o-mini-tts")
+        );
+        let restored = resolve(PartialConfig::from(resolved.clone()));
+        assert_eq!(restored.voice, resolved.voice);
     }
 
     #[test]

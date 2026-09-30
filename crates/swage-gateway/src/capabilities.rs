@@ -124,7 +124,7 @@ pub struct WorkflowCapabilitiesResponse {
 }
 
 pub async fn workflow_capabilities(state: &AppState) -> WorkflowCapabilitiesResponse {
-    let voice = state.voice_provider.capabilities();
+    let voice = state.active_voice_provider().capabilities();
     WorkflowCapabilitiesResponse {
         text: state.workflow_capabilities.text,
         vision: state.workflow_capabilities.vision(),
