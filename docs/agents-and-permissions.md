@@ -481,10 +481,11 @@ transcription_model = "whisper-1"   # sent to /audio/transcriptions
 speech_model = "tts-1"              # sent to /audio/speech
 ```
 
-Each key names a model id the provider serves for that audio task. With a
-key unset, the corresponding capability is off: `GET /api/voice/capabilities`
-reports it unavailable and its `unavailable_reason` field names what to
-configure (see
+Each key names a model id the provider serves for that audio task. When a
+capability is unavailable — because the default provider is absent, its
+credentials are unavailable, its protocol has no audio API, or a model id is
+unset — `GET /api/voice/capabilities` reports it with an `unavailable_reason`
+naming what to address (see
 [Interfaces and tooling — Voice capabilities](interfaces-and-tooling.md#voice-capabilities)).
 
 Both ids can be edited in the web UI under **Settings → Voice**, which also

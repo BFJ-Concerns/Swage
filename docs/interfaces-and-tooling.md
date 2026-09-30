@@ -611,15 +611,17 @@ audio. `GET /api/voice/capabilities` returns:
 
 - **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
   and text-to-speech are available.
-- **`unavailable_reason`** — when either capability is off, a message naming
-  which `[voice]` keys to set (e.g. "set `transcription_model` in the [voice]
-  settings to a model the default provider serves"). Absent when both
+- **`unavailable_reason`** — when either capability is off, the reason and
+  what to address: the default provider may be absent, its credentials
+  unavailable, its protocol incompatible (only OpenAI-protocol providers
+  serve audio), or a `[voice]` model id may be unset. Absent when both
   capabilities are available.
-- **`default_voice`** and **`supported_voices`** — the synthesis voice list
-  when synthesis is available.
+- **`default_voice`** and **`supported_voices`** — the default synthesis
+  voice and the available voice list. The OpenAI provider reports both
+  regardless of whether synthesis is configured.
 
-The two audio routes — `POST /api/voice/transcribe` and
-`POST /api/voice/synthesise` — send requests to the default provider's
+The two audio routes — `POST /api/voice/transcriptions` and
+`POST /api/voice/speech` — send requests to the default provider's
 OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
 A request to an unavailable capability returns a 422 validation error. See
 [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
@@ -671,19 +673,26 @@ documentation (see [Hosted documentation](#hosted-documentation)).
 
 ### Workspace tool output
 
-Several tools produce file artefacts as a side effect of their work — `shell`
-captures stdout and stderr, `browser_snapshot` writes accessibility snapshots
-and screenshots, and `url_fetch` saves raw HTML response bodies. When a session
-has an attached workspace, these artefacts land at:
+Several tools produce file artefacts as a side effect of their work. When a
+session has an attached workspace, these artefacts land at:
 
 ```
 .swage/tool-output/<turn_id>/<call_id>/<filename>
 ```
 
+`shell` writes stdout and stderr artefacts only when the output stream was
+truncated — a stream that fits in the tool result is reported inline and the
+artefact file is removed. The browser action tools (`browser_click`,
+`browser_type`, `browser_select`, `browser_scroll`) write screenshots;
+`browser_snapshot` writes accessibility snapshots as text. `url_fetch` saves
+raw HTML response bodies.
+
 The path the tool result reports is relative to the workspace root (e.g.
-`.swage/tool-output/turn/call/stdout.txt`), so `file_read` can open it
-directly. The `<turn_id>/<call_id>` structure keeps repeated calls from
-overwriting each other.
+`.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
+artefacts directly, but it refuses binary content — so a screenshot written
+by a browser action tool is not readable through `file_read`. The
+`<turn_id>/<call_id>` structure keeps repeated calls from overwriting each
+other.
 
 The first time a tool writes output, the gateway creates
 `.swage/tool-output/` and places a `.gitignore` containing `*` inside it.
