@@ -1,5 +1,5 @@
 <script lang="ts">
-  type InformationalTab = "plugins" | "channels" | "devices" | "voice" | "account";
+  type InformationalTab = "plugins" | "channels" | "devices" | "account";
 
   interface Props {
     tab: InformationalTab;
@@ -19,10 +19,6 @@
     devices: {
       title: "Attached devices",
       body: "Device listing will mirror /api/operator/overview.devices once this surface is wired.",
-    },
-    voice: {
-      title: "Voice capabilities",
-      body: "Read-only capability flags live on the voice endpoint; configuration arrives with a future settings backend.",
     },
     account: {
       title: "Account",

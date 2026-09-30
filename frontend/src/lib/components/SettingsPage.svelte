@@ -20,6 +20,7 @@
   import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
   import SkillsPanel from "./SkillsPanel.svelte";
+  import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
   import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
 
   // Agents, providers, generation, automation, and recovery have working
@@ -69,6 +70,7 @@
     "providers",
     "generation",
     "automation",
+    "voice",
   ]);
 
   onMount(async () => {
@@ -121,6 +123,7 @@
       observability: settings.observability,
       communication: settings.communication,
       sessions: settings.sessions,
+      voice: settings.voice,
     });
   }
 
@@ -215,7 +218,7 @@
     },
     voice: {
       title: "Voice",
-      sub: "Speech transcription and synthesis capabilities offered by the active gateway.",
+      sub: "The models the default provider uses for speech transcription and synthesis.",
     },
     recovery: {
       title: "Recovery",
@@ -249,7 +252,6 @@
     "plugins",
     "channels",
     "devices",
-    "voice",
     "account",
   ]);
 
@@ -360,21 +362,9 @@
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "voice"}
-      <!--
-        Debt marker: this visible settings page is intentionally a shell until
-        Swage has a voice provider/configuration model.
-
-        Bind to /api/voice/capabilities for read-only state, then add voice
-        provider configuration (transcription engine, synthesis voice,
-        per-topic overrides). The capabilities endpoint exists; the
-        configuration endpoint does not.
-        Why: the TopicOperations capability strip is the only place voice
-        surfaces today.
-        How to apply: once a /api/voice/config endpoint exists, replace this
-        shell with the real form.
-        ---
-      -->
-      <InformationalSettingsPanel {tab} />
+      {#if settings}
+        <VoiceSettingsPanel bind:settings />
+      {/if}
     {:else if tab === "recovery"}
       <RecoverySettingsPanel />
     {:else if tab === "display"}
