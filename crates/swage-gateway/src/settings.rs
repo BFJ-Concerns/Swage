@@ -56,14 +56,8 @@ async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(
 }
 
 fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Value, ApiError> {
-    let mut snapshot = serde_json::to_value(settings)
-        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))?;
-    if let Some(api_key) = snapshot.pointer_mut("/tool_runtime/search/api_key")
-        && !api_key.is_null()
-    {
-        *api_key = serde_json::Value::String("[REDACTED]".to_string());
-    }
-    Ok(snapshot)
+    serde_json::to_value(settings)
+        .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))
 }
 
 fn tool_runtime_from_config(
@@ -963,6 +957,13 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
         ));
     }
 
+    if let Some(search) = &runtime.search
+        && let Err(message) =
+            swage_config::validation::validate_search_provider_type(&search.provider_type)
+    {
+        return Err(ApiError::validation(message));
+    }
+
     let python = &runtime.python_execute;
     if python.timeout_secs == 0
         || python.startup_timeout_secs == 0
@@ -1442,6 +1443,27 @@ mod tests {
     }
 
     #[test]
+    fn search_provider_type_is_validated_at_save() {
+        let mut runtime = ToolRuntimeSettings {
+            shell_timeout_secs: 30,
+            python_execute: wire_from_config(swage_config::PythonExecuteToolConfig::default()),
+            max_output_bytes: 100_000,
+            plugin_directory: None,
+            search: Some(
+                serde_json::from_value(json!({
+                    "provider_type": "brave", "base_url": "http://search.invalid"
+                }))
+                .unwrap(),
+            ),
+        };
+        let error = validate_tool_runtime_settings(&runtime).expect_err("unsupported provider");
+        assert!(error.message().contains("brave"));
+        assert!(error.message().contains("searxng"));
+        runtime.search.as_mut().unwrap().provider_type = "searxng".into();
+        validate_tool_runtime_settings(&runtime).expect("SearxNG is supported");
+    }
+
+    #[test]
     fn duplicated_settings_shapes_round_trip_bidirectionally() {
         use swage_protocol::client::settings as wire;
 
@@ -1454,9 +1476,7 @@ mod tests {
         assert_bidirectional_settings_bridge::<
             swage_config::SearchProviderConfig,
             wire::SearchProviderConfig,
-        >(
-            json!({"provider_type": "searxng", "base_url": "https://search.invalid", "api_key": "secret-ref"}),
-        );
+        >(json!({"provider_type": "searxng", "base_url": "https://search.invalid"}));
         assert_bidirectional_settings_bridge::<
             swage_config::ToolPermissionConfig,
             wire::ToolPermissionConfig,
@@ -1495,7 +1515,6 @@ mod tests {
         let search = json!({
             "provider_type": "searxng",
             "base_url": "https://search.invalid",
-            "api_key": null,
             "endpoint": "https://ignored.invalid"
         });
         assert!(serde_json::from_value::<wire::SearchProviderConfig>(search).is_err());
@@ -2040,7 +2059,6 @@ mod tests {
         config.tools.search = Some(swage_config::SearchProviderConfig {
             provider_type: "searxng".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
-            api_key: Some("old-search-key".into()),
         });
         let state = AppState::new(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
@@ -2105,7 +2123,6 @@ mod tests {
                 search: Some(swage_protocol::client::settings::SearchProviderConfig {
                     provider_type: "searxng".to_string(),
                     base_url: "http://127.0.0.1:8080".to_string(),
-                    api_key: Some("new-search-key".to_string()),
                 }),
             }),
             tool_permissions: None,
@@ -2145,17 +2162,14 @@ mod tests {
             .iter()
             .find(|event| event.event_kind == "configuration_change")
             .expect("settings configuration change");
-        assert_eq!(
-            change.metadata["prior_state"]["tool_runtime"]["search"]["api_key"],
-            "[REDACTED]"
-        );
-        assert_eq!(
-            change.metadata["new_state"]["tool_runtime"]["search"]["api_key"],
-            "[REDACTED]"
-        );
-        let audit_json = serde_json::to_string(&change.metadata).unwrap();
-        assert!(!audit_json.contains("old-search-key"));
-        assert!(!audit_json.contains("new-search-key"));
+        for state in ["prior_state", "new_state"] {
+            assert_eq!(
+                change.metadata[state]["tool_runtime"]["search"],
+                json!({
+                    "provider_type": "searxng", "base_url": "http://127.0.0.1:8080"
+                })
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

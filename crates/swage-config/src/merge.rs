@@ -2258,7 +2258,6 @@ mod tests {
                     search: Some(Some(SearchProviderConfig {
                         provider_type: "searxng".to_string(),
                         base_url: "http://search.invalid".to_string(),
-                        api_key: None,
                     })),
                     ..Default::default()
                 }),
