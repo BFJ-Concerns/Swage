@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
+description: Network binding, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, voice capabilities, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
 ---
 
 # Interfaces and tooling
@@ -604,6 +604,27 @@ The compiled set is byte-identical to the repository source by test, and
 every document must carry a title and a description — both are enforced
 by the gateway's test suite.
 
+## Voice capabilities
+
+The voice capabilities endpoint reports what the current runtime can do with
+audio. `GET /api/voice/capabilities` returns:
+
+- **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
+  and text-to-speech are available.
+- **`unavailable_reason`** — when either capability is off, a message naming
+  which `[voice]` keys to set (e.g. "set `transcription_model` in the [voice]
+  settings to a model the default provider serves"). Absent when both
+  capabilities are available.
+- **`default_voice`** and **`supported_voices`** — the synthesis voice list
+  when synthesis is available.
+
+The two audio routes — `POST /api/voice/transcribe` and
+`POST /api/voice/synthesise` — send requests to the default provider's
+OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
+A request to an unavailable capability returns a 422 validation error. See
+[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+for the configuration keys.
+
 ## Gateway tools
 
 The gateway ships a set of built-in tools that agents call during turns. Most
@@ -647,6 +668,30 @@ sandbox-eligible tools.
 
 **Documentation** — `docs_read` lists or reads the gateway's hosted
 documentation (see [Hosted documentation](#hosted-documentation)).
+
+### Workspace tool output
+
+Several tools produce file artefacts as a side effect of their work — `shell`
+captures stdout and stderr, `browser_snapshot` writes accessibility snapshots
+and screenshots, and `url_fetch` saves raw HTML response bodies. When a session
+has an attached workspace, these artefacts land at:
+
+```
+.swage/tool-output/<turn_id>/<call_id>/<filename>
+```
+
+The path the tool result reports is relative to the workspace root (e.g.
+`.swage/tool-output/turn/call/stdout.txt`), so `file_read` can open it
+directly. The `<turn_id>/<call_id>` structure keeps repeated calls from
+overwriting each other.
+
+The first time a tool writes output, the gateway creates
+`.swage/tool-output/` and places a `.gitignore` containing `*` inside it.
+This keeps every file under that directory out of `git status`, so tool
+artefacts never appear as untracked files in the workspace's repository.
+
+Sessions without an attached workspace write their tool output into the
+session's scratch directory instead.
 
 Operators can register additional tools through plugins; plugin tool names come
 from the plugin manifest rather than the gateway's built-in set.
