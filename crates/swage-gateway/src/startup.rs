@@ -210,7 +210,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         None,
         root,
     );
-    state.voice_provider = voice_provider;
+    state.replace_voice_provider(voice_provider);
     state.telegram = telegram;
     // The Codex CLI's auth store lives under a Swage-owned state directory;
     // registering it as file-backed secrets brings the harness's own tokens
@@ -386,36 +386,48 @@ async fn recover_worktrees_after_crash(state: &crate::state::AppState) -> Result
     state.worktree_host.recover(&claims).await
 }
 
-async fn create_voice_provider(
+/// Builds the voice provider from the default provider's endpoint and
+/// credentials plus the `[voice]` model routes. Every unavailable case carries
+/// a reason naming what to configure.
+pub(crate) async fn create_voice_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
 ) -> Arc<dyn swage_provider::VoiceProvider> {
     let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
         return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-            "voice is unavailable because no default provider/model pair is configured",
+            "voice needs an OpenAI-protocol default provider; no default provider/model pair is configured",
         ));
     };
-    let provider_config =
-        match resolve_provider_config(provider_endpoint, model_endpoint, secret_manager).await {
-            Ok(config) => config,
-            Err(_) => {
-                return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
-                    "voice is unavailable because the provider credentials are unavailable",
-                ));
-            }
-        };
+    let provider_config = match resolve_provider_config(
+        provider_endpoint,
+        model_endpoint,
+        secret_manager,
+    )
+    .await
+    {
+        Ok(config) => config,
+        Err(_) => {
+            return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
+                "voice is unavailable because the default provider's credentials are unavailable",
+            ));
+        }
+    };
 
     match provider_endpoint.protocol {
         swage_config::Protocol::OpenAi
         | swage_config::Protocol::OpenAiResponses
-        | swage_config::Protocol::OpenRouter => Arc::new(
-            swage_provider::OpenAiVoiceProvider::from_config(provider_config),
-        ),
+        | swage_config::Protocol::OpenRouter => Arc::new(swage_provider::OpenAiVoiceProvider::new(
+            provider_config,
+            swage_provider::VoiceModelRoutes {
+                transcription_model: config.voice.transcription_model.clone(),
+                speech_model: config.voice.speech_model.clone(),
+            },
+        )),
         swage_config::Protocol::Anthropic
         | swage_config::Protocol::Google
         | swage_config::Protocol::Codex => {
             Arc::new(swage_provider::UnsupportedVoiceProvider::new(format!(
-                "voice is unavailable for provider protocol {:?}",
+                "voice needs an OpenAI-protocol default provider; provider protocol {:?} serves no audio API",
                 provider_endpoint.protocol
             )))
         }

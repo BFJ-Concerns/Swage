@@ -3722,6 +3722,17 @@
             }
           ],
           "default": null
+        },
+        "voice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VoiceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -5210,6 +5221,9 @@
         },
         "tool_runtime": {
           "$ref": "#/$defs/ToolRuntimeSettings"
+        },
+        "voice": {
+          "$ref": "#/$defs/VoiceConfig"
         }
       },
       "required": [
@@ -5227,6 +5241,7 @@
         "observability",
         "communication",
         "sessions",
+        "voice",
         "restart_required",
         "can_restart"
       ]
@@ -6188,12 +6203,40 @@
         },
         "transcription": {
           "type": "boolean"
+        },
+        "unavailable_reason": {
+          "description": "Why transcription or synthesis is unavailable, naming what to\nconfigure; absent when both are available.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "transcription",
         "synthesis"
       ]
+    },
+    "VoiceConfig": {
+      "description": "Model routes for voice, served by the default provider's endpoint. An\nunset id leaves that capability unavailable.",
+      "type": "object",
+      "properties": {
+        "speech_model": {
+          "description": "Model id sent with text-to-speech requests.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transcription_model": {
+          "description": "Model id sent with speech-to-text requests.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "WorkerIsolation": {
       "description": "Runtime-managed isolation requested for a dispatched worker.",

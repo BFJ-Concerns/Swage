@@ -39,6 +39,7 @@ const KNOWN_SECTIONS: &[&str] = &[
     "communication",
     "scheduling",
     "sessions",
+    "voice",
     "channels",
 ];
 
@@ -100,6 +101,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         ],
         "scheduling" => &["run_history_max_age_days", "run_history_max_per_schedule"],
         "sessions" => &["archive_after_days"],
+        "voice" => &["transcription_model", "speech_model"],
         // telegram has a fixed nested schema validated by
         // `validate_channels_telegram_table`.
         "channels" => &["telegram"],
@@ -214,6 +216,9 @@ fn check_field_type(
             ("integer", matches!(value, Value::Integer(_)))
         }
         ("sessions", "archive_after_days") => ("integer", matches!(value, Value::Integer(_))),
+        ("voice", "transcription_model" | "speech_model") => {
+            ("string", matches!(value, Value::String(_)))
+        }
         ("channels", "telegram") => ("table", matches!(value, Value::Table(_))),
         // Unknown field — already caught before this call, so no match needed.
         _ => return None,
@@ -454,6 +459,21 @@ fn check_field_semantics(
                     ConfigProblemKind::SemanticError {
                         message: format!(
                             "sessions.archive_after_days must be between 1 and {MAX_ARCHIVE_AFTER_DAYS}, got {t}"
+                        ),
+                    },
+                ));
+            }
+        }
+        ("voice", "transcription_model" | "speech_model") => {
+            if let Value::String(model) = value
+                && model.trim().is_empty()
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "{field_path} must be a model id; omit it to leave the capability unavailable"
                         ),
                     },
                 ));
@@ -2019,6 +2039,28 @@ allowed_fields = ["user"]
             problems.is_empty(),
             "valid [communication] should produce no errors, got: {problems:?}"
         );
+    }
+
+    #[test]
+    fn voice_section_validates_and_rejects_a_blank_model_id() {
+        let problems = validate_toml_string(
+            "[voice]\ntranscription_model = \"whisper-1\"\nspeech_model = \"tts-1\"\n",
+            &path("config.toml"),
+        );
+        assert!(
+            problems.is_empty(),
+            "valid [voice] should pass, got: {problems:?}"
+        );
+
+        let problems =
+            validate_toml_string("[voice]\nspeech_model = \"  \"\n", &path("config.toml"));
+        assert_eq!(problems.len(), 1, "a blank id is refused: {problems:?}");
+        assert_eq!(
+            problems[0].field_path.as_deref(),
+            Some("voice.speech_model")
+        );
+        let problems = validate_toml_string("[voice]\nspeech_model = 3\n", &path("config.toml"));
+        assert_eq!(problems.len(), 1, "an id must be a string: {problems:?}");
     }
 
     #[test]
