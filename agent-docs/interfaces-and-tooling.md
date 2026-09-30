@@ -694,16 +694,23 @@ metadata the listing returns.
 | `supported_voices` | string[] | Available synthesis voices |
 | `unavailable_reason` | string or null | What to configure to enable a missing capability; absent when both are available |
 
-The `unavailable_reason` names the unset `[voice]` keys — e.g.
-"set `transcription_model` and `speech_model` in the [voice] settings to a
-model the default provider serves". See
+The `unavailable_reason` names what to address. Three cases:
+
+- No OpenAI-protocol default provider is configured.
+- The default provider's credentials are unavailable.
+- The default provider uses a non-OpenAI protocol (Anthropic, Google, Codex)
+  that serves no audio API.
+
+When the provider is available but a `[voice]` model id is unset, the reason
+names the missing key — e.g. "set `transcription_model` in the [voice]
+settings to a model the default provider serves". See
 [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
 for the configuration keys.
 
-The voice routes (`/api/voice/transcribe`, `/api/voice/synthesise`) use the
-configured model ids against the default provider's OpenAI-protocol audio
-endpoints. A request to an unavailable capability returns a 422 validation
-error.
+The voice routes (`POST /api/voice/transcriptions`, `POST /api/voice/speech`)
+use the configured model ids against the default provider's OpenAI-protocol
+audio endpoints. A request to an unavailable capability returns a 422
+validation error.
 
 ## Gateway tools
 
@@ -807,18 +814,23 @@ two sandbox-eligible tools.
 
 ### Workspace tool output
 
-Tools that produce file artefacts — `shell` (stdout/stderr), `browser_snapshot`
-(accessibility snapshots, screenshots), `url_fetch` (raw HTML bodies) — write
-them into the attached workspace at:
+Tools that produce file artefacts write them into the attached workspace at:
 
 ```
 .swage/tool-output/<turn_id>/<call_id>/<filename>
 ```
 
-The tool result reports the relative path (e.g.
-`.swage/tool-output/turn/call/stdout.txt`), which `file_read` can open
-directly. The `<turn_id>/<call_id>` structure prevents repeated calls from
-overwriting each other.
+`shell` writes stdout and stderr artefacts only when the stream was truncated;
+a non-truncated stream is reported inline and the artefact file is removed.
+The browser action tools (`browser_click`, `browser_type`, `browser_select`,
+`browser_scroll`) write screenshots; `browser_snapshot` writes accessibility
+snapshots as text. `url_fetch` writes raw HTML response bodies.
+
+The tool result reports the artefact's relative path (e.g.
+`.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
+artefacts directly; it refuses binary content, so screenshots are not
+readable through `file_read`. The `<turn_id>/<call_id>` structure prevents
+repeated calls from overwriting each other.
 
 On first write, the gateway creates `.swage/tool-output/` and writes a
 `.gitignore` containing `*` into it, so tool output never appears as
