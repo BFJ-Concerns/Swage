@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector (including succession-degradation diagnosis view), conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation and the docs_read tool, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
+description: Turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation and the docs_read tool, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -24,6 +24,8 @@ The inspector panel displays:
 | Summary | Always | Assembly name, total tokens, element count, duration |
 | Elements | Always | Table: element name, source (with optional preview), token count |
 | Compaction | `compaction_applied` is non-empty | Element name, requested vs actual strategy, tokens before/after, messages removed |
+| Fallbacks | `errors` is non-empty | Error message and which fallback assembly was used |
+| Warnings | `warnings` is non-empty | Each warning string |
 
 A `succession-degradation` compaction record's diagnosis details — the walls
 answered, each model call (stage, model, usage, report), the synthesis text,
@@ -32,8 +34,6 @@ turn's recorded context report, returned by `GET /api/turns/{id}/context`,
 but are not rendered by the inspector panel. The report retains compaction
 decisions from the first assembly and the successor in pass order, even when
 their names match.
-| Fallbacks | `errors` is non-empty | Error message and which fallback assembly was used |
-| Warnings | `warnings` is non-empty | Each warning string |
 
 `AssemblyReport` and `TurnContextResponse` live in
 `swage-protocol::client::context`. The stored-context endpoint and

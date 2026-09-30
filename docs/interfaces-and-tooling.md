@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector (including succession-degradation diagnosis view), conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
+description: Network binding, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, and the gateway's built-in tool inventory
 ---
 
 # Interfaces and tooling
@@ -79,6 +79,9 @@ to show):
   its token count.
 - **Compaction** — when the assembly compacted any element to fit the budget:
   which element, the strategy used, and the token count before and after.
+- **Fallbacks** — errors that occurred during assembly, including which fallback
+  assembly was used.
+- **Warnings** — anything else the assembly flagged.
 
 When a compaction record carries strategy `succession-degradation`
 (wall-triggered succession), the full diagnosis details — which walls were
@@ -87,9 +90,6 @@ a reused diagnosis was written for — are held in the turn's recorded context
 report, which `GET /api/turns/{id}/context` returns, but are not shown in the
 inspector panel. The report retains compaction decisions from the first
 assembly and the successor in pass order, even when their names match.
-- **Fallbacks** — errors that occurred during assembly, including which fallback
-  assembly was used.
-- **Warnings** — anything else the assembly flagged.
 
 The "context" link appears as soon as a streamed message finishes — the
 streaming store exposes the turn ID when the turn completes, so there is

@@ -487,7 +487,7 @@ neither a model entry nor an alias in the configuration being saved.
 
 ## Succession compaction
 
-When a turn's thread holds more history than the configured
+When a turn's assembled message list exceeds the configured
 `compaction_threshold` (default: 100 messages), the turn runs on a successor:
 the older part of the conversation history is replaced by a summary, the newer
 part is kept verbatim, and every other context element — orientation, norms,
