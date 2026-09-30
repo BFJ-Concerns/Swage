@@ -433,6 +433,56 @@ mod tests {
         tempfile::TempDir::new().expect("create temp dir")
     }
 
+    #[tokio::test]
+    async fn tool_output_artifact_is_readable_without_untracked_git_changes() {
+        use std::process::Command;
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tmp_workspace();
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .expect("run git init");
+        assert!(init.status.success(), "git init failed: {init:?}");
+
+        let ctx = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: dir.path().to_path_buf(),
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: Some("test-call".into()),
+            turn_id: None,
+        };
+        let artifact = tool_output_artifact_path(&ctx, "stdout.txt");
+        let mut file = create_tool_output_artifact(&artifact.absolute)
+            .await
+            .expect("create artefact");
+        file.write_all(b"full tool output").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        let resolved = resolve_context_path(&ctx, &artifact.relative)
+            .expect("resolve reported relative path");
+        assert_eq!(
+            tokio::fs::read(resolved.path).await.unwrap(),
+            b"full tool output"
+        );
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .current_dir(dir.path())
+            .output()
+            .expect("run git status");
+        assert!(status.status.success(), "git status failed: {status:?}");
+        assert_eq!(
+            String::from_utf8(status.stdout).unwrap(),
+            "",
+            "tool output must not dirty the workspace repository"
+        );
+    }
+
     // --- validate_path ---
 
     #[test]
