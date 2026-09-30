@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::MaskedString;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use swage_core::ApprovalTimeoutPolicy;
@@ -202,16 +201,13 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Web search provider configuration. Supports self-hosted instances (e.g. SearxNG)
-/// and any provider that exposes a compatible search API.
+/// Web search configuration for the supported SearxNG backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchProviderConfig {
-    /// Which search backend to use (e.g. "searxng").
+    /// Which search backend to use ("searxng").
     pub provider_type: String,
     /// The search provider's API endpoint (e.g. "http://localhost:8080").
     pub base_url: String,
-    /// Optional API key — required by some hosted providers, unused for self-hosted.
-    pub api_key: Option<MaskedString>,
 }
 
 /// Tool permission configuration — controls which tools an agent may invoke.
@@ -1096,17 +1092,17 @@ mod tests {
 
     #[test]
     fn search_provider_config_fields() {
-        let cfg = SearchProviderConfig {
-            provider_type: "searxng".to_string(),
-            base_url: "http://localhost:8080".to_string(),
-            api_key: Some("search-credential".into()),
-        };
-        assert_eq!(cfg.provider_type, "searxng");
-        assert_eq!(cfg.base_url, "http://localhost:8080");
-        assert_eq!(cfg.api_key.as_deref(), Some("search-credential"));
-        let debug = format!("{cfg:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("search-credential"));
+        let cfg: SearchProviderConfig = serde_json::from_value(serde_json::json!({
+            "provider_type": "searxng", "base_url": "http://localhost:8080"
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "provider_type": "searxng", "base_url": "http://localhost:8080"
+            })
+        );
     }
 
     #[test]

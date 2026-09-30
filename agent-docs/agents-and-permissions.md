@@ -216,6 +216,13 @@ rule by hierarchy level — e.g. `prompt rules (3 total: 1 Global, 2 Topic)`.
 Operator guidance rules from the config root appear as `Global`; those from
 workspace roots appear as `Topic`.
 
+## Search configuration
+
+`[tools.search]` configures `web_search`. SearxNG is the only supported backend.
+The fields are `provider_type` (must be `"searxng"`) and `base_url` (the
+SearxNG instance URL). Unsupported provider types are refused when configuration
+loads and when settings are saved.
+
 ## Tool permission model
 
 ### Permission bypass

@@ -43,6 +43,25 @@ const KNOWN_SECTIONS: &[&str] = &[
     "channels",
 ];
 
+const SUPPORTED_SEARCH_PROVIDERS: &[&str] = &["searxng"];
+
+/// Refuse search backends the web search tool cannot implement.
+pub fn validate_search_provider_type(provider_type: &str) -> Result<(), String> {
+    if SUPPORTED_SEARCH_PROVIDERS.contains(&provider_type) {
+        Ok(())
+    } else {
+        Err(unsupported_search_provider_message(provider_type))
+    }
+}
+
+/// Describe a refused search backend independently of configuration admission.
+pub fn unsupported_search_provider_message(provider_type: &str) -> String {
+    format!(
+        "unsupported search provider '{provider_type}'; expected one of: {}",
+        SUPPORTED_SEARCH_PROVIDERS.join(", ")
+    )
+}
+
 /// The longest inactivity delay a session archive may be configured with —
 /// ten years, well inside what a date arithmetic library accepts.
 pub const MAX_ARCHIVE_AFTER_DAYS: i64 = 3650;
@@ -280,6 +299,17 @@ fn check_field_semantics(
                         },
                     ));
                 }
+            }
+        }
+        ("tools", "search") => {
+            if let Some(Value::String(provider_type)) = value.get("provider_type")
+                && let Err(message) = validate_search_provider_type(provider_type)
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(format!("{field_path}.provider_type")),
+                    ConfigProblemKind::SemanticError { message },
+                ));
             }
         }
         ("models", "default_model_id") => {
@@ -1434,6 +1464,24 @@ model_id = "claude-sonnet-4-20250514"
                 .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
             "port=0 should produce SemanticError"
         );
+    }
+
+    #[test]
+    fn search_provider_type_is_validated_at_load() {
+        let unsupported =
+            "[tools.search]\nprovider_type = \"brave\"\nbase_url = \"http://search.invalid\"";
+        let problems = validate_toml_string(unsupported, &path("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("tools.search.provider_type")
+                    && matches!(&problem.kind, ConfigProblemKind::SemanticError { message }
+                    if message.contains("brave") && message.contains("searxng"))
+            }),
+            "unsupported provider must name the accepted set: {problems:?}"
+        );
+        assert!(parse_and_validate(unsupported, &path("config.toml")).is_err());
+        let supported = unsupported.replace("brave", "searxng");
+        assert!(parse_and_validate(&supported, &path("config.toml")).is_ok());
     }
 
     #[test]
