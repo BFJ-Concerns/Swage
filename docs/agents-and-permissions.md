@@ -182,6 +182,21 @@ The turn context inspector's prompts element shows the provenance of each
 instruction rule by hierarchy level. Operator guidance from the config root
 appears as "Global"; guidance from workspace roots appears as "Topic".
 
+## Search configuration
+
+To enable web search, configure a SearxNG instance in `config.toml`:
+
+```toml
+[tools.search]
+provider_type = "searxng"
+base_url = "http://localhost:8080"
+```
+
+SearxNG is the only supported backend. `provider_type` and `base_url` are the
+search configuration fields; `base_url` names your SearxNG instance.
+Unsupported provider types are refused when configuration loads and when
+settings are saved.
+
 ## Tool permission model
 
 ### Permission bypass
