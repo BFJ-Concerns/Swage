@@ -10,6 +10,8 @@ use std::path::{Component, Path, PathBuf};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
+const TOOL_OUTPUT_ROOT: &str = ".swage/tool-output";
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -39,8 +41,9 @@ pub fn tool_output_artifact_path(ctx: &dyn ToolContext, filename: &str) -> ToolO
         .call_id()
         .map(sanitise_path_segment)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let relative = format!(".swage/tool-output/{turn_id}/{call_id}/{filename}");
-    let absolute = ctx.working_directory().join(&relative);
+    let artifact = format!("{turn_id}/{call_id}/{filename}");
+    let relative = format!("{TOOL_OUTPUT_ROOT}/{artifact}");
+    let absolute = tool_output_root(ctx).join(artifact);
 
     ToolOutputArtifactPath { absolute, relative }
 }
@@ -48,15 +51,19 @@ pub fn tool_output_artifact_path(ctx: &dyn ToolContext, filename: &str) -> ToolO
 /// Creates an artefact at `<tool-output root>/<turn>/<call>/<file>`.
 ///
 /// The root ignores itself so tool output does not dirty a workspace repository.
-pub async fn create_tool_output_artifact(path: &Path) -> io::Result<tokio::fs::File> {
-    let root = path.ancestors().nth(3).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "Tool-output path has no root")
-    })?;
-    create_self_ignoring_directory(root).await?;
+pub async fn create_tool_output_artifact(
+    ctx: &dyn ToolContext,
+    path: &Path,
+) -> io::Result<tokio::fs::File> {
+    create_self_ignoring_directory(&tool_output_root(ctx)).await?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::File::create(path).await
+}
+
+fn tool_output_root(ctx: &dyn ToolContext) -> PathBuf {
+    ctx.working_directory().join(TOOL_OUTPUT_ROOT)
 }
 
 /// Creates runtime storage whose contents, including the ignore file, stay out of Git.
@@ -468,7 +475,7 @@ mod tests {
             turn_id: None,
         };
         let artifact = tool_output_artifact_path(&ctx, "stdout.txt");
-        let mut file = create_tool_output_artifact(&artifact.absolute)
+        let mut file = create_tool_output_artifact(&ctx, &artifact.absolute)
             .await
             .expect("create artefact");
         file.write_all(b"full tool output").await.unwrap();
