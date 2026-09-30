@@ -8,6 +8,8 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use swage_core::ProviderError;
 
+use swage_config::MaskedString;
+
 use crate::provider::ProviderConfig;
 
 /// Declares which voice features a configured runtime can actually use.
@@ -18,15 +20,20 @@ pub struct VoiceCapabilities {
     pub default_voice: Option<String>,
     #[serde(default)]
     pub supported_voices: Vec<String>,
+    /// Why transcription or synthesis is unavailable, naming what to
+    /// configure; `None` when both are available.
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
 }
 
 impl VoiceCapabilities {
-    pub fn unsupported() -> Self {
+    pub fn unsupported(reason: impl Into<String>) -> Self {
         Self {
             transcription: false,
             synthesis: false,
             default_voice: None,
             supported_voices: Vec::new(),
+            unavailable_reason: Some(reason.into()),
         }
     }
 }
@@ -88,7 +95,7 @@ impl UnsupportedVoiceProvider {
 #[async_trait]
 impl VoiceProvider for UnsupportedVoiceProvider {
     fn capabilities(&self) -> VoiceCapabilities {
-        VoiceCapabilities::unsupported()
+        VoiceCapabilities::unsupported(self.reason.clone())
     }
 
     async fn transcribe(
@@ -107,21 +114,70 @@ impl VoiceProvider for UnsupportedVoiceProvider {
     }
 }
 
+/// The models an endpoint serves for each audio API. Voice never borrows the
+/// chat model: an unset id leaves that capability unavailable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VoiceModelRoutes {
+    pub transcription_model: Option<String>,
+    pub speech_model: Option<String>,
+}
+
 /// OpenAI-compatible voice provider.
 ///
-/// Uses the standard `/audio/transcriptions` and `/audio/speech` endpoints.
+/// Uses the standard `/audio/transcriptions` and `/audio/speech` endpoints,
+/// requesting each with the model its route names.
 pub struct OpenAiVoiceProvider {
-    config: ProviderConfig,
+    api_key: Option<MaskedString>,
+    base_url: String,
+    routes: VoiceModelRoutes,
 }
 
 impl OpenAiVoiceProvider {
-    pub fn from_config(config: ProviderConfig) -> Self {
-        Self { config }
+    /// Builds the provider from an endpoint's credentials and base URL plus
+    /// the audio model routes. The endpoint config's chat model is not used.
+    pub fn new(endpoint: ProviderConfig, routes: VoiceModelRoutes) -> Self {
+        Self {
+            api_key: endpoint.api_key,
+            base_url: endpoint.base_url,
+            routes,
+        }
+    }
+
+    fn unavailable_reason(&self) -> Option<String> {
+        let unset: Vec<&str> = [
+            ("transcription_model", &self.routes.transcription_model),
+            ("speech_model", &self.routes.speech_model),
+        ]
+        .into_iter()
+        .filter(|(_, model)| model.is_none())
+        .map(|(key, _)| key)
+        .collect();
+        if unset.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "set {} in the [voice] settings to a model the default provider serves",
+            unset
+                .iter()
+                .map(|key| format!("`{key}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ))
+    }
+
+    fn route_model<'a>(&self, model: &'a Option<String>) -> Result<&'a str, ProviderError> {
+        model
+            .as_deref()
+            .ok_or_else(|| ProviderError::InvalidRequest {
+                message: self
+                    .unavailable_reason()
+                    .unwrap_or_else(|| "voice model is not configured".to_string()),
+            })
     }
 
     fn auth_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(ref key) = self.config.api_key
+        if let Some(ref key) = self.api_key
             && let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", key.expose_secret()))
         {
             headers.insert(AUTHORIZATION, value);
@@ -148,10 +204,11 @@ struct OpenAiTranscriptionResponse {
 impl VoiceProvider for OpenAiVoiceProvider {
     fn capabilities(&self) -> VoiceCapabilities {
         VoiceCapabilities {
-            transcription: true,
-            synthesis: true,
+            transcription: self.routes.transcription_model.is_some(),
+            synthesis: self.routes.speech_model.is_some(),
             default_voice: Some("alloy".to_string()),
             supported_voices: Self::supported_voices(),
+            unavailable_reason: self.unavailable_reason(),
         }
     }
 
@@ -159,6 +216,7 @@ impl VoiceProvider for OpenAiVoiceProvider {
         &self,
         request: TranscriptionRequest,
     ) -> Result<TranscriptionResponse, ProviderError> {
+        let model = self.route_model(&self.routes.transcription_model)?;
         let file_part = reqwest::multipart::Part::bytes(request.audio_bytes)
             .mime_str(&request.mime_type)
             .map_err(|error| ProviderError::InvalidRequest {
@@ -168,12 +226,12 @@ impl VoiceProvider for OpenAiVoiceProvider {
 
         let form = reqwest::multipart::Form::new()
             .part("file", file_part)
-            .text("model", self.config.model.clone());
+            .text("model", model.to_string());
 
         let response = reqwest::Client::new()
             .post(format!(
                 "{}/audio/transcriptions",
-                self.config.base_url.trim_end_matches('/')
+                self.base_url.trim_end_matches('/')
             ))
             .headers(self.auth_headers())
             .multipart(form)
@@ -204,6 +262,7 @@ impl VoiceProvider for OpenAiVoiceProvider {
     }
 
     async fn synthesise(&self, request: SpeechRequest) -> Result<SpeechResponse, ProviderError> {
+        let model = self.route_model(&self.routes.speech_model)?;
         let voice = request.voice.unwrap_or_else(|| {
             self.capabilities()
                 .default_voice
@@ -221,7 +280,7 @@ impl VoiceProvider for OpenAiVoiceProvider {
         let response = reqwest::Client::new()
             .post(format!(
                 "{}/audio/speech",
-                self.config.base_url.trim_end_matches('/')
+                self.base_url.trim_end_matches('/')
             ))
             .headers({
                 let mut headers = self.auth_headers();
@@ -229,7 +288,7 @@ impl VoiceProvider for OpenAiVoiceProvider {
                 headers
             })
             .json(&serde_json::json!({
-                "model": self.config.model,
+                "model": model,
                 "input": request.text,
                 "voice": voice,
                 "response_format": format,
@@ -279,16 +338,139 @@ mod tests {
         assert!(capabilities.supported_voices.is_empty());
     }
 
+    /// The chat model the endpoint config carries; no audio request may use it.
+    const CHAT_MODEL: &str = "chat-model-not-for-audio";
+
+    fn routed(base_url: &str, routes: VoiceModelRoutes) -> OpenAiVoiceProvider {
+        OpenAiVoiceProvider::new(ProviderConfig::new("key", CHAT_MODEL, base_url), routes)
+    }
+
+    fn both_routes() -> VoiceModelRoutes {
+        VoiceModelRoutes {
+            transcription_model: Some("whisper-route".into()),
+            speech_model: Some("speech-route".into()),
+        }
+    }
+
+    /// Accepts one HTTP request, answers it with `body`, and returns the raw
+    /// request bytes as text.
+    async fn capture_one_request(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                received.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&received);
+                if let Some(header_end) = text.find("\r\n\r\n") {
+                    let length = text[..header_end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if received.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&received).into_owned()
+        });
+        (base_url, handle)
+    }
+
+    #[tokio::test]
+    async fn transcription_requests_the_configured_transcription_model() {
+        let (base_url, captured) = capture_one_request(r#"{"text":"hello"}"#).await;
+        let response = routed(&base_url, both_routes())
+            .transcribe(TranscriptionRequest {
+                audio_bytes: b"RIFF".to_vec(),
+                mime_type: "audio/wav".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.text, "hello");
+
+        let request = captured.await.unwrap();
+        assert!(request.starts_with("POST /audio/transcriptions "));
+        assert!(
+            request.contains("name=\"model\"\r\n\r\nwhisper-route\r\n"),
+            "multipart model field must carry the transcription route: {request}"
+        );
+        assert!(!request.contains(CHAT_MODEL), "{request}");
+    }
+
+    #[tokio::test]
+    async fn synthesis_requests_the_configured_speech_model() {
+        let (base_url, captured) = capture_one_request("RIFFAUDIO").await;
+        routed(&base_url, both_routes())
+            .synthesise(SpeechRequest {
+                text: "hi".into(),
+                voice: None,
+                format: None,
+            })
+            .await
+            .unwrap();
+
+        let request = captured.await.unwrap();
+        assert!(request.starts_with("POST /audio/speech "));
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["model"], "speech-route");
+        assert!(!request.contains(CHAT_MODEL), "{request}");
+    }
+
+    #[tokio::test]
+    async fn an_unset_route_is_unavailable_and_names_the_setting() {
+        let provider = routed(
+            "http://127.0.0.1:9",
+            VoiceModelRoutes {
+                transcription_model: Some("whisper-route".into()),
+                speech_model: None,
+            },
+        );
+        let capabilities = provider.capabilities();
+        assert!(capabilities.transcription);
+        assert!(!capabilities.synthesis);
+        let reason = capabilities.unavailable_reason.unwrap();
+        assert!(
+            reason.contains("speech_model") && reason.contains("[voice]"),
+            "{reason}"
+        );
+        assert!(!reason.contains("transcription_model"), "{reason}");
+
+        let error = provider
+            .synthesise(SpeechRequest {
+                text: "hi".into(),
+                voice: None,
+                format: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("speech_model"), "{error}");
+    }
+
     #[test]
     fn openai_voice_provider_reports_expected_defaults() {
-        let provider = OpenAiVoiceProvider::from_config(ProviderConfig::new(
-            "key",
-            "gpt-4o-mini-tts",
-            "https://api.openai.com/v1",
-        ));
+        let provider = routed("https://api.openai.com/v1", both_routes());
         let capabilities = provider.capabilities();
         assert!(capabilities.transcription);
         assert!(capabilities.synthesis);
+        assert_eq!(capabilities.unavailable_reason, None);
         assert_eq!(capabilities.default_voice.as_deref(), Some("alloy"));
         assert!(
             capabilities
