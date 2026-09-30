@@ -455,7 +455,7 @@ being saved is rejected.
 ## Succession compaction
 
 When the turn's assembled message list exceeds the compaction threshold
-(default: 100 messages), the next turn runs on a **successor** — a fresh context where the
+(default: 100 messages), the turn runs on a **successor** — a fresh context where the
 older part of the conversation history is replaced by a summary, the newer
 part is kept verbatim, and every other context element (orientation, norms,
 prompts, briefings, skills) is rendered afresh from its sources. The summary
