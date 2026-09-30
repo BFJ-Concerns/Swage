@@ -26,6 +26,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Tool output written into an attached workspace no longer appears as untracked files in that workspace’s Git repository.
+
 - Session previews in conversation, topic and operator lists show the latest user or assistant message; tool and system messages do not replace the preview.
 - A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart or cancellation is settled as interrupted, and the resumed conversation replays those calls with their results.
 - Shared memory notes now save to the session's topic, or to general memory when no topic is selected, so later sessions in that scope can read them.
