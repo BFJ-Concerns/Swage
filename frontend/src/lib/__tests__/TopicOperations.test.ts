@@ -221,4 +221,23 @@ describe("TopicOperations", () => {
     expect(document.body.textContent).toContain("topics: 1");
     expect(document.body.textContent).toContain("sessions: 2");
   });
+
+  it("names what voice needs where it is unavailable", async () => {
+    vi.mocked(workflowApi.fetchVoiceCapabilities).mockResolvedValue({
+      transcription: true,
+      synthesis: false,
+      default_voice: "alloy",
+      supported_voices: [],
+      unavailable_reason: "set `speech_model` in the [voice] settings to a model the default provider serves",
+    });
+    component = mount(TopicOperations, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const strip = document.querySelector(".capability-strip");
+    expect(strip?.textContent).toContain("no speech");
+    expect(strip?.textContent).toContain("set `speech_model` in the [voice] settings");
+  });
 });

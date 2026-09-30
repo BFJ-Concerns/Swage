@@ -134,6 +134,23 @@ without being copied out of the harness's own `auth.json`.
 See [Provider credentials](docs/interfaces-and-tooling.md#provider-credentials)
 for the creation journey and request shape.
 
+### Voice
+
+Speech transcription and synthesis are optional. They need an
+OpenAI-protocol default provider whose endpoint serves the audio APIs, plus
+the model to request for each:
+
+```toml
+[voice]
+transcription_model = "whisper-1"   # sent to /audio/transcriptions
+speech_model = "tts-1"              # sent to /audio/speech
+```
+
+Voice never uses the chat model. With a model unset, that capability is off,
+and the web UI's voice line and `GET /api/voice/capabilities` say what to
+configure. Both ids can be set under Settings → Voice; a save applies without
+a restart.
+
 `SWAGE_HOME` overrides the whole data root (config, database, logs) — useful
 for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.
 
