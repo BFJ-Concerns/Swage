@@ -1,5 +1,5 @@
 ---
-description: Turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation and the docs_read tool, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, and the gateway's built-in tool inventory
+description: Turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation and the docs_read tool, voice capabilities, wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, the gateway's built-in tool inventory, and workspace tool output
 ---
 
 # Interfaces and tooling
@@ -681,6 +681,30 @@ byte-identical to the repository source. The
 `every_shipped_document_carries_a_title_and_description` test verifies the
 metadata the listing returns.
 
+## Voice capabilities
+
+`GET /api/voice/capabilities` returns a `VoiceCapabilitiesResponse`
+(`swage-protocol::client::voice`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `transcription` | bool | Whether speech-to-text is available |
+| `synthesis` | bool | Whether text-to-speech is available |
+| `default_voice` | string or null | The default synthesis voice (e.g. `"alloy"`) |
+| `supported_voices` | string[] | Available synthesis voices |
+| `unavailable_reason` | string or null | What to configure to enable a missing capability; absent when both are available |
+
+The `unavailable_reason` names the unset `[voice]` keys — e.g.
+"set `transcription_model` and `speech_model` in the [voice] settings to a
+model the default provider serves". See
+[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+for the configuration keys.
+
+The voice routes (`/api/voice/transcribe`, `/api/voice/synthesise`) use the
+configured model ids against the default provider's OpenAI-protocol audio
+endpoints. A request to an unavailable capability returns a 422 validation
+error.
+
 ## Gateway tools
 
 The gateway ships these built-in tools
@@ -780,6 +804,28 @@ two sandbox-eligible tools.
 | Tool | Source |
 |---|---|
 | `docs_read` | `docs_read.rs` — list or read the gateway's hosted documentation; see [Hosted documentation](#hosted-documentation) |
+
+### Workspace tool output
+
+Tools that produce file artefacts — `shell` (stdout/stderr), `browser_snapshot`
+(accessibility snapshots, screenshots), `url_fetch` (raw HTML bodies) — write
+them into the attached workspace at:
+
+```
+.swage/tool-output/<turn_id>/<call_id>/<filename>
+```
+
+The tool result reports the relative path (e.g.
+`.swage/tool-output/turn/call/stdout.txt`), which `file_read` can open
+directly. The `<turn_id>/<call_id>` structure prevents repeated calls from
+overwriting each other.
+
+On first write, the gateway creates `.swage/tool-output/` and writes a
+`.gitignore` containing `*` into it, so tool output never appears as
+untracked files in the workspace's Git repository.
+
+Sessions without an attached workspace write tool output into the session's
+scratch directory instead.
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
 configuration; their names come from the plugin manifest.
