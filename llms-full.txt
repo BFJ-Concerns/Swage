@@ -486,6 +486,32 @@ the topic. Settings saves reject an invalid `compaction_threshold` (non-positive
 count) and a `diagnosis_reader_model` or `diagnosis_synthesis_model` that names
 neither a model entry nor an alias in the configuration being saved.
 
+## Voice configuration
+
+The `[voice]` section configures speech transcription and synthesis.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `transcription_model` | string or absent | absent | Model id sent to the default provider's `/audio/transcriptions` endpoint |
+| `speech_model` | string or absent | absent | Model id sent to the default provider's `/audio/speech` endpoint |
+
+Voice uses the default provider's OpenAI-protocol audio endpoints. It never
+uses the chat model. With a model unset, that capability reports itself
+unavailable — `GET /api/voice/capabilities` returns an `unavailable_reason`
+naming what to configure
+(see [Interfaces and tooling — Voice capabilities](interfaces-and-tooling.md#voice-capabilities)).
+
+Config example:
+
+```toml
+[voice]
+transcription_model = "whisper-1"
+speech_model = "tts-1"
+```
+
+Both ids can be edited in the web UI under **Settings → Voice**; a save
+applies without a gateway restart.
+
 ## Succession compaction
 
 When a turn's assembled message list exceeds the configured
@@ -1332,6 +1358,30 @@ byte-identical to the repository source. The
 `every_shipped_document_carries_a_title_and_description` test verifies the
 metadata the listing returns.
 
+## Voice capabilities
+
+`GET /api/voice/capabilities` returns a `VoiceCapabilitiesResponse`
+(`swage-protocol::client::voice`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `transcription` | bool | Whether speech-to-text is available |
+| `synthesis` | bool | Whether text-to-speech is available |
+| `default_voice` | string or null | The default synthesis voice (e.g. `"alloy"`) |
+| `supported_voices` | string[] | Available synthesis voices |
+| `unavailable_reason` | string or null | What to configure to enable a missing capability; absent when both are available |
+
+The `unavailable_reason` names the unset `[voice]` keys — e.g.
+"set `transcription_model` and `speech_model` in the [voice] settings to a
+model the default provider serves". See
+[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+for the configuration keys.
+
+The voice routes (`/api/voice/transcribe`, `/api/voice/synthesise`) use the
+configured model ids against the default provider's OpenAI-protocol audio
+endpoints. A request to an unavailable capability returns a 422 validation
+error.
+
 ## Gateway tools
 
 The gateway ships these built-in tools
@@ -1431,6 +1481,28 @@ two sandbox-eligible tools.
 | Tool | Source |
 |---|---|
 | `docs_read` | `docs_read.rs` — list or read the gateway's hosted documentation; see [Hosted documentation](#hosted-documentation) |
+
+### Workspace tool output
+
+Tools that produce file artefacts — `shell` (stdout/stderr), `browser_snapshot`
+(accessibility snapshots, screenshots), `url_fetch` (raw HTML bodies) — write
+them into the attached workspace at:
+
+```
+.swage/tool-output/<turn_id>/<call_id>/<filename>
+```
+
+The tool result reports the relative path (e.g.
+`.swage/tool-output/turn/call/stdout.txt`), which `file_read` can open
+directly. The `<turn_id>/<call_id>` structure prevents repeated calls from
+overwriting each other.
+
+On first write, the gateway creates `.swage/tool-output/` and writes a
+`.gitignore` containing `*` into it, so tool output never appears as
+untracked files in the workspace's Git repository.
+
+Sessions without an attached workspace write tool output into the session's
+scratch directory instead.
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
 configuration; their names come from the plugin manifest.
