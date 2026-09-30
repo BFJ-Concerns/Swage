@@ -27,6 +27,14 @@ The inspector panel displays:
 | Fallbacks | `errors` is non-empty | Error message and which fallback assembly was used |
 | Warnings | `warnings` is non-empty | Each warning string |
 
+A `succession-degradation` compaction record's diagnosis details — the walls
+answered, each model call (stage, model, usage, report), the synthesis text,
+and the turn a reused diagnosis was originally written for — are held in the
+turn's recorded context report, returned by `GET /api/turns/{id}/context`,
+but are not rendered by the inspector panel. The report retains compaction
+decisions from the first assembly and the successor in pass order, even when
+their names match.
+
 `AssemblyReport` and `TurnContextResponse` live in
 `swage-protocol::client::context`. The stored-context endpoint and
 `ContextAssembled` WebSocket event use the same typed report; the frontend

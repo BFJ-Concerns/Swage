@@ -83,6 +83,14 @@ to show):
   assembly was used.
 - **Warnings** — anything else the assembly flagged.
 
+When a compaction record carries strategy `succession-degradation`
+(wall-triggered succession), the full diagnosis details — which walls were
+answered, each model call's stage and usage, the synthesis text, and the turn
+a reused diagnosis was written for — are held in the turn's recorded context
+report, which `GET /api/turns/{id}/context` returns, but are not shown in the
+inspector panel. The report retains compaction decisions from the first
+assembly and the successor in pass order, even when their names match.
+
 The "context" link appears as soon as a streamed message finishes — the
 streaming store exposes the turn ID when the turn completes, so there is
 no need to reload the surface for the link to appear. The terminal UI has a

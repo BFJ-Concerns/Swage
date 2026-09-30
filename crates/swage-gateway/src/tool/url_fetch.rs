@@ -162,12 +162,14 @@ impl Tool for UrlFetchTool {
         let raw_body_artifact_path =
             is_html.then(|| tool_output_artifact_path(ctx, RAW_HTML_ARTIFACT_FILENAME));
         let mut raw_body_artifact_writer = match raw_body_artifact_path.as_ref() {
-            Some(path) => Some(create_tool_output_artifact(&path.absolute).await.map_err(
-                |error| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to create raw HTML artifact: {error}"),
-                },
-            )?),
+            Some(path) => Some(
+                create_tool_output_artifact(ctx, &path.absolute)
+                    .await
+                    .map_err(|error| ToolError::ExecutionFailed {
+                        name: self.name().to_owned(),
+                        message: format!("Failed to create raw HTML artifact: {error}"),
+                    })?,
+            ),
             None => None,
         };
         let mut body_bytes: Vec<u8> = Vec::new();
