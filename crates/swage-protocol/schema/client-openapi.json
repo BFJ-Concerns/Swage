@@ -3807,12 +3807,6 @@
       "SearchProviderConfig": {
         "additionalProperties": false,
         "properties": {
-          "api_key": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "base_url": {
             "type": "string"
           },

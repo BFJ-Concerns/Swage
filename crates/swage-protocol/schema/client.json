@@ -4150,12 +4150,6 @@
     "SearchProviderConfig": {
       "type": "object",
       "properties": {
-        "api_key": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "base_url": {
           "type": "string"
         },

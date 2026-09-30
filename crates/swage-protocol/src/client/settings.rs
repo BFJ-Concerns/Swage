@@ -261,7 +261,6 @@ pub struct PythonExecuteToolConfig {
 pub struct SearchProviderConfig {
     pub provider_type: String,
     pub base_url: String,
-    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
