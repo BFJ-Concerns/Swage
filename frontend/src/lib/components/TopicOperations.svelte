@@ -231,9 +231,6 @@
           ? `${voiceCapabilities.transcription ? "transcription" : "no transcription"} · ${voiceCapabilities.synthesis ? "speech" : "no speech"}`
           : "capability unknown"}
       </span>
-      {#if voiceCapabilities?.unavailable_reason}
-        <span class="voice-reason">{voiceCapabilities.unavailable_reason}</span>
-      {/if}
     </div>
     <button class="secondary" onclick={exportRecovery} disabled={busyAction === "recovery"}>
       {busyAction === "recovery" ? "Exporting..." : "Export recovery"}

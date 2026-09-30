@@ -147,9 +147,10 @@ speech_model = "tts-1"              # sent to /audio/speech
 ```
 
 Voice never uses the chat model. With a model unset, that capability is off,
-and the web UI's voice line and `GET /api/voice/capabilities` say what to
-configure. Both ids can be set under Settings → Voice; a save applies without
-a restart.
+and `GET /api/voice/capabilities` says what to configure. Both ids can be set
+in the web UI under **Settings → Voice** (the Voice entry in the settings
+navigation), which also states this prerequisite; a save applies without a
+restart.
 
 `SWAGE_HOME` overrides the whole data root (config, database, logs) — useful
 for throwaway instances: `SWAGE_HOME=/tmp/swage-test swage gateway start`.
