@@ -1,7 +1,7 @@
 //! Web search tool — searches the web via a configurable search provider.
 //!
 //! Currently supports SearxNG (self-hosted meta-search engine). The provider
-//! type, endpoint, and optional API key come from the resolved config's
+//! type and endpoint come from the resolved config's
 //! `[tools.search]` section. Returns structured results as plain text.
 
 use async_trait::async_trait;
@@ -168,10 +168,14 @@ impl Tool for WebSearchTool {
                 base_url: config.base_url.clone(),
                 client: reqwest::Client::new(),
             }),
-            _ => Box::new(SearxNgProvider {
-                base_url: config.base_url.clone(),
-                client: reqwest::Client::new(),
-            }),
+            unsupported => {
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!(
+                        "unsupported search provider '{unsupported}'; expected one of: searxng"
+                    ),
+                });
+            }
         };
 
         let results = provider.search(&query, max_results).await.map_err(|msg| {
@@ -216,13 +220,57 @@ mod tests {
             provider_config: Some(SearchProviderConfig {
                 provider_type: "searxng".to_string(),
                 base_url: "http://localhost:8080".to_string(),
-                api_key: None,
             }),
         }
     }
 
     fn ctx() -> MockToolContext {
         MockToolContext::new("agent-test", "sess-test")
+    }
+
+    #[tokio::test]
+    async fn search_provider_selects_only_searxng() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let app = axum::Router::new().route("/search", axum::routing::get(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({"results": [{"title": "Backend result", "url": "https://result.invalid", "content": "Search response"}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut tool = WebSearchTool {
+            provider_config: Some(
+                serde_json::from_value(json!({
+                    "provider_type": "brave", "base_url": base_url
+                }))
+                .unwrap(),
+            ),
+        };
+        let result = tool.execute(json!({"query": "test"}), &ctx()).await;
+        let error = result.expect_err("unsupported provider must be refused before HTTP");
+        assert!(error.to_string().contains("brave"));
+        assert!(error.to_string().contains("searxng"));
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        tool.provider_config.as_mut().unwrap().provider_type = "searxng".into();
+        let result = tool.execute(json!({"query": "test"}), &ctx()).await;
+        server.abort();
+        assert!(
+            result.unwrap()["output"]
+                .as_str()
+                .unwrap()
+                .contains("Backend result")
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -280,7 +328,6 @@ mod tests {
             provider_config: Some(SearchProviderConfig {
                 provider_type: "searxng".to_string(),
                 base_url: "http://127.0.0.1:19999".to_string(),
-                api_key: None,
             }),
         };
         let err = tool
