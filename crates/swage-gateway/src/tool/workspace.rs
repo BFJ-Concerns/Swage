@@ -45,12 +45,24 @@ pub fn tool_output_artifact_path(ctx: &dyn ToolContext, filename: &str) -> ToolO
     ToolOutputArtifactPath { absolute, relative }
 }
 
-/// Creates a tool-output artefact file and any missing parent directories.
+/// Creates an artefact at `<tool-output root>/<turn>/<call>/<file>`.
+///
+/// The root ignores itself so tool output does not dirty a workspace repository.
 pub async fn create_tool_output_artifact(path: &Path) -> io::Result<tokio::fs::File> {
+    let root = path.ancestors().nth(3).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Tool-output path has no root")
+    })?;
+    create_self_ignoring_directory(root).await?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::File::create(path).await
+}
+
+/// Creates runtime storage whose contents, including the ignore file, stay out of Git.
+async fn create_self_ignoring_directory(path: &Path) -> io::Result<()> {
+    tokio::fs::create_dir_all(path).await?;
+    tokio::fs::write(path.join(".gitignore"), b"*\n").await
 }
 
 pub fn location_approval_error(
