@@ -475,8 +475,8 @@ mod tests {
         file.flush().await.unwrap();
         drop(file);
 
-        let resolved = resolve_context_path(&ctx, &artifact.relative)
-            .expect("resolve reported relative path");
+        let resolved =
+            resolve_context_path(&ctx, &artifact.relative).expect("resolve reported relative path");
         assert_eq!(
             tokio::fs::read(resolved.path).await.unwrap(),
             b"full tool output"
