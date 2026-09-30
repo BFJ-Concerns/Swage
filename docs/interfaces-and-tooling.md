@@ -682,10 +682,14 @@ session has an attached workspace, these artefacts land at:
 
 `shell` writes stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
-artefact file is removed. The browser action tools (`browser_click`,
-`browser_type`, `browser_select`, `browser_scroll`) write screenshots;
-`browser_snapshot` writes accessibility snapshots as text. `url_fetch` saves
-raw HTML response bodies.
+artefact file is removed. Three browser action tools — `browser_click`,
+`browser_select`, and `browser_scroll` — write a post-action screenshot when
+the browser screenshot policy is not Off; `browser_type` never captures, so
+sensitive input is not written to disk. `browser_snapshot` writes a full
+accessibility snapshot as text only when the rendered snapshot is truncated;
+otherwise the result is inline with no artefact file. `url_fetch` writes
+`raw-body.html` only when the HTML body exceeds its capture limit; a body
+that fits is reported inline and the artefact file is removed.
 
 The path the tool result reports is relative to the workspace root (e.g.
 `.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
