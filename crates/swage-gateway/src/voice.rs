@@ -14,12 +14,13 @@ pub use swage_protocol::client::voice::{
 };
 
 pub async fn voice_capabilities(state: &AppState) -> VoiceCapabilitiesResponse {
-    let capabilities = state.voice_provider.capabilities();
+    let capabilities = state.active_voice_provider().capabilities();
     VoiceCapabilitiesResponse {
         transcription: capabilities.transcription,
         synthesis: capabilities.synthesis,
         default_voice: capabilities.default_voice,
         supported_voices: capabilities.supported_voices,
+        unavailable_reason: capabilities.unavailable_reason,
     }
 }
 
@@ -27,7 +28,8 @@ pub async fn transcribe_audio(
     state: &AppState,
     request: TranscribeAudioRequest,
 ) -> Result<TranscribeAudioResponse, ApiError> {
-    let capabilities = state.voice_provider.capabilities();
+    let voice_provider = state.active_voice_provider();
+    let capabilities = voice_provider.capabilities();
     if !capabilities.transcription {
         return Err(ApiError::validation(
             "voice transcription is unavailable for the configured runtime".to_string(),
@@ -44,8 +46,7 @@ pub async fn transcribe_audio(
         ));
     }
 
-    let response: TranscriptionResponse = state
-        .voice_provider
+    let response: TranscriptionResponse = voice_provider
         .transcribe(TranscriptionRequest {
             audio_bytes: request.audio_bytes,
             mime_type: request.mime_type,
@@ -62,7 +63,8 @@ pub async fn synthesise_speech(
     state: &AppState,
     request: SynthesiseSpeechRequest,
 ) -> Result<SynthesiseSpeechResponse, ApiError> {
-    let capabilities = state.voice_provider.capabilities();
+    let voice_provider = state.active_voice_provider();
+    let capabilities = voice_provider.capabilities();
     if !capabilities.synthesis {
         return Err(ApiError::validation(
             "voice synthesis is unavailable for the configured runtime".to_string(),
@@ -72,8 +74,7 @@ pub async fn synthesise_speech(
         return Err(ApiError::validation("text must not be empty".to_string()));
     }
 
-    let response: SpeechResponse = state
-        .voice_provider
+    let response: SpeechResponse = voice_provider
         .synthesise(SpeechRequest {
             text: request.text,
             voice: request.voice,

@@ -32,7 +32,7 @@ pub use model::{
     ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
     ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
-    SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
+    SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, VoiceConfig,
     resolve_provider_route,
 };
 

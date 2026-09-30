@@ -766,6 +766,20 @@ impl Default for SessionsConfig {
     }
 }
 
+/// Model routes for voice. Voice speaks only to the default provider's
+/// endpoint; each id is the model that endpoint serves for that audio API.
+/// An unset id leaves that capability unavailable — voice never falls back
+/// to the default chat model.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VoiceConfig {
+    /// Model id sent with speech-to-text requests (`/audio/transcriptions`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcription_model: Option<String>,
+    /// Model id sent with text-to-speech requests (`/audio/speech`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_model: Option<String>,
+}
+
 /// Named generation parameters that can be applied to provider requests.
 ///
 /// Empty presets are invalid at the settings API boundary. The config type is
@@ -863,6 +877,8 @@ pub struct ResolvedConfig {
     pub scheduling: SchedulingConfig,
     /// Session list housekeeping: the inactivity archive.
     pub sessions: SessionsConfig,
+    /// Model routes for transcription and speech synthesis.
+    pub voice: VoiceConfig,
     /// Named generation parameter presets available to model entries.
     pub generation: GenerationConfig,
     /// External communication channel configuration.

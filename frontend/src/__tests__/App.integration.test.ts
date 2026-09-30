@@ -253,6 +253,7 @@ function makeSettings(
       expiry_interval_secs: 60,
     },
     sessions: { archive_after_days: 7 },
+    voice: {},
     restart_required: false,
     can_restart: false,
   };
@@ -2140,5 +2141,29 @@ describe("App", () => {
     );
     expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
     expect(topicsApi.attachTopicWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("reaches the voice settings from the settings navigation", async () => {
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(makeSettings({}));
+    setPath("/settings/providers");
+    component = mount(App, { target: document.body });
+    await waitForText("Automation");
+
+    const voice = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        'nav[aria-label="Settings sections"] button',
+      ),
+    ).find((button) => button.textContent?.trim() === "Voice");
+    if (!voice) throw new Error("Settings navigation has no Voice entry");
+    flushSync(() => voice.click());
+    await settleUi();
+
+    expect(window.location.pathname).toBe("/settings/voice");
+    expect(
+      document.querySelector('input[aria-label="Transcription model"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain("OpenAI protocol");
   });
 });
