@@ -1507,9 +1507,13 @@ Tools that produce file artefacts write them into the attached workspace at:
 
 `shell` writes stdout and stderr artefacts only when the stream was truncated;
 a non-truncated stream is reported inline and the artefact file is removed.
-The browser action tools (`browser_click`, `browser_type`, `browser_select`,
-`browser_scroll`) write screenshots; `browser_snapshot` writes accessibility
-snapshots as text. `url_fetch` writes raw HTML response bodies.
+`browser_click`, `browser_select`, and `browser_scroll` write a post-action
+screenshot when the browser screenshot policy is not `Off`; `browser_type`
+never captures. `browser_snapshot` writes a full accessibility snapshot as
+text only when the rendered snapshot is truncated; otherwise the result is
+inline with no artefact. `url_fetch` writes `raw-body.html` only when the
+HTML body exceeds its capture limit; a body that fits is reported inline and
+the artefact file is removed.
 
 The tool result reports the artefact's relative path (e.g.
 `.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
