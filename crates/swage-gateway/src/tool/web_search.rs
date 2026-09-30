@@ -163,19 +163,20 @@ impl Tool for WebSearchTool {
         let max_results = params["max_results"].as_u64().unwrap_or(10) as usize;
 
         // Build a provider from config. Only SearxNG is supported for now.
-        let provider: Box<dyn SearchProvider> =
-            match swage_config::validation::validate_search_provider_type(&config.provider_type) {
-                Ok(()) => Box::new(SearxNgProvider {
-                    base_url: config.base_url.clone(),
-                    client: reqwest::Client::new(),
-                }),
-                Err(message) => {
-                    return Err(ToolError::ExecutionFailed {
-                        name: self.name().to_owned(),
-                        message,
-                    });
-                }
-            };
+        let provider: Box<dyn SearchProvider> = match config.provider_type.as_str() {
+            "searxng" => Box::new(SearxNgProvider {
+                base_url: config.base_url.clone(),
+                client: reqwest::Client::new(),
+            }),
+            unsupported => {
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: swage_config::validation::unsupported_search_provider_message(
+                        unsupported,
+                    ),
+                });
+            }
+        };
 
         let results = provider.search(&query, max_results).await.map_err(|msg| {
             ToolError::ExecutionFailed {
