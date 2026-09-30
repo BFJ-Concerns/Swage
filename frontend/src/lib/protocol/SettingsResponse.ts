@@ -11,5 +11,6 @@ import type { SandboxConfig } from "./SandboxConfig";
 import type { SessionsConfig } from "./SessionsConfig";
 import type { ToolPermissionConfig } from "./ToolPermissionConfig";
 import type { ToolRuntimeSettings } from "./ToolRuntimeSettings";
+import type { VoiceConfig } from "./VoiceConfig";
 
-export type SettingsResponse = { providers: { [key in string]: ProviderSettings }, default_provider: string, models: { [key in string]: ModelSettings }, default_model: string, generation_presets: { [key in string]: GenerationPresetConfig }, tool_runtime: ToolRuntimeSettings, tool_permissions: ToolPermissionConfig, hitl: HitlConfig, sandbox: SandboxConfig, context: ContextConfig, pricing: PricingConfig, observability: ObservabilityConfig, communication: CommunicationConfig, sessions: SessionsConfig, restart_required: boolean, can_restart: boolean, };
+export type SettingsResponse = { providers: { [key in string]: ProviderSettings }, default_provider: string, models: { [key in string]: ModelSettings }, default_model: string, generation_presets: { [key in string]: GenerationPresetConfig }, tool_runtime: ToolRuntimeSettings, tool_permissions: ToolPermissionConfig, hitl: HitlConfig, sandbox: SandboxConfig, context: ContextConfig, pricing: PricingConfig, observability: ObservabilityConfig, communication: CommunicationConfig, sessions: SessionsConfig, voice: VoiceConfig, restart_required: boolean, can_restart: boolean, };

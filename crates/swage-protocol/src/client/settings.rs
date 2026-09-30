@@ -478,6 +478,22 @@ pub struct SessionsConfig {
     pub archive_after_days: u64,
 }
 
+/// Model routes for voice, served by the default provider's endpoint. An
+/// unset id leaves that capability unavailable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
+pub struct VoiceConfig {
+    /// Model id sent with speech-to-text requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub transcription_model: Option<String>,
+    /// Model id sent with text-to-speech requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub speech_model: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SettingsResponse {
@@ -495,6 +511,7 @@ pub struct SettingsResponse {
     pub observability: ObservabilityConfig,
     pub communication: CommunicationConfig,
     pub sessions: SessionsConfig,
+    pub voice: VoiceConfig,
     pub restart_required: bool,
     pub can_restart: bool,
 }
@@ -536,6 +553,9 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub sessions: Option<SessionsConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub voice: Option<VoiceConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

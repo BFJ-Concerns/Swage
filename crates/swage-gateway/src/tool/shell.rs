@@ -106,8 +106,8 @@ impl Tool for ShellTool {
         let read_fut = async move {
             let (stdout_res, stderr_res) = tokio::join!(
                 // join! drives both reads concurrently — critical to avoid deadlock.
-                read_bounded(&mut stdout_pipe, cap, artifact_paths.stdout_path),
-                read_bounded(&mut stderr_pipe, cap, artifact_paths.stderr_path),
+                read_bounded(ctx, &mut stdout_pipe, cap, artifact_paths.stdout_path),
+                read_bounded(ctx, &mut stderr_pipe, cap, artifact_paths.stderr_path),
             );
 
             // Propagate I/O errors rather than panicking — a panic inside
@@ -236,6 +236,7 @@ fn shell_output_follow_up(path: &str) -> Value {
 /// Continues draining after the cap so the child process never stalls on a
 /// full pipe buffer.
 async fn read_bounded<R>(
+    ctx: &dyn ToolContext,
     reader: &mut R,
     cap: usize,
     artifact_path: Option<ToolOutputArtifactPath>,
@@ -247,7 +248,7 @@ where
     let mut tmp = [0u8; 4096];
     let mut total = 0usize;
     let mut artifact_writer = match artifact_path.as_ref() {
-        Some(path) => Some(create_tool_output_artifact(&path.absolute).await?),
+        Some(path) => Some(create_tool_output_artifact(ctx, &path.absolute).await?),
         None => None,
     };
 
