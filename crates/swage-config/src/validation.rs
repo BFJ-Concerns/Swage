@@ -42,6 +42,20 @@ const KNOWN_SECTIONS: &[&str] = &[
     "channels",
 ];
 
+const SUPPORTED_SEARCH_PROVIDERS: &[&str] = &["searxng"];
+
+/// Refuse search backends the web search tool cannot implement.
+pub fn validate_search_provider_type(provider_type: &str) -> Result<(), String> {
+    if SUPPORTED_SEARCH_PROVIDERS.contains(&provider_type) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported search provider '{provider_type}'; expected one of: {}",
+            SUPPORTED_SEARCH_PROVIDERS.join(", ")
+        ))
+    }
+}
+
 /// The longest inactivity delay a session archive may be configured with —
 /// ten years, well inside what a date arithmetic library accepts.
 pub const MAX_ARCHIVE_AFTER_DAYS: i64 = 3650;
@@ -279,14 +293,12 @@ fn check_field_semantics(
         }
         ("tools", "search") => {
             if let Some(Value::String(provider_type)) = value.get("provider_type")
-                && provider_type != "searxng"
+                && let Err(message) = validate_search_provider_type(provider_type)
             {
                 problems.push(make_problem(
                     file_path,
                     Some(format!("{field_path}.provider_type")),
-                    ConfigProblemKind::SemanticError {
-                        message: format!("unsupported search provider '{provider_type}'; expected one of: searxng"),
-                    },
+                    ConfigProblemKind::SemanticError { message },
                 ));
             }
         }
