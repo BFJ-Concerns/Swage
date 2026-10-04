@@ -1233,6 +1233,7 @@ mod tests {
                     "thread_id": root_thread_id,
                     "turn_id": Uuid::new_v4(),
                     "role": "user",
+                    "origin": "user",
                     "content": "Hello",
                     "timestamp": "2025-01-01T00:01:00Z",
                     "turn_state": "completed",
