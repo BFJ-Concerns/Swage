@@ -111,12 +111,14 @@ describe("MemoryPanel", () => {
 
   it("sends an instruction to the curator for the chosen scope and shows its reply and the changed page", async () => {
     let sent: unknown;
+    const topicPages = [{ reference: "topic/conventions", summary: null as string | null }];
     gateway({
       general: [{ reference: "general/profile", summary: null }],
-      topic: [{ reference: "topic/conventions", summary: null }],
+      topic: topicPages,
       bodies: { "general:general/profile": "Ben takes Fridays off." },
       instruct: (body) => {
         sent = body;
+        topicPages.push({ reference: "topic/harvest", summary: null });
         return json({
           reply: "Removed the note about Fridays.",
           pages_changed: [{ reference: "topic/conventions", summary: null, body: "Beds are labelled south to north." }],
@@ -148,6 +150,10 @@ describe("MemoryPanel", () => {
     const changed = document.querySelector('[aria-label="Pages the curator changed"]');
     expect(changed?.textContent).toContain("topic/conventions");
     expect(changed?.textContent).toContain("Beds are labelled south to north.");
+    // A page the instruction created joins the listing without a reload.
+    await vi.waitFor(() =>
+      expect(document.querySelector('[aria-label="Garden memory pages"]')?.textContent).toContain("topic/harvest"),
+    );
   });
 
   it("says when an instruction changed no page, and shows a refused instruction's error", async () => {
