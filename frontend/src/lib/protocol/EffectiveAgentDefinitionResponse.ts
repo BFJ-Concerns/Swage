@@ -4,4 +4,9 @@ import type { EffectiveAgentDefinitionSourceScope } from "./EffectiveAgentDefini
 /**
  * An agent definition available when creating a session in one topic.
  */
-export type EffectiveAgentDefinitionResponse = { id: string, display_name: string, description: string, instructions: string, model_id?: string | null, tool_permissions: unknown, skills: Array<string>, output_schema: unknown, output_max_retries?: number | null, is_builtin: boolean, source_scope: EffectiveAgentDefinitionSourceScope, };
+export type EffectiveAgentDefinitionResponse = { id: string, display_name: string, description: string, instructions: string, model_id?: string | null, tool_permissions: unknown, skills: Array<string>, output_schema: unknown, output_max_retries?: number | null, is_builtin: boolean,
+/**
+ * Whether the picker offers it for a new session; a platform agent that
+ * runs only where the platform runs it is listed but not offered.
+ */
+selectable: boolean, source_scope: EffectiveAgentDefinitionSourceScope, };

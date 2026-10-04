@@ -329,6 +329,7 @@ function makeAgentDefinition(
     output_schema: null,
     output_max_retries: null,
     is_builtin: false,
+    selectable: true,
     source_scope: "global",
     ...overrides,
   };
@@ -1236,6 +1237,7 @@ describe("App", () => {
         id: "gateway",
         display_name: "Swage default",
         is_builtin: true,
+        selectable: true,
       }),
       makeAgentDefinition({
         id: "picker-witness",
@@ -1350,6 +1352,7 @@ describe("App", () => {
         id: "swage-default",
         display_name: "Swage default",
         is_builtin: true,
+        selectable: true,
       }),
       makeAgentDefinition({ id: "reviewer", display_name: "Review companion" }),
     ]);

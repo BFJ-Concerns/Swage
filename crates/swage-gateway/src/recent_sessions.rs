@@ -83,6 +83,17 @@ pub async fn list_recent_sessions(
     let mut conversations: HashMap<Uuid, RecentSession> = HashMap::new();
     let mut groups: HashMap<Root, Vec<RecentSession>> = HashMap::new();
     for activity in &listed {
+        // A curator session that curated no conversation is reached from
+        // Settings (the instruction that ran it); it is not a conversation
+        // the list offers.
+        if matches!(
+            activity.session.origin,
+            SessionOrigin::MemoryCuration {
+                attended_session_id: None
+            }
+        ) {
+            continue;
+        }
         let root = root_of(state, &activity.session.id, &activity.session.origin).await?;
         if !groups.contains_key(&root) {
             sources.push(root.clone());
@@ -178,6 +189,11 @@ fn wire_origin(origin: &SessionOrigin) -> WireSessionOrigin {
         SessionOrigin::Delegation { parent_session_id } => WireSessionOrigin::Delegation {
             parent_session_id: *parent_session_id,
         },
+        SessionOrigin::MemoryCuration {
+            attended_session_id,
+        } => WireSessionOrigin::MemoryCuration {
+            attended_session_id: *attended_session_id,
+        },
     }
 }
 
@@ -204,6 +220,21 @@ async fn root_of(
                     None => return Ok(Root::Conversation(parent_session_id)),
                 }
             }
+            // A curator session files under the conversation it curated; one
+            // that curated nothing in particular (an instruction from
+            // Settings) is its own root.
+            SessionOrigin::MemoryCuration {
+                attended_session_id: Some(attended),
+            } => match state.storage.get_session(attended).await? {
+                Some(parent) => {
+                    current_session = parent.id;
+                    current_origin = parent.origin;
+                }
+                None => return Ok(Root::Conversation(attended)),
+            },
+            SessionOrigin::MemoryCuration {
+                attended_session_id: None,
+            } => return Ok(Root::Conversation(current_session)),
             SessionOrigin::WorkflowWorker { run_id } => {
                 let mut run_id = run_id;
                 let mut dispatching_session = None;
@@ -497,6 +528,54 @@ mod tests {
             panic!("expected the run as source");
         };
         assert_eq!(label.as_deref(), Some("build-verify"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_curator_session_files_under_its_conversation_and_an_instruction_s_stays_out() {
+        let (state, storage) = make_state();
+        let topic = storage.general_scope().await.unwrap();
+        let conversation = open(&storage, topic.id, SessionOrigin::Direct).await;
+        say(&storage, conversation, "hello").await;
+        let curator = open(
+            &storage,
+            topic.id,
+            SessionOrigin::MemoryCuration {
+                attended_session_id: Some(conversation),
+            },
+        )
+        .await;
+        let instruction = open(
+            &storage,
+            topic.id,
+            SessionOrigin::MemoryCuration {
+                attended_session_id: None,
+            },
+        )
+        .await;
+
+        let response = list_recent_sessions(
+            &state,
+            SessionListing {
+                topic_id: None,
+                archived: false,
+                include_archived: false,
+            },
+        )
+        .await
+        .unwrap();
+        let entries = entry_ids(&response);
+        assert_eq!(entries.len(), 1, "one group: the conversation, {entries:?}");
+        assert_eq!(
+            entries[0].1,
+            vec![curator],
+            "the curator's pass is filed under it"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|(_, children)| children.contains(&instruction)),
+            "an instruction's session is reached from Settings, not the list"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

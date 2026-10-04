@@ -38,6 +38,28 @@ describe("AgentPicker", () => {
     ]);
   });
 
+  it("never offers a definition the platform keeps for itself", () => {
+    component = mount(AgentPicker, {
+      target: document.body,
+      props: {
+        definitions: [
+          makeAgentDefinition("default", "built_in", { display_name: "Swage default" }),
+          makeAgentDefinition("memory-curator", "built_in", {
+            display_name: "Memory curator",
+            selectable: false,
+          }),
+          makeAgentDefinition("project", "global", { display_name: "Project agent" }),
+        ],
+      },
+    });
+
+    const picker = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    expect(Array.from(picker!.options, (option) => option.textContent)).toEqual([
+      "Swage default",
+      "Project agent",
+    ]);
+  });
+
   it("addresses each definition by its own id and reports the chosen one", () => {
     let selectedAgentId = "";
     component = mount(AgentPicker, {

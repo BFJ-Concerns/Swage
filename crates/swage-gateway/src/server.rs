@@ -298,6 +298,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/secrets/{id}/validate",
             post(handlers::validate_secret),
         )
+        .route("/api/memory/pages", get(handlers::list_memory_pages))
+        .route("/api/memory/page", get(handlers::get_memory_page))
+        .route(
+            "/api/memory/instructions",
+            post(handlers::apply_memory_instruction),
+        )
         .route("/api/operator/runs", get(handlers::list_operator_runs))
         .route(
             "/api/operator/runs/{kind}/{id}",

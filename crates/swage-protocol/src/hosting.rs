@@ -293,6 +293,9 @@ pub struct EffectiveAgentDefinitionResponse {
     #[ts(optional, type = "number | null")]
     pub output_max_retries: Option<u32>,
     pub is_builtin: bool,
+    /// Whether the picker offers it for a new session; a platform agent that
+    /// runs only where the platform runs it is listed but not offered.
+    pub selectable: bool,
     pub source_scope: EffectiveAgentDefinitionSourceScope,
 }
 

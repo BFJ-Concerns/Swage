@@ -357,6 +357,7 @@ fn effective_agent_definition_response(
         output_schema: definition.output_schema,
         output_max_retries: definition.output_max_retries,
         is_builtin: effective.is_builtin,
+        selectable: effective.selectable,
         source_scope,
     }
 }
@@ -2275,6 +2276,7 @@ mod tests {
                     output_max_retries: None,
                 },
                 is_builtin,
+                selectable: true,
             }
         }
 
@@ -5089,4 +5091,115 @@ mod tests {
             "/var/lib/swage/scratch/topics/example/sessions/example"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Memory: the operator's pages and the curator's instruction route
+// ---------------------------------------------------------------------------
+
+/// Which memory scope a request addresses: the general scope unless a topic
+/// is named.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryScopeQuery {
+    pub topic_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryPageQuery {
+    pub topic_id: Option<Uuid>,
+    pub reference: String,
+}
+
+fn memory_scope_selector(
+    topic_id: Option<Uuid>,
+) -> swage_protocol::client::memory::MemoryScopeSelector {
+    match topic_id {
+        Some(topic_id) => swage_protocol::client::memory::MemoryScopeSelector::Topic { topic_id },
+        None => swage_protocol::client::memory::MemoryScopeSelector::General,
+    }
+}
+
+/// `GET /api/memory/pages?topic_id=` — every page of one scope, as the
+/// index lists them.
+pub async fn list_memory_pages(
+    State(state): State<AppState>,
+    Query(query): Query<MemoryScopeQuery>,
+) -> Result<Json<swage_protocol::client::memory::MemoryPageListResponse>, ApiError> {
+    let scope = memory_scope_selector(query.topic_id);
+    let (_, location) = crate::memory_curation::topic_for_scope(&state, &scope).await?;
+    let memory_scope = if location.is_general() {
+        crate::memory::MemoryScope::General
+    } else {
+        crate::memory::MemoryScope::Topic
+    };
+    let pages = crate::memory::list_entries(&state.config_root, &location, memory_scope)
+        .await
+        .map_err(|error| ApiError::internal(format!("memory could not be listed: {error}")))?
+        .into_iter()
+        .map(|line| swage_protocol::client::memory::MemoryPageSummary {
+            reference: line.reference.to_string(),
+            summary: line.summary,
+        })
+        .collect();
+    Ok(Json(
+        swage_protocol::client::memory::MemoryPageListResponse { scope, pages },
+    ))
+}
+
+/// `GET /api/memory/page?reference=&topic_id=` — one page, whole.
+pub async fn get_memory_page(
+    State(state): State<AppState>,
+    Query(query): Query<MemoryPageQuery>,
+) -> Result<Json<swage_protocol::client::memory::MemoryPageResponse>, ApiError> {
+    let scope = memory_scope_selector(query.topic_id);
+    let (_, location) = crate::memory_curation::topic_for_scope(&state, &scope).await?;
+    let reference = crate::memory::MemoryReference::parse(&query.reference)
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    let entry_location = crate::memory::scope_location_for(&reference, &location)
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    let entry = crate::memory::read_entry(&state.config_root, &entry_location, &reference)
+        .await
+        .map_err(|error| ApiError::internal(format!("memory could not be read: {error}")))?
+        .ok_or_else(|| ApiError::not_found_str("memory page", &reference.to_string()))?;
+    Ok(Json(swage_protocol::client::memory::MemoryPageResponse {
+        reference: reference.to_string(),
+        summary: entry.summary,
+        body: entry.body,
+    }))
+}
+
+/// `POST /api/memory/instructions` — change memory by instructing the
+/// curator; the response shows every page it changed, whole.
+pub async fn apply_memory_instruction(
+    State(state): State<AppState>,
+    Json(request): Json<swage_protocol::client::memory::MemoryInstructionRequest>,
+) -> Result<Json<swage_protocol::client::memory::MemoryInstructionResponse>, ApiError> {
+    let (topic_id, location) =
+        crate::memory_curation::topic_for_scope(&state, &request.scope).await?;
+    let pass =
+        crate::memory_curation::apply_instruction(&state, topic_id, &request.instruction).await?;
+    let mut pages_changed = Vec::with_capacity(pass.entries_written.len());
+    for reference in &pass.entries_written {
+        let entry_location = crate::memory::scope_location_for(reference, &location)
+            .map_err(|error| ApiError::validation(error.to_string()))?;
+        if let Some(entry) =
+            crate::memory::read_entry(&state.config_root, &entry_location, reference)
+                .await
+                .map_err(|error| ApiError::internal(format!("memory could not be read: {error}")))?
+        {
+            pages_changed.push(swage_protocol::client::memory::MemoryPageResponse {
+                reference: reference.to_string(),
+                summary: entry.summary,
+                body: entry.body,
+            });
+        }
+    }
+    Ok(Json(
+        swage_protocol::client::memory::MemoryInstructionResponse {
+            reply: pass.reply,
+            pages_changed,
+            curator_session_id: pass.curator_session_id,
+            turn_id: pass.turn_id,
+        },
+    ))
 }

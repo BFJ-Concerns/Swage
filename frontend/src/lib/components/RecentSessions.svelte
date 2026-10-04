@@ -93,6 +93,8 @@
         return "workflow worker";
       case "delegation":
         return "delegated";
+      case "memory_curation":
+        return "memory curation";
       case "direct":
         return "conversation";
     }

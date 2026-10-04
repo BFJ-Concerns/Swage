@@ -2305,6 +2305,148 @@
         ],
         "type": "object"
       },
+      "MemoryInstructionRequest": {
+        "additionalProperties": false,
+        "description": "An instruction to the curator about the operator's memory — the only way\na page changes from Settings.",
+        "properties": {
+          "instruction": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScopeSelector"
+          }
+        },
+        "required": [
+          "scope",
+          "instruction"
+        ],
+        "type": "object"
+      },
+      "MemoryInstructionResponse": {
+        "description": "What the curator did with an instruction: its reply, and every page it\nchanged, whole, so the view shows the result as instructed.",
+        "properties": {
+          "curator_session_id": {
+            "description": "The curator session the instruction ran in — its record of the pass.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "pages_changed": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryPageResponse"
+            },
+            "type": "array"
+          },
+          "reply": {
+            "type": "string"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reply",
+          "pages_changed",
+          "curator_session_id",
+          "turn_id"
+        ],
+        "type": "object"
+      },
+      "MemoryPageListResponse": {
+        "description": "Every page of one scope.",
+        "properties": {
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryPageSummary"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/MemoryScopeSelector"
+          }
+        },
+        "required": [
+          "scope",
+          "pages"
+        ],
+        "type": "object"
+      },
+      "MemoryPageResponse": {
+        "description": "One page, whole.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reference",
+          "body"
+        ],
+        "type": "object"
+      },
+      "MemoryPageSummary": {
+        "description": "One memory page as the index lists it: its reference and the curator's\none-sentence summary.",
+        "properties": {
+          "reference": {
+            "description": "The reference the index spells: `general/<entry>` or `topic/<entry>`.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Absent when the page carries no summary line yet.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reference"
+        ],
+        "type": "object"
+      },
+      "MemoryScopeSelector": {
+        "description": "Which memory store a request addresses: the operator's general memory,\nor one topic's.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "general",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "topic",
+                "type": "string"
+              },
+              "topic_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "topic_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "MessageAttachment": {
         "description": "Something submitted beside a message's text and carried to the model as\nits own content part. The tag names what the attachment is; a client\nsends only kinds the gateway's configured provider can consume, and the\ngateway refuses the turn otherwise rather than dropping the part.",
         "oneOf": [
@@ -4841,6 +4983,26 @@
             "required": [
               "kind",
               "parent_session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The platform's memory curator opened it, to curate the named\nconversation or (naming none) to apply an instruction from Settings.",
+            "properties": {
+              "attended_session_id": {
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "memory_curation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
             ],
             "type": "object"
           }
@@ -8785,6 +8947,110 @@
           }
         },
         "summary": "Read one hosted document by name."
+      }
+    },
+    "/api/memory/instructions": {
+      "post": {
+        "operationId": "apply_memory_instruction",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryInstructionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryInstructionResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Change memory by instructing the platform's curator; the reply shows every page it changed."
+      }
+    },
+    "/api/memory/page": {
+      "get": {
+        "operationId": "get_memory_page",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "topic_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryPageResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read one memory page, whole, by the reference the index spells."
+      }
+    },
+    "/api/memory/pages": {
+      "get": {
+        "operationId": "list_memory_pages",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "topic_id",
+            "required": false,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryPageListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List every memory page of one scope — general memory, or a topic's."
       }
     },
     "/api/sessions": {

@@ -167,6 +167,36 @@ impl Tool for MemoryWriteTool {
         write_entry(&root, &location, &reference, summary, body)
             .await
             .map_err(|error| failed(tool, error))?;
+        // Every page change is in the unified record: which page, from which
+        // session, by which agent. A write that cannot be recorded is a loud
+        // failure, not a silent one — the page stands and the result says so.
+        let state =
+            super::require_gateway_state(ctx, tool, "memory_write runs on the gateway host")?;
+        let session_id = ctx.session_id().parse::<uuid::Uuid>().ok();
+        state
+            .storage
+            .create_audit_event(swage_storage::NewAuditEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id,
+                entity_kind: "memory_entry".into(),
+                entity_id: reference.to_string(),
+                event_kind: "memory_entry_written".into(),
+                summary: format!("memory entry {reference} written"),
+                metadata: json!({
+                    "reference": reference.to_string(),
+                    "scope": reference.scope.label(),
+                    "summary": summary,
+                    "bytes": body.len(),
+                    "agent_id": ctx.agent_id(),
+                }),
+            })
+            .await
+            .map_err(|error| {
+                failed(
+                    tool,
+                    format!("the entry was written but its record could not be: {error}"),
+                )
+            })?;
         Ok(json!({
             "reference": reference.to_string(),
             "recorded": true,

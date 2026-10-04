@@ -738,6 +738,10 @@
           "minimum": 0
         },
         "output_schema": true,
+        "selectable": {
+          "description": "Whether the picker offers it for a new session; a platform agent that\nruns only where the platform runs it is listed but not offered.",
+          "type": "boolean"
+        },
         "skills": {
           "type": "array",
           "items": {
@@ -756,6 +760,7 @@
         "instructions",
         "skills",
         "is_builtin",
+        "selectable",
         "source_scope"
       ]
     },

@@ -32,6 +32,10 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
+/// The memory curator's prompt: the instructions every curation pass runs
+/// under. The authored default is the first variant.
+pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

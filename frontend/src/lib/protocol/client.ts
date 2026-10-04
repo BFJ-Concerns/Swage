@@ -18,6 +18,10 @@ import type { DocumentListResponse } from "./DocumentListResponse";
 import type { DocumentResponse } from "./DocumentResponse";
 import type { LibraryEntryResponse } from "./LibraryEntryResponse";
 import type { LibraryListResponse } from "./LibraryListResponse";
+import type { MemoryInstructionRequest } from "./MemoryInstructionRequest";
+import type { MemoryInstructionResponse } from "./MemoryInstructionResponse";
+import type { MemoryPageListResponse } from "./MemoryPageListResponse";
+import type { MemoryPageResponse } from "./MemoryPageResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
@@ -162,6 +166,28 @@ export async function deleteConversation(id: string): Promise<void> {
 /** Read a turn context report. */
 export async function getTurnContext(id: string): Promise<TurnContextResponse> {
   return request<TurnContextResponse>("GET", `/api/turns/${encodeURIComponent(id)}/context`);
+}
+
+/** List every memory page of one scope — general memory, or a topic's. */
+export async function listMemoryPages(topicId?: string): Promise<MemoryPageListResponse> {
+  const query = new URLSearchParams();
+  if (topicId !== undefined) query.set("topic_id", topicId);
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<MemoryPageListResponse>("GET", `/api/memory/pages${suffix}`);
+}
+
+/** Read one memory page, whole, by the reference the index spells. */
+export async function getMemoryPage(reference: string, topicId?: string): Promise<MemoryPageResponse> {
+  const query = new URLSearchParams();
+  query.set("reference", reference);
+  if (topicId !== undefined) query.set("topic_id", topicId);
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<MemoryPageResponse>("GET", `/api/memory/page${suffix}`);
+}
+
+/** Change memory by instructing the platform's curator; the reply shows every page it changed. */
+export async function applyMemoryInstruction(body: MemoryInstructionRequest): Promise<MemoryInstructionResponse> {
+  return request<MemoryInstructionResponse>("POST", `/api/memory/instructions`, body);
 }
 
 /** List a session's surfaces — the work surfaces open with it. */
