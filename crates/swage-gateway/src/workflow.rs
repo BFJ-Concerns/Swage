@@ -15882,7 +15882,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -26420,7 +26420,7 @@ protocol = "openai"
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -26571,7 +26571,7 @@ protocol = "openai"
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -26777,7 +26777,7 @@ protocol = "openai"
             Arc::new(PendingWithoutEvidenceProvider {
                 pending: Arc::clone(&pending),
             }),
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
