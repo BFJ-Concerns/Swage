@@ -5849,16 +5849,16 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
 // Test helpers
 // -----------------------------------------------------------------------
 
-/// Build an AppState with a pre-populated session and its default thread.
-///
-/// Returns the state and the session_id. The thread is created automatically
-/// so that `process_turn` can look it up via `list_by_session`.
 pub(crate) fn sandboxed_turn_config() -> swage_config::ResolvedConfig {
     let mut config = swage_config::ResolvedConfig::default();
     config.sandbox.enabled = true;
     config
 }
 
+/// Build an AppState with a pre-populated session and its default thread.
+///
+/// Returns the state and the session_id. The thread is created automatically
+/// so that `process_turn` can look it up via `list_by_session`.
 pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
     make_state_with_storage(provider_chunks, storage).await
