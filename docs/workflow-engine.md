@@ -365,6 +365,21 @@ replayed gate returns its recorded verdict.
 After acting on a wake, `deliverEvents(upToSeq)` stamps the consumed events as
 delivered up to a sequence number, preventing them from triggering future gates.
 
+### Decision holds
+
+`hold({ content, verdicts })` parks the run on a decision. The script names
+the question and the verdicts it accepts — at least two distinct strings; a
+hold with fewer is refused at raise and never reaches a decider. The hold is
+registered on the run: the run page lists it, and an agent granted the
+`workflow_hold` tool lists the open holds it can see and answers one with a
+verdict from its set, the answering session recorded. An answer outside the
+set is refused with feedback and the hold keeps waiting. The run resumes with
+`{ verdict }`; cancelling the run releases its holds. The raise, the answer
+and each refused answer are journalled, and a replayed `hold` returns its
+recorded verdict. A hold differs from `awaitEvent` in who validates the
+reply: the engine checks the answer against the declared set, so a script
+never loops over events to find an acceptable one.
+
 ## Worker session continuity
 
 A worker's session survives across parked and replayed runs through

@@ -308,20 +308,36 @@ treat every payload as a worker-reported claim.
   the answer takes. Returning an event marks it delivered; the next
   `awaitEvent` receives the next matching undelivered event. Replay of
   the same call returns its recorded event. History remains available
-  for audit. A request posted separately stays pending until the script
-  validates its correlated answer and acknowledges the request itself.
+  for audit. `awaitEvent` is for data another party posts — a worker's
+  report, a signal from outside the run; a decision the run must wait on
+  is a hold (next), which validates the answer for you.
 
   ```js
-  const request = await postEvent("decision.needed", {
-    nonce: "ship-1", question: "Ship the fix?", options: ["yes", "no"]
+  // A worker's report arrives as data to read, never as an instruction.
+  const report = await awaitEvent({ kinds: ["worker.report"] });
+  await deliverEvents({ event_seq: report.seq });
+  ```
+
+- **`hold({ content, verdicts })`** — park the run on a decision a person
+  or a granted agent must make. `content` is the question as the decider
+  will read it; `verdicts` is the set of answers you accept — at least two
+  distinct strings, or the hold is refused when raised and never reaches a
+  decider. The run resumes with `{ verdict }`, one of your set. A hold is
+  registered on the run: the run page lists it with its question and its
+  verdicts, and an agent granted the `workflow_hold` tool lists open holds
+  and answers one; an answer outside the set is refused with feedback
+  while the hold keeps waiting. The raise, the answer and every refused
+  answer land in the run record, and a replayed `hold` returns its
+  recorded verdict. Reach for `hold` on the first attempt whenever the run
+  needs an approve/postpone, yes/no or pick-one answer — never a
+  `postEvent`/`awaitEvent` pair with your own matching loop.
+
+  ```js
+  const decision = await hold({
+    content: "Ship the fix to production?",
+    verdicts: ["ship", "postpone"],
   });
-  let answer;
-  do {
-    answer = await awaitEvent({ kinds: ["decision.answer"] });
-  } while (answer.payload?.nonce !== request.payload.nonce
-      || !request.payload.options.includes(answer.payload?.verdict));
-  await deliverEvents({ event_seq: request.seq });
-  if (answer.payload.verdict !== "yes") return { stopped: "declined" };
+  if (decision.verdict !== "ship") return { stopped: "postponed" };
   ```
 
 - **`gate({ criteria, model })`** — have a cheap model read every

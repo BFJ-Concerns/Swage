@@ -1183,7 +1183,11 @@ async fn run_body(
                 .get_session(*session_id)
                 .await?
                 .ok_or(GatewayError::ConversationNotFound { id: *session_id })?;
-            (session.id, session.agent_id, schedule.message.clone())
+            (
+                session.id,
+                session.agent_id,
+                compose_continuation_brief(&schedule.message),
+            )
         }
     };
     state
@@ -1481,6 +1485,18 @@ async fn previous_run_outcome(
 fn compose_fresh_opening(message: &str, previous_outcome: Option<&str>) -> String {
     let previous = previous_outcome.unwrap_or("This is the first run of this schedule.");
     format!("{message}\n\n## Previous run outcome\n\n{previous}")
+}
+
+/// The turn input a continuation run presents: the brief framed as this
+/// run's scheduled task, so the model carries out the brief and does not
+/// pick up unrelated open work from the conversation it continues.
+fn compose_continuation_brief(message: &str) -> String {
+    format!(
+        "## Scheduled task\n\nThis turn is a scheduled run in this conversation. Carry out the \
+         task below, and only it: the conversation's earlier messages are context for doing it, \
+         not work to resume — anything left open there waits for the person who opened \
+         it.\n\n{message}"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,6 +2177,17 @@ mod tests {
 
         let first = compose_fresh_opening("Check the queue.", None);
         assert!(first.contains("first run of this schedule"));
+    }
+
+    #[test]
+    fn continuation_brief_is_framed_as_this_runs_scheduled_task() {
+        let brief = compose_continuation_brief("Append today's note to the log.");
+        assert!(brief.starts_with("## Scheduled task"));
+        assert!(
+            brief.contains("only it"),
+            "the frame confines the run to its brief"
+        );
+        assert!(brief.ends_with("Append today's note to the log."));
     }
 
     #[test]
