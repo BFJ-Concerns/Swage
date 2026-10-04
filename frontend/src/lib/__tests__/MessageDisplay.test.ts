@@ -258,6 +258,84 @@ describe("settled partial responses", () => {
   });
 });
 
+describe("turns that ended without a reply, as loaded", () => {
+  function makeRequest(overrides: Partial<MessageView>): MessageView {
+    _msgSeq += 1;
+    return {
+      id: `m-${_msgSeq}`,
+      role: "user",
+      origin: "user",
+      content: "write the file",
+      timestamp: `2026-03-20T10:00:${String(_msgSeq).padStart(2, "0")}Z`,
+      turn_id: "turn-1",
+      turn_state: "interrupted",
+      ...overrides,
+    };
+  }
+
+  it("shows an interrupted turn's tool calls and state on its request", () => {
+    const store = makeConversationStore([
+      makeRequest({
+        tool_calls: [
+          makeToolCall({ call_id: "write", tool: "file_write", status: "success" }),
+          makeToolCall({ call_id: "shell", tool: "shell", status: "interrupted", result: null }),
+        ],
+      }),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    const request = document.body.querySelector('[aria-label="Your message"]');
+    expect(request?.querySelectorAll(".tool-call")).toHaveLength(2);
+    expect(request?.textContent).toContain("file_write");
+    expect(request?.textContent).toContain("Interrupted before a reply");
+  });
+
+  it("shows a failed turn's explanation on its request and retries the request", () => {
+    const startTurn = vi.fn();
+    const store = makeConversationStore([
+      makeRequest({
+        content: "Hello?",
+        turn_state: "failed",
+        failure_message: "provider unreachable: connection refused",
+      }),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: { ...makeStreamingStore(), startTurn } },
+    });
+
+    const request = document.body.querySelector('[aria-label="Your message"]');
+    expect(request?.querySelector('[role="alert"]')?.textContent).toContain(
+      "provider unreachable: connection refused",
+    );
+    const retry = [...(request?.querySelectorAll("button") ?? [])].find(
+      (button) => button.textContent === "Retry",
+    );
+    retry?.click();
+    expect(startTurn).toHaveBeenCalledWith("Hello?");
+  });
+
+  it("leaves a request whose turn replied without a failure account", () => {
+    const store = makeConversationStore([
+      makeRequest({ content: "Hi", turn_state: "failed" }),
+      makeAssistantMessage("Partial", undefined, undefined, "failed", "turn-1"),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    expect(document.body.textContent).not.toContain("No reply");
+    expect(document.body.textContent).toContain("Response failed");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Historical tool calls (committed messages)
 // ---------------------------------------------------------------------------
