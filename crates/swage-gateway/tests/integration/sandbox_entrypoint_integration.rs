@@ -214,3 +214,136 @@ async fn fallback_sandbox_real_binary_rejects_oversized_ipc_payloads() {
 
     sandbox.shutdown().await.unwrap();
 }
+
+/// Host PID of the process whose command line is exactly `argv` and whose PID
+/// in its own namespace (the last `NSpid` field) is `namespace_pid`.
+fn host_pid_of(argv: &[&str], namespace_pid: &str) -> Option<u32> {
+    std::fs::read_dir("/proc")
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let args: Vec<&[u8]> = cmdline
+                .split(|b| *b == 0)
+                .filter(|a| !a.is_empty())
+                .collect();
+            if args != argv.iter().map(|a| a.as_bytes()).collect::<Vec<_>>() {
+                return None;
+            }
+            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
+            let ns_pid = status.lines().find_map(|l| l.strip_prefix("NSpid:"))?;
+            (ns_pid.split_whitespace().last()? == namespace_pid).then_some(pid)
+        })
+}
+
+/// Whether `pid` still names a live (not yet exited) process.
+fn is_live(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        // The state field follows the parenthesised command name.
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z') && !rest.starts_with('X'))
+    })
+}
+
+/// Start a shell command that spawns a long-lived descendant (a `sleep` with
+/// its own command line) and appends to a marker file every 200 ms, abandon
+/// the call as a cancelled turn does (by dropping its future), then require
+/// the marker to stop growing, the descendant's PID to be gone, and the
+/// sandbox to serve the next call.
+async fn assert_abandoned_shell_command_stops(sandbox: &dyn Sandbox, workspace: &std::path::Path) {
+    let marker = workspace.join("marker");
+    // A duration unique to this run, so the descendant's command line names
+    // only this test's process.
+    let sleep_arg = format!(
+        "300.{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    );
+    let command = format!(
+        "sleep {sleep_arg} & echo $! > descendant.pid; \
+         while true; do date +%s%N >> marker; sleep 0.2; done"
+    );
+    let mut call = Box::pin(sandbox.execute_tool("shell", json!({ "command": command })));
+    // Capture the descendant while the call is still pending, so its PID is
+    // read before any cancellation can have fired.
+    let descendant = tokio::select! {
+        result = call.as_mut() => panic!("the looping command must still be running, got {result:?}"),
+        descendant = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let found = std::fs::read_to_string(workspace.join("descendant.pid"))
+                    .ok()
+                    .and_then(|pid| host_pid_of(&["sleep", &sleep_arg], pid.trim()));
+                if let Some(pid) = found.filter(|_| marker.exists()) {
+                    return pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }) => descendant.expect("the command and its descendant must start"),
+    };
+    assert!(
+        is_live(descendant),
+        "the descendant must be running before the call is abandoned"
+    );
+    // Abandon the call as a cancelled turn does: drop its pending future.
+    drop(call);
+
+    // Allow the cancel to reach the agent and the process group to die.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let settled_len = std::fs::metadata(&marker).unwrap().len();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().len(),
+        settled_len,
+        "the abandoned command must stop appending to its marker"
+    );
+    assert!(
+        !is_live(descendant),
+        "the abandoned command's descendant (pid {descendant}) must be gone"
+    );
+
+    let next = sandbox
+        .execute_tool("shell", json!({ "command": "printf after-cancel" }))
+        .await
+        .expect("the sandbox must serve the call after a cancelled one");
+    assert!(
+        next.output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("after-cancel")),
+        "the next call must receive its own result, got: {}",
+        next.output
+    );
+}
+
+#[tokio::test]
+async fn bubblewrap_sandbox_real_binary_stops_abandoned_shell_command() {
+    if find_bwrap().is_err() {
+        eprintln!("skipping real bubblewrap integration test: bwrap is not installed");
+        return;
+    }
+
+    let mut env_guard = ProcessEnvGuard::new();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut sandbox = BubblewrapSandbox::new(test_config(&temp_dir), test_llm_handler());
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    sandbox.spawn_agent().await.unwrap();
+
+    assert_abandoned_shell_command_stops(&sandbox, temp_dir.path()).await;
+
+    sandbox.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fallback_sandbox_real_binary_stops_abandoned_shell_command() {
+    let mut env_guard = ProcessEnvGuard::new();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    sandbox.spawn_agent().await.unwrap();
+
+    assert_abandoned_shell_command_stops(&sandbox, temp_dir.path()).await;
+
+    sandbox.shutdown().await.unwrap();
+}

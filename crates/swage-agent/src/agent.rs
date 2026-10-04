@@ -952,14 +952,14 @@ impl Agent {
                     // from tool dispatch may leave without persisting it here.
                     self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
                         .await;
-                    // Settle every started row without a recorded result so
-                    // history replay can explain the unknown outcome.
+                    // Settle every started row without a recorded result as
+                    // cancelled: dropping the dispatch stopped its execution.
                     if let Err(error) = self
                         .storage
                         .settle_started_tool_calls(
                             turn.id,
-                            swage_storage::store::INTERRUPTED_TOOL_RESULT,
-                            swage_storage::store::INTERRUPTED_TOOL_STATUS,
+                            swage_storage::store::CANCELLED_TOOL_RESULT,
+                            swage_storage::store::CANCELLED_TOOL_STATUS,
                         )
                         .await
                     {
