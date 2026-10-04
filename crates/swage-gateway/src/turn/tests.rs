@@ -4528,6 +4528,7 @@ impl TurnStore for MockStorage {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
@@ -4637,6 +4638,17 @@ impl TurnStore for MockStorage {
     async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError> {
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.cost_microcents = Some(cost);
+        }
+        Ok(())
+    }
+
+    async fn record_turn_failure_message(
+        &self,
+        id: Uuid,
+        message: &str,
+    ) -> Result<(), StorageError> {
+        if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+            t.failure_message.get_or_insert_with(|| message.to_owned());
         }
         Ok(())
     }
