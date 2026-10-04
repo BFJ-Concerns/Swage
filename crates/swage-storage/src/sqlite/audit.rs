@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{AuditEvent, NewAuditEvent};
+use crate::model::{AuditEvent, AuditEventFilter, NewAuditEvent};
 use crate::sqlite::SqliteStorage;
 use crate::store::AuditStore;
 
@@ -120,6 +120,57 @@ impl AuditStore for SqliteStorage {
         })
         .await
     }
+
+    async fn list_audit_events_filtered(
+        &self,
+        filter: AuditEventFilter,
+    ) -> Result<Vec<AuditEvent>, StorageError> {
+        self.with_conn(move |conn| {
+            // Each present filter is one predicate; the parameters are bound
+            // positionally in the order the predicates were appended.
+            let mut predicates: Vec<&str> = Vec::new();
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(session_id) = filter.session_id {
+                predicates.push("session_id = ?");
+                values.push(Box::new(session_id.to_string()));
+            }
+            if let Some(entity_kind) = filter.entity_kind {
+                predicates.push("entity_kind = ?");
+                values.push(Box::new(entity_kind));
+            }
+            if let Some(entity_id) = filter.entity_id {
+                predicates.push("entity_id = ?");
+                values.push(Box::new(entity_id));
+            }
+            if let Some(event_kind) = filter.event_kind {
+                predicates.push("event_kind = ?");
+                values.push(Box::new(event_kind));
+            }
+            if let Some(before) = filter.before {
+                predicates.push("created_at < ?");
+                values.push(Box::new(before.to_rfc3339()));
+            }
+            values.push(Box::new(i64::try_from(filter.limit).unwrap_or(i64::MAX)));
+            let where_clause = if predicates.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", predicates.join(" AND "))
+            };
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+                 FROM audit_events
+                 {where_clause}
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?"
+            ))?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(values.iter().map(|value| value.as_ref())),
+                row_to_audit_event,
+            )?;
+            rows.collect()
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -130,7 +181,7 @@ mod tests {
     use crate::store::{
         ApprovalStore, AuditStore, SessionStore, ThreadStore, TopicStore, TurnStore,
     };
-    use crate::{ApprovalKind, ApprovalState, NewAuditEvent};
+    use crate::{ApprovalKind, ApprovalState, AuditEventFilter, NewAuditEvent};
     use crate::{NewApprovalRequest, NewSession, NewThread, NewTurn, TurnState};
     use swage_core::ApprovalTimeoutPolicy;
 
@@ -195,6 +246,105 @@ mod tests {
                     && event.summary.contains("pending -> approved")
             }),
             "expected approval transition audit event, got: {events:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_record_is_read_by_session_entity_and_kind_in_bounded_pages() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let topic = storage.general_scope().await.unwrap();
+        let session_a = storage
+            .create_session(crate::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let session_b = storage
+            .create_session(crate::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let event = |id: &str,
+                     session: Option<uuid::Uuid>,
+                     entity_kind: &str,
+                     entity_id: &str,
+                     kind: &str| {
+            NewAuditEvent {
+                id: id.into(),
+                session_id: session,
+                entity_kind: entity_kind.into(),
+                entity_id: entity_id.into(),
+                event_kind: kind.into(),
+                summary: format!("{kind} on {entity_kind} {entity_id}"),
+                metadata: serde_json::json!({ "id": id }),
+            }
+        };
+        for new in [
+            event("e1", Some(session_a.id), "turn", "t-1", "state_transition"),
+            event(
+                "e2",
+                Some(session_a.id),
+                "surface",
+                "s-1",
+                "surface_module_written",
+            ),
+            event(
+                "e3",
+                Some(session_b.id),
+                "surface",
+                "s-1",
+                "surface_module_written",
+            ),
+            event("e4", None, "settings", "global", "configuration_change"),
+        ] {
+            storage.create_audit_event(new).await.unwrap();
+        }
+        let ids = |events: &[crate::AuditEvent]| {
+            events
+                .iter()
+                .map(|event| event.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let by_kind = storage
+            .list_audit_events_filtered(AuditEventFilter {
+                event_kind: Some("surface_module_written".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&by_kind), vec!["e3", "e2"], "newest first, by kind");
+
+        let by_entity_and_session = storage
+            .list_audit_events_filtered(AuditEventFilter {
+                session_id: Some(session_a.id),
+                entity_kind: Some("surface".into()),
+                entity_id: Some("s-1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&by_entity_and_session), vec!["e2"], "filters combine");
+
+        let first_page = storage
+            .list_audit_events_filtered(AuditEventFilter {
+                limit: 2,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(ids(&first_page), vec!["e4", "e3"]);
+        let second_page = storage
+            .list_audit_events_filtered(AuditEventFilter {
+                limit: 2,
+                before: Some(first_page[1].created_at),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            second_page
+                .iter()
+                .all(|event| event.created_at < first_page[1].created_at),
+            "the cursor pages strictly older events: {:?}",
+            ids(&second_page)
         );
     }
 

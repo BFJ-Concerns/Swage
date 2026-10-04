@@ -499,6 +499,32 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// A read of the audit record: every filter is optional and they combine,
+/// the page is newest first, `before` is the cursor the previous page
+/// handed back, and `limit` bounds the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditEventFilter {
+    pub session_id: Option<Uuid>,
+    pub entity_kind: Option<String>,
+    pub entity_id: Option<String>,
+    pub event_kind: Option<String>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: usize,
+}
+
+impl Default for AuditEventFilter {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            entity_kind: None,
+            entity_id: None,
+            event_kind: None,
+            before: None,
+            limit: 100,
+        }
+    }
+}
+
 /// A centrally managed secret or credential reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRecord {

@@ -8,8 +8,8 @@ use swage_core::GatewayError;
 use swage_protocol::{
     client::context::AssemblyReport,
     hosting::{
-        AssemblyHistoryEntry, ConfigurationHistoryEvent, OperatorHistoryResponse,
-        VariantSelectionHistoryEvent,
+        AssemblyHistoryEntry, AuditEventListResponse, AuditEventView, ConfigurationHistoryEvent,
+        OperatorHistoryResponse, VariantSelectionHistoryEvent,
     },
 };
 
@@ -28,6 +28,72 @@ pub struct OperatorSearchQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorSearchResponse {
     pub results: Vec<OperatorSearchResult>,
+}
+
+/// The audit surface's query: filters by session, entity and kind, a
+/// `before` cursor from the previous page, and a page size.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuditEventQuery {
+    pub session_id: Option<Uuid>,
+    pub entity_kind: Option<String>,
+    pub entity_id: Option<String>,
+    pub event_kind: Option<String>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: Option<usize>,
+}
+
+/// The largest page the audit surface serves.
+pub const AUDIT_PAGE_LIMIT: usize = 500;
+const AUDIT_PAGE_DEFAULT: usize = 100;
+
+/// One page of the audit record under the query's filters, newest first,
+/// with the cursor for the next page when the record continues.
+pub async fn list_audit_events(
+    state: &AppState,
+    query: AuditEventQuery,
+) -> Result<AuditEventListResponse, GatewayError> {
+    let limit = query.limit.unwrap_or(AUDIT_PAGE_DEFAULT);
+    if limit == 0 || limit > AUDIT_PAGE_LIMIT {
+        return Err(GatewayError::ValidationError(format!(
+            "limit must be between 1 and {AUDIT_PAGE_LIMIT}"
+        )));
+    }
+    let blank_is_none = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let events = state
+        .storage
+        .list_audit_events_filtered(swage_storage::AuditEventFilter {
+            session_id: query.session_id,
+            entity_kind: blank_is_none(query.entity_kind),
+            entity_id: blank_is_none(query.entity_id),
+            event_kind: blank_is_none(query.event_kind),
+            before: query.before,
+            limit,
+        })
+        .await?;
+    let next_before = (events.len() == limit)
+        .then(|| events.last().map(|event| event.created_at))
+        .flatten();
+    Ok(AuditEventListResponse {
+        events: events.into_iter().map(audit_event_view).collect(),
+        next_before,
+    })
+}
+
+fn audit_event_view(event: swage_storage::AuditEvent) -> AuditEventView {
+    AuditEventView {
+        id: event.id,
+        session_id: event.session_id,
+        entity_kind: event.entity_kind,
+        entity_id: event.entity_id,
+        event_kind: event.event_kind,
+        summary: event.summary,
+        metadata: event.metadata,
+        created_at: event.created_at,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

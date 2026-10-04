@@ -229,6 +229,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/operator/overview", get(handlers::operator_overview))
         .route("/api/operator/history", get(handlers::operator_history))
         .route(
+            "/api/operator/audit-events",
+            get(handlers::operator_audit_events),
+        )
+        .route(
             "/api/topics/{topic_id}/agent-definitions",
             get(handlers::list_effective_agent_definitions),
         )

@@ -268,6 +268,16 @@ pub async fn operator_history(
     Ok(Json(crate::audit::operator_history(&state).await?))
 }
 
+/// `GET /api/operator/audit-events` — one page of the audit record under
+/// the query's filters (session, entity kind and id, event kind), newest
+/// first, with a cursor for the next page.
+pub async fn operator_audit_events(
+    State(state): State<AppState>,
+    Query(query): Query<crate::audit::AuditEventQuery>,
+) -> Result<Json<swage_protocol::hosting::AuditEventListResponse>, ApiError> {
+    Ok(Json(crate::audit::list_audit_events(&state, query).await?))
+}
+
 fn agent_definition_response(
     definition: swage_storage::AgentDefinition,
 ) -> AgentDefinitionResponse {
@@ -4825,6 +4835,122 @@ mod tests {
     // -----------------------------------------------------------------------
     // GET /api/operator/history
     // -----------------------------------------------------------------------
+
+    /// C15's reading of the record: by session, entity and kind, through
+    /// the product, in pages — never by querying storage.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_audit_surface_lists_events_by_session_entity_and_kind_in_pages() {
+        use swage_storage::model::{NewAuditEvent, NewSession};
+        use swage_storage::store::AuditStore;
+
+        let (router, storage) = make_router();
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let event =
+            |id: &str, session_id: Option<Uuid>, entity_kind: &str, kind: &str| NewAuditEvent {
+                id: id.into(),
+                session_id,
+                entity_kind: entity_kind.into(),
+                entity_id: "x".into(),
+                event_kind: kind.into(),
+                summary: format!("{kind} on {entity_kind}"),
+                metadata: serde_json::json!({ "id": id }),
+            };
+        for new in [
+            event("a1", Some(session.id), "turn", "state_transition"),
+            event("a2", Some(session.id), "surface", "surface_module_written"),
+            event("a3", None, "settings", "configuration_change"),
+        ] {
+            storage.create_audit_event(new).await.unwrap();
+        }
+        let get = |uri: String| {
+            let router = router.clone();
+            async move {
+                let resp = router
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(uri)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK);
+                body_json(resp).await
+            }
+        };
+        let ids = |body: &serde_json::Value| {
+            body["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let by_session = get(format!(
+            "/api/operator/audit-events?session_id={}",
+            session.id
+        ))
+        .await;
+        assert_eq!(
+            ids(&by_session),
+            vec!["a2", "a1"],
+            "newest first, the session's only"
+        );
+        assert_eq!(by_session["events"][0]["entity_kind"], "surface");
+        assert_eq!(by_session["events"][0]["metadata"]["id"], "a2");
+
+        let by_kind =
+            get("/api/operator/audit-events?event_kind=configuration_change".into()).await;
+        assert_eq!(ids(&by_kind), vec!["a3"]);
+        assert!(
+            by_kind["next_before"].is_null(),
+            "a page that ends the record has no cursor"
+        );
+
+        let page = get("/api/operator/audit-events?limit=2".into()).await;
+        assert_eq!(ids(&page), vec!["a3", "a2"]);
+        let cursor = page["next_before"]
+            .as_str()
+            .expect("a full page hands back a cursor");
+        let older = get(format!(
+            "/api/operator/audit-events?limit=2&before={}",
+            urlencoded(cursor)
+        ))
+        .await;
+        assert_eq!(ids(&older), vec!["a1"]);
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/operator/audit-events?limit=0")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a page needs a size: the refusal is a validation error"
+        );
+    }
+
+    fn urlencoded(value: &str) -> String {
+        value
+            .replace('%', "%25")
+            .replace('+', "%2B")
+            .replace(':', "%3A")
+    }
 
     #[tokio::test]
     async fn operator_history_reconstructs_only_configuration_and_experiment_records_newest_first()

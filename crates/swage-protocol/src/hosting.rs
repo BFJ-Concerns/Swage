@@ -192,6 +192,31 @@ pub struct OperatorHistoryResponse {
     pub assembly_reports: Vec<AssemblyHistoryEntry>,
 }
 
+/// One event of the local audit record, as recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct AuditEventView {
+    pub id: String,
+    pub session_id: Option<Uuid>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub event_kind: String,
+    pub summary: String,
+    #[ts(type = "unknown")]
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A page of the audit record, newest first, under the filters the request
+/// named. `next_before` is the cursor for the page after this one — absent
+/// when this page ends the record.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct AuditEventListResponse {
+    pub events: Vec<AuditEventView>,
+    pub next_before: Option<DateTime<Utc>>,
+}
+
 /// Scope filter for durable agent-definition reads and deletes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
@@ -334,6 +359,7 @@ pub struct HostingSurface {
     approval_decision: ApprovalDecisionRequest,
     operator_overview: OperatorOverviewResponse,
     operator_history: OperatorHistoryResponse,
+    audit_events: AuditEventListResponse,
     agent_definition_scope: AgentDefinitionScopeQuery,
     agent_definition_list: AgentDefinitionListResponse,
     effective_agent_definition_list: EffectiveAgentDefinitionListResponse,
