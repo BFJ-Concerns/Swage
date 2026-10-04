@@ -432,7 +432,10 @@ where
         .filter(|turn| {
             matches!(
                 turn.state,
-                TurnState::Completed | TurnState::Failed | TurnState::Interrupted
+                TurnState::Completed
+                    | TurnState::Incomplete
+                    | TurnState::Failed
+                    | TurnState::Interrupted
             )
         })
         .collect();

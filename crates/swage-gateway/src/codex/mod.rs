@@ -688,6 +688,8 @@ async fn run_turn_inner(
         .update_state(request.thread_id, ThreadState::Idle)
         .await?;
     let _ = request.event_tx.send(AgentEvent::TurnCompleted {
+        incomplete_reason: None,
+        incomplete_account: None,
         turn_id: request.turn_id,
         input_tokens,
         output_tokens,
@@ -695,6 +697,7 @@ async fn run_turn_inner(
         structured_output: structured_output.clone(),
     });
     Ok(OutboundMessage {
+        incomplete_reason: None,
         response: response_text,
         turn_id: request.turn_id,
         input_tokens,

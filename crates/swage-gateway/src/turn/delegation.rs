@@ -424,6 +424,31 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
     }
 
     async fn record_event(&self, session_id: Uuid, event: AgentEvent) -> Result<(), AgentError> {
+        if let AgentEvent::TurnCompleted {
+            turn_id,
+            incomplete_account: Some(account),
+            ..
+        } = &event
+        {
+            // Delegated replies have no socket-owned token stream. Announce
+            // their persisted partial reply and account using the same view
+            // a reload reads, including any tool effects the turn recorded.
+            let detail = crate::service::ConversationService::new(
+                self.state.storage.clone(),
+                self.state.topic_store.clone(),
+            )
+            .get_thread_detail(account.thread_id)
+            .await
+            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+            for message in detail.messages.into_iter().filter(|message| {
+                message.turn_id == Some(*turn_id)
+                    && (message.origin == swage_storage::MessageOrigin::Assistant
+                        || message.id == account.id)
+            }) {
+                crate::service::announce_appended_message(&self.state, session_id, message);
+            }
+            return Ok(());
+        }
         if let AgentEvent::RecordIntegrityLost { turn_id, reason } = &event {
             // Constitutive record loss (record_durability.rs): the child has
             // settled, so its gateway coordinator must mark the turn Failed.
