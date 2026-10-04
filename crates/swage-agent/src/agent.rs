@@ -878,6 +878,22 @@ impl Agent {
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
 
+                    // These tools can return a structured result successfully even
+                    // when the operation failed. Keep that result and the model's
+                    // feedback intact, but record the operation's outcome.
+                    let status = if status == "success"
+                        && match call.name.as_str() {
+                            "shell" => result_value["exit_code"]
+                                .as_i64()
+                                .is_some_and(|code| code != 0),
+                            "workflow_run" => result_value["state"] == "failed",
+                            _ => false,
+                        } {
+                        "error".to_string()
+                    } else {
+                        status
+                    };
+
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
                         .await;
