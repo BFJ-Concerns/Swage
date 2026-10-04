@@ -474,10 +474,12 @@ export function createStreamingStore(
 
         case "cancelled": {
           // User-initiated cancel. A call still running when the turn
-          // stopped has no result: its outcome is interrupted, as recovery
-          // records it. Calls that finished keep the outcome they reported.
+          // stopped has no result — whether it is still pending or the
+          // gateway already ended it as cancelled — so its outcome is
+          // interrupted, as recovery records it. Calls that finished keep
+          // the outcome they reported.
           const settledCalls = get(stream.activeToolCallsStore).map((call) =>
-            call.status === null
+            call.status === null || (call.status === "cancelled" && call.result == null)
               ? { ...call, status: "interrupted", result: INTERRUPTED_TOOL_RESULT }
               : call,
           );
