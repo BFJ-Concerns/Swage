@@ -1,9 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    collections::hash_map::DefaultHasher,
     fs,
-    hash::{Hash, Hasher},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Output},
@@ -12,6 +10,8 @@ use std::{
 };
 
 use serde_json::Value;
+
+use crate::support::scratch_tempdir;
 
 const FIXTURE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -39,13 +39,7 @@ impl GatewayProbe {
     }
 
     fn with_environment(explicit_root: bool, xdg_runtime: bool) -> Self {
-        let root = tempfile::TempDir::new().expect("failed to create the probe root");
-        let mut hash = DefaultHasher::new();
-        "qa-gateway-not-running-state".hash(&mut hash);
-        root.path().hash(&mut hash);
-        let offset = (hash.finish() % 1000) as u16;
-        let listener = (0..1000)
-            .find_map(|step| TcpListener::bind(("127.0.0.1", 35000 + (offset + step) % 1000)).ok())
+        let listener = TcpListener::bind(("127.0.0.1", 0))
             .expect("failed to reserve a loopback port for the gateway probe");
         let port = listener
             .local_addr()
@@ -54,14 +48,8 @@ impl GatewayProbe {
         drop(listener);
         Self {
             binary: PathBuf::from(env!("CARGO_BIN_EXE_swage")),
-            root,
-            // Keep the runtime path short enough for swage-sandbox's UUID socket
-            // name, so it never falls back outside the scratch filesystem.
-            runtime: tempfile::Builder::new()
-                .prefix("qa-gateway-not-running-state-")
-                .rand_bytes(1)
-                .tempdir_in("/tmp/scratch")
-                .expect("failed to create the probe runtime dir"),
+            root: tempfile::TempDir::new().expect("failed to create the probe root"),
+            runtime: scratch_tempdir(),
             home: tempfile::TempDir::new().expect("failed to create the probe home"),
             port,
             explicit_root,
@@ -70,8 +58,7 @@ impl GatewayProbe {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new("setsid");
-        command.arg(&self.binary);
+        let mut command = Command::new(&self.binary);
         command.env("HOME", self.home.path());
         if self.explicit_root {
             command.env("SWAGE_HOME", self.root.path());
