@@ -815,8 +815,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     }
 
-    if let Some(content) = terminal_account {
-        if let Err(error) = crate::service::append_platform_message(
+    if let Some(content) = terminal_account
+        && let Err(error) = crate::service::append_platform_message(
             state,
             crate::service::PlatformMessage {
                 session_id,
@@ -828,20 +828,19 @@ pub(super) async fn process_turn_with_composition_and_focus(
             },
         )
         .await
-        {
-            let account_turn_id = turn_id.unwrap_or(prepared_turn_id);
-            tracing::error!(%error, %account_turn_id, "failed to record the turn's terminal account");
-            let _ = record_durability::record_reconstruction_gap(
-                state.storage.as_ref(),
-                Some(session_id),
-                account_turn_id,
-                "terminal_account",
-                &error,
-            )
-            .await;
-            record_integrity_lost
-                .get_or_insert(format!("terminal account could not be persisted: {error}"));
-        }
+    {
+        let account_turn_id = turn_id.unwrap_or(prepared_turn_id);
+        tracing::error!(%error, %account_turn_id, "failed to record the turn's terminal account");
+        let _ = record_durability::record_reconstruction_gap(
+            state.storage.as_ref(),
+            Some(session_id),
+            account_turn_id,
+            "terminal_account",
+            &error,
+        )
+        .await;
+        record_integrity_lost
+            .get_or_insert(format!("terminal account could not be persisted: {error}"));
     }
 
     // The durability contract's escalation (record_durability.rs): a turn
