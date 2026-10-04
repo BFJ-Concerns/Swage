@@ -127,7 +127,7 @@ mod tests {
         crate::tool::workspace::writable_test_context(dir.path(), vec![])
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn creates_new_file() {
         let dir = TempDir::new().unwrap();
         let val = tool(&dir)
@@ -141,7 +141,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn overwrites_existing_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("existing.txt"), b"old content").unwrap();
@@ -158,7 +158,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn creates_parent_directories() {
         let dir = TempDir::new().unwrap();
         tool(&dir)
@@ -171,7 +171,7 @@ mod tests {
         assert!(dir.path().join("a/b/c/file.txt").exists());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_path_outside_workspace() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_new_file_beneath_symlink_parent_escape() {
         use std::os::unix::fs::symlink;
 
@@ -217,7 +217,7 @@ mod tests {
         assert!(!outside.path().join("escape.txt").exists());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn returns_error_for_missing_path_argument() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)
@@ -228,7 +228,7 @@ mod tests {
         assert!(err.to_string().contains("path"), "got: {err}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn returns_error_for_missing_content_argument() {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir)

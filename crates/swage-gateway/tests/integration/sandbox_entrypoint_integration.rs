@@ -380,9 +380,10 @@ async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_author
     let mut env_guard = ProcessEnvGuard::new();
     env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     for bubblewrap in [false, true] {
-        if bubblewrap && find_bwrap().is_err() {
-            panic!("bubblewrap is required for this route coverage");
-        }
+        assert!(
+            !bubblewrap || find_bwrap().is_ok(),
+            "bubblewrap is required for this route coverage"
+        );
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("existing.txt"), "original").unwrap();
         // The working directory is deliberately writable at the OS boundary:
