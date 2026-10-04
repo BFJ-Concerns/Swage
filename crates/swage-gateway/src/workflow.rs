@@ -15922,8 +15922,8 @@ mod tests {
                 .await
                 .expect("launch waiting run");
             wait_for_run_state(&storage, run.id, "parked").await;
-            wait_for_workflow_thread_exit(run.id).await;
-            wait_for_active_workflow_run_release(&state, run.id).await;
+            workflow_thread_exit(run.id).await;
+            active_workflow_run_release(&state, run.id).await;
 
             let api = WorkflowTestApi::start(state.clone()).await;
             let cancel_requested = api.cancel(run.id).await;
@@ -18509,27 +18509,37 @@ mod tests {
         );
     }
 
+    async fn workflow_thread_exit(run_id: Uuid) {
+        while workflow_thread_exists(run_id) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn active_workflow_run_release(state: &AppState, run_id: Uuid) {
+        while state
+            .active_workflow_runs
+            .lock()
+            .await
+            .contains_key(&run_id)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     async fn wait_for_workflow_thread_exit(run_id: Uuid) {
-        tokio::time::timeout(std::time::Duration::from_millis(250), async {
-            while workflow_thread_exists(run_id) {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            workflow_thread_exit(run_id),
+        )
         .await
         .unwrap_or_else(|_| panic!("workflow thread for run {run_id} remained alive"));
     }
 
     async fn wait_for_active_workflow_run_release(state: &AppState, run_id: Uuid) {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while state
-                .active_workflow_runs
-                .lock()
-                .await
-                .contains_key(&run_id)
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            active_workflow_run_release(state, run_id),
+        )
         .await
         .unwrap_or_else(|_| {
             panic!("active workflow registration for run {run_id} remained installed")
@@ -21867,7 +21877,7 @@ mod tests {
                 .await;
             run_id.set(started.id).expect("fixture run identity");
 
-            wait_for_terminal(&state, started.id).await;
+            wait_for_run_state(&storage, started.id, "failed").await;
 
             let run = storage
                 .get_workflow_run(started.id)
@@ -26516,7 +26526,7 @@ protocol = "openai"
             live.await;
 
             release.send(()).expect("release parked worker");
-            wait_for_terminal(&state, started.id).await;
+            wait_for_run_state(&storage, started.id, "completed").await;
             let settled = client
                 .get(&run_url)
                 .send()
@@ -26627,7 +26637,7 @@ protocol = "openai"
                 .expect("workflow run detail test hook remains open")
                 .forget();
             release.send(()).expect("release parked worker");
-            wait_for_terminal(&state, started.id).await;
+            wait_for_run_state(&storage, started.id, "completed").await;
             assert!(
                 state.active_workflow_workers.lock().await.is_empty(),
                 "worker settles and evicts its live overlay while run detail is paused"
@@ -26823,7 +26833,7 @@ protocol = "openai"
                 .await;
             pending.notified().await;
             api.cancel(started.id).await;
-            wait_for_terminal(&state, started.id).await;
+            wait_for_run_state(&storage, started.id, "cancelled").await;
 
             let journal = storage
                 .list_workflow_journal(started.id)
@@ -26871,10 +26881,15 @@ protocol = "openai"
     }
 
     /// Completion is event/state driven; this bound only diagnoses a hung journey.
-    async fn workflow_journey(journey: impl std::future::Future<Output = ()>) {
-        tokio::time::timeout(std::time::Duration::from_secs(180), journey)
-            .await
-            .expect("workflow journey hung before its required event or state");
+    fn workflow_journey(
+        journey: impl std::future::Future<Output = ()>,
+    ) -> impl std::future::Future<Output = ()> {
+        let journey = Box::pin(journey);
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(180), journey)
+                .await
+                .expect("workflow journey hung before its required event or state");
+        }
     }
 
     struct WorkflowTestApi {
