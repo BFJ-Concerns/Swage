@@ -36,7 +36,11 @@ parent_call_id?: string | null, } | { "type": "lagged", dropped: number, } | { "
 /**
  * The module written; absent for surface-level changes (creation).
  */
-module_id?: string | null, } | { "type": "library_updated", entry_id: string, } | { "type": "message_appended", session_id: string, message: MessageView, } | { "type": "message_queued", session_id: string, queued: QueuedMessageView, } | { "type": "queue_drained", session_id: string, turn_id: string, queued_ids: Array<string>, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string, input_tokens?: number | null, output_tokens?: number | null, cost_microcents?: number,
+module_id?: string | null, } | { "type": "library_updated", entry_id: string, } | { "type": "message_appended", session_id: string, message: MessageView, } | { "type": "message_queued", session_id: string, queued: QueuedMessageView, } | { "type": "queue_drained", session_id: string, turn_id: string, queued_ids: Array<string>, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string,
+/**
+ * Output-limit cause when the reply is incomplete.
+ */
+incomplete_reason?: string, input_tokens?: number | null, output_tokens?: number | null, cost_microcents?: number,
 /**
  * Validated, parsed JSON output when an output schema was configured and
  * validation passed. Absent (serialised as omitted) when no schema is
@@ -62,7 +66,11 @@ attempts: number,
 /**
  * Validation errors from the final attempt.
  */
-errors: Array<SchemaValidationError>, } | { "type": "delegation_started", parent_turn_id: string, child_turn_id?: string | null, target_agent_id: string, } | { "type": "delegation_completed", parent_turn_id: string, child_turn_id?: string | null, target_agent_id: string, success: boolean, } | { "type": "workflow_run_started", event: WorkflowRunStartedEvent, } | { "type": "workflow_entry_started", event: WorkflowEntryEvent, } | { "type": "workflow_entry_completed", event: WorkflowEntryEvent, } | { "type": "workflow_run_completed", event: WorkflowRunCompletedEvent, } | { "type": "error", code: string, message: string, } | { "type": "cancelled", } | { "type": "shutdown", reason: string, } | { "type": "skill_activated", name: string, display_name: string, description: string,
+errors: Array<SchemaValidationError>, } | { "type": "delegation_started", parent_turn_id: string, child_turn_id?: string | null, target_agent_id: string, } | { "type": "delegation_completed",
+/**
+ * Output-limit cause when the child response is incomplete.
+ */
+incomplete_reason?: string, parent_turn_id: string, child_turn_id?: string | null, target_agent_id: string, success: boolean, } | { "type": "workflow_run_started", event: WorkflowRunStartedEvent, } | { "type": "workflow_entry_started", event: WorkflowEntryEvent, } | { "type": "workflow_entry_completed", event: WorkflowEntryEvent, } | { "type": "workflow_run_completed", event: WorkflowRunCompletedEvent, } | { "type": "error", code: string, message: string, } | { "type": "cancelled", } | { "type": "shutdown", reason: string, } | { "type": "skill_activated", name: string, display_name: string, description: string,
 /**
  * Token budget consumed by this skill's instructions in the context window.
  */

@@ -241,6 +241,18 @@ describe("settled partial responses", () => {
     ).toHaveLength(1);
   });
 
+  it("shows an output-limited streamed reply as incomplete", () => {
+    const store = makeConversationStore([]);
+    const streamingStore = createStreamingStore({ conversationStore: store });
+    streamingStore.startTurn("Compare");
+    streamingStore.handleServerEvent({ type: "token", content: "The answer ends at a" });
+    streamingStore.handleServerEvent(JSON.parse('{"type":"turn_complete","turn_id":"limited-turn","incomplete_reason":"length"}'));
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore } });
+    expect(document.body.textContent).toContain("The answer ends at a");
+    expect(document.body.textContent).toContain("Response incomplete");
+    expect(document.body.textContent).not.toContain("Response interrupted");
+  });
+
   it("distinguishes interrupted and failed responses for the user", () => {
     const store = makeConversationStore([
       makeAssistantMessage("Stopped partial", undefined, undefined, "interrupted"),
