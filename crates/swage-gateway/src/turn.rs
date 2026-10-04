@@ -288,12 +288,12 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // Task names ride child-session metadata, while the definition is
     // resolved afresh for every execution. Missing or unreadable tasks fail
     // closed: silently running a different contract would be false success.
-    let (config, task_defines_output_retries) = match session
+    let task_definition_id = session
         .metadata
         .as_ref()
         .and_then(|m| m.get("task_definition"))
-        .and_then(serde_json::Value::as_str)
-    {
+        .and_then(serde_json::Value::as_str);
+    let (config, task_defines_output_retries) = match task_definition_id {
         Some(task_id) => {
             let definition =
                 crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
@@ -352,14 +352,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
 
-    if session
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("task_definition"))
-        .and_then(serde_json::Value::as_str)
-        .is_some()
-    {
-        if let Err(error) = crate::experimentation::select_session_variant(
+    if task_definition_id.is_some()
+        && let Err(error) = crate::experimentation::select_session_variant(
             state,
             &config.experimentation,
             crate::experimentation::LOCATION_TASK_PROMPT,
@@ -369,16 +363,10 @@ pub(super) async fn process_turn_with_composition_and_focus(
             Some(prepared_turn_id),
         )
         .await
-        {
-            record_terminal_state_and_release(
-                state,
-                session_id,
-                prepared_turn_id,
-                TurnState::Failed,
-            )
+    {
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;
-            return Err(GatewayError::ConfigError(error.to_string()));
-        }
+        return Err(GatewayError::ConfigError(error.to_string()));
     }
 
     // Step 5: Set up the cancellation token before any turn processing begins.
