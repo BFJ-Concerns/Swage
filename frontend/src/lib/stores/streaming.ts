@@ -591,11 +591,11 @@ export function createStreamingStore(
         !stream ||
         !get(stream.isStreamingStore) ||
         stream.activeTurnGeneration !== recoveredTurnGeneration ||
-        lastMessage?.role !== "assistant" ||
-        !["completed", "failed", "interrupted"].includes(lastMessage.turn_state ?? "")
+        (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform") ||
+        !["completed", "refused", "failed", "interrupted"].includes(lastMessage?.turn_state ?? "")
       ) return;
 
-      // The HTTP refresh recovered the terminal assistant message that the
+      // The HTTP refresh recovered the terminal reply or platform account that the
       // dropped socket could not deliver. Normal token events intentionally
       // carry no turn ID, so the monotonically increasing local generation
       // fences a later start that races the refresh. The durable conversation

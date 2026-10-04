@@ -203,12 +203,10 @@ async fn account_for_response(
             session_id,
             message,
         } = event
+            && session_id.to_string() == conversation_id
+            && message.id.to_string() == notice["id"].as_str().unwrap()
         {
-            if session_id.to_string() == conversation_id
-                && message.id.to_string() == notice["id"].as_str().unwrap()
-            {
-                announced = true;
-            }
+            announced = true;
         }
     }
     assert!(announced, "the recorded account must also reach open views");
