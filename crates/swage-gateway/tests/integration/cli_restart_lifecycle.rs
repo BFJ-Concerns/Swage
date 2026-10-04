@@ -1,7 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use std::{
+    collections::hash_map::DefaultHasher,
     fs,
+    hash::{Hash, Hasher},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Output},
@@ -37,7 +39,13 @@ impl GatewayProbe {
     }
 
     fn with_environment(explicit_root: bool, xdg_runtime: bool) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
+        let root = tempfile::TempDir::new().expect("failed to create the probe root");
+        let mut hash = DefaultHasher::new();
+        "qa-gateway-not-running-state".hash(&mut hash);
+        root.path().hash(&mut hash);
+        let offset = (hash.finish() % 1000) as u16;
+        let listener = (0..1000)
+            .find_map(|step| TcpListener::bind(("127.0.0.1", 35000 + (offset + step) % 1000)).ok())
             .expect("failed to reserve a loopback port for the gateway probe");
         let port = listener
             .local_addr()
@@ -46,8 +54,14 @@ impl GatewayProbe {
         drop(listener);
         Self {
             binary: PathBuf::from(env!("CARGO_BIN_EXE_swage")),
-            root: tempfile::TempDir::new().expect("failed to create the probe root"),
-            runtime: tempfile::TempDir::new().expect("failed to create the probe runtime dir"),
+            root,
+            // Keep the runtime path short enough for swage-sandbox's UUID socket
+            // name, so it never falls back outside the scratch filesystem.
+            runtime: tempfile::Builder::new()
+                .prefix("qa-gateway-not-running-state-")
+                .rand_bytes(3)
+                .tempdir_in("/tmp/scratch")
+                .expect("failed to create the probe runtime dir"),
             home: tempfile::TempDir::new().expect("failed to create the probe home"),
             port,
             explicit_root,
@@ -56,7 +70,8 @@ impl GatewayProbe {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(&self.binary);
+        let mut command = Command::new("setsid");
+        command.arg(&self.binary);
         command.env("HOME", self.home.path());
         if self.explicit_root {
             command.env("SWAGE_HOME", self.root.path());
@@ -88,13 +103,9 @@ impl GatewayProbe {
     }
 
     fn assert_ready_after_start(&self, output: Output) {
-        if output.status.success() {
-            return;
-        }
-
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("gateway did not become ready within 5s"),
+            output.status.success() || stderr.contains("gateway did not become ready within 5s"),
             "gateway start failed before readiness polling\nstdout: {}\nstderr: {stderr}",
             String::from_utf8_lossy(&output.stdout),
         );
@@ -105,7 +116,7 @@ impl GatewayProbe {
         // condition instead of treating scheduler pressure as a failed setup.
         let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
         loop {
-            if self.run(&["gateway", "status"]).status.success() {
+            if self.is_healthy() {
                 return;
             }
             assert!(
@@ -114,6 +125,18 @@ impl GatewayProbe {
             );
             thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    fn is_healthy(&self) -> bool {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build the health-check runtime")
+            .block_on(
+                swage_client::http::GatewayClient::new(&format!("http://127.0.0.1:{}", self.port))
+                    .health(),
+            )
+            .is_ok()
     }
 
     fn metadata_path(&self) -> PathBuf {
@@ -149,6 +172,95 @@ impl Drop for GatewayProbe {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+#[test]
+fn clean_stop_status_reports_not_running_without_an_error() {
+    let probe = GatewayProbe::new();
+    probe.start();
+    probe.assert_success(probe.run(&["gateway", "stop"]));
+    assert!(!probe.metadata_path().exists());
+
+    let output = probe.run(&["gateway", "status"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && !stdout.contains("Error:") && !stderr.contains("Error:"),
+        "stopped status must succeed without an error\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("not running") || stderr.contains("not running"),
+        "stopped status must report not running\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+struct ForegroundGateway(Child);
+
+impl Drop for ForegroundGateway {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn start_after_sigkill_recovers_without_a_status_call() {
+    let probe = GatewayProbe::new();
+    let port = probe.port.to_string();
+    let mut child = ForegroundGateway(
+        probe
+            .command()
+            .args(["gateway", "start", "--foreground", "--port", &port])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to start foreground gateway"),
+    );
+    let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
+    loop {
+        if probe.metadata_path().exists() && probe.is_healthy() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "foreground gateway did not become healthy"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let killed_pid = probe.pid();
+    assert_eq!(killed_pid, child.0.id());
+    child.0.kill().expect("failed to SIGKILL owned gateway");
+
+    // Do not wait/reap or call status: a terminated child retains its /proc
+    // entry until the parent reaps it, just as an unreaped detached daemon can.
+    let deadline = Instant::now() + FIXTURE_READY_TIMEOUT;
+    loop {
+        let status = fs::read_to_string(format!("/proc/{killed_pid}/status"))
+            .expect("unreaped gateway should still have a process entry");
+        if let Some(state) = status.lines().find(|line| line.starts_with("State:"))
+            && state.contains('Z')
+        {
+            eprintln!("Killed gateway {state}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "killed gateway did not terminate"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !probe.is_healthy(),
+        "killed gateway must no longer serve health"
+    );
+    let output = probe.run(&["gateway", "start", "--port", &port]);
+    probe.assert_ready_after_start(output);
+    assert_ne!(
+        probe.pid(),
+        killed_pid,
+        "start must publish a replacement PID"
+    );
+    assert!(probe.is_healthy(), "replacement gateway must serve health");
 }
 
 #[cfg(unix)]
