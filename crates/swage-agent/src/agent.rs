@@ -712,7 +712,7 @@ impl Agent {
             let round_reasoning = round_outcome.reasoning;
             accumulated.push_str(&round_text);
 
-            // No tool calls → LLM produced a final text response for this round.
+            // An output limit settles partial work; otherwise no tool calls means a final response.
             if incomplete_reason.is_some() || round_tool_calls.is_empty() {
                 break 'outer;
             }
@@ -1191,7 +1191,7 @@ impl Agent {
         // Persist the cause beside the partial response, including delegated
         // turns whose events never pass through the gateway projection loop.
         let incomplete_account = if let Some(reason) = &incomplete_reason {
-            Some(
+            Some(Box::new(
                 self.storage
                     .append_message(swage_storage::model::AppendMessage {
                         thread_id,
@@ -1205,7 +1205,7 @@ impl Agent {
                         agent_id: self.config.agent_id.clone(),
                     })
                     .await?,
-            )
+            ))
         } else {
             None
         };
