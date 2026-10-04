@@ -214,6 +214,58 @@ describe("turn context inspector trigger", () => {
   });
 });
 
+describe("assistant Markdown time blanks", () => {
+  it.each(["__:__", "___:___", "____:____"])("preserves the time blank %s", (content) => {
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(content)]) },
+    });
+
+    expect(document.querySelector(".assistant-content")?.textContent?.trim()).toBe(content);
+  });
+
+  it("preserves Arrived and Left time blanks in a settled template", () => {
+    const content = "Arrived at __:__.\nLeft at __:__.";
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(content)]) },
+    });
+
+    expect(document.querySelector(".assistant-content")?.textContent?.trim()).toBe(content);
+  });
+
+  it("preserves Arrived and Left time blanks in a streaming template", () => {
+    const content = "Arrived at __:__.\nLeft at __:__.";
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([]),
+        streamingStore: { ...makeStreamingStore([], true), streamedContent: content },
+      },
+    });
+
+    expect(document.querySelector(".streaming .assistant-content")?.textContent?.trim()).toBe(content);
+  });
+
+  it("control: preserves underscores separated by spaces", () => {
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage("a __ b")]) },
+    });
+
+    expect(document.querySelector(".assistant-content")?.textContent?.trim()).toBe("a __ b");
+  });
+
+  it("control: renders ordinary underscore bold emphasis", () => {
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage("__bold__")]) },
+    });
+
+    expect(document.querySelector(".assistant-content strong")?.textContent).toBe("bold");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Settled partial responses
 // ---------------------------------------------------------------------------
