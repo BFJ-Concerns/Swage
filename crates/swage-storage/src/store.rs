@@ -8,20 +8,21 @@ use crate::model::{
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
     ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord, DeviceRegistration,
     ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit, LibraryEntry,
-    LibraryEntryModule, LibrarySeeding, Material, Message, NewAgentDefinition, NewAgentMessage,
-    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
-    NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
-    NewKnowledgeCitation, NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage,
-    NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
-    NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition,
-    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
-    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
-    ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
-    SessionActivity, SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface,
-    SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    LibraryEntryModule, LibrarySeeding, Material, Message, ModuleSourceReplacement,
+    NewAgentDefinition, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
+    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewCurationAssertion,
+    NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry,
+    NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard, NewSchedule,
+    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
+    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
+    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
+    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
+    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule,
+    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
+    SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
+    SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
+    TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
@@ -1423,13 +1424,32 @@ pub trait SurfaceStore: Send + Sync {
         &self,
         surface_id: Uuid,
     ) -> Result<Vec<SurfaceModule>, StorageError>;
-    /// Replace a module instance's source, advancing the owning surface's
-    /// updated_at in the same write.
-    async fn update_surface_module_source(
+    /// Replace a module instance's source, provided its revision is still
+    /// the one the writer read; a moved-on revision leaves the row untouched
+    /// and returns it as it now stands. A landed replace advances the
+    /// revision and the owning surface's updated_at. `None` when there is no
+    /// such module.
+    async fn replace_surface_module_source(
         &self,
         id: Uuid,
+        expected_revision: i64,
         source: &str,
-    ) -> Result<(), StorageError>;
+    ) -> Result<Option<ModuleSourceReplacement>, StorageError>;
+    /// Remove a module instance and the notes hung on it, closing the gap in
+    /// the surface's positions. `None` when there is no such module.
+    async fn remove_surface_module(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<RemovedSurfaceModule>, StorageError>;
+    /// Place a module instance at `position` among its surface's modules —
+    /// 0 first, anything past the end last — renumbering the rest
+    /// contiguously. Returns the surface's modules in their new order;
+    /// `None` when there is no such module.
+    async fn move_surface_module(
+        &self,
+        id: Uuid,
+        position: i32,
+    ) -> Result<Option<Vec<SurfaceModule>>, StorageError>;
     /// Save a surface to the library: the entry and every module it keeps
     /// and their audit event land in one transaction. The generated entry id
     /// replaces `audit.entity_id` before the event is inserted.
@@ -2358,7 +2378,25 @@ mod tests {
         async fn list_surface_modules(&self, _: Uuid) -> Result<Vec<SurfaceModule>, StorageError> {
             unimplemented!()
         }
-        async fn update_surface_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+        async fn replace_surface_module_source(
+            &self,
+            _: Uuid,
+            _: i64,
+            _: &str,
+        ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
+            unimplemented!()
+        }
+        async fn remove_surface_module(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<RemovedSurfaceModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn move_surface_module(
+            &self,
+            _: Uuid,
+            _: i32,
+        ) -> Result<Option<Vec<SurfaceModule>>, StorageError> {
             unimplemented!()
         }
         async fn create_library_entry(

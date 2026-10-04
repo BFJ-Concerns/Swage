@@ -28,7 +28,7 @@ fn decode_tags(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceAnnotation> {
+pub(crate) fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceAnnotation> {
     let id: String = row.get(0)?;
     let surface_id: String = row.get(1)?;
     let module_id: String = row.get(2)?;
@@ -47,7 +47,8 @@ fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceAnnotat
     })
 }
 
-const COLUMNS: &str = "id, surface_id, module_id, body, tags, author, created_at, updated_at";
+pub(crate) const COLUMNS: &str =
+    "id, surface_id, module_id, body, tags, author, created_at, updated_at";
 
 #[async_trait]
 impl SurfaceAnnotationStore for SqliteStorage {

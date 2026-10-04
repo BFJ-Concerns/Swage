@@ -582,15 +582,14 @@ async fn startup_recovery_marks_orphaned_turns() {
     assert_eq!(count, 0, "no orphans should remain");
 }
 
-/// Sending a message during an active turn is rejected.
+/// A message sent during an active turn is never refused: it is queued, every
+/// view is told so, and it runs as the next turn the moment the active one
+/// ends — the drained turn's events reaching the same socket.
 ///
-/// Delivery Closure: Token streaming — concurrent turn rejection
-/// Spans: gateway-websocket, gateway-turn, storage-sqlite-impl
-///
-/// Proves: the one-active-turn-per-conversation constraint is enforced, and the
-///   error event includes the correct error code.
+/// Delivery Closure: Token streaming — mid-turn arrival (C60)
+/// Spans: gateway-websocket, gateway-turn, gateway-turn-queue, storage-sqlite-impl
 #[tokio::test(flavor = "multi_thread")]
-async fn reject_message_during_active_turn() {
+async fn a_message_sent_during_an_active_turn_queues_and_runs_as_the_next_turn() {
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
@@ -617,18 +616,17 @@ async fn reject_message_during_active_turn() {
     let event = ws_recv(&mut ws_read).await;
     assert_eq!(event["type"], "token");
 
-    // Send second message while first turn is active.
+    // Send second message while first turn is active: it is queued, not refused.
     ws_send(
         &mut ws_write,
         json!({"type": "send_message", "content": "Second"}),
     )
     .await;
+    let event = ws_recv_until(&mut ws_read, |e| e["type"] == "message_queued").await;
+    assert_eq!(event["queued"]["content"], "Second");
+    assert_eq!(event["queued"]["origin"], "user");
 
-    // Expect an error with turn_in_progress code.
-    let event = ws_recv_until(&mut ws_read, |e| e["type"] == "error").await;
-    assert_eq!(event["code"], "turn_in_progress");
-
-    // Complete the first turn.
+    // Complete the first turn: the queue runs as the next turn.
     tx1.send(StreamChunk::Done {
         finish_reason: None,
     })
@@ -637,13 +635,9 @@ async fn reject_message_during_active_turn() {
     drop(tx1);
     let event = ws_recv_until(&mut ws_read, |e| e["type"] == "turn_complete").await;
     assert_eq!(event["type"], "turn_complete");
+    let drained = ws_recv_until(&mut ws_read, |e| e["type"] == "queue_drained").await;
+    assert_eq!(drained["session_id"], conv_id);
 
-    // Send a new message after the first turn completes — should succeed.
-    ws_send(
-        &mut ws_write,
-        json!({"type": "send_message", "content": "Third"}),
-    )
-    .await;
     tx2.send(StreamChunk::Delta {
         content: "ok".into(),
     })
@@ -655,9 +649,11 @@ async fn reject_message_during_active_turn() {
     .await
     .unwrap();
     drop(tx2);
-
     let event = ws_recv_until(&mut ws_read, |e| e["type"] == "turn_complete").await;
-    assert_eq!(event["type"], "turn_complete");
+    assert_eq!(
+        event["turn_id"], drained["turn_id"],
+        "the queued message's turn streams to the open socket and completes"
+    );
 }
 
 // ===========================================================================

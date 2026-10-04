@@ -14,6 +14,7 @@ import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRe
 import type { CreateSurfaceRequest } from "./CreateSurfaceRequest";
 import type { CreateTopicRequest } from "./CreateTopicRequest";
 import type { DeleteSurfaceAnnotationResponse } from "./DeleteSurfaceAnnotationResponse";
+import type { DeleteSurfaceModuleResponse } from "./DeleteSurfaceModuleResponse";
 import type { DocumentListResponse } from "./DocumentListResponse";
 import type { DocumentResponse } from "./DocumentResponse";
 import type { LibraryEntryResponse } from "./LibraryEntryResponse";
@@ -23,6 +24,7 @@ import type { MemoryInstructionResponse } from "./MemoryInstructionResponse";
 import type { MemoryPageListResponse } from "./MemoryPageListResponse";
 import type { MemoryPageResponse } from "./MemoryPageResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
+import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
@@ -35,7 +37,6 @@ import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
 import type { SurfaceAnnotationView } from "./SurfaceAnnotationView";
 import type { SurfaceListResponse } from "./SurfaceListResponse";
-import type { SurfaceModuleView } from "./SurfaceModuleView";
 import type { SurfaceResponse } from "./SurfaceResponse";
 import type { TopicDefaultSurfaceRequest } from "./TopicDefaultSurfaceRequest";
 import type { TopicListResponse } from "./TopicListResponse";
@@ -45,6 +46,7 @@ import type { UpdateSurfaceAnnotationRequest } from "./UpdateSurfaceAnnotationRe
 import type { UpdateTopicRequest } from "./UpdateTopicRequest";
 import type { WorkspaceAttachmentResponse } from "./WorkspaceAttachmentResponse";
 import type { WriteSurfaceModuleRequest } from "./WriteSurfaceModuleRequest";
+import type { WriteSurfaceModuleResponse } from "./WriteSurfaceModuleResponse";
 import { ApiError } from "../api/error";
 
 let baseUrl = "";
@@ -243,9 +245,19 @@ export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
   return request<SurfaceResponse>("GET", `/api/surfaces/${encodeURIComponent(surfaceId)}`);
 }
 
-/** Write a surface module. */
-export async function writeSurfaceModule(surfaceId: string, body: WriteSurfaceModuleRequest): Promise<SurfaceModuleView> {
-  return request<SurfaceModuleView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules`, body);
+/** Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands. */
+export async function writeSurfaceModule(surfaceId: string, body: WriteSurfaceModuleRequest): Promise<WriteSurfaceModuleResponse> {
+  return request<WriteSurfaceModuleResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules`, body);
+}
+
+/** Remove a module from a surface, with the notes hung on it; both survive in the surface's history. */
+export async function deleteSurfaceModule(surfaceId: string, moduleId: string): Promise<DeleteSurfaceModuleResponse> {
+  return request<DeleteSurfaceModuleResponse>("DELETE", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules/${encodeURIComponent(moduleId)}`);
+}
+
+/** Place a module at a position among its surface's modules (0 first; past the end is last). Answers with the surface in its new order. */
+export async function moveSurfaceModule(surfaceId: string, moduleId: string, body: MoveSurfaceModuleRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules/${encodeURIComponent(moduleId)}/position`, body);
 }
 
 /** Create a surface annotation. */

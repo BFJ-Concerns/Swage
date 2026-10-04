@@ -1003,11 +1003,17 @@ async fn the_general_scope_lists_the_agent_definitions_a_topicless_session_can_r
     let definitions = listed["definitions"].as_array().expect("definitions");
     assert_eq!(
         definitions.len(),
-        1,
-        "a fresh install offers the built-in default: {listed}"
+        2,
+        "a fresh install ships the default agent and the platform's curator: {listed}"
     );
     assert_eq!(definitions[0]["id"], "gateway");
     assert_eq!(definitions[0]["is_builtin"], true);
+    assert_eq!(definitions[0]["selectable"], true);
+    assert_eq!(definitions[1]["id"], "memory-curator");
+    assert_eq!(
+        definitions[1]["selectable"], false,
+        "the curator is listed for Settings and never offered to a person's session"
+    );
 
     // Every conversation read carries the agent the session runs under.
     let (_, created) = http_json(

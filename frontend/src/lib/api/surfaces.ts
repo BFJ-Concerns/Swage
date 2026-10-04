@@ -6,8 +6,9 @@
 
 import type { SurfaceListResponse } from "../protocol/SurfaceListResponse";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
-import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
 import type { WriteSurfaceModuleRequest } from "../protocol/WriteSurfaceModuleRequest";
+import type { WriteSurfaceModuleResponse } from "../protocol/WriteSurfaceModuleResponse";
+import type { DeleteSurfaceModuleResponse } from "../protocol/DeleteSurfaceModuleResponse";
 import type { SurfaceAnnotationView } from "../protocol/SurfaceAnnotationView";
 import type { CreateSurfaceAnnotationRequest } from "../protocol/CreateSurfaceAnnotationRequest";
 import type { UpdateSurfaceAnnotationRequest } from "../protocol/UpdateSurfaceAnnotationRequest";
@@ -79,8 +80,23 @@ export async function removeTopicDefaultSurface(
 export async function writeSurfaceModule(
   surfaceId: string,
   body: WriteSurfaceModuleRequest,
-): Promise<SurfaceModuleView> {
+): Promise<WriteSurfaceModuleResponse> {
   return generated.writeSurfaceModule(surfaceId, body);
+}
+
+export async function deleteSurfaceModule(
+  surfaceId: string,
+  moduleId: string,
+): Promise<DeleteSurfaceModuleResponse> {
+  return generated.deleteSurfaceModule(surfaceId, moduleId);
+}
+
+export async function moveSurfaceModule(
+  surfaceId: string,
+  moduleId: string,
+  position: number,
+): Promise<SurfaceResponse> {
+  return generated.moveSurfaceModule(surfaceId, moduleId, { position });
 }
 
 export async function createSurfaceAnnotation(

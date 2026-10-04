@@ -70,6 +70,9 @@
     "delete_surface_annotation_response": {
       "$ref": "#/$defs/DeleteSurfaceAnnotationResponse"
     },
+    "delete_surface_module_response": {
+      "$ref": "#/$defs/DeleteSurfaceModuleResponse"
+    },
     "document": {
       "$ref": "#/$defs/DocumentResponse"
     },
@@ -111,6 +114,9 @@
     },
     "model_discovery": {
       "$ref": "#/$defs/ModelDiscoveryResponse"
+    },
+    "move_surface_module_request": {
+      "$ref": "#/$defs/MoveSurfaceModuleRequest"
     },
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
@@ -276,6 +282,9 @@
     },
     "write_surface_module_request": {
       "$ref": "#/$defs/WriteSurfaceModuleRequest"
+    },
+    "write_surface_module_response": {
+      "$ref": "#/$defs/WriteSurfaceModuleResponse"
     }
   },
   "required": [
@@ -295,6 +304,9 @@
     "memory_instruction_request",
     "memory_instruction_response",
     "write_surface_module_request",
+    "write_surface_module_response",
+    "move_surface_module_request",
+    "delete_surface_module_response",
     "create_surface_annotation_request",
     "update_surface_annotation_request",
     "delete_surface_annotation_response",
@@ -1732,6 +1744,24 @@
         "deleted"
       ]
     },
+    "DeleteSurfaceModuleResponse": {
+      "description": "Confirms a module was removed, with the notes that went with it. The\nremoved source and notes survive in the surface's provenance trail.",
+      "type": "object",
+      "properties": {
+        "annotations_removed": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted",
+        "annotations_removed"
+      ]
+    },
     "DeliveryRoutingRequest": {
       "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
       "type": "object",
@@ -3064,6 +3094,19 @@
         "provider_id",
         "model_id",
         "aliases"
+      ]
+    },
+    "MoveSurfaceModuleRequest": {
+      "description": "Place a module among its surface's modules: 0 is first, and a position\npast the end is the end.",
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "required": [
+        "position"
       ]
     },
     "NamedAssemblyReport": {
@@ -5937,6 +5980,11 @@
           "type": "integer",
           "format": "int32"
         },
+        "revision": {
+          "description": "Advances on every change to `source`; a replace names the revision\nit read.",
+          "type": "integer",
+          "format": "int64"
+        },
         "source": {
           "type": "string"
         },
@@ -5950,6 +5998,7 @@
         "kind",
         "position",
         "source",
+        "revision",
         "updated_at",
         "annotations"
       ]
@@ -9141,6 +9190,15 @@
       "description": "Write a module's source: replace an existing instance's content, or\nappend a new instance to the surface when `module_id` is absent.",
       "type": "object",
       "properties": {
+        "expected_revision": {
+          "description": "The module's revision as the writer read it. Required with\n`module_id`: a replace lands only against that revision, so a change\nmade since the writer read the module is never written over unseen.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
         "kind": {
           "description": "Module kind for a new instance (\"document\" first); ignored when\n`module_id` names an existing instance.",
           "type": [
@@ -9163,6 +9221,43 @@
       },
       "required": [
         "source"
+      ]
+    },
+    "WriteSurfaceModuleResponse": {
+      "description": "The answer to a module write. A replace against a moved-on revision is\nrefused: nothing changes and the writer is shown the module as it now\nstands, so replacing it is a second, deliberate write naming the current\nrevision.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "module": {
+              "$ref": "#/$defs/SurfaceModuleView"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "written"
+            }
+          },
+          "required": [
+            "outcome",
+            "module"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "current": {
+              "$ref": "#/$defs/SurfaceModuleView"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "stale"
+            }
+          },
+          "required": [
+            "outcome",
+            "current"
+          ]
+        }
       ]
     }
   }

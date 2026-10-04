@@ -131,6 +131,7 @@ impl DeliveryCapability for SurfaceDeliveryCapability {
                     module_id: None,
                     kind: Some("document".into()),
                     source: payload.content,
+                    expected_revision: None,
                 },
                 "workflow delivery",
             ) => result.map_err(|error| error.to_string())?,
