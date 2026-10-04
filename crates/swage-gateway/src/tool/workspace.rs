@@ -103,7 +103,7 @@ pub fn resolve_context_path(
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
     let working_directory = canonical_existing_root(ctx.working_directory())?;
-    let allowed_roots = context_roots(ctx)?;
+    let allowed_roots = context_roots(ctx, false)?;
 
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
@@ -126,7 +126,7 @@ pub fn resolve_new_context_path(
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
     let working_directory = canonical_existing_root(ctx.working_directory())?;
-    let allowed_roots = context_roots(ctx)?;
+    let allowed_roots = context_roots(ctx, true)?;
 
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
@@ -524,10 +524,14 @@ fn normalise_path(path: &Path) -> PathBuf {
     stack.iter().collect()
 }
 
-fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
+fn context_roots(ctx: &dyn ToolContext, allow_missing: bool) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
     for path in ctx.allowed_paths() {
-        let root = canonical_existing_root(path)?;
+        let root = if allow_missing && !path.exists() {
+            resolve_existing_prefix(&normalise_path(path), &path.to_string_lossy())?
+        } else {
+            canonical_existing_root(path)?
+        };
         if !roots.contains(&root) {
             roots.push(root);
         }
@@ -573,12 +577,15 @@ fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<S
         ctx.working_directory().join(requested)
     };
     let normalised = normalise_path(&raw);
-    // A write may create several parent directories. The approval must name
-    // an existing directory that can actually be added to the tool context.
-    normalised
-        .ancestors()
-        .find(|path| path.is_dir())
-        .and_then(|path| path.canonicalize().ok())
+    // Missing parents are part of the requested location, not a reason to
+    // grant access to a broader existing ancestor.
+    let root = if normalised.is_dir() {
+        normalised.as_path()
+    } else {
+        normalised.parent()?
+    };
+    resolve_existing_prefix(root, requested)
+        .ok()
         .map(|path| path.to_string_lossy().into_owned())
 }
 
@@ -858,6 +865,36 @@ mod tests {
         let result = continuable_output_value("abcdef", 0, 0, "file_read", serde_json::Map::new());
 
         assert_eq!(result.unwrap_err(), "max_output_bytes must be positive");
+    }
+
+    #[test]
+    fn missing_parent_approval_preserves_the_requested_directory_boundary() {
+        let dir = tmp_workspace();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let mut ctx = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: project,
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
+        let requested = "../missing/deep/report.md";
+        let root = match location_approval_error("file_write", &ctx, requested, "write") {
+            ToolError::RequiresLocationApproval { path, .. } => path,
+            other => panic!("expected location approval, got {other:?}"),
+        };
+        assert_eq!(root, dir.path().join("missing/deep").to_string_lossy());
+        assert!(!Path::new(&root).exists());
+        ctx.allowed_paths.push(PathBuf::from(root));
+        assert_eq!(
+            resolve_new_context_path(&ctx, requested).unwrap().path,
+            dir.path().join("missing/deep/report.md")
+        );
+        assert!(resolve_new_context_path(&ctx, "../missing/neighbour.md").is_err());
+        assert!(resolve_new_context_path(&ctx, "../outside.md").is_err());
     }
 
     #[test]
