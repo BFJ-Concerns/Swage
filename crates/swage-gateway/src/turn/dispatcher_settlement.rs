@@ -209,9 +209,20 @@ pub(super) async fn settle_turn_dispatcher(
             let isolation = ExecutionIsolation::Degraded {
                 reason: format!("sandbox_setup_failed: {error}"),
             };
+            let message = format!("Sandbox setup failed; the turn was not executed: {error}");
+            if let Some(reason) = super::projection::record_failure_explanation(
+                state,
+                session_id,
+                prepared_turn_id,
+                &message,
+            )
+            .await
+            {
+                tracing::error!(%reason, turn_id = %prepared_turn_id, "turn record integrity lost");
+            }
             let _ = ws_tx.send(ServerEvent::Error {
                 code: "sandbox_unavailable".into(),
-                message: format!("Sandbox setup failed; the turn was not executed: {error}"),
+                message,
             });
             record_terminal_state_and_release(
                 state,
