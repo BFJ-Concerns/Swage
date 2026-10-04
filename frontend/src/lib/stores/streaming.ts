@@ -104,6 +104,17 @@ export interface StreamingStoreOptions {
       turn_id?: string;
       tool_calls?: ToolCallView[];
     }, conversationId?: string | null): void;
+    /**
+     * Settle the person's pending request as a turn that ended without a
+     * reply: its terminal state and the tool calls it issued.
+     */
+    settleUnansweredRequest?(
+      settlement: {
+        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+        tool_calls: ToolCallView[];
+      },
+      conversationId?: string | null,
+    ): void;
     /** Installs a message the gateway recorded and announced on its conversation. */
     appendRecordedMessage?(
       message: import("../protocol/MessageView").MessageView,
@@ -456,15 +467,34 @@ export function createStreamingStore(
           break;
         }
 
-        case "cancelled":
-          // User-initiated cancel. Preserve partial content (they may want
-          // to read what was generated before they stopped it).
-          settlePartialResponse(ownerId, stream, "interrupted");
+        case "cancelled": {
+          // User-initiated cancel. A call still running when the turn
+          // stopped has no result: its outcome is interrupted, as recovery
+          // records it. Calls that finished keep the outcome they reported.
+          const settledCalls = get(stream.activeToolCallsStore).map((call) =>
+            call.status === null ? { ...call, status: "interrupted" } : call,
+          );
+          if (get(stream.streamedContentStore)) {
+            // Preserve partial content (they may want to read what was
+            // generated before they stopped it); the calls stay beside it.
+            settlePartialResponse(ownerId, stream, "interrupted");
+            stream.activeToolCallsStore.set(settledCalls);
+          } else if (options?.conversationStore?.settleUnansweredRequest) {
+            // No reply: the turn's account rides on its request, where the
+            // conversation shows it after a reload too.
+            options.conversationStore.settleUnansweredRequest(
+              { turn_state: "interrupted", tool_calls: settledCalls },
+              ownerId,
+            );
+            stream.activeToolCallsStore.set([]);
+          } else {
+            stream.activeToolCallsStore.set(settledCalls);
+          }
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
-          // activeToolCalls preserved — same rationale as the error case.
           stream.providerRetryStore.set(null);
           break;
+        }
 
         case "shutdown":
           // The gateway is shutting down. Preserve any partial content and

@@ -170,9 +170,26 @@
   // calls, failure explanation — on its request, since no assistant message
   // exists to hold it.
   function endedWithoutReply(message: (typeof messages)[number]): boolean {
-    if (message.role === "assistant" || !message.turn_id) return false;
+    if (message.role === "assistant") return false;
     if (message.turn_state !== "failed" && message.turn_state !== "interrupted") return false;
+    if (!message.turn_id) {
+      // A request settled live, before the gateway's record names its turn:
+      // a reply would follow it directly.
+      return messages[messages.indexOf(message) + 1]?.role !== "assistant";
+    }
     return !messages.some((other) => other.role === "assistant" && other.turn_id === message.turn_id);
+  }
+
+  // What Retry resends for a failed turn, shown on the message holding the
+  // turn's account: the request itself when no reply came, or — under a
+  // partial reply — the request that partial reply answered.
+  function retryContent(message: (typeof messages)[number]): string | null {
+    if (message.turn_state !== "failed") return null;
+    if (endedWithoutReply(message)) return message.content;
+    if (message.role !== "assistant" || !message.turn_id) return null;
+    const turnMessages = messages.filter((other) => other.turn_id === message.turn_id);
+    if (turnMessages[turnMessages.length - 1] !== message) return null;
+    return turnMessages.find((other) => isPersonsMessage(other))?.content ?? null;
   }
 
   // Retry resends the request through the ordinary send path.
@@ -323,8 +340,8 @@
             <span class="error-message">{message.failure_message}</span>
           </div>
         {/if}
-        {#if message.turn_state === "failed" && endedWithoutReply(message) && !isStreaming}
-          <button class="branch-link" onclick={() => retry(message.content)}>Retry</button>
+        {#if retryContent(message) !== null && !isStreaming}
+          <button class="branch-link" onclick={() => retry(retryContent(message)!)}>Retry</button>
         {/if}
         {#if shouldShowModel(message.role) && message.model}
           <div class="message-model">{message.model}</div>
