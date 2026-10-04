@@ -56,27 +56,67 @@ pub(crate) fn user_denied_feedback() -> String {
     String::from("The user denied this tool call. It did not run, and no approval is pending.")
 }
 
-/// Prefix an approved call's model-facing result with how the person
-/// approved it, so the model can account for the approval afterwards.
+/// A dispatch's payload and approval feedback travel separately so only the
+/// model-facing content carries the feedback. Storage metadata and hooks use
+/// the payload unchanged.
+pub(crate) struct ToolDispatchResult {
+    pub content: String,
+    pub is_error: bool,
+    pub status: String,
+    pub approval_note: Option<String>,
+    pub execution_prevented: bool,
+}
+
+impl From<(String, bool, String)> for ToolDispatchResult {
+    fn from((content, is_error, status): (String, bool, String)) -> Self {
+        Self {
+            content,
+            is_error,
+            status,
+            approval_note: None,
+            execution_prevented: false,
+        }
+    }
+}
+
+impl ToolDispatchResult {
+    pub fn model_content(&self, content: &str) -> String {
+        match &self.approval_note {
+            Some(note) => format!("{note}\n{content}"),
+            None => content.to_owned(),
+        }
+    }
+}
+
+/// Record how the person approved the call without altering its payload.
+/// Success confirms execution; validation or access failures prevent it.
+/// Other errors do not establish whether execution began.
 pub(crate) fn with_user_approval_note(
-    result: (String, bool, String),
+    mut result: ToolDispatchResult,
     scope: ApprovalDecisionScope,
-) -> (String, bool, String) {
+) -> ToolDispatchResult {
     let how = match scope {
         ApprovalDecisionScope::Once => "once",
         ApprovalDecisionScope::Session => "for this session",
         ApprovalDecisionScope::Permanent | ApprovalDecisionScope::PermanentGlobal => "permanently",
     };
-    let (text, is_error, status) = result;
-    if status == "rejected" {
+    if result.status == "rejected" {
         // A later gate on the same call denied it; that denial is the outcome.
-        return (text, is_error, status);
+        return result;
     }
-    (
-        format!("[The user approved this tool call {how}; it ran after approval.]\n{text}"),
-        is_error,
-        status,
-    )
+    let outcome = if result.status == "success" {
+        "; it ran after approval"
+    } else if result.execution_prevented {
+        "; it did not run"
+    } else {
+        ""
+    };
+    let note = format!("[The user approved this tool call {how}{outcome}.]");
+    result.approval_note = Some(match result.approval_note {
+        Some(previous) => format!("{note}\n{previous}"),
+        None => note,
+    });
+    result
 }
 
 /// Default approval timeout when neither config nor hook specifies one.
