@@ -377,6 +377,155 @@ async fn conversation_lifecycle_with_streaming() {
 /// Journey: Core Journey 1 (failure/recovery path)
 /// Spans: gateway-websocket, gateway-turn, storage-sqlite-impl, provider-trait
 ///
+/// Proves: a turn the provider failed keeps its explanation in the
+///   conversation the person reloads — the failed state and the provider's
+///   error ride on the request the turn answered, not only on the live event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_turn_keeps_its_explanation_after_reload() {
+    let provider = MockProvider::new(vec![StreamChunk::Error {
+        message: "provider unreachable: connection refused".into(),
+    }]);
+    let (router, addr, _storage) = start_test_server(provider).await;
+
+    let (_, body) = http(&router, "POST", "/api/conversations").await;
+    let conv_id = body["id"].as_str().unwrap().to_string();
+    let (mut ws_write, mut ws_read) = connect_ws(addr, &conv_id).await;
+    ws_send(
+        &mut ws_write,
+        json!({"type": "send_message", "content": "Hello?"}),
+    )
+    .await;
+    let event = ws_recv_until(&mut ws_read, |e| e["type"] == "error").await;
+    assert!(
+        event["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection refused"),
+        "live error: {event}"
+    );
+    drop(ws_write);
+    drop(ws_read);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (_, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
+    let messages = body["messages"].as_array().unwrap();
+    let request = messages
+        .iter()
+        .find(|m| m["content"] == "Hello?")
+        .expect("the request stays in the conversation");
+    assert_eq!(request["turn_state"], "failed", "{body}");
+    assert!(
+        request["failure_message"]
+            .as_str()
+            .is_some_and(|message| message.contains("connection refused")),
+        "the reloaded request must carry the failure explanation: {request}"
+    );
+}
+
+/// Proves: a turn interrupted by a gateway restart after a tool call had
+///   started keeps that call in the conversation — recovery settles the
+///   started row as interrupted, and the detail attaches it to the request
+///   the turn answered even though no assistant reply was ever written.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
+    use swage_core::Role;
+    use swage_storage::model::{AppendMessage, NewToolCall};
+    use swage_storage::store::{MessageStore, ToolCallStore};
+
+    let (router, _addr, storage) = start_test_server(MockProvider::new(vec![])).await;
+    let (_, body) = http(&router, "POST", "/api/conversations").await;
+    let conv_id = body["id"].as_str().unwrap().to_string();
+    let thread = storage
+        .list_by_session(conv_id.parse().unwrap())
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("conversation thread");
+
+    // The state a hard kill leaves: a processing turn, its request, one call
+    // that finished and one that was still running.
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".to_string(),
+            state: TurnState::Processing,
+            user_input: Some("write the file".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id: thread.id,
+            turn_id: Some(turn.id),
+            role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
+            content: "write the file".into(),
+            attachments: Vec::new(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    for (position, call_id, tool) in [(0, "call-write", "file_write"), (1, "call-shell", "shell")] {
+        let record = storage
+            .create_tool_call(NewToolCall {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                call_id: call_id.into(),
+                tool: tool.into(),
+                arguments: "{}".into(),
+                model_arguments: "{}".into(),
+                result: None,
+                model_result: None,
+                status: None,
+                duration_ms: None,
+                truncated: false,
+                total_bytes: None,
+                provider_round: 0,
+                position,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+        if call_id == "call-write" {
+            storage
+                .update_tool_call_result(
+                    record.id,
+                    "{\"written\":true}",
+                    "written",
+                    "success",
+                    3,
+                    false,
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+
+    let (_, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
+    let messages = body["messages"].as_array().unwrap();
+    let request = messages
+        .iter()
+        .find(|m| m["content"] == "write the file")
+        .expect("the request stays in the conversation");
+    assert_eq!(request["turn_state"], "interrupted", "{body}");
+    let calls = request["tool_calls"].as_array().unwrap();
+    let status_of = |call_id: &str| {
+        calls
+            .iter()
+            .find(|call| call["call_id"] == call_id)
+            .unwrap_or_else(|| panic!("{call_id} missing from the reloaded turn: {request}"))["status"]
+            .clone()
+    };
+    assert_eq!(status_of("call-write"), "success");
+    assert_eq!(status_of("call-shell"), "interrupted");
+}
+
 /// Proves: cancellation aborts the LLM stream, a cancelled event is sent,
 ///   the partial response is saved, and the conversation remains usable for
 ///   subsequent messages.

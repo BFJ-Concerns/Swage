@@ -507,6 +507,32 @@ pub(super) async fn project_agent_events(
                     *observer.lock().unwrap_or_else(|error| error.into_inner()) =
                         Some(message.clone());
                 }
+                // Reconstructive record (record_durability.rs): the turn's
+                // Failed state is the constitutive fact; the explanation the
+                // person saw enriches it so the conversation can show it
+                // after a reload. Its loss is named in the trail, and only a
+                // trail that cannot name it fails the turn's record.
+                let failed_turn_id = turn_id.unwrap_or(prepared_turn_id);
+                if let Err(error) = state
+                    .storage
+                    .record_turn_failure_message(failed_turn_id, &message)
+                    .await
+                {
+                    tracing::warn!(%error, turn_id = %failed_turn_id, "failed to persist failure_message");
+                    if let Err(gap_error) = record_durability::record_reconstruction_gap(
+                        state.storage.as_ref(),
+                        Some(session_id),
+                        failed_turn_id,
+                        "failure_message",
+                        &error,
+                    )
+                    .await
+                    {
+                        record_integrity_lost.get_or_insert(format!(
+                            "failure explanation could not be persisted or recorded as missing: {gap_error}"
+                        ));
+                    }
+                }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_error".to_string(),
                     message,

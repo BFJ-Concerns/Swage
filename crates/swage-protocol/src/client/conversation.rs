@@ -264,6 +264,11 @@ pub struct MessageView {
     pub timestamp: DateTime<Utc>,
     pub turn_state: Option<TurnState>,
     pub tool_calls: Vec<ToolCallView>,
+    /// Why the message's turn ended without a reply, as the person was told
+    /// live; carried on the message that holds the turn's account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]

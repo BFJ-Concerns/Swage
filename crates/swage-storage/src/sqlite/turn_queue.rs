@@ -242,6 +242,7 @@ impl TurnQueueStore for SqliteStorage {
                     delegated_input_tokens: None,
                     delegated_output_tokens: None,
                     execution_isolation: None,
+                    failure_message: None,
                 },
                 messages,
                 queued_ids,

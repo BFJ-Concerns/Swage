@@ -612,6 +612,13 @@ pub trait TurnStore: Send + Sync {
         id: Uuid,
         isolation: &TurnIsolation,
     ) -> Result<(), StorageError>;
+    /// Record the explanation shown to the person when the turn ended
+    /// without a reply. The first explanation recorded for a turn stands.
+    async fn record_turn_failure_message(
+        &self,
+        id: Uuid,
+        message: &str,
+    ) -> Result<(), StorageError>;
     /// Persist the validated structured output for a completed turn.
     ///
     /// Called when output schema validation succeeds. The `output` value is
@@ -2578,6 +2585,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn record_turn_failure_message(
+            &self,
+            _id: Uuid,
+            _message: &str,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn record_turn_isolation(
