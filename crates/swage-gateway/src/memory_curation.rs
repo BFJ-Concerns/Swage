@@ -27,7 +27,7 @@ use swage_storage::{
     model::Message,
 };
 
-use crate::memory::{MEMORY_CURATOR_AGENT_ID, MemoryReference};
+use crate::memory::{MEMORY_CURATOR_AGENT_ID, MemoryReference, MemoryScope};
 use crate::service::{PlatformMessage, append_platform_message};
 use crate::state::AppState;
 use crate::thread_selection::resolve_thread_for_session;
@@ -239,16 +239,22 @@ fn instruction_brief(instruction: &str) -> String {
 }
 
 /// The platform message a live conversation receives when a pass over it
-/// changed memory: each page named, linked to its Settings view.
-fn change_notice(entries: &[MemoryReference]) -> String {
+/// changed memory: each page named, linked to its Settings view. A topic
+/// reference is relative to the conversation's topic, so the link names that
+/// topic as the page's scope; a general reference names `general`.
+fn change_notice(entries: &[MemoryReference], topic_id: Uuid) -> String {
     let pages: Vec<String> = entries
         .iter()
         .map(|reference| {
             let spelled = reference.to_string();
+            let scope = match reference.scope {
+                MemoryScope::General => "general".to_string(),
+                MemoryScope::Topic => topic_id.to_string(),
+            };
             // A reference's segments are letters, digits, hyphens and
             // underscores; the slash is its only reserved character.
             format!(
-                "[{spelled}](/settings/memory?reference={})",
+                "[{spelled}](/settings/memory?scope={scope}&reference={})",
                 spelled.replace('/', "%2F")
             )
         })
@@ -486,7 +492,7 @@ pub async fn curate_attended_session(
                 turn_id: None,
                 agent_id: attended.agent_id.clone(),
                 origin: MessageOrigin::Platform,
-                content: change_notice(&pass.entries_written),
+                content: change_notice(&pass.entries_written, attended.topic_id),
             },
         )
         .await?;
@@ -767,8 +773,18 @@ mod tests {
         assert!(
             notice
                 .content
-                .contains("/settings/memory?reference=general%2Fpeople%2Falice")
+                .contains("/settings/memory?scope=general&reference=general%2Fpeople%2Falice")
         );
+        // A topic page's link names the conversation's topic as its scope,
+        // since a topic reference alone does not say which topic holds it.
+        let topic_notice = change_notice(
+            &[MemoryReference::parse("topic/conventions").unwrap()],
+            attended.topic_id,
+        );
+        assert!(topic_notice.contains(&format!(
+            "/settings/memory?scope={}&reference=topic%2Fconventions",
+            attended.topic_id
+        )));
         let announced_to_attended = std::iter::from_fn(|| announcements.try_recv().ok()).any(|event| {
             matches!(
                 event,
