@@ -681,6 +681,60 @@ fn turn_complete_with_structured_output_serialises() {
 }
 
 #[test]
+fn message_appended_serialises_the_recorded_view() {
+    let session_id = Uuid::new_v4();
+    let message_id = Uuid::new_v4();
+    let event = ServerEvent::MessageAppended {
+        session_id,
+        message: swage_protocol::client::conversation::MessageView {
+            id: message_id,
+            thread_id: Uuid::new_v4(),
+            turn_id: None,
+            role: "user".into(),
+            origin: swage_storage::MessageOrigin::Schedule,
+            content: "Summarise the inbox".into(),
+            attachments: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            turn_state: None,
+            tool_calls: Vec::new(),
+        },
+    };
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "message_appended");
+    assert_eq!(json["session_id"], session_id.to_string());
+    assert_eq!(json["message"]["id"], message_id.to_string());
+    assert_eq!(json["message"]["origin"], "schedule");
+    assert_eq!(json["message"]["role"], "user");
+}
+
+#[test]
+fn a_recorded_message_reaches_only_its_own_conversation() {
+    let mine = Uuid::new_v4();
+    let event = ServerEvent::MessageAppended {
+        session_id: mine,
+        message: swage_protocol::client::conversation::MessageView {
+            id: Uuid::new_v4(),
+            thread_id: Uuid::new_v4(),
+            turn_id: None,
+            role: "user".into(),
+            origin: swage_storage::MessageOrigin::Platform,
+            content: "Memory updated".into(),
+            attachments: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            turn_state: None,
+            tool_calls: Vec::new(),
+        },
+    };
+    assert!(super::connection::broadcast_event_matches_session(
+        mine, &event
+    ));
+    assert!(!super::connection::broadcast_event_matches_session(
+        Uuid::new_v4(),
+        &event
+    ));
+}
+
+#[test]
 fn turn_complete_without_structured_output_omits_field() {
     let id = Uuid::new_v4();
     let event = ServerEvent::TurnComplete {

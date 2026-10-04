@@ -481,6 +481,11 @@ async fn seed_history(storage: &MockStorage, session_id: Uuid, count: usize) -> 
                 } else {
                     swage_core::Role::Assistant
                 },
+                origin: if index % 2 == 0 {
+                    swage_storage::MessageOrigin::User
+                } else {
+                    swage_storage::MessageOrigin::Assistant
+                },
                 content: format!("history message {index}"),
                 agent_id: "gateway".to_string(),
             })
@@ -4285,6 +4290,7 @@ impl ThreadStore for MockStorage {
                 attachments: Vec::new(),
                 turn_id: message.turn_id,
                 role: message.role,
+                origin: message.origin,
                 content: message.content,
                 position: message.position,
                 agent_id: message.agent_id,
@@ -4674,6 +4680,7 @@ impl MessageStore for MockStorage {
             attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
+            origin: swage_storage::MessageOrigin::User,
             content: message.content,
             position: message.position,
             agent_id: message.agent_id,
@@ -4706,6 +4713,7 @@ impl MessageStore for MockStorage {
             attachments: message.attachments,
             turn_id: message.turn_id,
             role: message.role,
+            origin: message.origin,
             content: message.content,
             position,
             agent_id: message.agent_id,
@@ -9027,6 +9035,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "Use echo".to_string(),
             position: 0,
             agent_id: "gateway".to_string(),
@@ -9039,6 +9048,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             attachments: Vec::new(),
             turn_id: Some(parent_turn.id),
             role: Role::Assistant,
+            origin: swage_storage::MessageOrigin::Assistant,
             content: "Echo complete".to_string(),
             position: 1,
             agent_id: "gateway".to_string(),
@@ -9210,6 +9220,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "Run the command".to_string(),
             position: 0,
             agent_id: "gateway".to_string(),
@@ -9222,6 +9233,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             attachments: Vec::new(),
             turn_id: Some(failed_turn.id),
             role: Role::Assistant,
+            origin: swage_storage::MessageOrigin::Assistant,
             content: "Trying the command".to_string(),
             position: 1,
             agent_id: "gateway".to_string(),
@@ -17968,6 +17980,7 @@ async fn a_stored_attachment_outside_the_contract_fails_the_history_rebuild() {
             attachments: vec![serde_json::json!({"kind": "hologram", "url": "x"})],
             turn_id: None,
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "look".into(),
             agent_id: "gateway".into(),
         })
@@ -18001,6 +18014,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
             attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "Delegated agent researcher completed:\nGathered 3 sources.".into(),
             agent_id: "gateway".into(),
         })
@@ -18012,6 +18026,7 @@ async fn delivered_delegation_results_survive_the_history_rebuild() {
             attachments: Vec::new(),
             turn_id: None,
             role: Role::Tool,
+            origin: swage_storage::MessageOrigin::Tool,
             content: "orphaned tool row".into(),
             agent_id: "gateway".into(),
         })
@@ -18088,6 +18103,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
             attachments: Vec::new(),
             turn_id: Some(turn.id),
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "append the marker, then run the long job".into(),
             agent_id: "gateway".into(),
         })
@@ -18203,6 +18219,7 @@ async fn assistantless_delegated_round_follows_the_delegated_task() {
                 attachments: Vec::new(),
                 turn_id: Some(turn_id),
                 role: Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: content.into(),
                 agent_id: "child".into(),
             })

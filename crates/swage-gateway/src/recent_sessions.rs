@@ -294,6 +294,7 @@ mod tests {
                 thread_id: thread.id,
                 turn_id: None,
                 role: Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: content.to_string(),
                 attachments: Vec::new(),
                 position: 0,

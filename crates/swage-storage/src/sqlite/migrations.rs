@@ -1214,6 +1214,10 @@ const COMPLETE_SCHEMA: &str = "
         id           TEXT    NOT NULL PRIMARY KEY,
         thread_id    TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
         role         TEXT    NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
+        -- Who authored the row: a person, the model, a tool, or the platform
+        -- path that composed it. Keyed by the UI's author label; a row with
+        -- no recorded origin is refused rather than guessed from its role.
+        origin       TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
         content      TEXT    NOT NULL,
         -- Content parts submitted beside the text, as a JSON array of the
         -- client wire's tagged attachment values; '[]' for text-only rows.

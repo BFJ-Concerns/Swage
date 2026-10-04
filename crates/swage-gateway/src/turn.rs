@@ -168,6 +168,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     let TurnInput {
         text: content,
         attachments,
+        origin,
     } = input;
 
     // Step 1: Resolve the topic and target thread for this session.
@@ -424,7 +425,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     }
 
     if !reuse_persisted_input {
-        record_failed_turn_and_release_on_error(
+        let recorded = record_failed_turn_and_release_on_error(
             state,
             session_id,
             prepared_turn_id,
@@ -435,6 +436,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
                     attachments: attachment_records(&attachments),
                     turn_id: Some(prepared_turn_id),
                     role: Role::User,
+                    origin,
                     content: before_inbound.canonical_content.clone(),
                     agent_id: session.agent_id.clone(),
                 })
@@ -442,14 +444,37 @@ pub(super) async fn process_turn_with_composition_and_focus(
                 .map_err(GatewayError::from),
         )
         .await?;
+        // A person's message reached their own view as they sent it; a row
+        // the platform composed — a schedule's brief, a workflow's prompt —
+        // reaches every open view here, so nobody learns of it on reload.
+        if origin != swage_storage::MessageOrigin::User {
+            let view = record_failed_turn_and_release_on_error(
+                state,
+                session_id,
+                prepared_turn_id,
+                crate::service::message_view(
+                    recorded,
+                    crate::service::pending_turn_state(),
+                    Vec::new(),
+                ),
+            )
+            .await?;
+            crate::service::announce_appended_message(state, session_id, view);
+        }
     }
 
     // Step 7: Deliver completed detached delegations (turn/detached_delivery.rs).
     // A storage failure here fails the turn — with the same explicit cleanup
     // as the surrounding error paths, so the thread is not left guarded by a
     // stale Pending turn.
-    let delivery_result =
-        deliver_detached_results(state, &session.agent_id, thread_id, prepared_turn_id).await;
+    let delivery_result = deliver_detached_results(
+        state,
+        session_id,
+        &session.agent_id,
+        thread_id,
+        prepared_turn_id,
+    )
+    .await;
     if let Err(error) = delivery_result {
         record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
             .await?;

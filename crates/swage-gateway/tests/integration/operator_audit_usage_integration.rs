@@ -199,6 +199,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
             attachments: Vec::new(),
             turn_id: Some(turn.id),
             role: swage_core::Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "message needle".into(),
             agent_id: "gateway".into(),
         })

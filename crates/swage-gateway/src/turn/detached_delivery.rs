@@ -5,23 +5,28 @@
 //! mailbox into the thread record, append-before-claim, before history is
 //! rebuilt. Failing the turn when delivery fails stays the coordinator's.
 
-use super::{AppState, AppendMessage, GatewayError, Role, Uuid};
+use swage_storage::MessageOrigin;
+
+use super::{AppState, GatewayError, Uuid};
+use crate::service::{PlatformMessage, append_platform_message};
 
 /// Deliver completed detached delegations. A detached child's
 /// Result waits in this agent's mailbox until its parent next turns;
-/// each is appended as a durable User-role message *before* history is
-/// rebuilt, so the result enters the thread record — visible in the
-/// UI, part of the audit trail, and carried to the model as ordinary
+/// each is appended as a durable platform message of origin
+/// `delegation` *before* history is rebuilt, so the result enters the
+/// thread record — labelled by its origin in the UI, announced to open
+/// views, part of the audit trail, and carried to the model as ordinary
 /// history content, never as instructions. User role, deliberately:
 /// the history rebuild carries Tool-role rows only when they answer a
 /// recorded tool call (providers reject orphaned tool results), so a
 /// platform-delivered notification rides the same role a channel or
-/// scheduled message would, with the rendering naming its real sender.
+/// scheduled message would, with the recorded origin naming its real sender.
 /// Append-before-claim: a failure between the two re-delivers next
 /// turn rather than losing the result, and a lost claim race leaves a
 /// duplicate row, not a gap.
 pub(super) async fn deliver_detached_results(
     state: &AppState,
+    session_id: Uuid,
     agent_id: &str,
     thread_id: Uuid,
     prepared_turn_id: Uuid,
@@ -30,17 +35,18 @@ pub(super) async fn deliver_detached_results(
         .await
         .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
     for result in &pending_results {
-        state
-            .storage
-            .append_message(AppendMessage {
+        append_platform_message(
+            state,
+            PlatformMessage {
+                session_id,
                 thread_id,
-                attachments: Vec::new(),
                 turn_id: Some(prepared_turn_id),
-                role: Role::User,
-                content: render_delegation_result(result),
                 agent_id: agent_id.to_owned(),
-            })
-            .await?;
+                origin: MessageOrigin::Delegation,
+                content: render_delegation_result(result),
+            },
+        )
+        .await?;
         swage_agent::mailbox::claim_result(&state.storage, result.id)
             .await
             .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;

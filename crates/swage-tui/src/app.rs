@@ -449,6 +449,7 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
         // Surfaces and their library are a web-surface concern; the terminal
         // client ignores them and the work-surface lag signal alike.
         ServerEvent::SurfaceUpdated { .. }
+        | ServerEvent::MessageAppended { .. }
         | ServerEvent::LibraryUpdated { .. }
         | ServerEvent::Lagged { .. } => EventOutcome::Continue,
 

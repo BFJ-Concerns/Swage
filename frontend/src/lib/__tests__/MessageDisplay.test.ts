@@ -105,6 +105,7 @@ function makeConversationStore(
     appendAssistantMessage: (message) => {
       messages.push({ role: "assistant", ...message });
     },
+    appendRecordedMessage: () => {},
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
     ...(branchFrom ? { branchFrom } : {}),
@@ -632,6 +633,45 @@ describe("branching from a message", () => {
     actions[0].click();
 
     await vi.waitFor(() => expect(branchFrom).toHaveBeenCalledWith("msg-9"));
+  });
+
+  it("labels a message by who wrote it, never by the role that carried it", () => {
+    // A schedule's brief rides the user role to the model, so the model
+    // treats it as the task; the person must still see it was not theirs.
+    const brief: MessageView = {
+      id: "msg-brief",
+      role: "user",
+      origin: "schedule",
+      content: "Summarise the **inbox**.",
+      timestamp: "2026-03-20T11:00:00Z",
+      turn_state: "pending",
+    };
+    const typed: MessageView = {
+      role: "user",
+      content: "Thanks",
+      timestamp: "2026-03-20T11:00:01Z",
+      turn_state: "pending",
+    };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([brief, typed]),
+        streamingStore: makeStreamingStore(),
+      },
+    });
+
+    const labels = Array.from(document.querySelectorAll(".role-label")).map(
+      (label) => label.textContent?.trim(),
+    );
+    expect(labels).toEqual(["Schedule", "You"]);
+
+    const briefElement = document.querySelector('[aria-label="Schedule message"]');
+    expect(briefElement).not.toBeNull();
+    // Not the person's words: it sits on the assistant's side, and renders
+    // as the platform wrote it (markdown), not as typed plain text.
+    expect(briefElement!.classList.contains("user")).toBe(false);
+    expect(briefElement!.querySelector("strong")?.textContent).toBe("inbox");
+    expect(document.querySelector('[aria-label="Your message"]')).not.toBeNull();
   });
 
   it("offers no branch action when the store cannot branch", () => {

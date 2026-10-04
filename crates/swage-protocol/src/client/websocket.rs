@@ -141,6 +141,15 @@ pub enum ServerEvent {
     /// Clients showing the catalogue refetch it — the event is the signal,
     /// not the content.
     LibraryUpdated { entry_id: Uuid },
+    /// A message was recorded on a conversation by something other than the
+    /// person at this client — a schedule's brief, a delegation's completion
+    /// notice, a notice from the platform — so open views append it where it
+    /// belongs without reloading. Carries the recorded message itself, the
+    /// same view the conversation's detail would return.
+    MessageAppended {
+        session_id: Uuid,
+        message: super::conversation::MessageView,
+    },
     /// Context assembly completed for a turn.
     ///
     /// Contains the full assembly report for diagnostics and token budget

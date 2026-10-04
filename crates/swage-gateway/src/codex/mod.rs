@@ -630,6 +630,7 @@ async fn run_turn_inner(
                     attachments: Vec::new(),
                     turn_id: Some(request.turn_id),
                     role: Role::Assistant,
+                    origin: swage_storage::MessageOrigin::Assistant,
                     content: response_text.clone(),
                     agent_id: request.agent_id.clone(),
                 })
@@ -673,6 +674,7 @@ async fn run_turn_inner(
             attachments: Vec::new(),
             turn_id: Some(request.turn_id),
             role: Role::Assistant,
+            origin: swage_storage::MessageOrigin::Assistant,
             content: response_text.clone(),
             agent_id: request.agent_id.clone(),
         })

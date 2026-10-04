@@ -24,6 +24,7 @@
 
   import type { ConversationStore } from "../stores/conversations";
   import type { StreamingStore } from "../stores/streaming";
+  import { authorLabel, isPersonsMessage } from "../message-authorship";
   import {
     DEFAULT_DISPLAY_PREFERENCES,
     type DisplayPreferences,
@@ -231,17 +232,21 @@
     {#each messages as message (message.timestamp)}
       <div
         class="message"
-        class:user={message.role === "user"}
-        class:assistant={message.role === "assistant"}
-        aria-label={message.role === "user" ? "Your message" : "Assistant message"}
+        class:user={isPersonsMessage(message)}
+        class:assistant={!isPersonsMessage(message)}
+        class:platform={!isPersonsMessage(message) && message.role === "user"}
+        aria-label={isPersonsMessage(message) ? "Your message" : `${authorLabel(message)} message`}
       >
-        <!-- Role label is real DOM text, not a CSS ::before — so it reaches the
-             accessibility tree reliably across screen-reader/browser combos
-             (UI audit f-14). User and assistant messages also sit on opposite
-             sides with mirrored borders so the roles read at a glance even with
-             colour off (UI audit f-23). -->
-        <span class="role-label" class:user-label={message.role === "user"}>
-          {message.role === "user" ? "You" : "Assistant"}
+        <!-- The author label is real DOM text, not a CSS ::before — so it
+             reaches the accessibility tree reliably across screen-reader/browser
+             combos (UI audit f-14). It names who wrote the message — the person,
+             the assistant, or the platform path (a schedule, a delegation) that
+             composed it — never the provider-facing role, so a brief the
+             platform wrote is not shown as the person's words. The person's
+             messages sit on the right with mirrored borders so the sides read
+             at a glance even with colour off (UI audit f-23). -->
+        <span class="role-label" class:user-label={isPersonsMessage(message)}>
+          {authorLabel(message)}
         </span>
         <!-- The assistant invokes tools before producing its response. Keep
              persisted calls inside that turn and ahead of its content. -->
@@ -252,8 +257,8 @@
             {/each}
           </div>
         {/if}
-        {#if message.role === "user"}
-          <!-- User messages render as plain text (no markdown injection). -->
+        {#if isPersonsMessage(message)}
+          <!-- The person's own messages render as plain text (no markdown injection). -->
           <div class="message-content user-content">
             {message.content}
           </div>
@@ -483,6 +488,13 @@
 
   .role-label.user-label {
     color: var(--ink-orange);
+  }
+
+  /* A message the platform wrote — a schedule's brief, a delegation's
+     notice — reads on the assistant's side with a softer rule, so it is
+     neither the person's words nor the model's reply at a glance. */
+  .message.platform .message-content {
+    border-left-color: var(--ink-soft);
   }
 
   /* ---- Message content ---------------------------------------------------- */

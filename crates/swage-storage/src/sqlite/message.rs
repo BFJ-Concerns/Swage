@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use swage_core::{Role, StorageError};
 
-use crate::model::{AppendMessage, Message, NewMessage};
+use crate::model::{AppendMessage, Message, MessageOrigin, NewMessage};
 use crate::sqlite::SqliteStorage;
 use crate::store::MessageStore;
 
@@ -15,14 +15,18 @@ use crate::store::MessageStore;
 // ---------------------------------------------------------------------------
 
 /// Column order: id, thread_id, turn_id, role, content, position, agent_id,
-/// tool_call_id, tool_name, created_at, attachments (11 columns, matching
-/// every SELECT).
+/// tool_call_id, tool_name, created_at, attachments, origin (12 columns,
+/// matching every SELECT).
+const MESSAGE_COLUMNS: &str = "id, thread_id, turn_id, role, content, position, agent_id,
+                        tool_call_id, tool_name, created_at, attachments, origin";
+
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
     let turn_id: Option<String> = row.get(2)?;
     let created: String = row.get(9)?;
     let attachments: String = row.get(10)?;
+    let origin: String = row.get(11)?;
 
     let role: String = row.get(3)?;
 
@@ -32,6 +36,9 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
         role: Role::from_str(&role).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        origin: origin.parse::<MessageOrigin>().map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, err.into())
         })?,
         content: row.get(4)?,
         attachments: parse_attachments(&attachments)?,
@@ -85,8 +92,8 @@ impl MessageStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
@@ -99,6 +106,7 @@ impl MessageStore for SqliteStorage {
                     Option::<&str>::None, // tool_name — same
                     &now_str,
                     encode_attachments(&message.attachments)?,
+                    message.origin.as_str(),
                 ],
             )?;
 
@@ -108,6 +116,7 @@ impl MessageStore for SqliteStorage {
                 attachments: message.attachments,
                 turn_id: message.turn_id,
                 role: message.role,
+                origin: message.origin,
                 content: message.content,
                 position: message.position,
                 agent_id: message.agent_id,
@@ -134,8 +143,8 @@ impl MessageStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
@@ -148,6 +157,7 @@ impl MessageStore for SqliteStorage {
                     Option::<&str>::None,
                     &now_str,
                     encode_attachments(&message.attachments)?,
+                    message.origin.as_str(),
                 ],
             )?;
 
@@ -157,6 +167,7 @@ impl MessageStore for SqliteStorage {
                 attachments: message.attachments,
                 turn_id: message.turn_id,
                 role: message.role,
+                origin: message.origin,
                 content: message.content,
                 position,
                 agent_id: message.agent_id,
@@ -170,13 +181,12 @@ impl MessageStore for SqliteStorage {
 
     async fn list_messages_by_thread(&self, thread_id: Uuid) -> Result<Vec<Message>, StorageError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, thread_id, turn_id, role, content, position, agent_id,
-                        tool_call_id, tool_name, created_at, attachments
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS}
                  FROM messages
                  WHERE thread_id = ?1
-                 ORDER BY position ASC",
-            )?;
+                 ORDER BY position ASC"
+            ))?;
             let rows = stmt.query_map(params![thread_id.to_string()], row_to_message)?;
             rows.collect()
         })
@@ -192,7 +202,7 @@ impl MessageStore for SqliteStorage {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT m.id, m.thread_id, m.turn_id, m.role, m.content, m.position, m.agent_id,
-                        m.tool_call_id, m.tool_name, m.created_at, m.attachments
+                        m.tool_call_id, m.tool_name, m.created_at, m.attachments, m.origin
                  FROM messages m
                  JOIN threads t ON m.thread_id = t.id
                  WHERE t.session_id = ?1
@@ -209,10 +219,11 @@ impl MessageStore for SqliteStorage {
     async fn get_message(&self, id: Uuid) -> Result<Option<Message>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
-                "SELECT id, thread_id, turn_id, role, content, position, agent_id,
-                        tool_call_id, tool_name, created_at, attachments
+                &format!(
+                    "SELECT {MESSAGE_COLUMNS}
                  FROM messages
-                 WHERE id = ?1",
+                 WHERE id = ?1"
+                ),
                 params![id.to_string()],
                 row_to_message,
             )
@@ -293,6 +304,7 @@ mod tests {
             attachments: Vec::new(),
             turn_id: None,
             role,
+            origin: origin_for(role),
             content: content.into(),
             position,
             agent_id: "test-agent".to_string(),
@@ -305,9 +317,64 @@ mod tests {
             attachments: Vec::new(),
             turn_id: None,
             role,
+            origin: origin_for(role),
             content: content.into(),
             agent_id: "test-agent".to_string(),
         }
+    }
+
+    /// The origin a person-or-model row carries by default in these tests.
+    fn origin_for(role: Role) -> MessageOrigin {
+        match role {
+            Role::Assistant => MessageOrigin::Assistant,
+            Role::Tool => MessageOrigin::Tool,
+            Role::User | Role::System => MessageOrigin::User,
+        }
+    }
+
+    // --- origin ---
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_platform_authored_row_keeps_its_origin_apart_from_its_role() {
+        // Role is what the provider sees; origin is who wrote it. A schedule's
+        // brief rides the user role so the model treats it as the task, yet
+        // the record must still say a person did not type it.
+        let (storage, session_id, thread_id) = make_thread().await;
+        let mut brief = append_msg(thread_id, Role::User, "Summarise the inbox.");
+        brief.origin = MessageOrigin::Schedule;
+
+        let appended = storage.append_message(brief).await.unwrap();
+        assert_eq!(appended.origin, MessageOrigin::Schedule);
+        assert_eq!(appended.role, Role::User);
+
+        let listed = storage.list_messages_by_thread(thread_id).await.unwrap();
+        assert_eq!(listed[0].origin, MessageOrigin::Schedule);
+        let fetched = storage.get_message(appended.id).await.unwrap().unwrap();
+        assert_eq!(fetched.origin, MessageOrigin::Schedule);
+        let latest = storage
+            .get_latest_for_session(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.origin, MessageOrigin::Schedule);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_row_with_an_unknown_origin_is_refused_as_corruption() {
+        // The column constraint refuses the write; a reader never has to
+        // guess an origin from the role.
+        let (storage, _, thread_id) = make_thread().await;
+        let error = storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
+                     VALUES (?1, ?2, NULL, 'user', 'x', 0, 'test-agent', NULL, NULL, ?3, '[]', 'guesswork')",
+                    params![Uuid::new_v4().to_string(), thread_id.to_string(), Utc::now().to_rfc3339()],
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(error.is_err(), "an unknown origin must not be stored");
     }
 
     // --- attachments ---

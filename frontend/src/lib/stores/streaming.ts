@@ -104,6 +104,11 @@ export interface StreamingStoreOptions {
       turn_id?: string;
       tool_calls?: ToolCallView[];
     }, conversationId?: string | null): void;
+    /** Installs a message the gateway recorded and announced on its conversation. */
+    appendRecordedMessage?(
+      message: import("../protocol/MessageView").MessageView,
+      conversationId: string,
+    ): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
@@ -518,6 +523,14 @@ export function createStreamingStore(
           // input returns. The approval API responds via fetch; the WS event
           // is an authoritative signal that the gate has closed.
           stream.pendingApprovalStore.set(null);
+          break;
+
+        case "message_appended":
+          // A row the gateway recorded on this conversation that nobody here
+          // typed — a schedule's brief, a delegation's notice — joins the view
+          // as the gateway holds it, so an open conversation never learns of
+          // it only on reload.
+          options?.conversationStore?.appendRecordedMessage?.(event.message, event.session_id);
           break;
 
         case "context_assembled":

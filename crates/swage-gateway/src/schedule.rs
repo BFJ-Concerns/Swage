@@ -1197,8 +1197,15 @@ async fn run_body(
         )
         .await?;
 
-    let output =
-        crate::automated_turn::run_placeholder_turn(state, session_id, &input, turn_id).await?;
+    // The brief is the platform's, not the person's: the recorded row says so,
+    // and an open view of a continued conversation sees it arrive.
+    let output = crate::automated_turn::run_placeholder_turn(
+        state,
+        session_id,
+        crate::turn::TurnInput::text(&input).with_origin(swage_storage::MessageOrigin::Schedule),
+        turn_id,
+    )
+    .await?;
 
     // Delivery runs after a successful turn: a failure here still fails the
     // run, but the output the turn produced is preserved on the row.
@@ -1933,6 +1940,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: "The queue was empty at last check. ".repeat(20),
                 position: 0,
                 agent_id: "gateway".into(),

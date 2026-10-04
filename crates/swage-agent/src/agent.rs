@@ -1074,6 +1074,7 @@ impl Agent {
                             attachments: Vec::new(),
                             turn_id: Some(turn.id),
                             role: Role::Assistant,
+                            origin: swage_storage::MessageOrigin::Assistant,
                             content: accumulated.clone(),
                             agent_id: self.config.agent_id.clone(),
                         })
@@ -1173,6 +1174,7 @@ impl Agent {
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })
@@ -2481,6 +2483,7 @@ impl Agent {
                 attachments: Vec::new(),
                 turn_id: Some(turn_id),
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: safe_content.clone(),
                 agent_id: self.config.agent_id.clone(),
             })

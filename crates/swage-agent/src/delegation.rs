@@ -343,6 +343,7 @@ impl DelegationExecutor {
                     attachments: Vec::new(),
                     turn_id: Some(turn_id),
                     role: message.role(),
+                    origin: swage_storage::MessageOrigin::Delegation,
                     content: message.text_content(),
                     agent_id: target_agent_id.clone(),
                 })
