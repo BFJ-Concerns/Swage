@@ -74,6 +74,11 @@ export interface StreamingStore {
   cancelTurn(): void;
 }
 
+// The outcome an interrupted call shows: the result recovery records for a
+// started call (swage-storage `INTERRUPTED_TOOL_RESULT`), so a stopped row
+// reads the same live as it does after a reload.
+const INTERRUPTED_TOOL_RESULT = "tool call did not report a result; its outcome is unknown";
+
 // ---------------------------------------------------------------------------
 // Injected dependencies
 // ---------------------------------------------------------------------------
@@ -472,7 +477,9 @@ export function createStreamingStore(
           // stopped has no result: its outcome is interrupted, as recovery
           // records it. Calls that finished keep the outcome they reported.
           const settledCalls = get(stream.activeToolCallsStore).map((call) =>
-            call.status === null ? { ...call, status: "interrupted" } : call,
+            call.status === null
+              ? { ...call, status: "interrupted", result: INTERRUPTED_TOOL_RESULT }
+              : call,
           );
           if (get(stream.streamedContentStore)) {
             // Preserve partial content (they may want to read what was
