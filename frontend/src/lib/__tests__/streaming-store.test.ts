@@ -29,7 +29,7 @@ import {
   createStreamingStore,
   withConversationAutoCreate,
 } from "../stores/streaming";
-import type { ServerEvent } from "../types";
+import type { MessageView, ServerEvent } from "../types";
 
 // ---------------------------------------------------------------------------
 // Mock dependency factories
@@ -85,6 +85,22 @@ describe("initial state", () => {
 // ---------------------------------------------------------------------------
 
 describe("reconnect reconciliation", () => {
+  it.each(["refused", "failed"])("clears a live projection when a recovered platform account records %s", (state) => {
+    const messages: MessageView[] = [{
+      role: "user", origin: "platform", content: "The provider did not complete this request.",
+      timestamp: "2026-10-04T20:00:00Z", turn_state: state as MessageView["turn_state"], turn_id: "recovered-turn",
+    }];
+    const store = createStreamingStore({ conversationStore: {
+      get activeConversation() { return { messages }; },
+      appendOptimisticUserMessage: () => {}, appendAssistantMessage: () => {},
+    } });
+    store.startTurn("Request before the socket dropped");
+    const generation = store.activeTurnGeneration;
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.reconcileAfterReconnect(generation);
+    expect(store.isStreaming).toBe(false);
+    expect(store.streamedContent).toBe("");
+  });
   it("clears a live projection when the recovered same turn is terminal", () => {
     const messages = [{
       role: "assistant" as const,
