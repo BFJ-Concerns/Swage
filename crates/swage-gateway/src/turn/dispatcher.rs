@@ -576,6 +576,10 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     let build = build_gateway_dispatcher(state, request)
         .await
         .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
+    // The request's turn is the one the audit attributes the build to — for a
+    // delegated child, the sender's — so no turn row is stamped here: a turn's
+    // own boundary is written where its dispatcher settles for it
+    // (dispatcher_settlement.rs), never from a build made on its behalf.
     record_degraded_execution(
         state,
         &build.isolation,
@@ -584,9 +588,6 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
         turn_id,
     )
     .await?;
-    if let Some(turn_id) = turn_id {
-        record_turn_isolation(state, &build.isolation, turn_id).await?;
-    }
     Ok(build)
 }
 

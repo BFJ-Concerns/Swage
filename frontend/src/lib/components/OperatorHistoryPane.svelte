@@ -3,6 +3,7 @@
   import { fetchAuditEvents, fetchOperatorHistory } from "../api/operator";
   import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
   import type { AuditEventView } from "../protocol/AuditEventView";
+  import type { AuditEventCursor } from "../protocol/AuditEventCursor";
   import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   let history = $state<OperatorHistoryResponse | null>(null);
@@ -17,7 +18,7 @@
   let auditEntityId = $state("");
   let auditEventKind = $state("");
   let auditEvents = $state<AuditEventView[]>([]);
-  let auditNextBefore = $state<string | null>(null);
+  let auditNextCursor = $state<AuditEventCursor | null>(null);
   let auditError = $state<string | null>(null);
   let auditLoaded = $state(false);
 
@@ -25,7 +26,7 @@
     return JSON.stringify(state, null, 2);
   }
 
-  function auditFilter(before?: string) {
+  function auditFilter(before?: AuditEventCursor) {
     return {
       sessionId: auditSessionId.trim() || undefined,
       entityKind: auditEntityKind.trim() || undefined,
@@ -41,7 +42,7 @@
     try {
       const page = await fetchAuditEvents(auditFilter());
       auditEvents = page.events;
-      auditNextBefore = page.next_before ?? null;
+      auditNextCursor = page.next_cursor ?? null;
     } catch (error) {
       auditError = error instanceof Error ? error.message : "Failed to load the audit record";
     } finally {
@@ -50,12 +51,12 @@
   }
 
   async function loadOlderAudit(): Promise<void> {
-    if (!auditNextBefore) return;
+    if (!auditNextCursor) return;
     auditError = null;
     try {
-      const page = await fetchAuditEvents(auditFilter(auditNextBefore));
+      const page = await fetchAuditEvents(auditFilter(auditNextCursor));
       auditEvents = [...auditEvents, ...page.events];
-      auditNextBefore = page.next_before ?? null;
+      auditNextCursor = page.next_cursor ?? null;
     } catch (error) {
       auditError = error instanceof Error ? error.message : "Failed to load the audit record";
     }
@@ -116,7 +117,7 @@
           </article>
         {/each}
       </div>
-      {#if auditNextBefore}
+      {#if auditNextCursor}
         <button type="button" class="load-older" onclick={() => void loadOlderAudit()}>Load older events</button>
       {/if}
     {/if}

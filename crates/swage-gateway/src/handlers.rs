@@ -1432,7 +1432,7 @@ pub async fn submit_turn(
         return Ok((
             StatusCode::ACCEPTED,
             Json(SubmitTurnResponse {
-                turn_id: running_turn.unwrap_or(req.conversation_id),
+                turn_id: running_turn,
                 status: "queued".into(),
                 queued: Some(queued),
             }),
@@ -1463,10 +1463,19 @@ pub async fn submit_turn(
                 crate::turn::TurnInput::with_attachments(req.message, req.attachments),
             )
             .await?;
+            // The claim lost to a turn the table holds: name that turn.
+            let running_turn = state
+                .storage
+                .list_turns_by_thread(thread.id)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?
+                .into_iter()
+                .find(|turn| !turn.state.is_terminal())
+                .map(|turn| turn.id);
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(SubmitTurnResponse {
-                    turn_id: req.conversation_id,
+                    turn_id: running_turn,
                     status: "queued".into(),
                     queued: Some(queued),
                 }),
@@ -1531,7 +1540,7 @@ pub async fn submit_turn(
     Ok((
         StatusCode::ACCEPTED,
         Json(SubmitTurnResponse {
-            turn_id,
+            turn_id: Some(turn_id),
             status: "pending".into(),
             queued: None,
         }),
@@ -2443,7 +2452,9 @@ mod tests {
         let turn_id = client
             .submit_turn(conversation.id, None, "hello", None)
             .await
-            .expect("submit async turn");
+            .expect("submit async turn")
+            .turn_id
+            .expect("the turn opened");
 
         let poll = {
             // Generous deadline: under a full-workspace test run the async
@@ -2710,7 +2721,9 @@ mod tests {
                 Some(focus.to_string()),
             )
             .await
-            .expect("submit focused async turn");
+            .expect("submit focused async turn")
+            .turn_id
+            .expect("the turn opened");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -4911,18 +4924,18 @@ mod tests {
             get("/api/operator/audit-events?event_kind=configuration_change".into()).await;
         assert_eq!(ids(&by_kind), vec!["a3"]);
         assert!(
-            by_kind["next_before"].is_null(),
+            by_kind["next_cursor"].is_null(),
             "a page that ends the record has no cursor"
         );
 
         let page = get("/api/operator/audit-events?limit=2".into()).await;
         assert_eq!(ids(&page), vec!["a3", "a2"]);
-        let cursor = page["next_before"]
-            .as_str()
-            .expect("a full page hands back a cursor");
+        let cursor = &page["next_cursor"];
+        assert!(cursor.is_object(), "a full page hands back a cursor");
         let older = get(format!(
-            "/api/operator/audit-events?limit=2&before={}",
-            urlencoded(cursor)
+            "/api/operator/audit-events?limit=2&before={}&before_id={}",
+            urlencoded(cursor["created_at"].as_str().unwrap()),
+            cursor["id"].as_str().unwrap()
         ))
         .await;
         assert_eq!(ids(&older), vec!["a1"]);

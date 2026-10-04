@@ -248,8 +248,8 @@
       conversationStore.appendRecordedMessage(msg, conversationId),
     appendQueuedMessage: (queued, conversationId) =>
       conversationStore.appendQueuedMessage(queued, conversationId),
-    clearQueuedMessages: (conversationId) =>
-      conversationStore.clearQueuedMessages(conversationId),
+    clearQueuedMessages: (conversationId, queuedIds) =>
+      conversationStore.clearQueuedMessages(conversationId, queuedIds),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
     selectThread: (threadId) => conversationStore.selectThread!(threadId),

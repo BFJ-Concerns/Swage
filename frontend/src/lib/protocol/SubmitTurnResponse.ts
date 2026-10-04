@@ -4,9 +4,11 @@ import type { QueuedMessageView } from "./QueuedMessageView";
 export type SubmitTurnResponse = {
 /**
  * The turn the submission opened — or, when the message was queued
- * behind a running turn, that running turn.
+ * behind a running turn, that running turn; absent when the message was
+ * queued and the turn it waits on could not be named (it ended in the
+ * same instant, and the queue is running the message as the next turn).
  */
-turn_id: string,
+turn_id?: string | null,
 /**
  * `pending` for a turn that opened; `queued` for a message held for the
  * next turn.

@@ -4775,9 +4775,16 @@
           ]
         },
         {
-          "description": "The session's queue became the next turn's input: the queued\nmessages are now recorded messages (each announced) and the queue is\nempty.",
+          "description": "The session's queue became the next turn's input: the queued\nmessages are now recorded messages (each announced) and the queue is\nempty.\nThe queue ran as the next turn: the held messages whose ids are\nlisted are now recorded rows (each announced on its own); a message\nqueued after the drain took its batch is not among them and stays\nheld.",
           "type": "object",
           "properties": {
+            "queued_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
             "session_id": {
               "type": "string",
               "format": "uuid"
@@ -4794,7 +4801,8 @@
           "required": [
             "type",
             "session_id",
-            "turn_id"
+            "turn_id",
+            "queued_ids"
           ]
         },
         {
@@ -5920,13 +5928,15 @@
           "type": "string"
         },
         "turn_id": {
-          "description": "The turn the submission opened — or, when the message was queued\nbehind a running turn, that running turn.",
-          "type": "string",
+          "description": "The turn the submission opened — or, when the message was queued\nbehind a running turn, that running turn; absent when the message was\nqueued and the turn it waits on could not be named (it ended in the\nsame instant, and the queue is running the message as the next turn).",
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "uuid"
         }
       },
       "required": [
-        "turn_id",
         "status"
       ]
     },

@@ -147,8 +147,19 @@ impl AuditStore for SqliteStorage {
                 values.push(Box::new(event_kind));
             }
             if let Some(before) = filter.before {
-                predicates.push("created_at < ?");
-                values.push(Box::new(before.to_rfc3339()));
+                // Strictly older, or the same instant and an id that sorts
+                // earlier: the page order is (instant DESC, id DESC). Rows are
+                // stamped by two producers in two spellings (the gateway's
+                // RFC 3339 with an offset, the triggers' `…Z`), so the
+                // comparison is on the parsed instant, never the text.
+                predicates.push(
+                    "(julianday(created_at) < julianday(?) \
+                      OR (julianday(created_at) = julianday(?) AND id < ?))",
+                );
+                let stamp = before.created_at.to_rfc3339();
+                values.push(Box::new(stamp.clone()));
+                values.push(Box::new(stamp));
+                values.push(Box::new(before.id));
             }
             values.push(Box::new(i64::try_from(filter.limit).unwrap_or(i64::MAX)));
             let where_clause = if predicates.is_empty() {
@@ -160,7 +171,7 @@ impl AuditStore for SqliteStorage {
                 "SELECT id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
                  FROM audit_events
                  {where_clause}
-                 ORDER BY created_at DESC, id DESC
+                 ORDER BY julianday(created_at) DESC, id DESC
                  LIMIT ?"
             ))?;
             let rows = stmt.query_map(
@@ -181,7 +192,7 @@ mod tests {
     use crate::store::{
         ApprovalStore, AuditStore, SessionStore, ThreadStore, TopicStore, TurnStore,
     };
-    use crate::{ApprovalKind, ApprovalState, AuditEventFilter, NewAuditEvent};
+    use crate::{ApprovalKind, ApprovalState, AuditCursor, AuditEventFilter, NewAuditEvent};
     use crate::{NewApprovalRequest, NewSession, NewThread, NewTurn, TurnState};
     use swage_core::ApprovalTimeoutPolicy;
 
@@ -334,17 +345,82 @@ mod tests {
         let second_page = storage
             .list_audit_events_filtered(AuditEventFilter {
                 limit: 2,
-                before: Some(first_page[1].created_at),
+                before: Some(AuditCursor {
+                    created_at: first_page[1].created_at,
+                    id: first_page[1].id.clone(),
+                }),
                 ..Default::default()
             })
             .await
             .unwrap();
+        assert_eq!(
+            ids(&second_page),
+            vec!["e2", "e1"],
+            "the cursor resumes after the exact event, whatever its timestamp shares"
+        );
         assert!(
-            second_page
-                .iter()
-                .all(|event| event.created_at < first_page[1].created_at),
-            "the cursor pages strictly older events: {:?}",
-            ids(&second_page)
+            second_page.iter().all(|event| event.id != first_page[1].id),
+            "the boundary event is on one page only"
+        );
+    }
+
+    /// The gateway stamps rows in RFC 3339 with an offset; the storage
+    /// triggers stamp theirs as `…Z`. The page order and the cursor must read
+    /// both as instants, or a trigger's row vanishes at a page boundary.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pages_are_ordered_by_instant_across_the_two_timestamp_spellings() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: "gateway-stamped".into(),
+                session_id: None,
+                entity_kind: "turn".into(),
+                entity_id: "t".into(),
+                event_kind: "state_transition".into(),
+                summary: "gateway".into(),
+                metadata: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        // A row as a trigger writes it, one second later, in the trigger's spelling.
+        storage
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO audit_events (id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at)
+                     VALUES ('trigger-stamped', NULL, 'turn', 't', 'state_transition', 'trigger', '{}',
+                             strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+1 second'))",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let first = storage
+            .list_audit_events_filtered(AuditEventFilter {
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first[0].id, "trigger-stamped",
+            "the later instant comes first, whatever its spelling"
+        );
+        let next = storage
+            .list_audit_events_filtered(AuditEventFilter {
+                limit: 1,
+                before: Some(AuditCursor {
+                    created_at: first[0].created_at,
+                    id: first[0].id.clone(),
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            next[0].id, "gateway-stamped",
+            "the cursor crosses the spelling boundary"
         );
     }
 

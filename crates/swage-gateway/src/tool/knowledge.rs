@@ -369,7 +369,12 @@ impl Tool for KnowledgeRecordTool {
                 content.as_bytes().to_vec(),
                 url.map(str::to_owned),
                 media_type.to_owned(),
-                extracted_text.map(|text| (text.to_owned(), AGENT_SUPPLIED_EXTRACTOR.to_owned())),
+                // Text the model hands over is searchable under its own words
+                // — the content itself when it is text and no extraction was
+                // given — and labelled as the model's, so never citable.
+                extracted_text
+                    .or_else(|| media_type.starts_with("text/").then_some(content))
+                    .map(|text| (text.to_owned(), AGENT_SUPPLIED_EXTRACTOR.to_owned())),
             ),
         };
 
@@ -520,10 +525,18 @@ async fn retained_fetch(
         .to_owned();
     let path = validate_path(ctx.working_directory(), relative)
         .map_err(|error| failed(RECORD_TOOL, error))?;
+    // The path is relative to the working directory the fetch ran under —
+    // the same directory for a session unless its workspace changed since —
+    // and its turn and call ids make a same-named file elsewhere impossible
+    // in practice; a body not found here was fetched under another
+    // directory and is fetched again, never guessed at.
     let bytes = tokio::fs::read(&path).await.map_err(|error| {
         failed(
             RECORD_TOOL,
-            format!("the fetch's retained body could not be read: {error}"),
+            format!(
+                "the fetch's retained body is not under this session's current working directory \
+                 ({error}); if the workspace changed since the fetch, fetch the page again"
+            ),
         )
     })?;
     Ok(RetainedFetch {
@@ -1057,6 +1070,9 @@ mod tests {
                 json!({
                     "content": "first retained bytes without an extraction",
                     "url": "https://example.test/changed-before-extraction",
+                    // A body that yields no text of its own: nothing to search
+                    // until an extraction is supplied.
+                    "media_type": "application/pdf",
                 }),
                 &ctx,
             )
@@ -1068,6 +1084,7 @@ mod tests {
                     "content": "different bytes fetched on retry",
                     "url": "https://example.test/changed-before-extraction",
                     "extracted_text": "text derived from the different retry bytes",
+                    "media_type": "application/pdf",
                 }),
                 &ctx,
             )
@@ -1271,6 +1288,21 @@ mod tests {
             .unwrap();
         assert_eq!(retold["searchable"], true);
         assert_eq!(retold["citable"], false);
+        let browsed = tool
+            .execute(
+                json!({
+                    "content": "What the browser showed, as the gatherer read it.",
+                    "url": "https://example.test/browser-only",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            browsed["searchable"], true,
+            "text handed over without an extraction is searched under its own words"
+        );
+        assert_eq!(browsed["citable"], false);
         let retold_id: Uuid = retold["observation_id"].as_str().unwrap().parse().unwrap();
         let refused = storage
             .add_citation(NewKnowledgeCitation {

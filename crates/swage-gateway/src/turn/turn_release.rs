@@ -30,12 +30,17 @@ async fn release_active_turn_on_error<T, E>(
     result
 }
 
-pub(super) async fn record_terminal_state_and_release(
+/// Record the turn's terminal state and release the session. Every path a
+/// turn ends on — before or after its agent ran — comes through here, so
+/// this is also where a session is handed to its queue: a turn that fails
+/// at settlement drains what waited behind it as a completed one does.
+pub(crate) async fn record_terminal_state_and_release(
     state: &AppState,
     session_id: Uuid,
     turn_id: Uuid,
     turn_state: TurnState,
 ) -> Result<(), GatewayError> {
+    let drains_queue = crate::turn_queue::drains_queue_after(turn_state.clone());
     release_active_turn_on_error(
         state,
         session_id,
@@ -43,6 +48,9 @@ pub(super) async fn record_terminal_state_and_release(
     )
     .await?;
     release_active_turn(state, session_id).await;
+    if drains_queue {
+        crate::turn_queue::spawn_drain(state.clone(), session_id);
+    }
     Ok(())
 }
 

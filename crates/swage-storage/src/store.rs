@@ -7,13 +7,13 @@ use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMessage, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, AuditEventFilter, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
-    DeviceRegistration, ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit,
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message, ModuleSourceReplacement,
-    NewAgentDefinition, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
-    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewCurationAssertion,
-    NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry,
-    NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard, NewSchedule,
-    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
+    DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, InboundAudit, KnowledgeCitation,
+    KnowledgeSearchHit, LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message,
+    ModuleSourceReplacement, NewAgentDefinition, NewAgentMessage, NewApprovalRequest,
+    NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
+    NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
+    NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard,
+    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
     NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
     NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
     NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
@@ -151,6 +151,15 @@ pub trait SessionStore: Send + Sync {
         &self,
         id: Uuid,
         metadata: Option<serde_json::Value>,
+    ) -> Result<Session, StorageError>;
+    /// Set one top-level key of the session's metadata, leaving every other
+    /// key as the row holds it now — the write for a value owned by one
+    /// writer among several.
+    async fn set_session_metadata_key(
+        &self,
+        id: Uuid,
+        key: &str,
+        value: serde_json::Value,
     ) -> Result<Session, StorageError>;
     async fn set_session_active_workspace(
         &self,
@@ -292,12 +301,17 @@ pub trait TurnQueueStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<QueuedTurnInput>, StorageError>;
-    /// Remove and return everything queued for a session, in arrival order,
-    /// atomically: the queue hands over to one taker.
-    async fn take_queued_turn_inputs(
+    /// Run the session's queue as one turn, atomically: the turn row created
+    /// (its input the queued texts joined by a blank line), one message row per
+    /// queued input in arrival order with its origin, and the queue rows
+    /// removed — all or nothing. `None` when nothing was queued, or when the
+    /// thread already holds a live turn and the one-live-turn index refused the
+    /// claim; the queue is then untouched.
+    async fn drain_queued_turn_inputs(
         &self,
         session_id: Uuid,
-    ) -> Result<Vec<QueuedTurnInput>, StorageError>;
+        agent_id: &str,
+    ) -> Result<Option<DrainedTurnQueue>, StorageError>;
     /// Every session with something queued.
     async fn sessions_with_queued_turn_inputs(&self) -> Result<Vec<Uuid>, StorageError>;
 }
@@ -1432,6 +1446,14 @@ pub trait SurfaceStore: Send + Sync {
         module: NewSurfaceModule,
     ) -> Result<SurfaceModule, StorageError>;
     async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError>;
+    /// Append a module instance after the surface's last one, its position
+    /// assigned under the connection lock so two appends never share one.
+    async fn append_surface_module(
+        &self,
+        surface_id: Uuid,
+        kind: &str,
+        source: &str,
+    ) -> Result<SurfaceModule, StorageError>;
     /// A surface's module instances in position order.
     async fn list_surface_modules(
         &self,
@@ -1735,6 +1757,14 @@ mod tests {
         ) -> Result<Session, StorageError> {
             unimplemented!()
         }
+        async fn set_session_metadata_key(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<Session, StorageError> {
+            unimplemented!()
+        }
         async fn set_session_active_workspace(
             &self,
             _: Uuid,
@@ -1977,10 +2007,11 @@ mod tests {
         ) -> Result<Vec<QueuedTurnInput>, StorageError> {
             unimplemented!()
         }
-        async fn take_queued_turn_inputs(
+        async fn drain_queued_turn_inputs(
             &self,
             _: Uuid,
-        ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+            _: &str,
+        ) -> Result<Option<DrainedTurnQueue>, StorageError> {
             unimplemented!()
         }
         async fn sessions_with_queued_turn_inputs(&self) -> Result<Vec<Uuid>, StorageError> {
@@ -2392,6 +2423,14 @@ mod tests {
             unimplemented!()
         }
         async fn get_surface_module(&self, _: Uuid) -> Result<Option<SurfaceModule>, StorageError> {
+            unimplemented!()
+        }
+        async fn append_surface_module(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<SurfaceModule, StorageError> {
             unimplemented!()
         }
         async fn list_surface_modules(&self, _: Uuid) -> Result<Vec<SurfaceModule>, StorageError> {

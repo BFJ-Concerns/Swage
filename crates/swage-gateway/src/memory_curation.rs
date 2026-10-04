@@ -271,11 +271,15 @@ async fn curator_session_for(
         return Ok(existing);
     }
     let created = create_curator_session(state, attended.topic_id, Some(attended.id)).await?;
-    let metadata = attended.metadata.get_or_insert_with(|| json!({}));
-    metadata[CURATOR_SESSION_METADATA_KEY] = json!(created.to_string());
+    // One key, written in place: the attended session's other metadata is
+    // another writer's, and a pass runs long enough for them to move.
     *attended = state
         .storage
-        .set_session_metadata(attended.id, attended.metadata.clone())
+        .set_session_metadata_key(
+            attended.id,
+            CURATOR_SESSION_METADATA_KEY,
+            json!(created.to_string()),
+        )
         .await?;
     Ok(created)
 }
@@ -348,12 +352,22 @@ async fn run_curator_turn(
         turn_id,
     )
     .await?;
-    let entries_written = state
-        .storage
-        .list_tool_calls_by_turn(turn_id)
-        .await?
+    let writes = state.storage.list_tool_calls_by_turn(turn_id).await?;
+    // A write the curator attempted and the store refused is a fact lost if
+    // the position advances past it: the pass fails here, and the stretch
+    // stays unread for the next one.
+    if let Some(failed) = writes
+        .iter()
+        .find(|call| call.tool == "memory_write" && call.status.as_deref() != Some("success"))
+    {
+        return Err(GatewayError::ValidationError(format!(
+            "a memory write failed during the curation pass ({}); the stretch stays unread",
+            failed.result.as_deref().unwrap_or("no result recorded")
+        )));
+    }
+    let entries_written = writes
         .into_iter()
-        .filter(|call| call.tool == "memory_write" && call.status.as_deref() == Some("success"))
+        .filter(|call| call.tool == "memory_write")
         .filter_map(|call| {
             serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .ok()
@@ -446,11 +460,13 @@ pub async fn curate_attended_session(
 
     // The position advances only once the pass has run: a pass that fails
     // leaves the stretch unread for the next one.
-    let metadata = attended.metadata.get_or_insert_with(|| json!({}));
-    metadata[CURATION_POSITION_METADATA_KEY] = json!(to_position);
     state
         .storage
-        .set_session_metadata(attended.id, attended.metadata.clone())
+        .set_session_metadata_key(
+            attended.id,
+            CURATION_POSITION_METADATA_KEY,
+            json!(to_position),
+        )
         .await?;
     record_pass(
         state,
@@ -772,6 +788,39 @@ mod tests {
                 .await
                 .expect("second pass")
                 .is_none()
+        );
+    }
+
+    /// A write the store refused must not be left behind an advanced
+    /// position: the pass fails and the next one re-reads the stretch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_whose_write_failed_leaves_the_stretch_unread() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, storage) = state_with(
+            write_then_reply(
+                "nowhere/at-all",
+                "An entry at a reference the store refuses.",
+                "Alice lives in Leeds.",
+                "Recorded.",
+            ),
+            root.path(),
+        )
+        .await;
+        let attended = attended_conversation(
+            &storage,
+            &[(Role::User, "My sister Alice has moved to Leeds.")],
+        )
+        .await;
+
+        let error = curate_attended_session(&state, &attended)
+            .await
+            .expect_err("a refused write fails the pass");
+        assert!(error.to_string().contains("memory write failed"), "{error}");
+        let attended_now = storage.get_session(attended.id).await.unwrap().unwrap();
+        assert_eq!(
+            metadata_position(&attended_now),
+            None,
+            "the position did not advance past the lost fact"
         );
     }
 

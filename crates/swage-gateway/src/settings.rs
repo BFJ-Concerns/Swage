@@ -808,12 +808,18 @@ fn refuse_declared_section_problems<S>(section: Option<&S>) -> Result<(), ApiErr
 where
     S: swage_protocol::client::settings_section::SettingsSection,
 {
-    if let Some(section) = section
-        && let Some(problem) = section.problems().into_iter().next()
-    {
-        return Err(ApiError::validation(problem.message));
+    let Some(section) = section else {
+        return Ok(());
+    };
+    let problems: Vec<String> = section
+        .problems()
+        .into_iter()
+        .map(|problem| format!("{}.{}: {}", S::SCHEMA.name, problem.field, problem.message))
+        .collect();
+    if problems.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    Err(ApiError::validation(problems.join("; ")))
 }
 
 /// The runtime sections a settings save may carry, each absent when the

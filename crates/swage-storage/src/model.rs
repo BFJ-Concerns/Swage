@@ -499,6 +499,15 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// Where a page of the audit record ended: the last event's time and id,
+/// so the next page resumes after that exact event even when several share
+/// a timestamp.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditCursor {
+    pub created_at: DateTime<Utc>,
+    pub id: String,
+}
+
 /// A read of the audit record: every filter is optional and they combine,
 /// the page is newest first, `before` is the cursor the previous page
 /// handed back, and `limit` bounds the page.
@@ -508,7 +517,7 @@ pub struct AuditEventFilter {
     pub entity_kind: Option<String>,
     pub entity_id: Option<String>,
     pub event_kind: Option<String>,
-    pub before: Option<DateTime<Utc>>,
+    pub before: Option<AuditCursor>,
     pub limit: usize,
 }
 
@@ -2281,6 +2290,16 @@ pub struct NewQueuedTurnInput {
     pub origin: MessageOrigin,
     pub content: String,
     pub attachments: Vec<serde_json::Value>,
+}
+
+/// A session's queue run as one turn: the turn row, and one recorded message
+/// per queued input in arrival order.
+#[derive(Debug, Clone)]
+pub struct DrainedTurnQueue {
+    pub turn: Turn,
+    pub messages: Vec<Message>,
+    /// The queue rows this drain took, by id — what a view clears.
+    pub queued_ids: Vec<Uuid>,
 }
 
 /// Input for appending a new message at the end of a thread.

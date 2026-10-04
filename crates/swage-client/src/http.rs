@@ -621,7 +621,7 @@ impl GatewayClient {
         thread_id: Option<Uuid>,
         message: &str,
         output_schema: Option<serde_json::Value>,
-    ) -> Result<Uuid, ClientError> {
+    ) -> Result<SubmitTurnResponse, ClientError> {
         self.submit_turn_with_compaction_focus(
             conversation_id,
             thread_id,
@@ -640,7 +640,7 @@ impl GatewayClient {
         message: &str,
         output_schema: Option<serde_json::Value>,
         compaction_focus: Option<String>,
-    ) -> Result<Uuid, ClientError> {
+    ) -> Result<SubmitTurnResponse, ClientError> {
         let url = format!("{}/api/turns", self.base_url);
         let body = SubmitTurnRequest {
             conversation_id,
@@ -669,7 +669,7 @@ impl GatewayClient {
                     address: url.clone(),
                     source: e,
                 })?;
-        Ok(body.turn_id)
+        Ok(body)
     }
 
     /// Poll a turn for status and result.

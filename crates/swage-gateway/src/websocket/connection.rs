@@ -102,12 +102,11 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     // Subscribe to the server-wide broadcast channel before spawning the
     // forwarding task so no broadcast events (e.g. Shutdown) are missed.
     let mut bcast_rx = state.broadcast.subscribe();
-    // Turn events the queue's drain produces for this session: no connection
-    // owns that turn, so every connection open on the session receives them.
-    let mut session_rx = state.session_events.subscribe();
-
     // Channel that turn processing uses to send events back to this connection.
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+    // A turn no connection owns — one the queue started — reaches this
+    // connection through the same channel: lossless, in order.
+    state.listen_to_session(session_id, tx.clone()).await;
 
     // Spawn a forwarding task: reads from both the per-turn mpsc channel and
     // the server-wide broadcast channel, writing each event to the WebSocket.
@@ -135,30 +134,6 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                                 }
                             }
                         }
-                    }
-                }
-
-                result = session_rx.recv() => {
-                    match result {
-                        Ok((target, event)) => {
-                            if target != session_id {
-                                continue;
-                            }
-                            match serde_json::to_string(&event) {
-                                Ok(json) => {
-                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to serialise session event");
-                                }
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(n, "session event receiver lagged, {n} event(s) dropped");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
 

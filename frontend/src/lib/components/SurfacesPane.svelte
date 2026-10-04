@@ -42,6 +42,21 @@
   // while the editor was open. Shown beside the edit; replacing it is a
   // deliberate second act.
   let staleModule = $state<SurfaceModuleView | null>(null);
+  // A module mutation the gateway refused outright (the module is gone, the
+  // surface is not this session's): shown, and the surface refetched so the
+  // view matches what the gateway holds.
+  let moduleError = $state<string | null>(null);
+
+  async function refetchAfterFailure(error: unknown, surfaceId: string): Promise<void> {
+    moduleError = error instanceof Error ? error.message : "The change was not applied.";
+    stopEditing();
+    annotatingModuleId = null;
+    try {
+      await store.openSurface(surfaceId);
+    } catch {
+      // The failure message already shows; the next signal or open retries.
+    }
+  }
   // The module whose note the user is currently composing, if any.
   let annotatingModuleId = $state<string | null>(null);
   let annotationBody = $state("");
@@ -133,14 +148,31 @@
   async function saveEdit(): Promise<void> {
     const surface = store.activeSurface;
     if (!surface || editingModuleId === null) return;
-    const newer = await store.writeModule(
-      surface.id,
-      editingModuleId,
-      editingSource,
-      editingRevision,
-    );
+    moduleError = null;
+    let newer: SurfaceModuleView | null;
+    try {
+      newer = await store.writeModule(surface.id, editingModuleId, editingSource, editingRevision);
+    } catch (error) {
+      await refetchAfterFailure(error, surface.id);
+      return;
+    }
     if (newer) {
       staleModule = newer;
+      return;
+    }
+    stopEditing();
+  }
+
+  // The module the draft was for is gone (the other party removed it): the
+  // draft becomes a new module, or is discarded — never lost in state.
+  async function appendDraft(): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface) return;
+    moduleError = null;
+    try {
+      await store.writeModule(surface.id, null, editingSource, null);
+    } catch (error) {
+      await refetchAfterFailure(error, surface.id);
       return;
     }
     stopEditing();
@@ -158,20 +190,35 @@
   async function appendModule(): Promise<void> {
     const surface = store.activeSurface;
     if (!surface) return;
-    await store.writeModule(surface.id, null, "", null);
+    moduleError = null;
+    try {
+      await store.writeModule(surface.id, null, "", null);
+    } catch (error) {
+      await refetchAfterFailure(error, surface.id);
+    }
   }
 
   async function removeModule(moduleId: string): Promise<void> {
     const surface = store.activeSurface;
     if (!surface) return;
     if (editingModuleId === moduleId) stopEditing();
-    await store.deleteModule(surface.id, moduleId);
+    moduleError = null;
+    try {
+      await store.deleteModule(surface.id, moduleId);
+    } catch (error) {
+      await refetchAfterFailure(error, surface.id);
+    }
   }
 
   async function moveModule(moduleId: string, position: number): Promise<void> {
     const surface = store.activeSurface;
     if (!surface) return;
-    await store.moveModule(surface.id, moduleId, position);
+    moduleError = null;
+    try {
+      await store.moveModule(surface.id, moduleId, position);
+    } catch (error) {
+      await refetchAfterFailure(error, surface.id);
+    }
   }
 
   function startAnnotating(moduleId: string): void {
@@ -279,6 +326,19 @@
           {#if saveNotice}<span class="save-notice">{saveNotice}</span>{/if}
         {/if}
       </div>
+      {#if moduleError}
+        <p class="module-error" role="alert">{moduleError}</p>
+      {/if}
+      {#if editingModuleId !== null && !store.activeSurface.modules.some((candidate) => candidate.id === editingModuleId)}
+        <article class="module orphaned-draft" aria-label="Draft of a removed module">
+          <p>The module you were editing was removed. Your draft:</p>
+          <textarea bind:value={editingSource} rows="8"></textarea>
+          <div class="module-actions">
+            <button onclick={() => void appendDraft()}>Add it as a new module</button>
+            <button onclick={stopEditing}>Discard the draft</button>
+          </div>
+        </article>
+      {/if}
       {#each store.activeSurface.modules as module, index (module.id)}
         <article class="module" data-kind={module.kind}>
           {#if editingModuleId === module.id}
@@ -484,6 +544,13 @@
     border-left: 3px solid var(--ink-orange);
     padding: 4px 0 4px 8px;
     margin-bottom: 8px;
+  }
+
+  .module-error {
+    color: var(--ink-orange);
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    margin: 8px 0;
   }
 
   .annotations {

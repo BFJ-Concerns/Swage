@@ -334,6 +334,46 @@ impl SessionStore for SqliteStorage {
         .await
     }
 
+    async fn set_session_metadata_key(
+        &self,
+        id: Uuid,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<Session, StorageError> {
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(StorageError::QueryFailed(format!(
+                "metadata key '{key}' is not a plain identifier"
+            )));
+        }
+        let path = format!("$.{key}");
+        let value_json = serde_json::to_string(&value)
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        let affected = self
+            .with_conn(move |conn| {
+                let now_str = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE sessions
+                     SET metadata_json = json_set(COALESCE(metadata_json, '{}'), ?2, json(?3)),
+                         updated_at = ?4
+                     WHERE id = ?1",
+                    params![id.to_string(), path, value_json, now_str],
+                )
+            })
+            .await?;
+        if affected == 0 {
+            return Err(StorageError::NotFound {
+                entity: "session".into(),
+                id: id.to_string(),
+            });
+        }
+        self.get_session(id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".into(),
+                id: id.to_string(),
+            })
+    }
+
     async fn set_session_metadata(
         &self,
         id: Uuid,

@@ -64,7 +64,8 @@ export interface ConversationStore {
   /** Show a message the gateway is holding for the conversation's next turn. */
   appendQueuedMessage(queued: WireQueuedMessageView, conversationId: string): void;
   /** The held messages became the next turn's input: the queue is empty. */
-  clearQueuedMessages(conversationId: string): void;
+  /** Drop the held messages a drain took, by id; later arrivals stay held. */
+  clearQueuedMessages(conversationId: string, queuedIds: string[]): void;
   /** Install a fetched snapshot only when its owner is still selected. */
   replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
@@ -376,10 +377,14 @@ export function createConversationStore(): ConversationStore {
       activeConversationStore.set({ ...activeConversation, queued: [...held, queued] });
     },
 
-    clearQueuedMessages(conversationId) {
+    clearQueuedMessages(conversationId, queuedIds) {
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id !== conversationId) return;
-      activeConversationStore.set({ ...activeConversation, queued: [] });
+      const drained = new Set(queuedIds);
+      activeConversationStore.set({
+        ...activeConversation,
+        queued: (activeConversation.queued ?? []).filter((item) => !drained.has(item.id)),
+      });
     },
 
     appendRecordedMessage(message, conversationId) {

@@ -466,8 +466,10 @@ describe("durable local updates", () => {
     store.appendQueuedMessage({ ...queued, id: "q-other" }, "conv-2");
     expect(store.activeConversation!.queued).toHaveLength(1);
 
-    store.clearQueuedMessages("conv-1");
-    expect(store.activeConversation!.queued).toEqual([]);
+    // A message queued after the drain took its batch stays held.
+    store.appendQueuedMessage({ ...queued, id: "q-2", content: "and this" }, "conv-1");
+    store.clearQueuedMessages("conv-1", ["q-1"]);
+    expect(store.activeConversation!.queued!.map((item) => item.id)).toEqual(["q-2"]);
   });
 
   it("a recorded message for another conversation updates only that conversation's summary", async () => {

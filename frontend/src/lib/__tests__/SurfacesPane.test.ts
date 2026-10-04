@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
+import { fromStore, writable } from "svelte/store";
 import SurfacesPane from "../components/SurfacesPane.svelte";
 import type { SurfacesStore } from "../stores/surfaces";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
@@ -40,10 +41,18 @@ function surface(modules: SurfaceModuleView[]): SurfaceResponse {
   };
 }
 
-function fakeStore(active: SurfaceResponse) {
+function fakeStore(initial: SurfaceResponse) {
+  // Reactive, as the real store's is: the pane re-reads it when it changes.
+  const activeStore = writable<SurfaceResponse | null>(initial);
+  const activeState = fromStore(activeStore);
   const store = {
-    surfaces: [{ id: active.id, title: active.title, updated_at: active.updated_at }],
-    activeSurface: active as SurfaceResponse | null,
+    surfaces: [{ id: initial.id, title: initial.title, updated_at: initial.updated_at }],
+    get activeSurface() {
+      return activeState.current;
+    },
+    setActive(next: SurfaceResponse | null) {
+      activeStore.set(next);
+    },
     library: [],
     loadSurfaces: vi.fn(async () => {}),
     openSurface: vi.fn(async () => {}),
@@ -106,6 +115,66 @@ describe("SurfacesPane module controls", () => {
     button("Delete module", articles[1]).click();
     await settled();
     expect(store.deleteModule).toHaveBeenCalledWith(SURFACE_ID, "m-2");
+  });
+
+  it("keeps a draft whose module was removed meanwhile, as a new module or discarded", async () => {
+    const opened = module("m-1", "# Mine", 0);
+    const store = fakeStore(surface([opened]));
+    // The save is refused because the module changed; by the time the store
+    // refetches, the other party has removed the module altogether.
+    store.writeModule.mockImplementationOnce(async () => {
+      store.setActive(surface([]));
+      return { ...opened, source: "# Theirs", revision: 1 };
+    });
+    store.writeModule.mockResolvedValueOnce(null);
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    button("Edit").click();
+    flushSync();
+    const textarea = document.querySelector("article.module textarea") as HTMLTextAreaElement;
+    textarea.value = "# Mine, edited";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+    button("Save").click();
+    await settled();
+
+    const orphan = document.querySelector('[aria-label="Draft of a removed module"]');
+    expect(orphan).not.toBeNull();
+    expect((orphan!.querySelector("textarea") as HTMLTextAreaElement).value).toBe("# Mine, edited");
+
+    button("Add it as a new module").click();
+    await settled();
+    expect(store.writeModule).toHaveBeenLastCalledWith(SURFACE_ID, null, "# Mine, edited", null);
+    expect(document.querySelector('[aria-label="Draft of a removed module"]')).toBeNull();
+  });
+
+  it("shows a mutation the gateway refused and refetches the surface instead of stranding the editor", async () => {
+    const store = fakeStore(surface([module("m-1", "# Gone soon", 0)]));
+    store.writeModule.mockRejectedValueOnce(new Error("no module m-1 on surface"));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    button("Edit").click();
+    flushSync();
+    button("Save").click();
+    await settled();
+
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("no module m-1 on surface");
+    expect(document.querySelector("article.module textarea")).toBeNull();
+    expect(store.openSurface).toHaveBeenCalledWith(SURFACE_ID);
+
+    store.deleteModule.mockRejectedValueOnce(new Error("surface belongs to another session"));
+    button("Delete module").click();
+    await settled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("another session");
+    expect(store.openSurface).toHaveBeenCalledTimes(2);
   });
 
   it("saves against the revision the editor opened at, shows the newer version when refused, and replaces only on a second deliberate act", async () => {

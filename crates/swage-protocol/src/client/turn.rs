@@ -44,8 +44,10 @@ pub struct SubmitTurnRequest {
 #[ts(optional_fields = nullable)]
 pub struct SubmitTurnResponse {
     /// The turn the submission opened — or, when the message was queued
-    /// behind a running turn, that running turn.
-    pub turn_id: Uuid,
+    /// behind a running turn, that running turn; absent when the message was
+    /// queued and the turn it waits on could not be named (it ended in the
+    /// same instant, and the queue is running the message as the next turn).
+    pub turn_id: Option<Uuid>,
     /// `pending` for a turn that opened; `queued` for a message held for the
     /// next turn.
     pub status: String,

@@ -302,8 +302,25 @@
         "assembly_name"
       ]
     },
+    "AuditEventCursor": {
+      "description": "Where a page of the audit record ended, handed back for the next request\nas `before` and `before_id`.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "created_at",
+        "id"
+      ]
+    },
     "AuditEventListResponse": {
-      "description": "A page of the audit record, newest first, under the filters the request\nnamed. `next_before` is the cursor for the page after this one — absent\nwhen this page ends the record.",
+      "description": "A page of the audit record, newest first, under the filters the request\nnamed. `next_cursor` names the page after this one — absent when this\npage ends the record.",
       "type": "object",
       "properties": {
         "events": {
@@ -312,12 +329,15 @@
             "$ref": "#/$defs/AuditEventView"
           }
         },
-        "next_before": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "date-time"
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuditEventCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
