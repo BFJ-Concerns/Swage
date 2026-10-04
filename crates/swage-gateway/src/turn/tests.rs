@@ -4371,7 +4371,25 @@ impl swage_storage::SurfaceStore for MockStorage {
     ) -> Result<Vec<swage_storage::SurfaceModule>, StorageError> {
         unimplemented!()
     }
-    async fn update_surface_module_source(&self, _: Uuid, _: &str) -> Result<(), StorageError> {
+    async fn replace_surface_module_source(
+        &self,
+        _: Uuid,
+        _: i64,
+        _: &str,
+    ) -> Result<Option<swage_storage::ModuleSourceReplacement>, StorageError> {
+        unimplemented!()
+    }
+    async fn remove_surface_module(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<swage_storage::RemovedSurfaceModule>, StorageError> {
+        unimplemented!()
+    }
+    async fn move_surface_module(
+        &self,
+        _: Uuid,
+        _: i32,
+    ) -> Result<Option<Vec<swage_storage::SurfaceModule>>, StorageError> {
         unimplemented!()
     }
     async fn create_library_entry(

@@ -14,6 +14,7 @@
 
 import { fromStore, writable } from "svelte/store";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
+import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
 import type { SurfaceSummary } from "../protocol/SurfaceSummary";
 import type { LibraryEntrySummary } from "../protocol/LibraryEntrySummary";
 import type { ServerEvent } from "../types";
@@ -47,11 +48,22 @@ export interface SurfacesStore {
     tags?: string[],
   ): Promise<void>;
   entryName(entryId: string): string | null;
+  // Write a module: append one (moduleId null), or replace one's source
+  // against the revision the editor opened with. Resolves to null when the
+  // write landed, or to the module as it now stands when the save was
+  // refused because the module changed since that revision — the caller
+  // shows that, and a save naming the newer revision is the deliberate act
+  // of replacing it.
   writeModule(
     surfaceId: string,
     moduleId: string | null,
     source: string,
-  ): Promise<void>;
+    expectedRevision: number | null,
+  ): Promise<SurfaceModuleView | null>;
+  // Remove a module and the notes on it; both survive in the surface's history.
+  deleteModule(surfaceId: string, moduleId: string): Promise<void>;
+  // Place a module at a position among the surface's modules (0 is first).
+  moveModule(surfaceId: string, moduleId: string, position: number): Promise<void>;
   // Leave a note on one of the surface's modules — the only anchor there is.
   annotate(
     surfaceId: string,
@@ -218,11 +230,26 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
       surfaceId: string,
       moduleId: string | null,
       source: string,
-    ): Promise<void> {
-      await surfacesApi.writeSurfaceModule(surfaceId, {
+      expectedRevision: number | null,
+    ): Promise<SurfaceModuleView | null> {
+      const response = await surfacesApi.writeSurfaceModule(surfaceId, {
         module_id: moduleId ?? undefined,
         source,
+        expected_revision: expectedRevision ?? undefined,
       });
+      // Either way the surface is refetched: a landed write for its own
+      // change, a refused one for the change it was refused over.
+      await refreshActive(surfaceId);
+      return response.outcome === "stale" ? response.current : null;
+    },
+
+    async deleteModule(surfaceId: string, moduleId: string): Promise<void> {
+      await surfacesApi.deleteSurfaceModule(surfaceId, moduleId);
+      await refreshActive(surfaceId);
+    },
+
+    async moveModule(surfaceId: string, moduleId: string, position: number): Promise<void> {
+      await surfacesApi.moveSurfaceModule(surfaceId, moduleId, position);
       await refreshActive(surfaceId);
     },
 

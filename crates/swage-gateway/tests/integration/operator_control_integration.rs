@@ -301,15 +301,18 @@ async fn effective_agent_definition_endpoint_selects_the_requested_topic() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let definitions = body["definitions"].as_array().unwrap();
-    assert_eq!(definitions.len(), 3, "effective winners: {body}");
+    assert_eq!(definitions.len(), 4, "effective winners: {body}");
     assert_eq!(definitions[0]["id"], "gateway");
     assert_eq!(definitions[0]["source_scope"], "built_in");
-    assert_eq!(definitions[1]["id"], "researcher");
-    assert_eq!(definitions[1]["instructions"], "authored winner");
-    assert_eq!(definitions[1]["source_scope"], "global");
-    assert_eq!(definitions[2]["id"], "shared");
-    assert_eq!(definitions[2]["instructions"], "topic winner");
-    assert_eq!(definitions[2]["source_scope"], "topic");
+    assert_eq!(definitions[1]["id"], "memory-curator");
+    assert_eq!(definitions[1]["source_scope"], "built_in");
+    assert_eq!(definitions[1]["selectable"], false);
+    assert_eq!(definitions[2]["id"], "researcher");
+    assert_eq!(definitions[2]["instructions"], "authored winner");
+    assert_eq!(definitions[2]["source_scope"], "global");
+    assert_eq!(definitions[3]["id"], "shared");
+    assert_eq!(definitions[3]["instructions"], "topic winner");
+    assert_eq!(definitions[3]["source_scope"], "topic");
     assert!(
         definitions
             .iter()

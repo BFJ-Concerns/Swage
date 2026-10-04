@@ -267,6 +267,14 @@ pub fn build_router(state: AppState) -> Router {
             post(surface::write_surface_module_handler),
         )
         .route(
+            "/api/surfaces/{surface_id}/modules/{module_id}",
+            delete(surface::delete_surface_module_handler),
+        )
+        .route(
+            "/api/surfaces/{surface_id}/modules/{module_id}/position",
+            post(surface::move_surface_module_handler),
+        )
+        .route(
             "/api/surfaces/{surface_id}/annotations",
             post(surface::create_surface_annotation_handler),
         )

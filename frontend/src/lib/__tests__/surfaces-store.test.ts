@@ -72,6 +72,7 @@ function surfaceBody(source: string, annotations: unknown[] = []) {
         kind: "document",
         position: 0,
         source,
+        revision: 0,
         updated_at: "2026-08-28T00:00:00Z",
         annotations,
       },
@@ -304,6 +305,69 @@ describe("surfaces store", () => {
     expect(store.activeSurface?.modules[0].annotations[0].body).toBe(
       "mine, on this module",
     );
+  });
+
+  it("saves against the revision the editor opened at, and hands back the newer module when refused", async () => {
+    const newer = { ...surfaceBody("# Someone else's").modules[0], revision: 1 };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
+      .mockResolvedValueOnce(jsonResponse({ outcome: "stale", current: newer }))
+      .mockResolvedValueOnce(jsonResponse({ ...surfaceBody("# Someone else's"), modules: [newer] }))
+      .mockResolvedValueOnce(jsonResponse({ outcome: "written", module: { ...newer, source: "# Mine", revision: 2 } }))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Mine")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    await store.openSurface(SURFACE_ID);
+
+    const refused = await store.writeModule(SURFACE_ID, MODULE_ID, "# Mine", 0);
+    expect(requestBody(fetchMock.mock.calls[3])).toEqual({
+      module_id: MODULE_ID,
+      source: "# Mine",
+      expected_revision: 0,
+    });
+    expect(refused?.source).toBe("# Someone else's");
+    expect(store.activeSurface?.modules[0].source).toBe(
+      "# Someone else's",
+      // the refused save still refetches: the surface shows what the saver was refused over
+    );
+
+    const landed = await store.writeModule(SURFACE_ID, MODULE_ID, "# Mine", 1);
+    expect(requestBody(fetchMock.mock.calls[5]).expected_revision).toBe(1);
+    expect(landed).toBeNull();
+    expect(store.activeSurface?.modules[0].source).toBe("# Mine");
+  });
+
+  it("removes a module and moves one through their own routes, then refetches", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(listBody))
+      .mockResolvedValueOnce(jsonResponse(libraryBody))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
+      .mockResolvedValueOnce(jsonResponse(surfaceBody("# Draft")))
+      .mockResolvedValueOnce(jsonResponse({ deleted: true, annotations_removed: 0 }))
+      .mockResolvedValueOnce(jsonResponse({ ...surfaceBody("# Draft"), modules: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    await store.openSurface(SURFACE_ID);
+
+    await store.moveModule(SURFACE_ID, MODULE_ID, 2);
+    const [moveUrl, moveInit] = fetchMock.mock.calls[3];
+    expect(moveUrl).toBe(`/api/surfaces/${SURFACE_ID}/modules/${MODULE_ID}/position`);
+    expect(JSON.parse(moveInit.body as string)).toEqual({ position: 2 });
+
+    await store.deleteModule(SURFACE_ID, MODULE_ID);
+    const [deleteUrl, deleteInit] = fetchMock.mock.calls[5];
+    expect(deleteUrl).toBe(`/api/surfaces/${SURFACE_ID}/modules/${MODULE_ID}`);
+    expect((deleteInit as RequestInit).method).toBe("DELETE");
+    expect(store.activeSurface?.modules).toEqual([]);
   });
 
   it("ignores surface_updated for a surface that is not open", async () => {

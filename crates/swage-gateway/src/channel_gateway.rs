@@ -695,6 +695,7 @@ async fn deliver_to_target(
                     module_id: None,
                     kind: Some("document".into()),
                     source: content.to_string(),
+                    expected_revision: None,
                 },
                 "delivery",
             )

@@ -1230,8 +1230,12 @@ pub struct SurfaceModule {
     /// The canonical module kind this instance was seeded from ("document"
     /// first). Kinds are compiled-in until module authoring lands.
     pub kind: String,
-    /// Ordering index within the surface.
+    /// Ordering index within the surface: contiguous from 0, so a position
+    /// is always an index into the surface's module list.
     pub position: i32,
+    /// Advances by one on every change to `source`. A writer names the
+    /// revision it read, and a replace lands only against that revision.
+    pub revision: i64,
     /// The module's durable source, in the kind's own format (markdown for
     /// the document module).
     pub source: String,
@@ -1253,6 +1257,24 @@ pub struct NewSurfaceModule {
     pub kind: String,
     pub position: i32,
     pub source: String,
+}
+
+/// The outcome of replacing a module's source against the revision the
+/// writer read — the row as it now stands, either way.
+#[derive(Debug, Clone)]
+pub enum ModuleSourceReplacement {
+    /// The source landed and the revision advanced.
+    Replaced(SurfaceModule),
+    /// The revision had moved on since the writer read it: nothing changed,
+    /// and this is the row the writer had not seen.
+    Stale(SurfaceModule),
+}
+
+/// A module removed from its surface, with the notes that hung on it.
+#[derive(Debug, Clone)]
+pub struct RemovedSurfaceModule {
+    pub module: SurfaceModule,
+    pub annotations: Vec<SurfaceAnnotation>,
 }
 
 /// A note hung on one of a surface's modules — the shared reference a user and

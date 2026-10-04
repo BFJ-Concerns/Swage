@@ -13,10 +13,12 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, NewAuditEvent, NewLibraryEntry,
-    NewLibraryEntryModule, NewSurface, NewSurfaceModule, Surface, SurfaceModule,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, ModuleSourceReplacement, NewAuditEvent,
+    NewLibraryEntry, NewLibraryEntryModule, NewSurface, NewSurfaceModule, RemovedSurfaceModule,
+    Surface, SurfaceModule,
 };
 use crate::sqlite::SqliteStorage;
+use crate::sqlite::surface_annotation::{COLUMNS as ANNOTATION_COLUMNS, row_to_annotation};
 use crate::sqlite::topic::{decode_tags, encode_tags};
 use crate::store::SurfaceStore;
 
@@ -25,7 +27,8 @@ const SURFACE_COLUMNS: &str =
     "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name";
 const ENTRY_COLUMNS: &str = "id, name, description, tags, origin_topic_id, saved_from_surface_id, \
     created_at, updated_at";
-const MODULE_COLUMNS: &str = "id, surface_id, kind, position, source, created_at, updated_at";
+const MODULE_COLUMNS: &str =
+    "id, surface_id, kind, position, source, created_at, updated_at, revision";
 const ENTRY_MODULE_COLUMNS: &str = "id, entry_id, kind, position, source, created_at, updated_at";
 
 fn row_to_surface(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
@@ -93,9 +96,58 @@ fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceModule> {
         kind: row.get(2)?,
         position: row.get(3)?,
         source: row.get(4)?,
+        revision: row.get(7)?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
+}
+
+fn module_by_id(conn: &rusqlite::Connection, id: Uuid) -> rusqlite::Result<Option<SurfaceModule>> {
+    conn.query_row(
+        &format!("SELECT {MODULE_COLUMNS} FROM surface_modules WHERE id = ?1"),
+        params![id.to_string()],
+        row_to_module,
+    )
+    .optional()
+}
+
+fn modules_in_order(
+    conn: &rusqlite::Connection,
+    surface_id: Uuid,
+) -> rusqlite::Result<Vec<SurfaceModule>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MODULE_COLUMNS} FROM surface_modules WHERE surface_id = ?1
+         ORDER BY position ASC, created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![surface_id.to_string()], row_to_module)?;
+    rows.collect()
+}
+
+/// Write `ordered` back as the surface's module order — positions 0..n — and
+/// stamp the surface. Every removal and move passes through here, so the
+/// position column stays contiguous and a position is always an index.
+fn write_module_order(
+    conn: &rusqlite::Connection,
+    surface_id: Uuid,
+    ordered: Vec<SurfaceModule>,
+) -> rusqlite::Result<Vec<SurfaceModule>> {
+    let now_str = Utc::now().to_rfc3339();
+    let mut written = Vec::with_capacity(ordered.len());
+    for (index, module) in ordered.into_iter().enumerate() {
+        let position = index as i32;
+        if module.position != position {
+            conn.execute(
+                "UPDATE surface_modules SET position = ?1 WHERE id = ?2",
+                params![position, module.id.to_string()],
+            )?;
+        }
+        written.push(SurfaceModule { position, ..module });
+    }
+    conn.execute(
+        "UPDATE surfaces SET updated_at = ?1 WHERE id = ?2",
+        params![&now_str, surface_id.to_string()],
+    )?;
+    Ok(written)
 }
 
 pub(crate) fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
@@ -200,6 +252,7 @@ impl SurfaceStore for SqliteStorage {
                 kind: module.kind,
                 position: module.position,
                 source: module.source,
+                revision: 0,
                 created_at: now,
                 updated_at: now,
             })
@@ -234,24 +287,104 @@ impl SurfaceStore for SqliteStorage {
         .await
     }
 
-    async fn update_surface_module_source(
+    async fn replace_surface_module_source(
         &self,
         id: Uuid,
+        expected_revision: i64,
         source: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
         let source = source.to_owned();
         self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
             let now_str = Utc::now().to_rfc3339();
-            conn.execute(
-                "UPDATE surface_modules SET source = ?1, updated_at = ?2 WHERE id = ?3",
-                params![&source, &now_str, id.to_string()],
+            // The revision is the guard: the update lands only on the row the
+            // writer read. A zero-row update is either the stale case or a
+            // missing module — the read-back tells the two apart.
+            let changed = tx.execute(
+                "UPDATE surface_modules
+                 SET source = ?1, revision = revision + 1, updated_at = ?2
+                 WHERE id = ?3 AND revision = ?4",
+                params![&source, &now_str, id.to_string(), expected_revision],
             )?;
-            conn.execute(
-                "UPDATE surfaces SET updated_at = ?1
-                 WHERE id = (SELECT surface_id FROM surface_modules WHERE id = ?2)",
-                params![&now_str, id.to_string()],
+            if changed == 1 {
+                tx.execute(
+                    "UPDATE surfaces SET updated_at = ?1
+                     WHERE id = (SELECT surface_id FROM surface_modules WHERE id = ?2)",
+                    params![&now_str, id.to_string()],
+                )?;
+            }
+            let current = module_by_id(&tx, id)?;
+            tx.commit()?;
+            Ok(current.map(|module| {
+                if changed == 1 {
+                    ModuleSourceReplacement::Replaced(module)
+                } else {
+                    ModuleSourceReplacement::Stale(module)
+                }
+            }))
+        })
+        .await
+    }
+
+    async fn remove_surface_module(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<RemovedSurfaceModule>, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let Some(module) = module_by_id(&tx, id)? else {
+                return Ok(None);
+            };
+            let annotations = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT {ANNOTATION_COLUMNS} FROM surface_annotations
+                     WHERE module_id = ?1 ORDER BY created_at ASC, id ASC"
+                ))?;
+                let rows = stmt.query_map(params![id.to_string()], row_to_annotation)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            // The notes go with the module they hang on — removed here as
+            // one visible statement, not left to the foreign-key cascade.
+            tx.execute(
+                "DELETE FROM surface_annotations WHERE module_id = ?1",
+                params![id.to_string()],
             )?;
-            Ok(())
+            tx.execute(
+                "DELETE FROM surface_modules WHERE id = ?1",
+                params![id.to_string()],
+            )?;
+            let remaining = modules_in_order(&tx, module.surface_id)?;
+            write_module_order(&tx, module.surface_id, remaining)?;
+            tx.commit()?;
+            Ok(Some(RemovedSurfaceModule {
+                module,
+                annotations,
+            }))
+        })
+        .await
+    }
+
+    async fn move_surface_module(
+        &self,
+        id: Uuid,
+        position: i32,
+    ) -> Result<Option<Vec<SurfaceModule>>, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let Some(module) = module_by_id(&tx, id)? else {
+                return Ok(None);
+            };
+            let mut ordered = modules_in_order(&tx, module.surface_id)?;
+            let from = ordered
+                .iter()
+                .position(|item| item.id == module.id)
+                .expect("a module lists among its own surface's modules");
+            let moved = ordered.remove(from);
+            let to = position.clamp(0, ordered.len() as i32) as usize;
+            ordered.insert(to, moved);
+            let written = write_module_order(&tx, module.surface_id, ordered)?;
+            tx.commit()?;
+            Ok(Some(written))
         })
         .await
     }
@@ -620,26 +753,168 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn writing_a_module_touches_its_surface_updated_at() {
+    async fn a_replace_lands_against_the_revision_read_and_advances_it() {
         let (storage, _, session) = make_session().await;
         let surface = surface_with_modules(&storage, session, &["before"]).await;
         let module = storage.list_surface_modules(surface.id).await.unwrap()[0].clone();
+        assert_eq!(module.revision, 0, "a new module starts at revision 0");
 
-        storage
-            .update_surface_module_source(module.id, "after")
-            .await
-            .unwrap();
-
-        let read = storage
-            .get_surface_module(module.id)
+        let outcome = storage
+            .replace_surface_module_source(module.id, module.revision, "after")
             .await
             .unwrap()
-            .unwrap();
+            .expect("the module exists");
+        let ModuleSourceReplacement::Replaced(read) = outcome else {
+            panic!("a replace against the revision read lands");
+        };
         assert_eq!(read.source, "after");
+        assert_eq!(read.revision, 1);
         let surface_read = storage.get_page(surface.id).await.unwrap().unwrap();
         assert!(
             surface_read.updated_at >= read.created_at,
             "surface carries the mutation's timestamp"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_replace_against_a_moved_on_revision_changes_nothing_and_returns_the_row() {
+        let (storage, _, session) = make_session().await;
+        let surface = surface_with_modules(&storage, session, &["draft"]).await;
+        let module = storage.list_surface_modules(surface.id).await.unwrap()[0].clone();
+        storage
+            .replace_surface_module_source(module.id, 0, "the agent's edit")
+            .await
+            .unwrap();
+
+        // An editor opened at revision 0 saves after the agent's edit landed.
+        let outcome = storage
+            .replace_surface_module_source(module.id, 0, "the person's edit")
+            .await
+            .unwrap()
+            .expect("the module exists");
+        let ModuleSourceReplacement::Stale(current) = outcome else {
+            panic!("a replace against a moved-on revision is refused");
+        };
+        assert_eq!(
+            current.source, "the agent's edit",
+            "the saver sees what it did not"
+        );
+        assert_eq!(current.revision, 1);
+        let stored = storage
+            .get_surface_module(module.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.source, "the agent's edit", "nothing landed");
+
+        assert!(
+            storage
+                .replace_surface_module_source(Uuid::new_v4(), 0, "x")
+                .await
+                .unwrap()
+                .is_none(),
+            "a missing module is not a stale one"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removing_a_module_takes_its_notes_and_closes_the_gap() {
+        use crate::model::NewSurfaceAnnotation;
+        use crate::store::SurfaceAnnotationStore;
+
+        let (storage, _, session) = make_session().await;
+        let surface = surface_with_modules(&storage, session, &["a", "b", "c"]).await;
+        let modules = storage.list_surface_modules(surface.id).await.unwrap();
+        let middle = modules[1].clone();
+        storage
+            .create_surface_annotation(NewSurfaceAnnotation {
+                surface_id: surface.id,
+                module_id: middle.id,
+                body: "about b".into(),
+                tags: Vec::new(),
+                author: "user".into(),
+            })
+            .await
+            .unwrap();
+
+        let removed = storage
+            .remove_surface_module(middle.id)
+            .await
+            .unwrap()
+            .expect("the module exists");
+        assert_eq!(removed.module.source, "b");
+        assert_eq!(removed.annotations.len(), 1);
+        assert_eq!(removed.annotations[0].body, "about b");
+
+        let remaining = storage.list_surface_modules(surface.id).await.unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|module| (module.source.as_str(), module.position))
+                .collect::<Vec<_>>(),
+            vec![("a", 0), ("c", 1)],
+            "positions close up behind the removed module"
+        );
+        assert!(
+            storage
+                .list_surface_annotations(surface.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the notes went with their module"
+        );
+        assert!(
+            storage
+                .remove_surface_module(middle.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a second removal finds nothing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn moving_a_module_renumbers_its_surface_and_clamps_the_target() {
+        let (storage, _, session) = make_session().await;
+        let surface = surface_with_modules(&storage, session, &["a", "b", "c"]).await;
+        let modules = storage.list_surface_modules(surface.id).await.unwrap();
+        let (a, c) = (modules[0].clone(), modules[2].clone());
+
+        let order = storage
+            .move_surface_module(c.id, 0)
+            .await
+            .unwrap()
+            .expect("the module exists");
+        assert_eq!(
+            order
+                .iter()
+                .map(|m| (m.source.as_str(), m.position))
+                .collect::<Vec<_>>(),
+            vec![("c", 0), ("a", 1), ("b", 2)]
+        );
+
+        let order = storage
+            .move_surface_module(a.id, 99)
+            .await
+            .unwrap()
+            .expect("the module exists");
+        assert_eq!(
+            order.iter().map(|m| m.source.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b", "a"],
+            "a position past the end is the end"
+        );
+        let stored = storage.list_surface_modules(surface.id).await.unwrap();
+        assert_eq!(
+            stored.iter().map(|m| m.position).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the stored positions are the returned order"
+        );
+        assert!(
+            storage
+                .move_surface_module(Uuid::new_v4(), 0)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -794,7 +1069,7 @@ mod tests {
         // entry nor the other.
         let module = storage.list_surface_modules(with_content.id).await.unwrap()[0].clone();
         storage
-            .update_surface_module_source(module.id, "## Today")
+            .replace_surface_module_source(module.id, module.revision, "## Today")
             .await
             .unwrap();
         assert_eq!(

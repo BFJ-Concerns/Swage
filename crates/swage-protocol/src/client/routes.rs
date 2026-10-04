@@ -34,9 +34,10 @@ use super::{
     },
     surface::{
         CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
-        LibraryEntryResponse, LibraryListResponse, SaveSurfaceToLibraryRequest,
-        SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse,
-        TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
+        DeleteSurfaceModuleResponse, LibraryEntryResponse, LibraryListResponse,
+        MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest, SurfaceAnnotationView,
+        SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
+        UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
     },
     topic::{
         CreateTopicRequest, RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
@@ -748,13 +749,61 @@ pub fn routes() -> Vec<Route> {
                 kind: ParameterType::Uuid,
             }],
             query_parameters: vec![],
-            summary: "Write a surface module.",
+            summary: "Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands.",
             request_optional: false,
 
             request: schema::<WriteSurfaceModuleRequest>(),
             response: Response {
                 status: 200,
-                body: schema::<SurfaceModuleView>(),
+                body: schema::<WriteSurfaceModuleResponse>(),
+            },
+        },
+        Route {
+            operation_id: "delete_surface_module",
+            method: Method::Delete,
+            path: "/api/surfaces/{surface_id}/modules/{module_id}",
+            path_parameters: vec![
+                Parameter {
+                    name: "surface_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "module_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Remove a module from a surface, with the notes hung on it; both survive in the surface's history.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<DeleteSurfaceModuleResponse>(),
+            },
+        },
+        Route {
+            operation_id: "move_surface_module",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}/modules/{module_id}/position",
+            path_parameters: vec![
+                Parameter {
+                    name: "surface_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "module_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Place a module at a position among its surface's modules (0 first; past the end is last). Answers with the surface in its new order.",
+            request_optional: false,
+
+            request: schema::<MoveSurfaceModuleRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceResponse>(),
             },
         },
         Route {

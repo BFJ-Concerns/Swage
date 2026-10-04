@@ -24,15 +24,17 @@ use uuid::Uuid;
 use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::surface::{
     CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
-    LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary, LibraryListResponse,
-    SaveSurfaceToLibraryRequest, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
-    SurfaceResponse, SurfaceSummary, TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest,
-    WriteSurfaceModuleRequest,
+    DeleteSurfaceModuleResponse, LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary,
+    LibraryListResponse, MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest,
+    SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse, SurfaceSummary,
+    TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
+    WriteSurfaceModuleResponse,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
-    LibraryEntry, LibrarySeeding, NewAuditEvent, NewLibraryEntry, NewLibraryEntryModule,
-    NewSurface, NewSurfaceAnnotation, NewSurfaceModule, Session, SurfaceAnnotation, SurfaceModule,
+    LibraryEntry, LibrarySeeding, ModuleSourceReplacement, NewAuditEvent, NewLibraryEntry,
+    NewLibraryEntryModule, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, Session, Surface,
+    SurfaceAnnotation, SurfaceModule,
 };
 
 use crate::error::{ApiError, Json, Path};
@@ -486,45 +488,77 @@ pub async fn remove_topic_default(
 /// append a new instance when the request names none. `author` names who
 /// made the change in the provenance record (an agent id, or "user" for the
 /// web surface).
+async fn surface_or_invalid(state: &AppState, surface_id: Uuid) -> Result<Surface, GatewayError> {
+    state
+        .storage
+        .get_page(surface_id)
+        .await?
+        .ok_or_else(|| GatewayError::ValidationError(format!("no surface with id {surface_id}")))
+}
+
+/// The module, provided it sits on this surface: a module id reached through
+/// another surface is not an address.
+async fn module_on_surface(
+    state: &AppState,
+    surface: &Surface,
+    module_id: Uuid,
+) -> Result<SurfaceModule, GatewayError> {
+    state
+        .storage
+        .get_surface_module(module_id)
+        .await?
+        .filter(|module| module.surface_id == surface.id)
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!(
+                "no module {module_id} on surface {}",
+                surface.id
+            ))
+        })
+}
+
+/// Write a module: append a new instance, or replace an existing one's source
+/// against the revision the writer read. A replace whose revision has moved
+/// on lands nothing and answers with the module as it now stands — the
+/// writer's next write, naming the current revision, is the deliberate act of
+/// replacing what it has now seen.
 pub async fn write_surface_module(
     state: &AppState,
     surface_id: Uuid,
     request: WriteSurfaceModuleRequest,
     author: &str,
-) -> Result<SurfaceModuleView, GatewayError> {
-    let surface =
-        state.storage.get_page(surface_id).await?.ok_or_else(|| {
-            GatewayError::ValidationError(format!("no surface with id {surface_id}"))
-        })?;
+) -> Result<WriteSurfaceModuleResponse, GatewayError> {
+    let surface = surface_or_invalid(state, surface_id).await?;
 
     let (module, prior_source) = match request.module_id {
         Some(module_id) => {
-            let existing = state
+            let existing = module_on_surface(state, &surface, module_id).await?;
+            let expected_revision = request.expected_revision.ok_or_else(|| {
+                GatewayError::ValidationError(
+                    "expected_revision is required when replacing a module: pass the revision \
+                     you read, so a change made since then is not written over unseen"
+                        .into(),
+                )
+            })?;
+            let outcome = state
                 .storage
-                .get_surface_module(module_id)
-                .await?
-                .filter(|module| module.surface_id == surface.id)
-                .ok_or_else(|| {
-                    GatewayError::ValidationError(format!(
-                        "no module {module_id} on surface {surface_id}"
-                    ))
-                })?;
-            state
-                .storage
-                .update_surface_module_source(existing.id, &request.source)
-                .await?;
-            // Read the row back rather than patching a copy: the store
-            // stamped updated_at, and the view must carry the stored truth.
-            let updated = state
-                .storage
-                .get_surface_module(existing.id)
+                .replace_surface_module_source(existing.id, expected_revision, &request.source)
                 .await?
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!(
                         "module {module_id} disappeared during the write"
                     ))
                 })?;
-            (updated, Some(existing.source))
+            match outcome {
+                ModuleSourceReplacement::Replaced(updated) => (updated, Some(existing.source)),
+                ModuleSourceReplacement::Stale(current) => {
+                    // Nothing landed, so nothing is recorded or signalled: the
+                    // refusal is the writer's to act on.
+                    let annotations = annotations_of(state, surface.id, current.id).await?;
+                    return Ok(WriteSurfaceModuleResponse::Stale {
+                        current: module_view(current, annotations),
+                    });
+                }
+            }
         }
         None => {
             let kind = request.kind.as_deref().unwrap_or("document");
@@ -580,15 +614,133 @@ pub async fn write_surface_module(
         module_id: Some(module.id),
     });
 
-    let annotations = state
+    let annotations = annotations_of(state, surface.id, module.id).await?;
+    Ok(WriteSurfaceModuleResponse::Written {
+        module: module_view(module, annotations),
+    })
+}
+
+async fn annotations_of(
+    state: &AppState,
+    surface_id: Uuid,
+    module_id: Uuid,
+) -> Result<Vec<SurfaceAnnotationView>, GatewayError> {
+    Ok(state
         .storage
-        .list_surface_annotations(surface.id)
+        .list_surface_annotations(surface_id)
         .await?
         .into_iter()
-        .filter(|annotation| annotation.module_id == module.id)
+        .filter(|annotation| annotation.module_id == module_id)
         .map(annotation_view)
-        .collect();
-    Ok(module_view(module, annotations))
+        .collect())
+}
+
+/// Remove a module from a surface, and the notes hung on it. The removed
+/// source and notes survive in the surface's provenance trail, which is where
+/// a reader learns what the deletion took.
+pub async fn delete_surface_module(
+    state: &AppState,
+    surface_id: Uuid,
+    module_id: Uuid,
+    author: &str,
+) -> Result<DeleteSurfaceModuleResponse, GatewayError> {
+    let surface = surface_or_invalid(state, surface_id).await?;
+    module_on_surface(state, &surface, module_id).await?;
+    let removed = state
+        .storage
+        .remove_surface_module(module_id)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!(
+                "module {module_id} disappeared during the removal"
+            ))
+        })?;
+
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "surface".into(),
+            entity_id: surface.id.to_string(),
+            event_kind: "surface_module_deleted".into(),
+            summary: format!("module removed from surface: {}", surface.title),
+            metadata: json!({
+                "module_id": removed.module.id,
+                "kind": removed.module.kind,
+                "position": removed.module.position,
+                "author": author,
+                "source": removed.module.source,
+                "annotations": removed
+                    .annotations
+                    .iter()
+                    .map(|annotation| json!({
+                        "id": annotation.id,
+                        "author": annotation.author,
+                        "body": annotation.body,
+                        "tags": annotation.tags,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        })
+        .await?;
+
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: surface.id,
+        module_id: Some(module_id),
+    });
+    Ok(DeleteSurfaceModuleResponse {
+        deleted: true,
+        annotations_removed: removed.annotations.len() as u32,
+    })
+}
+
+/// Place a module at a position among its surface's modules — 0 first, past
+/// the end last — and answer with the surface in its new order.
+pub async fn move_surface_module(
+    state: &AppState,
+    surface_id: Uuid,
+    module_id: Uuid,
+    request: MoveSurfaceModuleRequest,
+    author: &str,
+) -> Result<SurfaceResponse, GatewayError> {
+    let surface = surface_or_invalid(state, surface_id).await?;
+    let existing = module_on_surface(state, &surface, module_id).await?;
+    let order = state
+        .storage
+        .move_surface_module(module_id, request.position)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError(format!("module {module_id} disappeared during the move"))
+        })?;
+    let to = order
+        .iter()
+        .position(|module| module.id == module_id)
+        .expect("the moved module is in its surface's order") as i32;
+
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "surface".into(),
+            entity_id: surface.id.to_string(),
+            event_kind: "surface_module_moved".into(),
+            summary: format!("module moved on surface: {}", surface.title),
+            metadata: json!({
+                "module_id": module_id,
+                "author": author,
+                "from": existing.position,
+                "to": to,
+            }),
+        })
+        .await?;
+
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: surface.id,
+        module_id: Some(module_id),
+    });
+    surface_response(state, surface.id).await
 }
 
 /// Leave a note on one of a surface's modules. `author` names who left it in the
@@ -888,6 +1040,7 @@ fn module_view(
         kind: module.kind,
         position: module.position,
         source: module.source,
+        revision: module.revision,
         updated_at: module.updated_at,
         annotations,
     }
@@ -950,9 +1103,28 @@ pub async fn write_surface_module_handler(
     State(state): State<AppState>,
     Path(surface_id): Path<Uuid>,
     Json(request): Json<WriteSurfaceModuleRequest>,
-) -> Result<Json<SurfaceModuleView>, ApiError> {
+) -> Result<Json<WriteSurfaceModuleResponse>, ApiError> {
     Ok(Json(
         write_surface_module(&state, surface_id, request, "user").await?,
+    ))
+}
+
+pub async fn delete_surface_module_handler(
+    State(state): State<AppState>,
+    Path((surface_id, module_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<DeleteSurfaceModuleResponse>, ApiError> {
+    Ok(Json(
+        delete_surface_module(&state, surface_id, module_id, "user").await?,
+    ))
+}
+
+pub async fn move_surface_module_handler(
+    State(state): State<AppState>,
+    Path((surface_id, module_id)): Path<(Uuid, Uuid)>,
+    Json(request): Json<MoveSurfaceModuleRequest>,
+) -> Result<Json<SurfaceResponse>, ApiError> {
+    Ok(Json(
+        move_surface_module(&state, surface_id, module_id, request, "user").await?,
     ))
 }
 
@@ -1093,18 +1265,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let module = write_surface_module(
-            &state,
-            surface.id,
-            WriteSurfaceModuleRequest {
-                module_id: None,
-                kind: None,
-                source: "# Draft".into(),
-            },
-            "user",
-        )
-        .await
-        .unwrap();
+        let module = appended(
+            write_surface_module(
+                &state,
+                surface.id,
+                WriteSurfaceModuleRequest {
+                    module_id: None,
+                    kind: None,
+                    source: "# Draft".into(),
+                    expected_revision: None,
+                },
+                "user",
+            )
+            .await
+            .unwrap(),
+        );
         let other = create_surface(
             &state,
             session,
@@ -1115,19 +1290,313 @@ mod tests {
         )
         .await
         .unwrap();
-        let other_module = write_surface_module(
+        let other_module = appended(
+            write_surface_module(
+                &state,
+                other.id,
+                WriteSurfaceModuleRequest {
+                    module_id: None,
+                    kind: None,
+                    source: "# Other".into(),
+                    expected_revision: None,
+                },
+                "user",
+            )
+            .await
+            .unwrap(),
+        );
+        (state, storage, surface.id, module.id, other_module.id)
+    }
+
+    /// The module a write landed; an append never comes back stale.
+    fn appended(response: WriteSurfaceModuleResponse) -> SurfaceModuleView {
+        match response {
+            WriteSurfaceModuleResponse::Written { module } => module,
+            WriteSurfaceModuleResponse::Stale { .. } => panic!("an append is never stale"),
+        }
+    }
+
+    fn replace(module_id: Uuid, revision: i64, source: &str) -> WriteSurfaceModuleRequest {
+        WriteSurfaceModuleRequest {
+            module_id: Some(module_id),
+            kind: None,
+            source: source.into(),
+            expected_revision: Some(revision),
+        }
+    }
+
+    async fn sources_in_order(state: &AppState, surface_id: Uuid) -> Vec<(String, i32)> {
+        surface_response(state, surface_id)
+            .await
+            .unwrap()
+            .modules
+            .into_iter()
+            .map(|module| (module.source, module.position))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_save_against_a_moved_on_revision_lands_nothing_and_shows_the_newer_source() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let mut events = state.broadcast.subscribe();
+
+        // The agent read the module at revision 0 and replaced it.
+        let landed = write_surface_module(
             &state,
-            other.id,
-            WriteSurfaceModuleRequest {
-                module_id: None,
-                kind: None,
-                source: "# Other".into(),
-            },
+            surface_id,
+            replace(module_id, 0, "# Agent's"),
+            "gateway",
+        )
+        .await
+        .unwrap();
+        let WriteSurfaceModuleResponse::Written { module } = landed else {
+            panic!("the first replace lands");
+        };
+        assert_eq!(module.revision, 1);
+        let _signal = events.recv().await.expect("a landed write signals");
+        let trail_before = storage.list_audit_events().await.unwrap().len();
+
+        // The person's editor, opened at revision 0, saves after that.
+        let refused = write_surface_module(
+            &state,
+            surface_id,
+            replace(module_id, 0, "# Person's"),
             "user",
         )
         .await
         .unwrap();
-        (state, storage, surface.id, module.id, other_module.id)
+        let WriteSurfaceModuleResponse::Stale { current } = refused else {
+            panic!("a save over a changed module is refused");
+        };
+        assert_eq!(
+            current.source, "# Agent's",
+            "the saver is shown what it had not seen"
+        );
+        assert_eq!(current.revision, 1);
+        let stored = storage
+            .get_surface_module(module_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.source, "# Agent's", "nothing landed");
+        assert_eq!(
+            storage.list_audit_events().await.unwrap().len(),
+            trail_before,
+            "a refused save is not a write: nothing is recorded"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "nothing changed, so nothing is signalled"
+        );
+
+        // Replacing what it has now seen is a second, deliberate act.
+        let deliberate = write_surface_module(
+            &state,
+            surface_id,
+            replace(module_id, current.revision, "# Person's, knowingly"),
+            "user",
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            deliberate,
+            WriteSurfaceModuleResponse::Written { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_replace_without_the_revision_it_read_is_refused_before_anything_lands() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let error = write_surface_module(
+            &state,
+            surface_id,
+            WriteSurfaceModuleRequest {
+                module_id: Some(module_id),
+                kind: None,
+                source: "# Blind".into(),
+                expected_revision: None,
+            },
+            "gateway",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("expected_revision"),
+            "the refusal names what is missing: {error}"
+        );
+        let stored = storage
+            .get_surface_module(module_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.source, "# Draft");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removing_a_module_takes_its_notes_into_the_trail_and_signals_the_surface() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        create_surface_annotation(
+            &state,
+            surface_id,
+            annotation(module_id, "move this up"),
+            "user",
+        )
+        .await
+        .unwrap();
+        let mut events = state.broadcast.subscribe();
+
+        let response = delete_surface_module(&state, surface_id, module_id, "gateway")
+            .await
+            .unwrap();
+        assert!(response.deleted);
+        assert_eq!(
+            response.annotations_removed, 1,
+            "the answer says what went with the module"
+        );
+
+        assert!(
+            surface_response(&state, surface_id)
+                .await
+                .unwrap()
+                .modules
+                .is_empty(),
+            "the surface no longer carries the module"
+        );
+        let events_recorded = storage.list_audit_events().await.unwrap();
+        let recorded = events_recorded
+            .iter()
+            .find(|event| event.event_kind == "surface_module_deleted")
+            .expect("the removal is in the surface's trail");
+        assert_eq!(
+            recorded.metadata["source"], "# Draft",
+            "the removed source survives in the trail"
+        );
+        assert_eq!(recorded.metadata["annotations"][0]["body"], "move this up");
+        assert_eq!(recorded.metadata["author"], "gateway");
+
+        match events.recv().await.expect("the removal signals") {
+            ServerEvent::SurfaceUpdated {
+                surface_id: signalled,
+                module_id: Some(named),
+            } => {
+                assert_eq!(signalled, surface_id);
+                assert_eq!(named, module_id);
+            }
+            other => panic!("expected a surface_updated signal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn moving_a_module_reorders_the_surface_and_records_where_it_went() {
+        let (state, storage, surface_id, first, _) = seeded().await;
+        for source in ["# Second", "# Third"] {
+            write_surface_module(
+                &state,
+                surface_id,
+                WriteSurfaceModuleRequest {
+                    module_id: None,
+                    kind: None,
+                    source: source.into(),
+                    expected_revision: None,
+                },
+                "user",
+            )
+            .await
+            .unwrap();
+        }
+        let third = surface_response(&state, surface_id).await.unwrap().modules[2].id;
+
+        let reordered = move_surface_module(
+            &state,
+            surface_id,
+            third,
+            MoveSurfaceModuleRequest { position: 0 },
+            "gateway",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reordered
+                .modules
+                .iter()
+                .map(|module| (module.source.as_str(), module.position))
+                .collect::<Vec<_>>(),
+            vec![("# Third", 0), ("# Draft", 1), ("# Second", 2)],
+            "the answer is the surface in its new order"
+        );
+        assert_eq!(
+            sources_in_order(&state, surface_id).await,
+            vec![
+                ("# Third".to_string(), 0),
+                ("# Draft".to_string(), 1),
+                ("# Second".to_string(), 2)
+            ]
+        );
+
+        move_surface_module(
+            &state,
+            surface_id,
+            first,
+            MoveSurfaceModuleRequest { position: 99 },
+            "user",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sources_in_order(&state, surface_id)
+                .await
+                .into_iter()
+                .map(|(source, _)| source)
+                .collect::<Vec<_>>(),
+            vec!["# Third", "# Second", "# Draft"],
+            "past the end is the end"
+        );
+
+        let events_recorded = storage.list_audit_events().await.unwrap();
+        let mut moves: Vec<_> = events_recorded
+            .iter()
+            .filter(|event| event.event_kind == "surface_module_moved")
+            .map(|event| {
+                (
+                    event.metadata["from"].as_i64().unwrap(),
+                    event.metadata["to"].as_i64().unwrap(),
+                    event.metadata["author"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        moves.sort();
+        assert_eq!(
+            moves,
+            vec![(1, 2, "user".to_string()), (2, 0, "gateway".to_string())],
+            "each move records where the module came from, where it went, and who moved it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_module_on_another_surface_is_neither_removed_nor_moved_through_this_one() {
+        let (state, storage, surface_id, _, other_module_id) = seeded().await;
+        let removal = delete_surface_module(&state, surface_id, other_module_id, "gateway")
+            .await
+            .unwrap_err();
+        assert!(removal.to_string().contains("no module"));
+        let movement = move_surface_module(
+            &state,
+            surface_id,
+            other_module_id,
+            MoveSurfaceModuleRequest { position: 0 },
+            "gateway",
+        )
+        .await
+        .unwrap_err();
+        assert!(movement.to_string().contains("no module"));
+        assert!(
+            storage
+                .get_surface_module(other_module_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "the other surface's module is untouched"
+        );
     }
 
     fn annotation(module_id: Uuid, body: &str) -> CreateSurfaceAnnotationRequest {

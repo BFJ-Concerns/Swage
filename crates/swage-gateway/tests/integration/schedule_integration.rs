@@ -1576,7 +1576,16 @@ async fn completed_runs_deliver_to_a_surface_through_the_surface_substrate() {
         .unwrap();
     assert_eq!(modules.len(), 1);
     assert_eq!(modules[0].source, "scheduled surface output");
-    let event = events.recv().await.unwrap();
+    // The run's own events (its brief announced, its turn's progress) share
+    // the broadcast; the surface signal is the one this test is about.
+    let event = loop {
+        match events.recv().await.unwrap() {
+            event @ swage_protocol::client::websocket::ServerEvent::SurfaceUpdated { .. } => {
+                break event;
+            }
+            _ => continue,
+        }
+    };
     assert!(matches!(
         event,
         swage_protocol::client::websocket::ServerEvent::SurfaceUpdated {

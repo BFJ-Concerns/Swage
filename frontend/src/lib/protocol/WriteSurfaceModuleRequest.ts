@@ -9,4 +9,10 @@ export type WriteSurfaceModuleRequest = { module_id?: string | null,
  * Module kind for a new instance ("document" first); ignored when
  * `module_id` names an existing instance.
  */
-kind?: string | null, source: string, };
+kind?: string | null, source: string,
+/**
+ * The module's revision as the writer read it. Required with
+ * `module_id`: a replace lands only against that revision, so a change
+ * made since the writer read the module is never written over unseen.
+ */
+expected_revision?: number | null, };

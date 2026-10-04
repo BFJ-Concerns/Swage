@@ -14,6 +14,7 @@
   import DOMPurify from "dompurify";
   import { marked } from "marked";
   import type { SurfacesStore } from "../stores/surfaces";
+  import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
 
   interface Props {
     store: SurfacesStore;
@@ -31,9 +32,16 @@
   // The library entry a new surface is seeded from, "" for a blank surface.
   // The picker reads the catalogue; it never mutates it.
   let newEntryId = $state("");
-  // The module currently being edited by the user, if any.
+  // The module currently being edited by the user, if any, and the revision
+  // the editor opened at: a save names it, so a change made meanwhile is
+  // never written over unseen.
   let editingModuleId = $state<string | null>(null);
   let editingSource = $state("");
+  let editingRevision = $state<number | null>(null);
+  // The module as it now stands, when a save was refused because it changed
+  // while the editor was open. Shown beside the edit; replacing it is a
+  // deliberate second act.
+  let staleModule = $state<SurfaceModuleView | null>(null);
   // The module whose note the user is currently composing, if any.
   let annotatingModuleId = $state<string | null>(null);
   let annotationBody = $state("");
@@ -109,22 +117,61 @@
     saveNotice = `Saved to the library as “${name}”.`;
   }
 
-  function startEditing(moduleId: string, source: string): void {
-    editingModuleId = moduleId;
-    editingSource = source;
+  function startEditing(module: SurfaceModuleView): void {
+    editingModuleId = module.id;
+    editingSource = module.source;
+    editingRevision = module.revision;
+    staleModule = null;
+  }
+
+  function stopEditing(): void {
+    editingModuleId = null;
+    editingRevision = null;
+    staleModule = null;
   }
 
   async function saveEdit(): Promise<void> {
     const surface = store.activeSurface;
     if (!surface || editingModuleId === null) return;
-    await store.writeModule(surface.id, editingModuleId, editingSource);
-    editingModuleId = null;
+    const newer = await store.writeModule(
+      surface.id,
+      editingModuleId,
+      editingSource,
+      editingRevision,
+    );
+    if (newer) {
+      staleModule = newer;
+      return;
+    }
+    stopEditing();
+  }
+
+  // The user has seen the newer version and still wants their edit: save
+  // again naming the revision they have now seen.
+  function replaceAnyway(): void {
+    if (!staleModule) return;
+    editingRevision = staleModule.revision;
+    staleModule = null;
+    void saveEdit();
   }
 
   async function appendModule(): Promise<void> {
     const surface = store.activeSurface;
     if (!surface) return;
-    await store.writeModule(surface.id, null, "");
+    await store.writeModule(surface.id, null, "", null);
+  }
+
+  async function removeModule(moduleId: string): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface) return;
+    if (editingModuleId === moduleId) stopEditing();
+    await store.deleteModule(surface.id, moduleId);
+  }
+
+  async function moveModule(moduleId: string, position: number): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface) return;
+    await store.moveModule(surface.id, moduleId, position);
   }
 
   function startAnnotating(moduleId: string): void {
@@ -232,23 +279,53 @@
           {#if saveNotice}<span class="save-notice">{saveNotice}</span>{/if}
         {/if}
       </div>
-      {#each store.activeSurface.modules as module (module.id)}
+      {#each store.activeSurface.modules as module, index (module.id)}
         <article class="module" data-kind={module.kind}>
           {#if editingModuleId === module.id}
+            {#if staleModule}
+              <div class="stale-notice" role="alert">
+                <p>This module changed while you were editing it. It now reads:</p>
+                <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
+                <div class="module-content">{@html renderDocument(staleModule.source)}</div>
+                <div class="module-actions">
+                  <button onclick={replaceAnyway}>Replace it with my edit</button>
+                  <button onclick={stopEditing}>Keep the current version</button>
+                </div>
+              </div>
+            {/if}
             <textarea bind:value={editingSource} rows="8"></textarea>
             <div class="module-actions">
-              <button onclick={() => void saveEdit()}>Save</button>
-              <button onclick={() => (editingModuleId = null)}>Cancel</button>
+              {#if !staleModule}
+                <button onclick={() => void saveEdit()}>Save</button>
+              {/if}
+              <button onclick={stopEditing}>Cancel</button>
             </div>
           {:else if module.kind === "document"}
             <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
             <div class="module-content">{@html renderDocument(module.source)}</div>
             <div class="module-actions">
-              <button onclick={() => startEditing(module.id, module.source)}>
+              <button onclick={() => startEditing(module)}>
                 Edit
               </button>
               <button onclick={() => startAnnotating(module.id)}>
                 Add note
+              </button>
+              <button
+                aria-label="Move module up"
+                disabled={index === 0}
+                onclick={() => void moveModule(module.id, index - 1)}
+              >
+                Move up
+              </button>
+              <button
+                aria-label="Move module down"
+                disabled={index === store.activeSurface.modules.length - 1}
+                onclick={() => void moveModule(module.id, index + 1)}
+              >
+                Move down
+              </button>
+              <button aria-label="Delete module" onclick={() => void removeModule(module.id)}>
+                Delete
               </button>
             </div>
           {/if}
@@ -401,6 +478,12 @@
     display: flex;
     gap: 8px;
     margin-top: 4px;
+  }
+
+  .stale-notice {
+    border-left: 3px solid var(--ink-orange);
+    padding: 4px 0 4px 8px;
+    margin-bottom: 8px;
   }
 
   .annotations {

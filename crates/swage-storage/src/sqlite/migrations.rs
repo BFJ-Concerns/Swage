@@ -162,6 +162,7 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         kind        TEXT NOT NULL,
         position    INTEGER NOT NULL,
         source      TEXT NOT NULL,
+        revision    INTEGER NOT NULL DEFAULT 0,
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     );

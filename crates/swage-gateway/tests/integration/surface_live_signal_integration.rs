@@ -190,7 +190,11 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
         )
         .await
         .expect("the agent writes a module");
-    let module_id = module["id"].as_str().expect("module id").to_string();
+    assert_eq!(module["outcome"], "written");
+    let module_id = module["module"]["id"]
+        .as_str()
+        .expect("module id")
+        .to_string();
     let written = next_surface_signal(&mut socket).await;
     assert_eq!(written["module_id"], module_id);
 

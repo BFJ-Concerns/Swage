@@ -105,6 +105,41 @@ pub struct WriteSurfaceModuleRequest {
     #[ts(optional, as = "Option<_>")]
     pub kind: Option<String>,
     pub source: String,
+    /// The module's revision as the writer read it. Required with
+    /// `module_id`: a replace lands only against that revision, so a change
+    /// made since the writer read the module is never written over unseen.
+    #[serde(default)]
+    #[ts(optional, type = "number | null")]
+    pub expected_revision: Option<i64>,
+}
+
+/// The answer to a module write. A replace against a moved-on revision is
+/// refused: nothing changes and the writer is shown the module as it now
+/// stands, so replacing it is a second, deliberate write naming the current
+/// revision.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
+pub enum WriteSurfaceModuleResponse {
+    Written { module: SurfaceModuleView },
+    Stale { current: SurfaceModuleView },
+}
+
+/// Place a module among its surface's modules: 0 is first, and a position
+/// past the end is the end.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct MoveSurfaceModuleRequest {
+    pub position: i32,
+}
+
+/// Confirms a module was removed, with the notes that went with it. The
+/// removed source and notes survive in the surface's provenance trail.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct DeleteSurfaceModuleResponse {
+    pub deleted: bool,
+    pub annotations_removed: u32,
 }
 
 /// Leave a note on one of a surface's modules. `module_id` names the module the
@@ -162,6 +197,10 @@ pub struct SurfaceModuleView {
     pub kind: String,
     pub position: i32,
     pub source: String,
+    /// Advances on every change to `source`; a replace names the revision
+    /// it read.
+    #[ts(type = "number")]
+    pub revision: i64,
     pub updated_at: DateTime<Utc>,
     /// Notes hung on this module, oldest first.
     pub annotations: Vec<SurfaceAnnotationView>,

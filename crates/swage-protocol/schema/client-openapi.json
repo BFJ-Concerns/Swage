@@ -1373,6 +1373,24 @@
         ],
         "type": "object"
       },
+      "DeleteSurfaceModuleResponse": {
+        "description": "Confirms a module was removed, with the notes that went with it. The\nremoved source and notes survive in the surface's provenance trail.",
+        "properties": {
+          "annotations_removed": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted",
+          "annotations_removed"
+        ],
+        "type": "object"
+      },
       "DeliveryRoutingRequest": {
         "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
         "properties": {
@@ -2704,6 +2722,19 @@
           "provider_id",
           "model_id",
           "aliases"
+        ],
+        "type": "object"
+      },
+      "MoveSurfaceModuleRequest": {
+        "description": "Place a module among its surface's modules: 0 is first, and a position\npast the end is the end.",
+        "properties": {
+          "position": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position"
         ],
         "type": "object"
       },
@@ -5577,6 +5608,11 @@
             "format": "int32",
             "type": "integer"
           },
+          "revision": {
+            "description": "Advances on every change to `source`; a replace names the revision\nit read.",
+            "format": "int64",
+            "type": "integer"
+          },
           "source": {
             "type": "string"
           },
@@ -5590,6 +5626,7 @@
           "kind",
           "position",
           "source",
+          "revision",
           "updated_at",
           "annotations"
         ],
@@ -8781,6 +8818,15 @@
       "WriteSurfaceModuleRequest": {
         "description": "Write a module's source: replace an existing instance's content, or\nappend a new instance to the surface when `module_id` is absent.",
         "properties": {
+          "expected_revision": {
+            "default": null,
+            "description": "The module's revision as the writer read it. Required with\n`module_id`: a replace lands only against that revision, so a change\nmade since the writer read the module is never written over unseen.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "kind": {
             "default": null,
             "description": "Module kind for a new instance (\"document\" first); ignored when\n`module_id` names an existing instance.",
@@ -8805,6 +8851,43 @@
           "source"
         ],
         "type": "object"
+      },
+      "WriteSurfaceModuleResponse": {
+        "description": "The answer to a module write. A replace against a moved-on revision is\nrefused: nothing changes and the writer is shown the module as it now\nstands, so replacing it is a second, deliberate write naming the current\nrevision.",
+        "oneOf": [
+          {
+            "properties": {
+              "module": {
+                "$ref": "#/components/schemas/SurfaceModuleView"
+              },
+              "outcome": {
+                "const": "written",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "module"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "current": {
+                "$ref": "#/components/schemas/SurfaceModuleView"
+              },
+              "outcome": {
+                "const": "stale",
+                "type": "string"
+              }
+            },
+            "required": [
+              "outcome",
+              "current"
+            ],
+            "type": "object"
+          }
+        ]
       }
     }
   },
@@ -9804,7 +9887,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SurfaceModuleView"
+                  "$ref": "#/components/schemas/WriteSurfaceModuleResponse"
                 }
               }
             },
@@ -9814,7 +9897,99 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Write a surface module."
+        "summary": "Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands."
+      }
+    },
+    "/api/surfaces/{surface_id}/modules/{module_id}": {
+      "delete": {
+        "operationId": "delete_surface_module",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "module_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteSurfaceModuleResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Remove a module from a surface, with the notes hung on it; both survive in the surface's history."
+      }
+    },
+    "/api/surfaces/{surface_id}/modules/{module_id}/position": {
+      "post": {
+        "operationId": "move_surface_module",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "module_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveSurfaceModuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Place a module at a position among its surface's modules (0 first; past the end is last). Answers with the surface in its new order."
       }
     },
     "/api/surfaces/{surface_id}/save": {
