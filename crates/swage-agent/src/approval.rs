@@ -39,13 +39,53 @@ pub(crate) enum PreToolUseOutcome {
 /// tool dispatch loop.
 #[derive(Debug)]
 pub(crate) enum ApprovalGateOutcome {
-    /// Human approved — proceed with tool execution.
-    Approved,
+    /// Human approved — proceed with tool execution. The scope is carried
+    /// so the tool result can tell the model how the call was approved.
+    Approved { scope: ApprovalDecisionScope },
     /// Human rejected (or timeout treated as rejection) — deliver this
     /// feedback string as the tool result.
     Rejected { feedback: String },
     /// Timeout with interrupt policy — the turn must be interrupted.
     Interrupted,
+}
+
+/// Model-facing tool result for a call the person denied. The decision is
+/// stated in fixed words so a UI-supplied reason (e.g. which control was
+/// used) can never read as the outcome; any reason follows as the user's note.
+pub(crate) fn user_denied_feedback(reason: Option<&str>) -> String {
+    let mut feedback = String::from(
+        "The user denied this tool call. It did not run, and no approval is pending.",
+    );
+    if let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) {
+        feedback.push_str(" User's note: ");
+        feedback.push_str(reason);
+    }
+    feedback
+}
+
+/// Prefix an approved call's model-facing result with how the person
+/// approved it, so the model can account for the approval afterwards.
+pub(crate) fn with_user_approval_note(
+    result: (String, bool, String),
+    scope: ApprovalDecisionScope,
+) -> (String, bool, String) {
+    let how = match scope {
+        ApprovalDecisionScope::Once => "once",
+        ApprovalDecisionScope::Session => "for this session",
+        ApprovalDecisionScope::Permanent | ApprovalDecisionScope::PermanentGlobal => {
+            "permanently"
+        }
+    };
+    let (text, is_error, status) = result;
+    if status == "rejected" {
+        // A later gate on the same call denied it; that denial is the outcome.
+        return (text, is_error, status);
+    }
+    (
+        format!("[The user approved this tool call {how}; it ran after approval.]\n{text}"),
+        is_error,
+        status,
+    )
 }
 
 /// Default approval timeout when neither config nor hook specifies one.
