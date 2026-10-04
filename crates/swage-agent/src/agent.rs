@@ -455,7 +455,10 @@ mod approval_tests {
             text.contains("The user approved this tool call once"),
             "once-approved result must note the approval: {text}"
         );
-        assert!(text.contains("\"text\":\"ran\""), "tool output must follow: {text}");
+        assert!(
+            text.contains("\"text\":\"ran\""),
+            "tool output must follow: {text}"
+        );
 
         let (text, _, _) =
             dispatch_echo_approved_with(crate::approval::ApprovalDecisionScope::Session).await;
@@ -2128,8 +2131,7 @@ impl Agent {
                                 Ok((format_tool_error_for_model(&e), true, "error".to_string()))
                             }
                         };
-                        result
-                            .map(|result| crate::approval::with_user_approval_note(result, scope))
+                        result.map(|result| crate::approval::with_user_approval_note(result, scope))
                     }
                     ApprovalGateOutcome::Rejected { feedback } => {
                         Ok((feedback, true, "rejected".to_string()))
