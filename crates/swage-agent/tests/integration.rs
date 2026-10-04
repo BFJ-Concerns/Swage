@@ -627,6 +627,167 @@ async fn streaming_turn_ignores_reasoning_chunks_in_visible_response() {
     )));
 }
 
+struct RecordPostToolUse {
+    result: Mutex<Option<serde_json::Value>>,
+}
+
+#[async_trait]
+impl Hook for RecordPostToolUse {
+    fn name(&self) -> &str {
+        "record-tool-result"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if let HookEvent::PostToolUse { result, .. } = event {
+            *self.result.lock().expect("hook result") = Some(result.clone());
+        }
+        HookOutcome::Continue
+    }
+}
+
+async fn approved_metadata_result() -> (swage_storage::model::ToolCallRecord, serde_json::Value) {
+    use swage_agent::approval::{ApprovalDecision, ApprovalDecisionScope, ApprovalDecisionValue};
+    use swage_tool::permission::{PermissionConfig, RequireApprovalEntry};
+
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(CompactionStreamingProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "call-approved".into(),
+                name: "truncated_metadata".into(),
+                arguments: json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]));
+    let mut tools = swage_tool::registry::ToolRegistry::new();
+    tools
+        .register(Arc::new(TruncatedMetadataTool))
+        .expect("tool");
+    let dispatcher = ToolDispatcher::new(
+        Arc::new(tools),
+        PermissionConfig {
+            allow: vec!["*".into()],
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "truncated_metadata".into(),
+                timeout_secs: Some(5),
+                timeout_policy: None,
+            }],
+            ..PermissionConfig::default()
+        },
+        Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+        swage_tool::rate_limit::RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    );
+    let hook = Arc::new(RecordPostToolUse {
+        result: Mutex::new(None),
+    });
+    let mut hooks = HookRegistry::new();
+    hooks.register(HookRegistration::new(hook.clone()));
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .tool_dispatcher(dispatcher)
+        .hook_registry(Arc::new(hooks))
+        .approval_registrar(Arc::new(|_, sender| {
+            sender
+                .send(ApprovalDecision {
+                    decision: ApprovalDecisionValue::Approved,
+                    scope: ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .expect("approval receiver");
+        }))
+        .build()
+        .expect("agent");
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(topic.id, session.id, thread.id, "Use the tool", None),
+            event_tx,
+        )
+        .await
+        .expect("approved turn");
+    let call = storage
+        .list_tool_calls_by_turn(outbound.turn_id)
+        .await
+        .expect("tool calls")
+        .remove(0);
+    let messages = provider.last_stream_messages();
+    let replay = messages
+        .iter()
+        .find_map(|message| {
+            message.tool_replay()?.iter().find_map(|part| match part {
+                swage_core::ToolReplayPart::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+        })
+        .expect("provider tool result");
+    assert!(replay.contains("The user approved this tool call once; it ran after approval."));
+    assert!(
+        call.model_result
+            .as_deref()
+            .expect("stored model result")
+            .contains("The user approved this tool call once; it ran after approval.")
+    );
+    let hook_result = hook
+        .result
+        .lock()
+        .expect("hook result")
+        .clone()
+        .expect("hook fired");
+    (call, hook_result)
+}
+
+fn expected_metadata_result() -> serde_json::Value {
+    json!({
+        "output": "preview", "truncated": true, "total_bytes": 4096,
+        "follow_up": { "tool": "file_read", "arguments": { "path": "large.txt", "offset_bytes": 128 } }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_keeps_the_stored_object_result() {
+    let (call, _) = approved_metadata_result().await;
+    let raw = call.result.expect("stored result");
+    let value =
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap_or(serde_json::Value::String(raw));
+    assert_eq!(value, expected_metadata_result());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_keeps_extract_tool_result_metadata_truncated() {
+    let (call, _) = approved_metadata_result().await;
+    assert!(
+        call.truncated,
+        "approved object result must retain truncation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_keeps_extract_tool_result_metadata_total_bytes() {
+    let (call, _) = approved_metadata_result().await;
+    assert_eq!(call.total_bytes, Some(4096));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_keeps_the_post_tool_use_hook_object() {
+    let (_, result) = approved_metadata_result().await;
+    assert_eq!(result, expected_metadata_result());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_persists_tool_result_truncation_metadata() {
     let (storage, topic, session, thread) = setup_conversation("agent-a").await;
