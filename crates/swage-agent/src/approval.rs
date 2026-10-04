@@ -53,9 +53,8 @@ pub(crate) enum ApprovalGateOutcome {
 /// stated in fixed words so a UI-supplied reason (e.g. which control was
 /// used) can never read as the outcome; any reason follows as the user's note.
 pub(crate) fn user_denied_feedback(reason: Option<&str>) -> String {
-    let mut feedback = String::from(
-        "The user denied this tool call. It did not run, and no approval is pending.",
-    );
+    let mut feedback =
+        String::from("The user denied this tool call. It did not run, and no approval is pending.");
     if let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) {
         feedback.push_str(" User's note: ");
         feedback.push_str(reason);
@@ -72,9 +71,7 @@ pub(crate) fn with_user_approval_note(
     let how = match scope {
         ApprovalDecisionScope::Once => "once",
         ApprovalDecisionScope::Session => "for this session",
-        ApprovalDecisionScope::Permanent | ApprovalDecisionScope::PermanentGlobal => {
-            "permanently"
-        }
+        ApprovalDecisionScope::Permanent | ApprovalDecisionScope::PermanentGlobal => "permanently",
     };
     let (text, is_error, status) = result;
     if status == "rejected" {
