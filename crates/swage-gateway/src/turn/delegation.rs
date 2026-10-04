@@ -11,11 +11,10 @@ use super::{
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
-    execute_context_assembly, load_active_skills_for_agent, load_memory_for_assembly,
-    load_session_config, load_topic_memory, load_trusted_workspace_policy, mpsc,
-    operator_guidance_rules, resolve_authorised_worker_directory,
-    resolve_requested_skills_for_agent, resolve_swage_root, select_context_assembly,
-    shutdown_sandbox_guard, worker_placement_path,
+    execute_context_assembly, load_active_skills_for_agent, load_session_config,
+    load_trusted_workspace_policy, mpsc, operator_guidance_rules,
+    resolve_authorised_worker_directory, resolve_requested_skills_for_agent, resolve_swage_root,
+    select_context_assembly, shutdown_sandbox_guard, worker_placement_path,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -268,10 +267,13 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .await
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let assembly_name = context_choices.assembly_name;
-        let memory_content = load_memory_for_assembly(&assembly_name, || async {
-            load_topic_memory(&self.swage_root, &self.topic.location()).await
-        })
-        .await;
+        // A delegated child serves the operator through its parent and
+        // carries the same profile and index.
+        let memory_index = Some(
+            crate::memory::load_memory_index(&self.swage_root, &self.topic.location())
+                .await
+                .into_element(),
+        );
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
             .storage
@@ -308,7 +310,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             operator_guidance,
             active_skills,
             delegated_history,
-            memory_content.map(|content| (content, self.topic.name.clone())),
+            memory_index,
             environment,
             available_skills,
             self.config.default_model_id(),

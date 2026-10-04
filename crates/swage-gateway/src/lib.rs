@@ -62,6 +62,7 @@ pub mod knowledge;
 pub mod knowledge_mirror;
 pub mod lifecycle;
 pub mod material;
+pub mod memory;
 pub mod onboarding;
 pub mod operator;
 pub mod presence;

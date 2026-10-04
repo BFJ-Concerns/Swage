@@ -1,5 +1,4 @@
 pub mod agent_definition;
-pub mod agent_memory;
 pub mod agent_message;
 pub mod approval;
 pub mod attachment;

@@ -488,42 +488,6 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
-/// A durable agent-authored memory record tied to concrete run provenance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentMemoryRecord {
-    pub id: Uuid,
-    pub topic_id: Uuid,
-    pub session_id: Uuid,
-    pub turn_id: Uuid,
-    pub agent_id: String,
-    pub memory_kind: String,
-    pub title: String,
-    pub content: String,
-    pub tags: Vec<String>,
-    pub outcome_status: Option<String>,
-    pub source_summary: String,
-    pub metadata: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Input for creating a durable agent-memory record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewAgentMemoryRecord {
-    pub id: Uuid,
-    pub topic_id: Uuid,
-    pub session_id: Uuid,
-    pub turn_id: Uuid,
-    pub agent_id: String,
-    pub memory_kind: String,
-    pub title: String,
-    pub content: String,
-    pub tags: Vec<String>,
-    pub outcome_status: Option<String>,
-    pub source_summary: String,
-    pub metadata: serde_json::Value,
-}
-
 /// A centrally managed secret or credential reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRecord {

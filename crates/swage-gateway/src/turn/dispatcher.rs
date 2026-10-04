@@ -439,9 +439,11 @@ pub(crate) async fn build_gateway_dispatcher(
         &session_approval_grants,
     );
 
+    // A tool a platform agent holds is withheld from every other agent here,
+    // before permissions are consulted: no grant, not even `*`, offers it.
     let base_dispatcher = state.active_tool_dispatcher();
     let dispatcher = ToolDispatcher::new(
-        base_dispatcher.registry().clone(),
+        Arc::new(base_dispatcher.registry().for_agent(&agent_config.agent_id)),
         permissions,
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),

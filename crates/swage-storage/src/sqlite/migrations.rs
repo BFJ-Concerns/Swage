@@ -50,7 +50,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("025_materials", CREATE_MATERIAL_TABLES),
         ("028_deduplicate_attachment_ingestion_content", ""),
-        ("032_agent_memory", CREATE_AGENT_MEMORY_TABLE),
         (
             "033_workspace_attachments",
             CREATE_WORKSPACE_ATTACHMENT_TABLE,
@@ -768,58 +767,6 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
                 'external_id', NEW.external_id,
                 'turn_id', COALESCE(NEW.turn_id, ''),
                 'discard_reason', COALESCE(NEW.discard_reason, '')
-            ),
-            strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        );
-    END;
-";
-
-const CREATE_AGENT_MEMORY_TABLE: &str = "
-    CREATE TABLE IF NOT EXISTS agent_memories (
-        id                TEXT NOT NULL PRIMARY KEY,
-        topic_id        TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
-        session_id        TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        turn_id           TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-        agent_id          TEXT NOT NULL,
-        memory_kind       TEXT NOT NULL,
-        title             TEXT NOT NULL,
-        content           TEXT NOT NULL,
-        tags_json         TEXT NOT NULL,
-        outcome_status    TEXT,
-        source_summary    TEXT NOT NULL,
-        metadata_json     TEXT NOT NULL,
-        created_at        TEXT NOT NULL,
-        updated_at        TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_topic_agent
-        ON agent_memories(topic_id, agent_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_session
-        ON agent_memories(session_id, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_agent_memories_turn
-        ON agent_memories(turn_id, created_at DESC);
-
-    CREATE TRIGGER IF NOT EXISTS trg_agent_memories_created_audit
-    AFTER INSERT ON agent_memories
-    BEGIN
-        INSERT INTO audit_events (
-            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
-        ) VALUES (
-            lower(hex(randomblob(16))),
-            NEW.session_id,
-            'agent_memory',
-            NEW.id,
-            'memory_recorded',
-            'agent memory recorded',
-            json_object(
-                'topic_id', NEW.topic_id,
-                'turn_id', NEW.turn_id,
-                'agent_id', NEW.agent_id,
-                'memory_kind', NEW.memory_kind,
-                'title', NEW.title,
-                'outcome_status', COALESCE(NEW.outcome_status, ''),
-                'source_summary', NEW.source_summary,
-                'tags', json(NEW.tags_json)
             ),
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
@@ -2592,16 +2539,16 @@ mod tests {
 
         conn.execute(
             "INSERT INTO messages
-             (id, thread_id, role, content, position, agent_id, created_at)
-             VALUES (?1, ?2, 'assistant', 'ok', 0, 'agent-test', ?3)",
+             (id, thread_id, role, origin, content, position, agent_id, created_at)
+             VALUES (?1, ?2, 'assistant', 'assistant', 'ok', 0, 'agent-test', ?3)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), thread_id, now],
         )
         .expect("known role should insert");
 
         let result = conn.execute(
             "INSERT INTO messages
-             (id, thread_id, role, content, position, agent_id, created_at)
-             VALUES (?1, ?2, 'moderator', 'bad', 1, 'agent-test', ?3)",
+             (id, thread_id, role, origin, content, position, agent_id, created_at)
+             VALUES (?1, ?2, 'moderator', 'user', 'bad', 1, 'agent-test', ?3)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), thread_id, now],
         );
         assert!(result.is_err(), "unknown messages.role should fail closed");
@@ -2766,8 +2713,8 @@ mod tests {
         let thread_id = insert_thread(&conn, &session_id, &now);
 
         conn.execute(
-            "INSERT INTO messages (id, thread_id, role, content, position, agent_id, created_at)
-             VALUES (?1,?2,'user','hello',0,'agent-test',?3)",
+            "INSERT INTO messages (id, thread_id, role, origin, content, position, agent_id, created_at)
+             VALUES (?1,?2,'user','user','hello',0,'agent-test',?3)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), thread_id, now],
         )
         .unwrap();
@@ -2798,8 +2745,8 @@ mod tests {
         let message_id = uuid::Uuid::new_v4().to_string();
 
         conn.execute(
-            "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, created_at)
-             VALUES (?1,?2,?3,'assistant','hello',0,'agent-test',?4)",
+            "INSERT INTO messages (id, thread_id, turn_id, role, origin, content, position, agent_id, created_at)
+             VALUES (?1,?2,?3,'assistant','assistant','hello',0,'agent-test',?4)",
             rusqlite::params![message_id, thread_id, turn_id, now],
         )
         .expect("insert message");

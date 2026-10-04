@@ -134,7 +134,9 @@ impl Tool for KnowledgeSearchTool {
          pinned observation and version; record a citation with the knowledge_cite \
          tool, passing those values and the exact quote. The \
          knowledge base holds captured external material; it is not your memory \
-         (for what you know about your own work, use agent_memory for your \
+         (what your operator has stated about themselves and this topic is memory, \
+         indexed in your context and read with memory_read; the knowledge base \
+         holds gathered evidence — \
          private records or memory for the shared notes of this session's topic or general scope)."
     }
 

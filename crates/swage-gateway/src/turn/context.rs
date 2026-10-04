@@ -1,6 +1,6 @@
 use super::{
     ActiveSkill, AppState, ChatMessage, ContextElement, HierarchyLevel, HistoryElement,
-    MemoryElement, Path, PathBuf, PromptRule, PromptsElement, ResolvedToolRoot, SkillManager,
+    MemoryIndexElement, Path, PathBuf, PromptRule, PromptsElement, ResolvedToolRoot, SkillManager,
     SkillsElement, ToolRootSource, Uuid,
 };
 use swage_context::briefing::BriefingElement;
@@ -14,11 +14,6 @@ use swage_core::ScopeLocation;
 #[cfg(test)]
 use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
-#[cfg(test)]
-tokio::task_local! {
-    static TOPIC_MEMORY_LOAD_COUNT: std::cell::Cell<usize>;
-}
-
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
@@ -28,7 +23,6 @@ tokio::task_local! {
 ///   operator-guidance rules (the standard agent-guidance files, resolved by
 ///   `operator_guidance_rules` from the config root and trusted workspaces)
 /// - `SkillsElement`  — from the active skill set
-/// - `MemoryElement`  — only for a named assembly, from pre-loaded topic
 ///   memory content (may be empty)
 /// - `HistoryElement` — from the thread's message history
 ///
@@ -45,7 +39,7 @@ pub(crate) fn build_assembly_elements(
     operator_guidance: Vec<PromptRule>,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
-    memory: Option<(String, String)>,
+    memory: Option<MemoryIndexElement>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
     model_id: &str,
@@ -116,30 +110,26 @@ pub(crate) fn build_assembly_elements(
             .into_iter()
             .map(|resolved| Box::new(BriefingElement::new(resolved)) as Box<dyn ContextElement>),
     );
-    if let Some((content, topic_name)) = memory {
-        elements.push(Box::new(MemoryElement::new(content, topic_name)));
+    // The operator's profile and memory index: present on every turn of a
+    // session that serves the operator; absent for a workflow worker whose
+    // composition did not name it.
+    if let Some(memory) = memory {
+        elements.push(Box::new(memory));
     }
     elements.push(Box::new(HistoryElement::new(history)));
     elements
 }
 
-/// Load memory only when the already-selected assembly can use it.
-///
-/// The loader argument keeps the disposition directly testable: default turns
-/// must not invoke the filesystem seam at all.
-pub(crate) async fn load_memory_for_assembly<F, Fut>(
-    assembly_name: &str,
-    loader: F,
-) -> Option<String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = String>,
-{
-    if is_default_context_assembly(assembly_name) {
-        None
-    } else {
-        Some(loader().await)
-    }
+/// Whether a session's turns carry the operator's memory without being
+/// asked: every session serving the operator does — interactive, channel,
+/// scheduled, and the children they delegate to — while a workflow worker,
+/// a gate or a blind verifier receives memory only when its composition
+/// names it, so independence is never spoiled by an ambient profile.
+pub(crate) fn session_carries_memory(session: &swage_storage::Session) -> bool {
+    !matches!(
+        session.origin,
+        swage_storage::SessionOrigin::WorkflowWorker { .. }
+    )
 }
 
 pub(crate) fn is_default_context_assembly(assembly_name: &str) -> bool {
@@ -297,82 +287,6 @@ pub(crate) fn configuration_hierarchy(
 /// Files are read in alphabetical filename order and joined with a blank line
 /// between entries. Returns an empty string when the directory is absent or
 /// contains no `.md` files, so callers receive a valid `String` in all cases.
-pub(crate) async fn load_topic_memory(swage_root: &Path, scope: &ScopeLocation) -> String {
-    #[cfg(test)]
-    TOPIC_MEMORY_LOAD_COUNT
-        .try_with(|count| count.set(count.get() + 1))
-        .ok();
-
-    let memory_dir = scope.data_dir(swage_root).join("memory");
-
-    let mut entries = match tokio::fs::read_dir(&memory_dir).await {
-        Ok(rd) => rd,
-        // Missing directory is the common case for new topics.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return String::new(),
-        Err(error) => {
-            tracing::warn!(
-                path = %memory_dir.display(),
-                %error,
-                "failed to read topic memory directory"
-            );
-            return String::new();
-        }
-    };
-
-    // Collect .md paths and sort alphabetically so loading order is stable.
-    let mut paths: Vec<PathBuf> = Vec::new();
-    loop {
-        match entries.next_entry().await {
-            Ok(Some(entry)) => {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-                    paths.push(path);
-                }
-            }
-            Ok(None) => break,
-            Err(error) => {
-                tracing::warn!(
-                    path = %memory_dir.display(),
-                    %error,
-                    "failed to enumerate topic memory directory"
-                );
-                return String::new();
-            }
-        }
-    }
-    paths.sort();
-
-    let mut parts = Vec::new();
-    for path in paths {
-        match tokio::fs::read_to_string(&path).await {
-            Ok(content) => {
-                if !content.trim().is_empty() {
-                    parts.push(content);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "failed to read topic memory file");
-            }
-        }
-    }
-
-    parts.join("\n\n")
-}
-
-#[cfg(test)]
-pub(crate) async fn observe_topic_memory_loads<F>(future: F) -> (F::Output, usize)
-where
-    F: std::future::Future,
-{
-    TOPIC_MEMORY_LOAD_COUNT
-        .scope(std::cell::Cell::new(0), async move {
-            let output = future.await;
-            let count = TOPIC_MEMORY_LOAD_COUNT.with(std::cell::Cell::get);
-            (output, count)
-        })
-        .await
-}
-
 pub(crate) fn resolve_swage_root(state: &AppState) -> &Path {
     &state.config_root
 }
@@ -479,17 +393,24 @@ mod shipped_skill_tests {
             .join("memory");
         std::fs::create_dir_all(&general_dir).expect("general memory");
         std::fs::create_dir_all(&topic_dir).expect("topic memory");
-        std::fs::write(general_dir.join("a.md"), "general note").expect("write");
-        std::fs::write(topic_dir.join("a.md"), "alloys note").expect("write");
+        std::fs::write(general_dir.join("a.md"), "summary: general note\n\nbody").expect("write");
+        std::fs::write(topic_dir.join("a.md"), "summary: alloys note\n\nbody").expect("write");
 
-        assert_eq!(
-            load_topic_memory(root.path(), &ScopeLocation::General).await,
-            "general note"
-        );
-        assert_eq!(
-            load_topic_memory(root.path(), &ScopeLocation::topic("alloys")).await,
-            "alloys note"
-        );
+        let general = crate::memory::load_memory_index(root.path(), &ScopeLocation::General).await;
+        let summaries: Vec<_> = general
+            .lines
+            .iter()
+            .map(|line| line.summary.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(summaries, vec!["general note"]);
+        let alloys =
+            crate::memory::load_memory_index(root.path(), &ScopeLocation::topic("alloys")).await;
+        let references: Vec<_> = alloys
+            .lines
+            .iter()
+            .map(|line| line.reference.to_string())
+            .collect();
+        assert_eq!(references, vec!["general/a", "topic/a"]);
         assert!(!general_dir.starts_with(root.path().join("topics")));
     }
 

@@ -2633,7 +2633,6 @@ pub(crate) struct InMemoryDb {
     pub(crate) snapshots: HashMap<Uuid, (String, chrono::DateTime<chrono::Utc>)>,
     pub(crate) approvals: HashMap<Uuid, ApprovalRequest>,
     pub(crate) audit_events: Vec<swage_storage::AuditEvent>,
-    pub(crate) agent_memories: Vec<swage_storage::AgentMemoryRecord>,
     pub(crate) agent_messages: HashMap<Uuid, AgentMessage>,
     pub(crate) schedules: HashMap<Uuid, Schedule>,
     pub(crate) schedule_runs: HashMap<Uuid, ScheduleRun>,
@@ -5190,83 +5189,6 @@ impl swage_storage::store::AuditStore for MockStorage {
 }
 
 #[async_trait]
-impl swage_storage::store::AgentMemoryStore for MockStorage {
-    async fn create_agent_memory(
-        &self,
-        record: swage_storage::NewAgentMemoryRecord,
-    ) -> Result<swage_storage::AgentMemoryRecord, StorageError> {
-        let record = swage_storage::AgentMemoryRecord {
-            id: record.id,
-            topic_id: record.topic_id,
-            session_id: record.session_id,
-            turn_id: record.turn_id,
-            agent_id: record.agent_id,
-            memory_kind: record.memory_kind,
-            title: record.title,
-            content: record.content,
-            tags: record.tags,
-            outcome_status: record.outcome_status,
-            source_summary: record.source_summary,
-            metadata: record.metadata,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        self.db.lock().await.agent_memories.push(record.clone());
-        Ok(record)
-    }
-
-    async fn get_agent_memory(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<swage_storage::AgentMemoryRecord>, StorageError> {
-        Ok(self
-            .db
-            .lock()
-            .await
-            .agent_memories
-            .iter()
-            .find(|record| record.id == id)
-            .cloned())
-    }
-
-    async fn list_agent_memories(
-        &self,
-        topic_id: Uuid,
-        agent_id: Option<&str>,
-        session_id: Option<Uuid>,
-        query: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<swage_storage::AgentMemoryRecord>, StorageError> {
-        let query = query.map(|value| value.to_lowercase());
-        let mut records = self
-            .db
-            .lock()
-            .await
-            .agent_memories
-            .iter()
-            .filter(|record| record.topic_id == topic_id)
-            .filter(|record| agent_id.is_none_or(|id| record.agent_id == id))
-            .filter(|record| session_id.is_none_or(|id| record.session_id == id))
-            .filter(|record| {
-                query.as_ref().is_none_or(|needle| {
-                    record.title.to_lowercase().contains(needle)
-                        || record.content.to_lowercase().contains(needle)
-                        || record.source_summary.to_lowercase().contains(needle)
-                        || record
-                            .tags
-                            .iter()
-                            .any(|tag| tag.to_lowercase().contains(needle))
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        records.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
-        records.truncate(limit);
-        Ok(records)
-    }
-}
-
-#[async_trait]
 impl swage_storage::store::AgentDefinitionStore for MockStorage {
     async fn upsert_agent_definition(
         &self,
@@ -6316,7 +6238,7 @@ async fn full_turn_stores_messages_and_completes() {
     let (state, session_id) = make_state_with_session(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let (turn_result, memory_loads) = Box::pin(observe_topic_memory_loads(process_turn(
+    Box::pin(process_turn(
         &state,
         session_id,
         None,
@@ -6324,13 +6246,9 @@ async fn full_turn_stores_messages_and_completes() {
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
         None,
-    )))
-    .await;
-    turn_result.expect("turn should complete without error");
-    assert_eq!(
-        memory_loads, 0,
-        "a full turn using the default assembly must not reach the topic-memory loading seam"
-    );
+    ))
+    .await
+    .expect("turn should complete without error");
 
     let events: Vec<ServerEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
@@ -15450,7 +15368,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         vec![],
         history,
-        Some((String::new(), "My Topic".to_string())),
+        Some(MemoryIndexElement::new(None, Vec::new())),
         test_environment(),
         vec![],
         "claude-test-model",
@@ -15477,9 +15395,10 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
 
 /// When instructions are empty, build_assembly_elements still includes the
 /// prompts element (which will produce no system message), the skills element,
-/// and history. A default assembly does not receive a memory element.
+/// and history. A session that does not carry memory — a workflow worker —
+/// gets no memory element.
 #[test]
-fn default_assembly_elements_exclude_memory() {
+fn elements_built_without_memory_omit_the_memory_element() {
     let elements = build_assembly_elements(
         "",
         vec![],
@@ -15503,43 +15422,43 @@ fn default_assembly_elements_exclude_memory() {
     assert!(prompts.content().is_empty());
     assert!(
         elements.iter().all(|element| element.name() != "memory"),
-        "default element construction should omit memory"
+        "a session that does not carry memory gets no memory element"
+    );
+}
+
+#[test]
+fn a_workflow_worker_session_does_not_carry_memory_but_every_other_does() {
+    let mut session = swage_storage::fixtures::session(Uuid::new_v4());
+    for origin in [
+        swage_storage::SessionOrigin::Direct,
+        swage_storage::SessionOrigin::ScheduleRun {
+            schedule_id: Uuid::new_v4(),
+        },
+        swage_storage::SessionOrigin::Delegation {
+            parent_session_id: Uuid::new_v4(),
+        },
+    ] {
+        session.origin = origin;
+        assert!(session_carries_memory(&session), "{:?}", session.origin);
+    }
+    session.origin = swage_storage::SessionOrigin::WorkflowWorker {
+        run_id: Uuid::new_v4(),
+    };
+    assert!(
+        !session_carries_memory(&session),
+        "a worker receives memory only when its composition names it"
     );
 }
 
 #[tokio::test]
-async fn default_assembly_does_not_invoke_memory_loader() {
-    let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let loader_invoked = invoked.clone();
-
-    let memory = load_memory_for_assembly("default", || async move {
-        loader_invoked.store(true, std::sync::atomic::Ordering::SeqCst);
-        "should not be loaded".to_string()
-    })
-    .await;
-
-    assert!(
-        memory.is_none(),
-        "default assembly should not receive memory"
-    );
-    assert!(
-        !invoked.load(std::sync::atomic::Ordering::SeqCst),
-        "default assembly must not invoke the memory-loading seam"
-    );
-}
-
-#[tokio::test]
-async fn named_assembly_loads_memory_and_can_compose_it() {
-    let memory = load_memory_for_assembly("memory-aware", || async {
-        "Important topic context".to_string()
-    })
-    .await;
+async fn named_assembly_composes_the_memory_element_like_any_other() {
+    let memory = MemoryIndexElement::new(Some("Important topic context".to_string()), Vec::new());
     let elements = build_assembly_elements(
         "Be helpful.",
         vec![],
         vec![],
         vec![],
-        memory.map(|content| (content, "My Topic".to_string())),
+        Some(memory),
         test_environment(),
         vec![],
         "claude-test-model",
@@ -15743,8 +15662,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     assert!(!recomposed_context.contains("inspect delegated context"));
 }
 
-/// When memory_content is non-empty, the memory element produces a system
-/// message containing that content.
+/// The memory element carries the profile and index it was built with.
 #[test]
 fn build_assembly_elements_memory_element_contains_provided_content() {
     let elements = build_assembly_elements(
@@ -15752,9 +15670,9 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         vec![],
         vec![],
         vec![],
-        Some((
-            "Important topic context".to_string(),
-            "My Topic".to_string(),
+        Some(MemoryIndexElement::new(
+            Some("Important topic context".to_string()),
+            Vec::new(),
         )),
         test_environment(),
         vec![],
@@ -15767,11 +15685,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
     let memory = elements.iter().find(|e| e.name() == "memory").unwrap();
     let messages = memory.content();
 
-    assert_eq!(
-        messages.len(),
-        1,
-        "non-empty memory should produce one message"
-    );
+    assert_eq!(messages.len(), 1, "the memory element is one message");
     // content is Vec<ContentPart> — extract the text to check the value.
     let text = messages[0].content().iter().find_map(|p| {
         if let swage_core::ContentPart::Text { text } = p {
@@ -16023,81 +15937,6 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         "resolved instructions must precede operator guidance"
     );
 }
-
-/// load_topic_memory returns an empty string when the topic has no
-/// memory directory.
-#[tokio::test]
-async fn load_topic_memory_returns_empty_when_dir_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    // No memory directory created — the helper should not panic.
-    let result = load_topic_memory(dir.path(), &ScopeLocation::topic("no-such-topic")).await;
-    assert!(
-        result.is_empty(),
-        "should return empty string when memory dir is absent"
-    );
-}
-
-/// load_topic_memory reads all .md files from the memory directory and
-/// joins them in alphabetical filename order.
-#[tokio::test]
-async fn load_topic_memory_concatenates_md_files_alphabetically() {
-    let dir = tempfile::tempdir().unwrap();
-    let memory_dir = ScopeLocation::topic("my-topic")
-        .data_dir(dir.path())
-        .join("memory");
-    std::fs::create_dir_all(&memory_dir).unwrap();
-
-    // b_notes sorts after a_context.
-    std::fs::write(memory_dir.join("b_notes.md"), "Second file content").unwrap();
-    std::fs::write(memory_dir.join("a_context.md"), "First file content").unwrap();
-    // Non-.md file must not be included.
-    std::fs::write(memory_dir.join("other.txt"), "Should be ignored").unwrap();
-
-    let result = load_topic_memory(dir.path(), &ScopeLocation::topic("my-topic")).await;
-
-    assert!(
-        result.contains("First file content"),
-        "should include first .md file"
-    );
-    assert!(
-        result.contains("Second file content"),
-        "should include second .md file"
-    );
-    assert!(
-        !result.contains("Should be ignored"),
-        "should not include non-.md files"
-    );
-
-    // a_context.md sorts before b_notes.md alphabetically.
-    let first_pos = result.find("First file content").unwrap();
-    let second_pos = result.find("Second file content").unwrap();
-    assert!(
-        first_pos < second_pos,
-        "files should appear in alphabetical order"
-    );
-}
-
-/// load_topic_memory skips files with only whitespace content.
-#[tokio::test]
-async fn load_topic_memory_skips_empty_files() {
-    let dir = tempfile::tempdir().unwrap();
-    let memory_dir = ScopeLocation::topic("my-topic")
-        .data_dir(dir.path())
-        .join("memory");
-    std::fs::create_dir_all(&memory_dir).unwrap();
-
-    std::fs::write(memory_dir.join("empty.md"), "   \n  ").unwrap();
-    std::fs::write(memory_dir.join("content.md"), "Real content").unwrap();
-
-    let result = load_topic_memory(dir.path(), &ScopeLocation::topic("my-topic")).await;
-
-    assert!(result.contains("Real content"));
-    assert!(
-        !result.contains("   "),
-        "whitespace-only files should be excluded"
-    );
-}
-
 // -----------------------------------------------------------------------
 // Token usage persistence tests
 // -----------------------------------------------------------------------

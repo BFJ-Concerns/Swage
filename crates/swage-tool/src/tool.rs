@@ -106,6 +106,14 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// The one platform agent that may hold this tool, by agent id — `None`
+    /// for a tool any agent may be granted. A held tool is withheld from
+    /// every other agent before permissions are consulted, so no grant, not
+    /// even a wildcard, offers it elsewhere.
+    fn platform_holder(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Execute the tool with already-validated parameters.
     ///
     /// Returns the raw output `Value`; the framework wraps it into a

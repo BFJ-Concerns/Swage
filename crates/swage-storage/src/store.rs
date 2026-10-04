@@ -4,26 +4,26 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    ActiveSkillRecord, AgentDefinition, AgentMemoryRecord, AgentMessage, AppendMessage,
-    ApprovalRequest, ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob,
-    ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
-    DeviceRegistration, ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit,
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message, NewAgentDefinition,
-    NewAgentMemoryRecord, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
-    NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewCurationAssertion,
-    NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry,
-    NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard, NewSchedule,
-    NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
-    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, Schedule, ScheduleRun,
-    ScheduleRunUpdate, SecretRecord, Session, SessionActivity, SessionListing, SessionVariable,
-    SourceCapture, SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition,
-    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnState,
-    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
-    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
-    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    ActiveSkillRecord, AgentDefinition, AgentMessage, AppendMessage, ApprovalRequest,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
+    ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord, DeviceRegistration,
+    ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit, LibraryEntry,
+    LibraryEntryModule, LibrarySeeding, Material, Message, NewAgentDefinition, NewAgentMessage,
+    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
+    NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
+    NewKnowledgeCitation, NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage,
+    NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
+    NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition,
+    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
+    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
+    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
+    ProviderRoundRecord, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SessionActivity, SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface,
+    SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
+    WorkspaceAttachment,
 };
 
 // ---------------------------------------------------------------------------
@@ -225,23 +225,6 @@ pub trait AuditStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<AuditEvent>, StorageError>;
-}
-
-#[async_trait]
-pub trait AgentMemoryStore: Send + Sync {
-    async fn create_agent_memory(
-        &self,
-        record: NewAgentMemoryRecord,
-    ) -> Result<AgentMemoryRecord, StorageError>;
-    async fn get_agent_memory(&self, id: Uuid) -> Result<Option<AgentMemoryRecord>, StorageError>;
-    async fn list_agent_memories(
-        &self,
-        topic_id: Uuid,
-        agent_id: Option<&str>,
-        session_id: Option<Uuid>,
-        query: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<AgentMemoryRecord>, StorageError>;
 }
 
 /// Store for durable agent definitions.
@@ -1525,7 +1508,6 @@ pub trait Storage:
     + ChannelLinkStore
     + DeliveryStore
     + AuditStore
-    + AgentMemoryStore
     + AgentDefinitionStore
     + TaskDefinitionStore
     + SessionVariableStore
@@ -1564,7 +1546,6 @@ impl<T> Storage for T where
         + ChannelLinkStore
         + DeliveryStore
         + AuditStore
-        + AgentMemoryStore
         + AgentDefinitionStore
         + TaskDefinitionStore
         + SessionVariableStore
@@ -1858,34 +1839,6 @@ mod tests {
             &self,
             _: Uuid,
         ) -> Result<Vec<AuditEvent>, StorageError> {
-            unimplemented!()
-        }
-    }
-
-    #[async_trait]
-    impl AgentMemoryStore for StubStorage {
-        async fn create_agent_memory(
-            &self,
-            _: NewAgentMemoryRecord,
-        ) -> Result<AgentMemoryRecord, StorageError> {
-            unimplemented!()
-        }
-
-        async fn get_agent_memory(
-            &self,
-            _: Uuid,
-        ) -> Result<Option<AgentMemoryRecord>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn list_agent_memories(
-            &self,
-            _: Uuid,
-            _: Option<&str>,
-            _: Option<Uuid>,
-            _: Option<&str>,
-            _: usize,
-        ) -> Result<Vec<AgentMemoryRecord>, StorageError> {
             unimplemented!()
         }
     }
@@ -3285,37 +3238,6 @@ mod tests {
             }));
             std::mem::drop(t.list_audit_events());
             std::mem::drop(t.list_audit_events_by_session(Uuid::new_v4()));
-        }
-        let stub = StubStorage;
-        _assert(&stub);
-    }
-
-    #[test]
-    fn agent_memory_store_compile_check() {
-        fn _assert<T: AgentMemoryStore>(t: &T) {
-            let id = Uuid::new_v4();
-            std::mem::drop(t.create_agent_memory(NewAgentMemoryRecord {
-                id,
-                topic_id: Uuid::new_v4(),
-                session_id: Uuid::new_v4(),
-                turn_id: Uuid::new_v4(),
-                agent_id: "agent-a".into(),
-                memory_kind: "insight".into(),
-                title: "Remember this".into(),
-                content: "content".into(),
-                tags: vec!["tag".into()],
-                outcome_status: Some("succeeded".into()),
-                source_summary: "turn completed".into(),
-                metadata: serde_json::json!({}),
-            }));
-            std::mem::drop(t.get_agent_memory(id));
-            std::mem::drop(t.list_agent_memories(
-                Uuid::new_v4(),
-                Some("agent-a"),
-                None,
-                Some("tag"),
-                10,
-            ));
         }
         let stub = StubStorage;
         _assert(&stub);
