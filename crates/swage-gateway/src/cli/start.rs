@@ -51,8 +51,8 @@ pub(super) async fn run_with_environment(
         .map(|environment| environment.metadata_path())
         .unwrap_or_else(RuntimeMetadata::metadata_path);
     match RuntimeMetadata::load_from(&metadata_path) {
-        Ok(meta) if meta.is_stale() => {
-            // Metadata file exists but the recorded PID is dead — crashed gateway.
+        Ok(meta) if super::stop::is_pid_dead(meta.pid) => {
+            // A terminated gateway is dead even while its parent has not reaped it.
             eprintln!("Cleaning up stale metadata...");
             RuntimeMetadata::remove_at(&metadata_path)
                 .map_err(|e| ClientError::MetadataIo { source: e })?;
