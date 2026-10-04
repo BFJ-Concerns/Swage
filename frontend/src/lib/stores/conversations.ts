@@ -48,7 +48,7 @@ export interface ConversationStore {
     timestamp: string;
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "failed" | "interrupted"
+      "completed" | "incomplete" | "failed" | "interrupted"
     >;
     /** The thread the reply belongs to; absent means the thread in view. */
     thread_id?: string;

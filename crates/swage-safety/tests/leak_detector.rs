@@ -122,6 +122,72 @@ fn detects_ec_private_key_header() {
     assert!(result.contains("[REDACTED:pem_key]"));
 }
 
+#[test]
+fn pem_private_key_blocks_are_redacted_whole() {
+    let detector = LeakDetector::default();
+    for kind in [
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+    ] {
+        for newline in ["\n", "\r\n"] {
+            let block = format!(
+                "-----BEGIN {kind}-----{newline}MIIEpAIBAAKCAQEA{newline}c2VjcmV0a2V5Ym9keQ=={newline}-----END {kind}-----"
+            );
+            let input = format!("before\n{block}\nbetween\n{block}\nafter");
+            assert_eq!(
+                detector.scan(&input),
+                "before\n[REDACTED:pem_key]\nbetween\n[REDACTED:pem_key]\nafter",
+                "whole blocks must disappear for {kind} with {newline:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn truncated_pem_private_key_redacts_to_end_of_input() {
+    let detector = LeakDetector::default();
+    for body in [
+        "",
+        "\nMIIEpAIBAAKCAQEA\nc2VjcmV0a2V5Ym9keQ==\ntrailing text",
+    ] {
+        let input = format!("before\n-----BEGIN RSA PRIVATE KEY-----{body}");
+        assert_eq!(detector.scan(&input), "before\n[REDACTED:pem_key]");
+    }
+}
+
+#[test]
+fn overlapping_matches_redact_the_extending_tail() {
+    let detector = LeakDetector::new(vec![
+        LeakPattern {
+            name: "first".into(),
+            kind: PatternKind::Regex("ABCDEF".into()),
+            redaction_label: "first".into(),
+        },
+        LeakPattern {
+            name: "contained".into(),
+            kind: PatternKind::Regex("BCDE".into()),
+            redaction_label: "contained".into(),
+        },
+        LeakPattern {
+            name: "extending".into(),
+            kind: PatternKind::Regex("DEFGHI".into()),
+            redaction_label: "extending".into(),
+        },
+        LeakPattern {
+            name: "chained".into(),
+            kind: PatternKind::Regex("HIJKL".into()),
+            redaction_label: "chained".into(),
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        detector.scan("before ABCDEFGHIJKL after"),
+        "before [REDACTED:first] after"
+    );
+}
+
 // -- Bearer token detection -------------------------------------------------
 
 #[test]

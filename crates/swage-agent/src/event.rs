@@ -109,9 +109,11 @@ pub enum AgentEvent {
         duration_ms: Option<u64>,
     },
 
-    /// The turn has completed successfully; token counts are final.
+    /// The turn has settled; token counts and any incomplete account are final.
     TurnCompleted {
         turn_id: Uuid,
+        incomplete_reason: Option<String>,
+        incomplete_account: Option<Box<swage_storage::Message>>,
         input_tokens: u32,
         output_tokens: u32,
         tool_calls_count: u32,
@@ -203,6 +205,7 @@ pub enum AgentEvent {
     /// A tool-as-delegation has completed — the parent turn will resume
     /// with the delegate's result as the tool output.
     DelegationCompleted {
+        incomplete_reason: Option<String>,
         /// The agent that was delegated to.
         target_agent_id: String,
         /// Whether the delegation succeeded.
@@ -330,6 +333,8 @@ mod tests {
     fn test_turn_completed_constructible() {
         let turn_id = Uuid::new_v4();
         let event = AgentEvent::TurnCompleted {
+            incomplete_reason: None,
+            incomplete_account: None,
             turn_id,
             input_tokens: 100,
             output_tokens: 200,
@@ -342,6 +347,7 @@ mod tests {
             output_tokens,
             tool_calls_count,
             structured_output,
+            ..
         } = event
         {
             assert_eq!(id, turn_id);
@@ -399,6 +405,8 @@ mod tests {
         })
         .unwrap();
         tx.send(AgentEvent::TurnCompleted {
+            incomplete_reason: None,
+            incomplete_account: None,
             turn_id,
             input_tokens: 1,
             output_tokens: 2,
@@ -437,6 +445,7 @@ mod tests {
         })
         .unwrap();
         tx.send(AgentEvent::DelegationCompleted {
+            incomplete_reason: None,
             target_agent_id: "reviewer".to_string(),
             success: true,
         })
@@ -463,6 +472,8 @@ mod tests {
         let payload = serde_json::json!({"x": 1});
 
         tx.send(AgentEvent::TurnCompleted {
+            incomplete_reason: None,
+            incomplete_account: None,
             turn_id,
             input_tokens: 10,
             output_tokens: 20,

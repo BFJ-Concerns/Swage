@@ -23,7 +23,7 @@ use super::{
 /// 5. Store the user message with thread_id and position.
 /// 6. Build message history from the thread and send a streaming request to the provider.
 /// 7. For each chunk: forward Token events to the WebSocket, accumulate content.
-/// 8. On Done: store the assistant message, mark the turn Completed, send TurnComplete.
+/// 8. On Done: store the reply and any output-limit account, settle the turn, send TurnComplete.
 /// 9. On Cancel: store any partial response, mark the turn Interrupted, send Cancelled.
 /// 10. On provider Error: mark the turn Failed, send an Error event.
 /// 11. Cleanup: remove the CancellationToken from active_turns.

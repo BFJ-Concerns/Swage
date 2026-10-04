@@ -5849,6 +5849,12 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
 // Test helpers
 // -----------------------------------------------------------------------
 
+pub(crate) fn sandboxed_turn_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = true;
+    config
+}
+
 /// Build an AppState with a pre-populated session and its default thread.
 ///
 /// Returns the state and the session_id. The thread is created automatically
@@ -6251,7 +6257,8 @@ fn codex_turn_config() -> swage_config::ResolvedConfig {
 #[tokio::test]
 async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit() {
     let _guard = SwageHomeGuard::isolate();
-    let config = codex_turn_config();
+    let mut config = codex_turn_config();
+    config.sandbox.enabled = true;
     assert!(!config.sandbox.allow_degraded_execution);
     let (mut state, session_id) = make_state_with_config(Vec::new(), config).await;
 
@@ -6431,6 +6438,51 @@ async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
         state.active_turns.lock().await.is_empty(),
         "a refused ordinary provider turn must not remain active"
     );
+}
+
+#[tokio::test]
+async fn default_turn_persists_configuration_disabled_boundary() {
+    let _home = SwageHomeGuard::isolate();
+    let (state, session_id) = make_state_with_session(vec![StreamChunk::Done {
+        finish_reason: None,
+    }])
+    .await;
+    // If the default enables sandboxing, exercise the existing sandbox path
+    // without depending on bubblewrap being available on the test machine.
+    let state = state.with_test_sandbox();
+
+    Box::pin(process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello",
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    ))
+    .await
+    .expect("a default turn should complete");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        turn.execution_isolation,
+        Some(swage_storage::TurnIsolation::Degraded {
+            reason: "sandbox_disabled_by_configuration".into(),
+        }),
+        "the turn must persist the boundary selected from default configuration"
+    );
+    assert_eq!(turn.state, TurnState::Completed);
 }
 
 #[tokio::test]
@@ -7019,6 +7071,93 @@ async fn cancelled_hook_approval_persists_completed_round_text() {
 }
 
 #[tokio::test]
+async fn provider_retry_events_name_the_requested_turn_model() {
+    let (provider, captured_request) = CapturingProvider::new(vec![StreamChunk::Error {
+        message: "provider overloaded".into(),
+    }]);
+    let provider = swage_provider::retry::RetryProvider::new(
+        provider,
+        swage_provider::retry::RetryConfig {
+            max_retries: 3,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        },
+    );
+    let (storage, session_id) = make_storage_with_session().await;
+    storage
+        .set_session_selected_model(session_id, Some("selected-catalogue-entry".into()))
+        .await
+        .expect("select session model");
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "agent-default".into();
+    for (id, model_id) in [
+        ("agent-default", "claude-sonnet-5-5"),
+        (
+            "selected-catalogue-entry",
+            "gpt-model-access-does-not-exist",
+        ),
+    ] {
+        config.models.entries.insert(
+            id.into(),
+            swage_config::ModelEndpointConfig {
+                model_id: model_id.into(),
+                ..Default::default()
+            },
+        );
+    }
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider),
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("Hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("provider failure is surfaced as an event");
+
+    let requested_model = captured_request
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("provider received a request")
+        .model
+        .clone()
+        .expect("turn selected a model");
+    assert_eq!(requested_model, "gpt-model-access-does-not-exist");
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let retry_models: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ProviderRetryStarted { provider, .. }
+            | ServerEvent::ProviderRetrySettled { provider, .. } => Some(provider.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retry_models.len(),
+        4,
+        "three retry starts and final settlement"
+    );
+    for model in retry_models {
+        assert_eq!(
+            model, requested_model,
+            "retry status must name the request model"
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_error_marks_turn_failed() {
     let (state, session_id) = make_state_with_session(vec![StreamChunk::Error {
         message: "provider overloaded".to_string(),
@@ -7405,7 +7544,7 @@ async fn session_variable_read_failure_clears_active_turn() {
 
 #[tokio::test]
 async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
-    let (state, session_id) = make_state_with_session(vec![]).await;
+    let (state, session_id) = make_state_with_config(vec![], sandboxed_turn_config()).await;
     state.fail_next_dispatcher_builds(2);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -7487,6 +7626,7 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
         ],
     ];
     let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    state.runtime_config.write().unwrap().sandbox.enabled = true;
     state.fail_next_dispatcher_builds(1);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -11228,7 +11368,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        sandboxed_turn_config(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(SandboxedFileTool::new("file_read")) as Arc<dyn Tool>,
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
@@ -12193,7 +12333,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        sandboxed_turn_config(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
@@ -18522,4 +18662,172 @@ async fn a_failed_tool_call_create_refuses_the_dispatch_for_the_client() {
         ends[0].1.contains("record could not be written"),
         "the ToolEnd names the record failure: {ends:?}"
     );
+}
+
+async fn operation_outcome_turn(
+    calls: Vec<(&str, &str, serde_json::Value)>,
+) -> (
+    Arc<swage_storage::SqliteStorage>,
+    Uuid,
+    Vec<ServerEvent>,
+    Vec<CompletionRequest>,
+) {
+    let root = SwageHomeGuard::new();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut round: Vec<_> = calls
+        .into_iter()
+        .map(|(id, name, arguments)| StreamChunk::ToolUse {
+            call_id: id.into(),
+            name: name.into(),
+            arguments,
+        })
+        .collect();
+    round.push(StreamChunk::Done {
+        finish_reason: None,
+    });
+    let (provider, captured) = CapturingMultiRoundProvider::new(vec![
+        round,
+        vec![
+            StreamChunk::Delta {
+                content: "Finished".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let mut state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(crate::tool::shell::ShellTool {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 4096,
+            }) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::workflow_run::WorkflowRunTool),
+        ]),
+        None,
+        root.path().to_path_buf(),
+    );
+    // Exercise host tools without depending on an installed sandbox backend.
+    state.declared_execution_boundary = Some("container".into());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session.id,
+        None,
+        "Run the operations".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let thread = storage.list_by_session(session.id).await.unwrap()[0].id;
+    let turn = storage.list_turns_by_thread(thread).await.unwrap()[0].id;
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let requests = captured.lock().unwrap().clone();
+    (storage, turn, events, requests)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operation_outcome_shell_failure_is_recorded_and_streamed_without_losing_detail() {
+    let (storage, turn, events, requests) = operation_outcome_turn(vec![
+        (
+            "failed-shell",
+            "shell",
+            serde_json::json!({"command": "sh -c 'echo INTENTIONAL_FAILURE >&2; exit 23'"}),
+        ),
+        (
+            "successful-shell",
+            "shell",
+            serde_json::json!({"command": "true"}),
+        ),
+    ])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    let failure = calls
+        .iter()
+        .find(|call| call.call_id == "failed-shell")
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(failure.result.as_ref().unwrap()).unwrap();
+    assert_eq!(result["exit_code"], 23);
+    assert!(result.to_string().contains("INTENTIONAL_FAILURE"));
+    // The provider sees the original structured shell result, not a replacement error.
+    let model_result = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } if call_id == "failed-shell" => Some((content, is_error)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!model_result.1);
+    assert!(model_result.0.contains("INTENTIONAL_FAILURE"));
+    assert!(model_result.0.contains("23"));
+    assert_eq!(failure.status.as_deref(), Some("error"));
+    assert_eq!(
+        calls
+            .iter()
+            .find(|call| call.call_id == "successful-shell")
+            .unwrap()
+            .status
+            .as_deref(),
+        Some("success")
+    );
+    for (id, expected) in [("failed-shell", "error"), ("successful-shell", "success")] {
+        assert!(events.iter().any(|event| matches!(event, ServerEvent::ToolEnd { call_id, status, .. } if call_id == id && status == expected)), "missing {expected} ToolEnd for {id}: {events:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operation_outcome_failed_workflow_is_recorded_and_streamed() {
+    let (storage, turn, events, _) = operation_outcome_turn(vec![
+        ("failed-workflow", "workflow_run", serde_json::json!({"source": "return await agent('work', { task: 'nonexistent-outcome-task' });", "wait": true})),
+        ("successful-workflow", "workflow_run", serde_json::json!({"source": "return 'done';", "wait": true})),
+    ]).await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    let failure = calls
+        .iter()
+        .find(|call| call.call_id == "failed-workflow")
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(failure.result.as_ref().unwrap()).unwrap();
+    assert_eq!(result["state"], "failed");
+    assert!(
+        result
+            .to_string()
+            .contains("no task definition 'nonexistent-outcome-task' exists")
+    );
+    assert_eq!(failure.status.as_deref(), Some("error"));
+    let success = calls
+        .iter()
+        .find(|call| call.call_id == "successful-workflow")
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_str(success.result.as_ref().unwrap()).unwrap();
+    assert_eq!(result["state"], "completed");
+    assert_eq!(success.status.as_deref(), Some("success"));
+    for (id, expected) in [
+        ("failed-workflow", "error"),
+        ("successful-workflow", "success"),
+    ] {
+        assert!(events.iter().any(|event| matches!(event, ServerEvent::ToolEnd { call_id, status, .. } if call_id == id && status == expected)), "missing {expected} ToolEnd for {id}: {events:?}");
+    }
 }

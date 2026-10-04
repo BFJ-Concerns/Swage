@@ -350,7 +350,9 @@
           <span class="creator creator-{schedule.creator.kind}"
             >by {describeCreator(schedule.creator)}</span
           >
-          <span>next {formatTime(schedule.next_run_at ?? null)}</span>
+          {#if schedule.status !== "paused"}
+            <span>next {formatTime(schedule.next_run_at ?? null)}</span>
+          {/if}
         </div>
         <div class="scope-toggle row-actions">
           <button

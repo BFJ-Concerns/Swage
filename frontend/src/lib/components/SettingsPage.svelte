@@ -19,6 +19,8 @@
   import InformationalSettingsPanel from "./settings/InformationalSettingsPanel.svelte";
   import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
+  import MemoryPanel from "./MemoryPanel.svelte";
+  import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
   import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
@@ -36,6 +38,7 @@
     | "channels"
     | "devices"
     | "voice"
+    | "memory"
     | "recovery"
     | "display"
     | "account";
@@ -44,6 +47,8 @@
     tab?: SettingsTabId;
     topicId?: string | null;
     topics?: Topic[];
+    // The memory page a notice link names, opened on the memory tab.
+    memoryPage?: MemoryPageAddress | null;
     onSettingsSaved?: () => void | Promise<void>;
   }
 
@@ -51,6 +56,7 @@
     tab = "providers",
     topicId = null,
     topics = [],
+    memoryPage = null,
     onSettingsSaved,
   }: Props = $props();
 
@@ -62,6 +68,7 @@
   let isPersisting = $state(false);
   let hasLoadedSettings = $state(false);
   let lastPersistedSettingsFingerprint = "";
+  let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
   let status = $state("");
@@ -76,6 +83,7 @@
   onMount(async () => {
     try {
       settings = await fetchSettings();
+      lastSavedSearch = settings.tool_runtime.search ? { ...settings.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
       hasLoadedSettings = true;
@@ -106,6 +114,14 @@
     settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
   }
 
+  function searchIsIncomplete(search: SettingsResponse["tool_runtime"]["search"]): boolean {
+    return search != null && (!search.provider_type.trim() || !search.base_url.trim());
+  }
+
+  function toolRuntimeForSave(runtime: SettingsResponse["tool_runtime"]): SettingsResponse["tool_runtime"] {
+    return { ...runtime, search: searchIsIncomplete(runtime.search) ? lastSavedSearch : runtime.search };
+  }
+
   function settingsFingerprint(): string | null {
     if (!settings) return null;
     return JSON.stringify({
@@ -114,7 +130,7 @@
       models: settings.models,
       default_model: settings.default_model,
       generation_presets: settings.generation_presets,
-      tool_runtime: settings.tool_runtime,
+      tool_runtime: toolRuntimeForSave(settings.tool_runtime),
       tool_permissions: settings.tool_permissions,
       hitl: settings.hitl,
       sandbox: settings.sandbox,
@@ -132,6 +148,7 @@
     if (!settings) return false;
     error = null;
     status = "";
+    const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
       error = "Fix the invalid automation JSON before saving.";
       return false;
@@ -153,12 +170,16 @@
     try {
       isPersisting = true;
       normaliseDefaultModel();
-      settings = await saveSettings(settings);
+      const saved = await saveSettings({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
+      const searchDraft = settings.tool_runtime.search;
+      settings = saved;
+      lastSavedSearch = saved.tool_runtime.search ? { ...saved.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       // The server never echoes raw credentials; clear the input so the
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
       await onSettingsSaved?.();
       status =
         options.message ??
@@ -222,6 +243,10 @@
       title: "Voice",
       sub: "The models the default provider uses for speech transcription and synthesis.",
     },
+    memory: {
+      title: "Memory",
+      sub: "What the curator remembers from your conversations, in general and for each topic. To change a page, tell the curator.",
+    },
     recovery: {
       title: "Recovery",
       sub: "Operator-managed export bundles capturing topics, conversations, and configuration for restore.",
@@ -246,6 +271,7 @@
     "channels",
     "devices",
     "voice",
+    "memory",
     "recovery",
     "display",
     "account",
@@ -321,6 +347,8 @@
       <CommandsPanel {topicId} />
     {:else if tab === "skills"}
       <SkillsPanel {topicId} />
+    {:else if tab === "memory"}
+      <MemoryPanel {topics} page={memoryPage} />
     {:else if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until

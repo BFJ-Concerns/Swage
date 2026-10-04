@@ -4838,6 +4838,13 @@
               ],
               "format": "int64"
             },
+            "incomplete_reason": {
+              "description": "Output-limit cause when the reply is incomplete.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "input_tokens": {
               "type": [
                 "integer",
@@ -5061,6 +5068,13 @@
                 "null"
               ],
               "format": "uuid"
+            },
+            "incomplete_reason": {
+              "description": "Output-limit cause when the child response is incomplete.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "parent_turn_id": {
               "type": "string",
@@ -6561,6 +6575,7 @@
         "pending",
         "processing",
         "completed",
+        "incomplete",
         "failed",
         "interrupted",
         "awaiting_approval",

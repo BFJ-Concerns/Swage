@@ -55,6 +55,7 @@ fn complete_turn_pipeline_updates_state_end_to_end() {
     let outcome = handle_server_event(
         &mut state,
         ServerEvent::TurnComplete {
+            incomplete_reason: None,
             turn_id: Uuid::new_v4(),
             input_tokens: Some(100),
             output_tokens: Some(50),

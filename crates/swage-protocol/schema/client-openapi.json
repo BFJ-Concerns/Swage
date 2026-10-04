@@ -4466,6 +4466,13 @@
                   "null"
                 ]
               },
+              "incomplete_reason": {
+                "description": "Output-limit cause when the reply is incomplete.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "input_tokens": {
                 "format": "uint32",
                 "minimum": 0,
@@ -4685,6 +4692,13 @@
             "properties": {
               "child_turn_id": {
                 "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "incomplete_reason": {
+                "description": "Output-limit cause when the child response is incomplete.",
                 "type": [
                   "string",
                   "null"
@@ -6189,6 +6203,7 @@
           "pending",
           "processing",
           "completed",
+          "incomplete",
           "failed",
           "interrupted",
           "awaiting_approval",
