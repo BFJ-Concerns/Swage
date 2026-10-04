@@ -266,23 +266,29 @@ async fn assert_abandoned_shell_command_stops(sandbox: &dyn Sandbox, workspace: 
         "sleep {sleep_arg} & echo $! > descendant.pid; \
          while true; do date +%s%N >> marker; sleep 0.2; done"
     );
-    let abandoned = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        sandbox.execute_tool("shell", json!({ "command": command })),
-    )
-    .await;
+    let mut call = Box::pin(sandbox.execute_tool("shell", json!({ "command": command })));
+    // Capture the descendant while the call is still pending, so its PID is
+    // read before any cancellation can have fired.
+    let descendant = tokio::select! {
+        result = call.as_mut() => panic!("the looping command must still be running, got {result:?}"),
+        descendant = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let found = std::fs::read_to_string(workspace.join("descendant.pid"))
+                    .ok()
+                    .and_then(|pid| host_pid_of(&["sleep", &sleep_arg], pid.trim()));
+                if let Some(pid) = found.filter(|_| marker.exists()) {
+                    return pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }) => descendant.expect("the command and its descendant must start"),
+    };
     assert!(
-        abandoned.is_err(),
-        "the looping command must still be running when abandoned"
+        is_live(descendant),
+        "the descendant must be running before the call is abandoned"
     );
-    assert!(
-        marker.exists(),
-        "the command must have started before it was abandoned"
-    );
-    let namespace_pid = std::fs::read_to_string(workspace.join("descendant.pid")).unwrap();
-    let descendant = host_pid_of(&["sleep", &sleep_arg], namespace_pid.trim())
-        .expect("the descendant must be running when the call is abandoned");
-    assert!(is_live(descendant));
+    // Abandon the call as a cancelled turn does: drop its pending future.
+    drop(call);
 
     // Allow the cancel to reach the agent and the process group to die.
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
