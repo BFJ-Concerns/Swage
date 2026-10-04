@@ -1,8 +1,9 @@
 //! Variant selection — the runtime half of the experimentation seam.
 //!
 //! Where a behaviour could be done more than one way, the alternatives are
-//! registered as variants behind a stable surface and one is selected per
-//! use. Selection honours the configuration seam that already exists
+//! registered as variants behind a stable surface. A session's first use of
+//! a location selects and records its variant; later uses serve that record.
+//! Selection honours the configuration seam that already exists
 //! (`ExperimentationConfig`: the global kill switch, per-location
 //! enablement, forced variants) and records every decision to the audit
 //! trail, so any run can be reconstructed — which variant served it and
@@ -14,8 +15,10 @@
 //! unblinding step.
 //!
 //! The first location is context assembly (`context.assembly`). A new
-//! location is a location-id constant, a `select_variant` call at the
-//! choice point, and the audit write — no new tables or config shapes.
+//! session-scoped location is a location-id constant and a
+//! `select_session_variant` call at the choice point. A delegated task draws
+//! once at delegation through `select_variant` and `record_selection`.
+//! Neither path needs new tables or config shapes.
 
 use uuid::Uuid;
 
