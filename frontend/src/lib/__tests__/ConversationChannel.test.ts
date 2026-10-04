@@ -57,6 +57,8 @@ function makeConversationStore(
     appendOptimisticUserMessage: () => {},
     appendAssistantMessage: () => {},
     appendRecordedMessage: () => {},
+    appendQueuedMessage: () => {},
+    clearQueuedMessages: () => {},
     refreshActiveConversation: async () => {},
     selectThread: vi.fn(async () => {}),
     branchFrom: vi.fn(async () => {}),

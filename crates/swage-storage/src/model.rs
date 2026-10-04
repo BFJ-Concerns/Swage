@@ -2149,6 +2149,32 @@ pub struct NewMessage {
     pub agent_id: String,
 }
 
+/// A message accepted while the session's turn was running, waiting in
+/// arrival order to be the next turn's input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedTurnInput {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+    /// Arrival order within the session's queue.
+    pub seq: i64,
+    pub origin: MessageOrigin,
+    pub content: String,
+    /// Content parts beside the text, opaque as the wire carried them.
+    pub attachments: Vec<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Input for queueing a message behind a running turn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewQueuedTurnInput {
+    pub session_id: Uuid,
+    pub thread_id: Uuid,
+    pub origin: MessageOrigin,
+    pub content: String,
+    pub attachments: Vec<serde_json::Value>,
+}
+
 /// Input for appending a new message at the end of a thread.
 ///
 /// The storage layer assigns the next monotonic position atomically.

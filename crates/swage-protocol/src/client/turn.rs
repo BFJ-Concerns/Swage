@@ -43,8 +43,16 @@ pub struct SubmitTurnRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SubmitTurnResponse {
+    /// The turn the submission opened — or, when the message was queued
+    /// behind a running turn, that running turn.
     pub turn_id: Uuid,
+    /// `pending` for a turn that opened; `queued` for a message held for the
+    /// next turn.
     pub status: String,
+    /// The held message, present only when `status` is `queued`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub queued: Option<super::conversation::QueuedMessageView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

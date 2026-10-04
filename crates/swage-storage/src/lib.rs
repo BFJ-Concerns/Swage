@@ -46,3 +46,7 @@ pub use store::{
     TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore, WorkflowStore,
     WorkspaceAttachmentStore,
 };
+
+// The turn queue: messages held behind a running turn.
+pub use model::{NewQueuedTurnInput, QueuedTurnInput};
+pub use store::TurnQueueStore;

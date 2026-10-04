@@ -834,6 +834,20 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // Cleanup: remove the cancellation token regardless of outcome.
     release_active_turn(state, session_id).await;
 
+    // A turn that ended on its own hands the session to whatever queued
+    // behind it; a stopped turn leaves the queue standing (C60).
+    let final_state = state
+        .storage
+        .get_turn(turn_id.unwrap_or(prepared_turn_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|turn| turn.state)
+        .unwrap_or(TurnState::Completed);
+    if crate::turn_queue::drains_queue_after(final_state) {
+        crate::turn_queue::spawn_drain(state.clone(), session_id);
+    }
+
     Ok(())
 }
 

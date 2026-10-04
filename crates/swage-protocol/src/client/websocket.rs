@@ -150,6 +150,16 @@ pub enum ServerEvent {
         session_id: Uuid,
         message: super::conversation::MessageView,
     },
+    /// A message arrived while the session's turn was running and is held
+    /// for the next turn; open views show it as queued.
+    MessageQueued {
+        session_id: Uuid,
+        queued: super::conversation::QueuedMessageView,
+    },
+    /// The session's queue became the next turn's input: the queued
+    /// messages are now recorded messages (each announced) and the queue is
+    /// empty.
+    QueueDrained { session_id: Uuid, turn_id: Uuid },
     /// Context assembly completed for a turn.
     ///
     /// Contains the full assembly report for diagnostics and token budget

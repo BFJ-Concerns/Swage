@@ -150,6 +150,7 @@
   // These will become fully reactive once the stores are converted to $state.
 
   const messages = $derived(store?.activeConversation?.messages ?? []);
+  const queued = $derived(store?.activeConversation?.queued ?? []);
   const hasConversation = $derived(store?.activeConversation != null);
   const stream = $derived(
     streamingStore?.streamFor?.(store?.activeConversation?.id ?? null),
@@ -320,6 +321,16 @@
         {/each}
       </div>
     {/if}
+
+    <!-- ---- Messages held for the next turn ---- -->
+    {#each queued as held (held.id)}
+      <div class="message queued" class:user={held.origin === "user"} aria-label="Queued message">
+        <span class="role-label" class:user-label={held.origin === "user"}>
+          {authorLabel({ role: "user", origin: held.origin })} · queued
+        </span>
+        <div class="message-content user-content queued-content">{held.content}</div>
+      </div>
+    {/each}
 
     <!-- ---- Live streaming content: grows as tokens arrive ---- -->
     {#if isStreaming || streamedContent}
@@ -495,6 +506,13 @@
      neither the person's words nor the model's reply at a glance. */
   .message.platform .message-content {
     border-left-color: var(--ink-soft);
+  }
+
+  /* A message held for the next turn: the person's words, not yet taken up,
+     so it reads muted until the running turn ends. */
+  .message.queued .queued-content {
+    opacity: 0.7;
+    border-style: dashed;
   }
 
   /* ---- Message content ---------------------------------------------------- */

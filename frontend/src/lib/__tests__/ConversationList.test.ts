@@ -36,6 +36,8 @@ function makeStore(
     appendOptimisticUserMessage: vi.fn(),
     appendAssistantMessage: vi.fn(),
     appendRecordedMessage: vi.fn(),
+    appendQueuedMessage: vi.fn(),
+    clearQueuedMessages: vi.fn(),
     clearActiveConversation: vi.fn(),
     refreshActiveConversation: vi.fn().mockResolvedValue(undefined),
   };

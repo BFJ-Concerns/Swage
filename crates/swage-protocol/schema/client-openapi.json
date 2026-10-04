@@ -827,6 +827,13 @@
             },
             "type": "array"
           },
+          "queued": {
+            "description": "Messages accepted while a turn was running, waiting in arrival order\nto be the next turn's input. Empty when nothing waits.",
+            "items": {
+              "$ref": "#/components/schemas/QueuedMessageView"
+            },
+            "type": "array"
+          },
           "root_thread_id": {
             "description": "The thread the conversation started on. `messages` are its messages;\na branch's messages are read from `GET /api/threads/{id}`.",
             "format": "uuid",
@@ -3057,6 +3064,38 @@
         ],
         "type": "object"
       },
+      "QueuedMessageView": {
+        "description": "A message held behind a running turn: not yet a message of the\nconversation, but shown to every open view until the next turn takes it.",
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/MessageAttachment"
+            },
+            "type": "array"
+          },
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/MessageOrigin"
+          },
+          "queued_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "origin",
+          "content",
+          "queued_at"
+        ],
+        "type": "object"
+      },
       "RecentSession": {
         "description": "One session as the recent-sessions list shows it.",
         "properties": {
@@ -4283,6 +4322,51 @@
             "type": "object"
           },
           {
+            "description": "A message arrived while the session's turn was running and is held\nfor the next turn; open views show it as queued.",
+            "properties": {
+              "queued": {
+                "$ref": "#/components/schemas/QueuedMessageView"
+              },
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "message_queued",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "queued"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The session's queue became the next turn's input: the queued\nmessages are now recorded messages (each announced) and the queue is\nempty.",
+            "properties": {
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "turn_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "queue_drained",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.",
             "properties": {
               "report": {
@@ -5388,10 +5472,23 @@
       },
       "SubmitTurnResponse": {
         "properties": {
+          "queued": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueuedMessageView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The held message, present only when `status` is `queued`."
+          },
           "status": {
+            "description": "`pending` for a turn that opened; `queued` for a message held for the\nnext turn.",
             "type": "string"
           },
           "turn_id": {
+            "description": "The turn the submission opened — or, when the message was queued\nbehind a running turn, that running turn.",
             "format": "uuid",
             "type": "string"
           }

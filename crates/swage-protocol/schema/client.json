@@ -1187,6 +1187,13 @@
             "$ref": "#/$defs/MessageView"
           }
         },
+        "queued": {
+          "description": "Messages accepted while a turn was running, waiting in arrival order\nto be the next turn's input. Empty when nothing waits.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueuedMessageView"
+          }
+        },
         "root_thread_id": {
           "description": "The thread the conversation started on. `messages` are its messages;\na branch's messages are read from `GET /api/threads/{id}`.",
           "type": "string",
@@ -3416,6 +3423,38 @@
         "job"
       ]
     },
+    "QueuedMessageView": {
+      "description": "A message held behind a running turn: not yet a message of the\nconversation, but shown to every open view until the next turn takes it.",
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageAttachment"
+          }
+        },
+        "content": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "origin": {
+          "$ref": "#/$defs/MessageOrigin"
+        },
+        "queued_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "origin",
+        "content",
+        "queued_at"
+      ]
+    },
     "RecentSession": {
       "description": "One session as the recent-sessions list shows it.",
       "type": "object",
@@ -4642,6 +4681,51 @@
           ]
         },
         {
+          "description": "A message arrived while the session's turn was running and is held\nfor the next turn; open views show it as queued.",
+          "type": "object",
+          "properties": {
+            "queued": {
+              "$ref": "#/$defs/QueuedMessageView"
+            },
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "message_queued"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "queued"
+          ]
+        },
+        {
+          "description": "The session's queue became the next turn's input: the queued\nmessages are now recorded messages (each announced) and the queue is\nempty.",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": {
+              "type": "string",
+              "const": "queue_drained"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "turn_id"
+          ]
+        },
+        {
           "description": "Context assembly completed for a turn.\n\nContains the full assembly report for diagnostics and token budget\ninspection. Only delivered to connections subscribed to the `\"context\"`\nchannel unless the report contains errors, in which case it is always\nsent so the client can surface assembly failures to the user.",
           "type": "object",
           "properties": {
@@ -5748,10 +5832,23 @@
     "SubmitTurnResponse": {
       "type": "object",
       "properties": {
+        "queued": {
+          "description": "The held message, present only when `status` is `queued`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueuedMessageView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "status": {
+          "description": "`pending` for a turn that opened; `queued` for a message held for the\nnext turn.",
           "type": "string"
         },
         "turn_id": {
+          "description": "The turn the submission opened — or, when the message was queued\nbehind a running turn, that running turn.",
           "type": "string",
           "format": "uuid"
         }

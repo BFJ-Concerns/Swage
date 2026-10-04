@@ -134,8 +134,10 @@ describe("reconnect reconciliation", () => {
     store.startTurn("Old turn before the refresh");
     const recoveredTurnGeneration = store.activeTurnGeneration;
 
-    // Force the refresh to remain pending while a newer turn becomes live.
-    store.startTurn("New turn while the refresh is delayed");
+    // Force the refresh to remain pending while a newer turn becomes live:
+    // a message sent meanwhile was queued, and the gateway started the next
+    // turn on it when the old one ended.
+    store.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "newer-turn" });
     store.handleServerEvent({ type: "token", content: "new live content" });
 
     store.reconcileAfterReconnect(recoveredTurnGeneration);
@@ -176,6 +178,45 @@ describe("startTurn", () => {
     expect(store.streamedContent).toBe("");
     expect(store.turnError).toBeNull();
     expect(store.isStreaming).toBe(true);
+  });
+
+  it("sends a message typed mid-turn without touching the live stream, and shows it once the gateway queues it", () => {
+    const conv = {
+      ...createMockConversationStore(),
+      appendQueuedMessage: vi.fn(),
+      clearQueuedMessages: vi.fn(),
+    };
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+
+    store.startTurn("first");
+    store.handleServerEvent({ type: "token", content: "streaming…" });
+    const liveGeneration = store.activeTurnGeneration;
+
+    store.startTurn("a second thought");
+
+    // Sent, but neither appended optimistically nor treated as a new stream.
+    expect(conn.sendMessage).toHaveBeenCalledTimes(2);
+    expect(conv.appendOptimisticUserMessage).toHaveBeenCalledTimes(1);
+    expect(store.streamedContent).toBe("streaming…");
+    expect(store.activeTurnGeneration).toBe(liveGeneration);
+
+    const queued = {
+      id: "q-1",
+      origin: "user" as const,
+      content: "a second thought",
+      queued_at: "2026-10-04T10:00:00Z",
+    };
+    store.handleServerEvent({ type: "message_queued", session_id: "conv-9", queued });
+    expect(conv.appendQueuedMessage).toHaveBeenCalledWith(queued, "conv-9");
+
+    // The old turn ends and the queue runs: the view sees a turn start.
+    store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
+    expect(store.isStreaming).toBe(false);
+    store.handleServerEvent({ type: "queue_drained", session_id: "conv-9", turn_id: "t-2" });
+    expect(conv.clearQueuedMessages).toHaveBeenCalledWith("conv-9");
+    expect(store.isStreaming).toBe(true);
+    expect(store.streamedContent).toBe("");
   });
 
   it("routes a recorded message the gateway announces to the conversation store", () => {

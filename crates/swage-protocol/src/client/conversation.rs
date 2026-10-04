@@ -90,6 +90,25 @@ pub struct ConversationDetail {
     /// a branch's messages are read from `GET /api/threads/{id}`.
     pub root_thread_id: Uuid,
     pub messages: Vec<MessageView>,
+    /// Messages accepted while a turn was running, waiting in arrival order
+    /// to be the next turn's input. Empty when nothing waits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub queued: Vec<QueuedMessageView>,
+}
+
+/// A message held behind a running turn: not yet a message of the
+/// conversation, but shown to every open view until the next turn takes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct QueuedMessageView {
+    pub id: Uuid,
+    pub origin: MessageOrigin,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub attachments: Vec<super::turn::MessageAttachment>,
+    pub queued_at: DateTime<Utc>,
 }
 
 /// A branch: a sibling thread that carries its parent's messages up to the

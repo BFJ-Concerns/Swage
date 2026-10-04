@@ -2644,6 +2644,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) managed_secret_values: HashMap<Uuid, String>,
     pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
     pub(crate) session_variables: Vec<swage_storage::SessionVariable>,
+    pub(crate) turn_queue: Vec<swage_storage::QueuedTurnInput>,
 }
 
 impl MockStorage {
@@ -5185,6 +5186,76 @@ impl swage_storage::store::AuditStore for MockStorage {
             .filter(|event| event.session_id == Some(session_id))
             .cloned()
             .collect())
+    }
+}
+
+#[async_trait]
+impl swage_storage::store::TurnQueueStore for MockStorage {
+    async fn enqueue_turn_input(
+        &self,
+        input: swage_storage::NewQueuedTurnInput,
+    ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
+        let mut db = self.db.lock().await;
+        let seq = db
+            .turn_queue
+            .iter()
+            .filter(|queued| queued.session_id == input.session_id)
+            .map(|queued| queued.seq)
+            .max()
+            .map_or(0, |seq| seq + 1);
+        let queued = swage_storage::QueuedTurnInput {
+            id: Uuid::new_v4(),
+            session_id: input.session_id,
+            thread_id: input.thread_id,
+            seq,
+            origin: input.origin,
+            content: input.content,
+            attachments: input.attachments,
+            created_at: chrono::Utc::now(),
+        };
+        db.turn_queue.push(queued.clone());
+        Ok(queued)
+    }
+
+    async fn list_queued_turn_inputs(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<swage_storage::QueuedTurnInput>, StorageError> {
+        let db = self.db.lock().await;
+        let mut queued: Vec<_> = db
+            .turn_queue
+            .iter()
+            .filter(|queued| queued.session_id == session_id)
+            .cloned()
+            .collect();
+        queued.sort_by_key(|queued| queued.seq);
+        Ok(queued)
+    }
+
+    async fn take_queued_turn_inputs(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<swage_storage::QueuedTurnInput>, StorageError> {
+        let mut db = self.db.lock().await;
+        let (mut taken, kept): (Vec<_>, Vec<_>) = db
+            .turn_queue
+            .drain(..)
+            .partition(|queued| queued.session_id == session_id);
+        db.turn_queue = kept;
+        taken.sort_by_key(|queued| queued.seq);
+        Ok(taken)
+    }
+
+    async fn sessions_with_queued_turn_inputs(&self) -> Result<Vec<Uuid>, StorageError> {
+        let db = self.db.lock().await;
+        let mut sessions: Vec<Uuid> = db
+            .turn_queue
+            .iter()
+            .map(|queued| queued.session_id)
+            .collect();
+        sessions.sort();
+        sessions.dedup();
+        Ok(sessions)
     }
 }
 

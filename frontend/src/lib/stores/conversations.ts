@@ -12,6 +12,7 @@ import type {
   MessageView,
 } from "../types";
 import type { MessageView as WireMessageView } from "../protocol/MessageView";
+import type { QueuedMessageView as WireQueuedMessageView } from "../protocol/QueuedMessageView";
 import * as api from "../api/conversations";
 
 export interface ConversationStore {
@@ -60,6 +61,10 @@ export interface ConversationStore {
    * on the conversation it names, exactly as the gateway holds it.
    */
   appendRecordedMessage(message: WireMessageView, conversationId: string): void;
+  /** Show a message the gateway is holding for the conversation's next turn. */
+  appendQueuedMessage(queued: WireQueuedMessageView, conversationId: string): void;
+  /** The held messages became the next turn's input: the queue is empty. */
+  clearQueuedMessages(conversationId: string): void;
   /** Install a fetched snapshot only when its owner is still selected. */
   replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
@@ -361,6 +366,20 @@ export function createConversationStore(): ConversationStore {
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
       }, conversationId);
+    },
+
+    appendQueuedMessage(queued, conversationId) {
+      const activeConversation = get(activeConversationStore);
+      if (activeConversation?.id !== conversationId) return;
+      const held = activeConversation.queued ?? [];
+      if (held.some((item) => item.id === queued.id)) return;
+      activeConversationStore.set({ ...activeConversation, queued: [...held, queued] });
+    },
+
+    clearQueuedMessages(conversationId) {
+      const activeConversation = get(activeConversationStore);
+      if (activeConversation?.id !== conversationId) return;
+      activeConversationStore.set({ ...activeConversation, queued: [] });
     },
 
     appendRecordedMessage(message, conversationId) {
