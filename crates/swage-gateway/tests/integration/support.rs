@@ -163,10 +163,15 @@ impl Drop for LiveTestGateway {
 }
 
 /// Events and state decide completion; this bound reports a hung journey.
-pub async fn journey<T>(future: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(std::time::Duration::from_secs(180), future)
-        .await
-        .expect("journey hung before its required event or state")
+pub fn journey<T>(
+    future: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    let future = Box::pin(future);
+    async move {
+        tokio::time::timeout(std::time::Duration::from_secs(180), future)
+            .await
+            .expect("journey hung before its required event or state")
+    }
 }
 
 pub async fn live_http_json(
