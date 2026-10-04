@@ -35,6 +35,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.
 - Retry badges name the model requested for the current turn.
 
