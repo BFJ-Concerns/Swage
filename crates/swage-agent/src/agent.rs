@@ -309,6 +309,161 @@ mod approval_tests {
             "human rejection must emit its settlement log"
         );
     }
+
+    fn deciding_registrar(
+        decision: crate::approval::ApprovalDecisionValue,
+        scope: crate::approval::ApprovalDecisionScope,
+        reason: Option<&'static str>,
+    ) -> ApprovalChannelRegistrar {
+        Arc::new(move |_approval_id, sender| {
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision,
+                    scope,
+                    reason: reason.map(Into::into),
+                })
+                .expect("registered sender accepts the decision");
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn denied_tool_call_feedback_names_the_user_denial_not_the_reason() {
+        let (agent, execution) = approval_fixture(deciding_registrar(
+            crate::approval::ApprovalDecisionValue::Rejected,
+            crate::approval::ApprovalDecisionScope::Once,
+            Some("approval card"),
+        ))
+        .await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = agent
+            .handle_approval_gate(
+                &execution,
+                ApprovalKind::Tool,
+                Some("file_write".into()),
+                None,
+                None,
+                "Allow file_write?".into(),
+                None,
+                std::time::Duration::from_secs(5),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .expect("approval gate");
+
+        let crate::approval::ApprovalGateOutcome::Rejected { feedback } = outcome else {
+            panic!("expected a rejected outcome, got {outcome:?}");
+        };
+        assert!(
+            feedback.starts_with("The user denied this tool call."),
+            "the decision must lead, independent of the UI's reason string: {feedback}"
+        );
+        assert!(
+            feedback.contains("did not run") && feedback.contains("no approval is pending"),
+            "the denial must read as final: {feedback}"
+        );
+    }
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl swage_tool::tool::Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echoes input."
+        }
+
+        fn parameters(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": { "text": { "type": "string" } } })
+        }
+
+        async fn execute(
+            &self,
+            params: Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<Value, swage_core::ToolError> {
+            Ok(params)
+        }
+    }
+
+    fn approval_required_echo_dispatcher() -> ToolDispatcher {
+        let mut registry = swage_tool::registry::ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
+        ToolDispatcher::new(
+            Arc::new(registry),
+            swage_tool::permission::PermissionConfig {
+                allow: vec!["*".into()],
+                deny: vec![],
+                bundles: std::collections::HashMap::new(),
+                require_approval: vec![swage_tool::permission::RequireApprovalEntry {
+                    tool_name: "echo".into(),
+                    timeout_secs: Some(5),
+                    timeout_policy: None,
+                }],
+            },
+            Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+            swage_tool::rate_limit::RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        )
+    }
+
+    async fn dispatch_echo_approved_with(
+        scope: crate::approval::ApprovalDecisionScope,
+    ) -> (String, bool, String) {
+        let (mut agent, execution) = approval_fixture(deciding_registrar(
+            crate::approval::ApprovalDecisionValue::Approved,
+            scope,
+            Some("approval card"),
+        ))
+        .await;
+        agent.tool_dispatcher = Some(approval_required_echo_dispatcher());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let call = ToolCall {
+            call_id: "call-1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({ "text": "ran" }),
+        };
+        agent
+            .dispatch_tool_call(
+                &call,
+                &execution,
+                &[],
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .expect("approved dispatch")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_tool_call_result_carries_the_approval_note() {
+        let (text, is_error, status) =
+            dispatch_echo_approved_with(crate::approval::ApprovalDecisionScope::Once).await;
+        assert!(!is_error, "approved call must succeed: {text}");
+        assert_eq!(status, "success");
+        assert!(
+            text.contains("The user approved this tool call once"),
+            "once-approved result must note the approval: {text}"
+        );
+        assert!(text.contains("\"text\":\"ran\""), "tool output must follow: {text}");
+
+        let (text, _, _) =
+            dispatch_echo_approved_with(crate::approval::ApprovalDecisionScope::Session).await;
+        assert!(
+            text.contains("The user approved this tool call for this session"),
+            "session-approved result must note the approval scope: {text}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -838,17 +993,20 @@ impl Agent {
                                     )
                                     .await?
                                 {
-                                    ApprovalGateOutcome::Approved => {
+                                    ApprovalGateOutcome::Approved { scope } => {
                                         // Approved — proceed with normal dispatch.
-                                        self.dispatch_tool_call(
-                                            call,
-                                            &execution,
-                                            &llm_request.messages,
-                                            &event_tx,
-                                            &cancel_token,
-                                            &mut approval_scope,
+                                        crate::approval::with_user_approval_note(
+                                            self.dispatch_tool_call(
+                                                call,
+                                                &execution,
+                                                &llm_request.messages,
+                                                &event_tx,
+                                                &cancel_token,
+                                                &mut approval_scope,
+                                            )
+                                            .await?,
+                                            scope,
                                         )
-                                        .await?
                                     }
                                     ApprovalGateOutcome::Rejected { feedback } => {
                                         (feedback, true, "rejected".to_string())
@@ -1716,7 +1874,7 @@ impl Agent {
             )
             .await?
         {
-            ApprovalGateOutcome::Approved => {
+            ApprovalGateOutcome::Approved { scope } => {
                 let result = if skip_tool_permission_gate {
                     self.race_tool_dispatch(
                         dispatcher.dispatch_approved(
@@ -1749,6 +1907,7 @@ impl Agent {
                     .await?
                 };
                 tool_dispatch_result(result)
+                    .map(|result| crate::approval::with_user_approval_note(result, scope))
             }
             ApprovalGateOutcome::Rejected { feedback } => {
                 Ok((feedback, true, "rejected".to_string()))
@@ -1918,9 +2077,9 @@ impl Agent {
                     )
                     .await?
                 {
-                    ApprovalGateOutcome::Approved => {
+                    ApprovalGateOutcome::Approved { scope } => {
                         // Re-dispatch skipping the permission check.
-                        match self
+                        let result = match self
                             .race_tool_dispatch(
                                 dispatcher.dispatch_approved(
                                     &call.name,
@@ -1968,7 +2127,9 @@ impl Agent {
                             Err(e) => {
                                 Ok((format_tool_error_for_model(&e), true, "error".to_string()))
                             }
-                        }
+                        };
+                        result
+                            .map(|result| crate::approval::with_user_approval_note(result, scope))
                     }
                     ApprovalGateOutcome::Rejected { feedback } => {
                         Ok((feedback, true, "rejected".to_string()))
@@ -2327,7 +2488,7 @@ impl Agent {
                     decision: crate::approval::ApprovalDecisionValue::Approved,
                     reason: d.reason,
                 });
-                Ok(ApprovalGateOutcome::Approved)
+                Ok(ApprovalGateOutcome::Approved { scope: d.scope })
             }
             GateResult::Decision(d) => {
                 // Rejected by human.
@@ -2335,6 +2496,7 @@ impl Agent {
                     .reason
                     .clone()
                     .unwrap_or_else(|| "rejected by reviewer".into());
+                let feedback = crate::approval::user_denied_feedback(d.reason.as_deref());
                 self.resume_after_approval_decision(
                     approval.id,
                     execution.turn_id,
@@ -2353,9 +2515,7 @@ impl Agent {
                     reason = %reason_text,
                     "tool approval rejected and settled"
                 );
-                Ok(ApprovalGateOutcome::Rejected {
-                    feedback: format!("Tool call rejected: {reason_text}"),
-                })
+                Ok(ApprovalGateOutcome::Rejected { feedback })
             }
             GateResult::Timeout => {
                 // Timeout or channel dropped — apply policy.
