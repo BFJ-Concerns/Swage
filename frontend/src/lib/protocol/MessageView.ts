@@ -17,4 +17,9 @@ origin: MessageOrigin, content: string,
  * Content parts recorded beside the text when the message was
  * submitted; absent for text-only messages.
  */
-attachments?: Array<MessageAttachment>, timestamp: string, turn_state?: TurnState | null, tool_calls: Array<ToolCallView>, };
+attachments?: Array<MessageAttachment>, timestamp: string, turn_state?: TurnState | null, tool_calls: Array<ToolCallView>,
+/**
+ * Why the message's turn ended without a reply, as the person was told
+ * live; carried on the message that holds the turn's account.
+ */
+failure_message?: string, };

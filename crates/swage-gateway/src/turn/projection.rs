@@ -526,6 +526,16 @@ pub(super) async fn project_agent_events(
                     *observer.lock().unwrap_or_else(|error| error.into_inner()) =
                         Some(message.clone());
                 }
+                if let Some(reason) = record_failure_explanation(
+                    state,
+                    session_id,
+                    turn_id.unwrap_or(prepared_turn_id),
+                    &message,
+                )
+                .await
+                {
+                    record_integrity_lost.get_or_insert(reason);
+                }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_error".to_string(),
                     message,
@@ -643,4 +653,37 @@ pub(crate) fn route_approval_agent_event(
         }
         _ => false,
     }
+}
+
+/// Keep the explanation a failed turn showed the person, so the
+/// conversation shows it after a reload as it did live.
+///
+/// Reconstructive record (record_durability.rs): the turn's Failed state is
+/// the constitutive fact; the explanation enriches it. Its loss is named in
+/// the trail; `Some(reason)` means even that could not be recorded, and the
+/// caller escalates.
+pub(super) async fn record_failure_explanation(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    message: &str,
+) -> Option<String> {
+    let error = state
+        .storage
+        .record_turn_failure_message(turn_id, message)
+        .await
+        .err()?;
+    tracing::warn!(%error, %turn_id, "failed to persist failure_message");
+    record_durability::record_reconstruction_gap(
+        state.storage.as_ref(),
+        Some(session_id),
+        turn_id,
+        "failure_message",
+        &error,
+    )
+    .await
+    .err()
+    .map(|gap_error| {
+        format!("failure explanation could not be persisted or recorded as missing: {gap_error}")
+    })
 }

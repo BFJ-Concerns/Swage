@@ -700,6 +700,7 @@ fn message_appended_serialises_the_recorded_view() {
             timestamp: chrono::Utc::now(),
             turn_state: None,
             tool_calls: Vec::new(),
+            failure_message: None,
         },
     };
     let json = serde_json::to_value(&event).unwrap();
@@ -726,6 +727,7 @@ fn a_recorded_message_reaches_only_its_own_conversation() {
             timestamp: chrono::Utc::now(),
             turn_state: None,
             tool_calls: Vec::new(),
+            failure_message: None,
         },
     };
     assert!(super::connection::broadcast_event_matches_session(

@@ -4528,6 +4528,7 @@ impl TurnStore for MockStorage {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
@@ -4637,6 +4638,17 @@ impl TurnStore for MockStorage {
     async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError> {
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.cost_microcents = Some(cost);
+        }
+        Ok(())
+    }
+
+    async fn record_turn_failure_message(
+        &self,
+        id: Uuid,
+        message: &str,
+    ) -> Result<(), StorageError> {
+        if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+            t.failure_message.get_or_insert_with(|| message.to_owned());
         }
         Ok(())
     }
@@ -16693,6 +16705,46 @@ async fn failed_agent_build_marks_turn_failed_and_leaves_thread_usable() {
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[0].state, TurnState::Failed);
     assert_eq!(turns[1].state, TurnState::Completed);
+}
+
+/// A request the gateway could not construct is a failed turn like any
+/// other: the explanation the person saw live is the one the turn keeps.
+#[tokio::test]
+async fn a_request_construction_failure_keeps_its_explanation_on_the_turn() {
+    let (state, session_id) = make_state_with_session(Vec::new()).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    let _ = process_turn(
+        &state,
+        session_id,
+        None,
+        "First attempt".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        Some(serde_json::json!({"type": 17})),
+    )
+    .await
+    .expect_err("malformed output schema must fail agent construction");
+    let Some(ServerEvent::Error { code, message }) = rx.recv().await else {
+        panic!("the failure must reach the person live");
+    };
+    assert_eq!(code, "agent_construction_error");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns[0].state, TurnState::Failed);
+    assert_eq!(
+        turns[0].failure_message.as_deref(),
+        Some(message.as_str()),
+        "the turn must keep the explanation the person saw"
+    );
 }
 
 #[tokio::test]

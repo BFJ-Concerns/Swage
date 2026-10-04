@@ -2591,6 +2591,13 @@
           "content": {
             "type": "string"
           },
+          "failure_message": {
+            "description": "Why the message's turn ended without a reply, as the person was told\nlive; carried on the message that holds the turn's account.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "description": "The message's own identity — what a branch is taken from.",
             "format": "uuid",
