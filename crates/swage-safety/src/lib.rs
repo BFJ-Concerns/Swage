@@ -45,7 +45,7 @@ struct CompiledRegex {
 ///
 /// Scans text for known credential patterns and replaces matches with
 /// `[REDACTED:<type>]` labels. Built-in patterns cover common API keys,
-/// AWS credentials, PEM headers, bearer tokens, and high-entropy strings
+/// AWS credentials, PEM private keys, bearer tokens, and high-entropy strings
 /// near credential keywords.
 pub struct LeakDetector {
     /// Aho-Corasick automaton for literal patterns. `None` when no literals
@@ -167,12 +167,12 @@ impl LeakDetector {
         // Sort by start position, then prefer longer matches (more specific)
         redactions.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
-        // Remove overlapping ranges — keep the first (longest at each position)
+        // Merge overlapping ranges, retaining the first match's label.
         let mut merged: Vec<(usize, usize, &str)> = Vec::new();
         for redaction in redactions {
-            if let Some(last) = merged.last() {
-                // Skip if this range overlaps with the previous one
+            if let Some(last) = merged.last_mut() {
                 if redaction.0 < last.1 {
+                    last.1 = last.1.max(redaction.1);
                     continue;
                 }
             }
@@ -215,7 +215,11 @@ fn builtin_patterns() -> Vec<LeakPattern> {
         },
         LeakPattern {
             name: "pem_private_key".into(),
-            kind: PatternKind::Regex(r"-----BEGIN [A-Z ]*PRIVATE KEY-----".into()),
+            // A truncated block is sensitive through the end of the input.
+            kind: PatternKind::Regex(
+                r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)"
+                    .into(),
+            ),
             redaction_label: "pem_key".into(),
         },
         LeakPattern {
