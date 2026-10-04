@@ -14,7 +14,8 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    FileContent, location_approval_error, read_file_content, resolve_context_path,
+    FileContent, location_approval_error, read_file_content, require_workspace_write_access,
+    resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,7 @@ impl Tool for FileEditTool {
         let mut prepared = Vec::with_capacity(changes.len());
 
         for change in &changes {
+            require_workspace_write_access(ctx, &change.resolved_path, self.name()).await?;
             let bytes = match read_file_content(&change.resolved_path)
                 .await
                 .map_err(|error| read_error(self.name(), &change.requested_path, error))?
@@ -634,17 +636,14 @@ fn write_error(tool_name: &str, requested_path: &str, error: std::io::Error) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_tool::context::MockToolContext;
     use tempfile::TempDir;
 
     fn tool() -> FileEditTool {
         FileEditTool
     }
 
-    fn ctx(dir: &TempDir) -> MockToolContext {
-        let mut ctx = MockToolContext::new("agent-test", "sess-test");
-        ctx.working_directory = dir.path().to_path_buf();
-        ctx
+    fn ctx(dir: &TempDir) -> crate::tool_executor::GatewayToolContext {
+        crate::tool::workspace::writable_test_context(dir.path(), vec![])
     }
 
     fn edit(path: &str, edits: Vec<Value>) -> Value {
@@ -882,8 +881,10 @@ mod tests {
         let path = outside.path().join("note.txt");
         std::fs::write(&path, "outside old").unwrap();
 
-        let mut context = ctx(&workspace);
-        context.allowed_paths = vec![outside.path().to_path_buf()];
+        let context = crate::tool::workspace::writable_test_context(
+            workspace.path(),
+            vec![outside.path().to_path_buf()],
+        );
 
         tool()
             .execute(

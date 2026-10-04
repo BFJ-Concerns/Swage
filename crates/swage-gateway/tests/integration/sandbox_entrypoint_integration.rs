@@ -374,3 +374,54 @@ async fn fallback_sandbox_real_binary_stops_abandoned_shell_command() {
 
     sandbox.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_authority() {
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    for bubblewrap in [false, true] {
+        if bubblewrap && find_bwrap().is_err() {
+            panic!("bubblewrap is required for this route coverage");
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+        // The working directory is deliberately writable at the OS boundary:
+        // only the tool's missing attachment authority can refuse this write.
+        let mut sandbox: Box<dyn Sandbox> = if bubblewrap {
+            Box::new(BubblewrapSandbox::new(
+                test_config(&root),
+                test_llm_handler(),
+            ))
+        } else {
+            Box::new(FallbackSandbox::new(test_config(&root), test_llm_handler()))
+        };
+        sandbox.spawn_agent().await.unwrap();
+        let write = sandbox
+            .execute_tool(
+                "file_write",
+                json!({"path": "nested/probe.txt", "content": "bad"}),
+            )
+            .await
+            .unwrap();
+        let edit = sandbox.execute_tool("file_edit", json!({"changes": [
+            {"path": "existing.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "bad"}]}
+        ]})).await.unwrap();
+        // Shut the child down before asserting so a failing regression also
+        // releases its process and socket resources.
+        sandbox.shutdown().await.unwrap();
+        for result in [write, edit] {
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("cannot establish workspace write access")),
+                "sandbox child without attachment authority must refuse mutations: {result:?}"
+            );
+        }
+        assert!(!root.path().join("nested").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+            "original"
+        );
+    }
+}

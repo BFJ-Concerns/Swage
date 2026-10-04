@@ -9,7 +9,9 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::{location_approval_error, resolve_new_context_path};
+use crate::tool::workspace::{
+    location_approval_error, require_workspace_write_access, resolve_new_context_path,
+};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -74,6 +76,8 @@ impl Tool for FileWriteTool {
         let resolved = resolve_new_context_path(ctx, &path_str)
             .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "write"))?;
 
+        require_workspace_write_access(ctx, &resolved.path, self.name()).await?;
+
         // Create parent directories so the write doesn't fail on a missing tree.
         if let Some(parent) = resolved.path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -112,7 +116,6 @@ impl Tool for FileWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_tool::context::MockToolContext;
     use tempfile::TempDir;
 
     fn tool(dir: &TempDir) -> FileWriteTool {
@@ -120,10 +123,8 @@ mod tests {
         FileWriteTool
     }
 
-    fn ctx(dir: &TempDir) -> MockToolContext {
-        let mut ctx = MockToolContext::new("agent-test", "sess-test");
-        ctx.working_directory = dir.path().to_path_buf();
-        ctx
+    fn ctx(dir: &TempDir) -> crate::tool_executor::GatewayToolContext {
+        crate::tool::workspace::writable_test_context(dir.path(), vec![])
     }
 
     #[tokio::test]

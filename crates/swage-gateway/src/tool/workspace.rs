@@ -153,6 +153,131 @@ pub fn resolve_new_context_path(
     })
 }
 
+/// Refuses native file mutations covered by an attachment without write access.
+///
+/// Only the gateway context can establish an attachment's write permission.
+/// A sandbox child or another context without that authority fails closed.
+pub async fn require_workspace_write_access(
+    ctx: &dyn ToolContext,
+    path: &Path,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    let Some(gateway) = ctx
+        .as_any()
+        .downcast_ref::<crate::tool_executor::GatewayToolContext>()
+    else {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: "Permission denied: cannot establish workspace write access without gateway attachment permissions".into(),
+        });
+    };
+    let failure = |message: String| ToolError::ExecutionFailed {
+        name: tool_name.to_owned(),
+        message,
+    };
+    let session_id = uuid::Uuid::parse_str(ctx.session_id())
+        .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?;
+    let session = gateway
+        .storage()
+        .get_session(session_id)
+        .await
+        .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?
+        .ok_or_else(|| failure("Cannot check workspace write access: session is missing".into()))?;
+    let attachments = gateway
+        .storage()
+        .list_workspace_attachments_by_topic(session.topic_id)
+        .await
+        .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?;
+    for attachment in attachments
+        .into_iter()
+        .filter(|attachment| !attachment.is_missing)
+    {
+        let root = Path::new(if attachment.canonical_path.is_empty() {
+            &attachment.path
+        } else {
+            &attachment.canonical_path
+        });
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if path.starts_with(&root)
+            && !attachment
+                .permissions
+                .iter()
+                .any(|permission| permission == "write")
+        {
+            return Err(failure(format!(
+                "Permission denied: workspace '{}' has read-only access: {}",
+                attachment.label,
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks attachment access before native file mutations leave the gateway.
+/// Device paths outside gateway attachments remain governed by the device.
+pub(crate) async fn require_native_file_write_access(
+    tool_name: &str,
+    params: &Value,
+    ctx: &dyn ToolContext,
+) -> Result<(), ToolError> {
+    let paths: Vec<&str> = match tool_name {
+        "file_write" => params["path"].as_str().into_iter().collect(),
+        "file_edit" => params["changes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|change| change["path"].as_str())
+            .collect(),
+        _ => return Ok(()),
+    };
+    for requested in paths {
+        let path = Path::new(requested);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            ctx.working_directory().join(path)
+        };
+        let path = normalise_path(&path);
+        let path = resolve_existing_prefix(&path, requested).map_err(|message| {
+            ToolError::ExecutionFailed {
+                name: tool_name.to_owned(),
+                message,
+            }
+        })?;
+        require_workspace_write_access(ctx, &path, tool_name).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn writable_test_context(
+    working_directory: &Path,
+    allowed_paths: Vec<PathBuf>,
+) -> crate::tool_executor::GatewayToolContext {
+    use std::sync::Arc;
+    use swage_storage::{NewSession, SessionOrigin, SessionStore, SqliteStorage, TopicStore};
+    let storage = Arc::new(SqliteStorage::in_memory().expect("test storage"));
+    let session = futures::executor::block_on(async {
+        let topic = storage.general_scope().await.expect("general scope");
+        storage
+            .create_session(NewSession {
+                topic_id: topic.id,
+                agent_id: "agent-test".into(),
+                origin: SessionOrigin::Direct,
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .expect("session")
+    });
+    let mut base = swage_tool::context::MockToolContext::new("agent-test", session.id.to_string());
+    base.working_directory = working_directory.to_path_buf();
+    base.allowed_paths = allowed_paths;
+    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+    crate::tool_executor::GatewayToolContext::new(&base, tx, storage)
+}
+
 /// Validates that `requested` resolves to a path inside `workspace_root`.
 ///
 /// Returns the resolved absolute path on success, or an error message if
