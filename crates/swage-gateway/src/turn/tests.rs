@@ -18536,6 +18536,15 @@ async fn operation_outcome_turn(
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
     let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
     let mut round: Vec<_> = calls
         .into_iter()
         .map(|(id, name, arguments)| StreamChunk::ToolUse {
