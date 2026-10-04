@@ -11877,7 +11877,11 @@ mod tests {
         observation_id: std::sync::Mutex<Option<Uuid>>,
     }
 
-    struct StaggeredFailingProvider;
+    struct OrderedFailingProvider {
+        storage: Arc<SqliteStorage>,
+        run_id: Arc<tokio::sync::OnceCell<Uuid>>,
+        concurrent_entered: Arc<Notify>,
+    }
 
     #[derive(Default)]
     struct PlacementWritingProvider {
@@ -12274,9 +12278,9 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl swage_provider::LlmProvider for StaggeredFailingProvider {
+    impl swage_provider::LlmProvider for OrderedFailingProvider {
         fn model_id(&self) -> &str {
-            "staggered-failing-model"
+            "ordered-failing-model"
         }
 
         async fn complete(
@@ -12305,9 +12309,34 @@ mod tests {
                 .any(|part| {
                     matches!(part, swage_core::ContentPart::Text { text } if text.contains("terminal call fails first"))
                 });
-            let delay = if is_terminal_call { 10 } else { 200 };
+            let storage = Arc::clone(&self.storage);
+            let run_id = Arc::clone(&self.run_id);
+            let concurrent_entered = Arc::clone(&self.concurrent_entered);
             Box::pin(futures::stream::once(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                if is_terminal_call {
+                    concurrent_entered.notified().await;
+                } else {
+                    concurrent_entered.notify_one();
+                    loop {
+                        let Some(run_id) = run_id.get() else {
+                            tokio::task::yield_now().await;
+                            continue;
+                        };
+                        let terminal_settled = storage
+                            .list_workflow_journal(*run_id)
+                            .await
+                            .expect("failure ordering journal")
+                            .iter()
+                            .any(|entry| {
+                                entry.request["label"] == "terminal call"
+                                    && entry.status == "failed"
+                            });
+                        if terminal_settled {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
                 swage_core::StreamChunk::Error {
                     message: if is_terminal_call {
                         "terminal call provider failure".into()
@@ -21784,19 +21813,27 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_failures_attribute_handover_to_the_terminal_call() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.general_scope().await.expect("topic");
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn TopicStore>,
-            Arc::new(StaggeredFailingProvider),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let source = r#"
+        workflow_journey(async {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let topic = storage.general_scope().await.expect("topic");
+            let run_id = Arc::new(tokio::sync::OnceCell::new());
+            let root = tempfile::tempdir().expect("isolated workflow root");
+            let state = AppState::new_with_config_root(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn TopicStore>,
+                Arc::new(OrderedFailingProvider {
+                    storage: Arc::clone(&storage),
+                    run_id: Arc::clone(&run_id),
+                    concurrent_entered: Arc::new(Notify::new()),
+                }),
+                workflow_worker_test_config(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+                root.path().to_path_buf(),
+            );
+            let source = r#"
             const terminalCall = agent("terminal call fails first", {
                 agent: "default",
                 label: "terminal call",
@@ -21807,86 +21844,97 @@ mod tests {
                 label: "later concurrent call",
                 maxAttempts: 1,
             });
+            // Both failures settle before the script propagates the terminal one.
+            await Promise.allSettled([terminalCall, concurrentCall]);
             await terminalCall;
-            await concurrentCall;
         "#;
-        let Json(started) = start_inline_run(
-            State(state.clone()),
-            Path(topic.id),
-            Json(StartInlineWorkflowRunRequest {
-                source: source.into(),
-                args: Value::Null,
-                budget: Some(WorkflowBudget {
-                    max_agent_calls: None,
-                    per_route: Default::default(),
-                    max_total_tokens: None,
-                    reserved_closing_tokens: None,
-                    max_concurrent_agent_calls: Some(2),
-                }),
-            }),
-        )
-        .await
-        .expect("start inline run");
+            let api = WorkflowTestApi::start(state.clone()).await;
+            let started = api
+                .start_inline(
+                    topic.id,
+                    StartInlineWorkflowRunRequest {
+                        source: source.into(),
+                        args: Value::Null,
+                        budget: Some(WorkflowBudget {
+                            max_agent_calls: None,
+                            per_route: Default::default(),
+                            max_total_tokens: None,
+                            reserved_closing_tokens: None,
+                            max_concurrent_agent_calls: Some(2),
+                        }),
+                    },
+                )
+                .await;
+            run_id.set(started.id).expect("fixture run identity");
 
-        wait_for_terminal(&state, started.id).await;
+            wait_for_terminal(&state, started.id).await;
 
-        let run = storage
-            .get_workflow_run(started.id)
-            .await
-            .expect("run")
-            .expect("present");
-        let handover = run.handover.expect("attributed terminal handover");
-        let journal = storage
-            .list_workflow_journal(started.id)
-            .await
-            .expect("journal");
-        let failed_call_error = handover["failed_call"]["error"]
-            .as_str()
-            .expect("attributed call error");
-        let terminal_error = run.error_message.as_deref().expect("terminal error");
-        let terminal_call = journal
-            .iter()
-            .find(|entry| entry.request["label"] == "terminal call")
-            .expect("terminal failed call");
-        let concurrent_call = journal
-            .iter()
-            .find(|entry| entry.request["label"] == "later concurrent call")
-            .expect("other concurrent failed call");
-        assert_eq!(run.state, "failed");
-        assert_eq!(terminal_call.status, "failed");
-        assert_eq!(concurrent_call.status, "failed");
-        assert_eq!(handover["classification"], "interrupted");
-        assert_eq!(
-            handover["failed_call"]["label"],
-            terminal_call.request["label"]
-        );
-        assert_eq!(
-            handover["failed_call"]["journal_entry_id"],
-            terminal_call.id.to_string()
-        );
-        assert_ne!(
-            handover["failed_call"]["journal_entry_id"],
-            concurrent_call.id.to_string()
-        );
-        assert_eq!(
-            terminal_call.error_message.as_deref(),
-            Some(failed_call_error),
-            "the handover must retain the known terminal call's failure"
-        );
-        assert_ne!(
-            concurrent_call.error_message.as_deref(),
-            Some(failed_call_error),
-            "the later concurrent failure must remain distinguishable"
-        );
-        assert!(terminal_error.contains(failed_call_error));
-        assert!(
-            !terminal_error.contains(
+            let run = storage
+                .get_workflow_run(started.id)
+                .await
+                .expect("run")
+                .expect("present");
+            let handover = run.handover.expect("attributed terminal handover");
+            let journal = storage
+                .list_workflow_journal(started.id)
+                .await
+                .expect("journal");
+            let failed_call_error = handover["failed_call"]["error"]
+                .as_str()
+                .expect("attributed call error");
+            let terminal_error = run.error_message.as_deref().expect("terminal error");
+            let terminal_call = journal
+                .iter()
+                .find(|entry| entry.request["label"] == "terminal call")
+                .expect("terminal failed call");
+            let concurrent_call = journal
+                .iter()
+                .find(|entry| entry.request["label"] == "later concurrent call")
+                .expect("other concurrent failed call");
+            assert_eq!(run.state, "failed");
+            assert_eq!(terminal_call.status, "failed");
+            assert_eq!(concurrent_call.status, "failed");
+            assert!(
                 concurrent_call
                     .error_message
                     .as_deref()
-                    .expect("later concurrent failure text")
-            )
-        );
+                    .is_some_and(|error| error.contains("later concurrent provider failure")),
+                "second provider failure settles before script rejection"
+            );
+            assert_eq!(handover["classification"], "interrupted");
+            assert_eq!(
+                handover["failed_call"]["label"],
+                terminal_call.request["label"]
+            );
+            assert_eq!(
+                handover["failed_call"]["journal_entry_id"],
+                terminal_call.id.to_string()
+            );
+            assert_ne!(
+                handover["failed_call"]["journal_entry_id"],
+                concurrent_call.id.to_string()
+            );
+            assert_eq!(
+                terminal_call.error_message.as_deref(),
+                Some(failed_call_error),
+                "the handover must retain the known terminal call's failure"
+            );
+            assert_ne!(
+                concurrent_call.error_message.as_deref(),
+                Some(failed_call_error),
+                "the later concurrent failure must remain distinguishable"
+            );
+            assert!(terminal_error.contains(failed_call_error));
+            assert!(
+                !terminal_error.contains(
+                    concurrent_call
+                        .error_message
+                        .as_deref()
+                        .expect("later concurrent failure text")
+                )
+            );
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
