@@ -12,7 +12,8 @@ use crate::tool::Tool;
 /// These names are reserved for Swage's built-in tool implementations.
 /// Attempting to register a custom tool under any of these names returns an error.
 const PROTECTED_NAMES: &[&str] = &[
-    "agent_memory",
+    "memory_read",
+    "memory_write",
     "shell",
     "file_edit",
     "file_read",
@@ -27,7 +28,6 @@ const PROTECTED_NAMES: &[&str] = &[
     "browser_type",
     "browser_select",
     "browser_scroll",
-    "memory",
     "python_execute",
     "workspace",
     "delegate",
@@ -55,6 +55,23 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             protected: PROTECTED_NAMES.iter().copied().collect(),
+        }
+    }
+
+    /// The registry as one agent sees it: every tool except those a different
+    /// platform agent holds (`Tool::platform_holder`).
+    pub fn for_agent(&self, agent_id: &str) -> Self {
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|(_, tool)| {
+                    tool.platform_holder()
+                        .is_none_or(|holder| holder == agent_id)
+                })
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+                .collect(),
+            protected: self.protected.clone(),
         }
     }
 
@@ -179,6 +196,53 @@ mod tests {
         fn with_description(name: &'static str, description: &'static str) -> Self {
             Self { name, description }
         }
+    }
+
+    /// A tool one platform agent holds.
+    struct HeldTool;
+
+    #[async_trait]
+    impl Tool for HeldTool {
+        fn name(&self) -> &str {
+            "held_by_curator"
+        }
+
+        fn description(&self) -> &str {
+            "Held."
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        fn platform_holder(&self) -> Option<&'static str> {
+            Some("memory-curator")
+        }
+
+        async fn execute(&self, _: Value, _: &dyn ToolContext) -> Result<Value, ToolError> {
+            Ok(json!({}))
+        }
+    }
+
+    #[test]
+    fn a_platform_held_tool_is_offered_only_to_its_holder() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(NamedTool::new("open_tool")))
+            .unwrap();
+        registry.register(Arc::new(HeldTool)).unwrap();
+
+        let curator = registry.for_agent("memory-curator");
+        assert!(curator.get("held_by_curator").is_some());
+        assert!(curator.get("open_tool").is_some());
+
+        let other = registry.for_agent("gateway");
+        assert!(
+            other.get("held_by_curator").is_none(),
+            "no other agent sees a held tool, before any permission is consulted"
+        );
+        assert!(other.get("open_tool").is_some());
+        assert_eq!(other.list().len(), 1);
     }
 
     #[async_trait]

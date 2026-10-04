@@ -23,13 +23,13 @@ use swage_gateway::{
 };
 use swage_provider::LlmProvider;
 use swage_storage::{
-    ApprovalKind, NewAgentMemoryRecord, NewApprovalRequest, NewSchedule, NewScheduleRun,
-    NewSession, NewThread, NewTurn, ScheduleCreator, ScheduleKind, ScheduleRunState,
-    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SessionPolicy, SqliteStorage, TurnState,
+    ApprovalKind, NewApprovalRequest, NewSchedule, NewScheduleRun, NewSession, NewThread, NewTurn,
+    ScheduleCreator, ScheduleKind, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
+    ScheduleStatus, SessionPolicy, SqliteStorage, TurnState,
     model::AppendMessage,
     store::{
-        AgentMemoryStore, ApprovalStore, DeliveryStore, MessageStore, ScheduleStore, SessionStore,
-        Storage, ThreadStore, TopicStore, TurnStore,
+        ApprovalStore, DeliveryStore, MessageStore, ScheduleStore, SessionStore, Storage,
+        ThreadStore, TopicStore, TurnStore,
     },
 };
 
@@ -306,64 +306,6 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
         delivery_body["results"][0]["session_id"],
         session_id.to_string()
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn operator_memory_surfaces_expose_provenance_and_searchability() {
-    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = test_state(Arc::clone(&storage));
-    let router = build_router(state);
-    let (topic_id, session_id, thread_id) = seed_session(&storage).await;
-
-    let turn = storage
-        .create_turn(NewTurn {
-            thread_id,
-            agent_id: "gateway".into(),
-            state: TurnState::Completed,
-            user_input: Some("remember this".into()),
-            parent_turn_id: None,
-        })
-        .await
-        .unwrap();
-    let memory = storage
-        .create_agent_memory(NewAgentMemoryRecord {
-            id: Uuid::new_v4(),
-            topic_id,
-            session_id,
-            turn_id: turn.id,
-            agent_id: "gateway".into(),
-            memory_kind: "outcome".into(),
-            title: "Preview route requirement".into(),
-            content: "The preview route remains required.".into(),
-            tags: vec!["preview".into()],
-            outcome_status: Some("succeeded".into()),
-            source_summary: "conversation turn".into(),
-            metadata: json!({"confidence": "high"}),
-        })
-        .await
-        .unwrap();
-
-    let (list_status, list_body) = get_json(
-        &router,
-        &format!("/api/operator/memories?session_id={session_id}"),
-    )
-    .await;
-    assert_eq!(list_status, StatusCode::OK);
-    assert_eq!(list_body["memories"][0]["id"], memory.id.to_string());
-
-    let (detail_status, detail_body) =
-        get_json(&router, &format!("/api/operator/memories/{}", memory.id)).await;
-    assert_eq!(detail_status, StatusCode::OK);
-    assert_eq!(detail_body["title"], "Preview route requirement");
-
-    let (search_status, search_body) = get_json(
-        &router,
-        "/api/operator/search?kind=agent_memory&q=preview%20route",
-    )
-    .await;
-    assert_eq!(search_status, StatusCode::OK);
-    assert_eq!(search_body["results"][0]["id"], memory.id.to_string());
-    assert_eq!(search_body["results"][0]["kind"], "agent_memory");
 }
 
 #[tokio::test(flavor = "multi_thread")]

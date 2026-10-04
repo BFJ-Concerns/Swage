@@ -12,7 +12,6 @@ use swage_protocol::{
         VariantSelectionHistoryEvent,
     },
 };
-use swage_storage::AgentMemoryRecord;
 
 use crate::state::AppState;
 
@@ -75,20 +74,6 @@ pub struct OperatorUsageResponse {
     pub run: Option<RunUsage>,
     pub session: Option<UsageAggregate>,
     pub schedule: Option<UsageAggregate>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct AgentMemoryListQuery {
-    pub topic_id: Option<Uuid>,
-    pub session_id: Option<Uuid>,
-    pub agent_id: Option<String>,
-    pub q: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AgentMemoryListResponse {
-    pub memories: Vec<AgentMemoryRecord>,
 }
 
 pub async fn operator_history(state: &AppState) -> Result<OperatorHistoryResponse, GatewayError> {
@@ -420,121 +405,9 @@ pub async fn operator_search(
         }
     }
 
-    if matches_kind(kind_filter, "agent_memory") {
-        let search_query = search_text.as_deref();
-        let mut memories = Vec::new();
-        if let Some(session_id) = session_filter {
-            if let Some(session) = state.storage.get_session(session_id).await? {
-                memories.extend(
-                    state
-                        .storage
-                        .list_agent_memories(
-                            session.topic_id,
-                            None,
-                            Some(session.id),
-                            search_query,
-                            limit,
-                        )
-                        .await?,
-                );
-            }
-        } else {
-            for topic in &topics {
-                memories.extend(
-                    state
-                        .storage
-                        .list_agent_memories(topic.id, None, None, search_query, limit)
-                        .await?,
-                );
-            }
-        }
-
-        for memory in memories {
-            if matches_query(
-                &search_text,
-                &[
-                    &memory.id.to_string(),
-                    &memory.agent_id,
-                    &memory.memory_kind,
-                ],
-                Some(&format!("{} {}", memory.title, memory.content)),
-            ) || matches_query(&search_text, &[], Some(&memory.source_summary))
-            {
-                results.push(OperatorSearchResult {
-                    kind: "agent_memory".into(),
-                    id: memory.id.to_string(),
-                    session_id: Some(memory.session_id),
-                    topic_id: Some(memory.topic_id),
-                    title: memory.title,
-                    excerpt: Some(memory.source_summary),
-                    occurred_at: memory.updated_at,
-                });
-            }
-        }
-    }
-
     results.sort_by_key(|result| std::cmp::Reverse(result.occurred_at));
     results.truncate(limit);
     Ok(OperatorSearchResponse { results })
-}
-
-pub async fn list_agent_memories(
-    state: &AppState,
-    query: AgentMemoryListQuery,
-) -> Result<AgentMemoryListResponse, GatewayError> {
-    let limit = query.limit.unwrap_or(50).min(200);
-    let search = query.q.as_deref();
-    let mut memories = Vec::new();
-
-    if let Some(topic_id) = query.topic_id {
-        memories.extend(
-            state
-                .storage
-                .list_agent_memories(
-                    topic_id,
-                    query.agent_id.as_deref(),
-                    query.session_id,
-                    search,
-                    limit,
-                )
-                .await?,
-        );
-    } else if let Some(session_id) = query.session_id {
-        if let Some(session) = state.storage.get_session(session_id).await? {
-            memories.extend(
-                state
-                    .storage
-                    .list_agent_memories(
-                        session.topic_id,
-                        query.agent_id.as_deref(),
-                        Some(session_id),
-                        search,
-                        limit,
-                    )
-                    .await?,
-            );
-        }
-    } else {
-        for topic in state.topic_store.list_scopes().await? {
-            memories.extend(
-                state
-                    .storage
-                    .list_agent_memories(topic.id, query.agent_id.as_deref(), None, search, limit)
-                    .await?,
-            );
-        }
-        memories.sort_by_key(|memory| std::cmp::Reverse(memory.updated_at));
-        memories.truncate(limit);
-    }
-
-    Ok(AgentMemoryListResponse { memories })
-}
-
-pub async fn get_agent_memory(
-    state: &AppState,
-    id: Uuid,
-) -> Result<Option<AgentMemoryRecord>, GatewayError> {
-    Ok(state.storage.get_agent_memory(id).await?)
 }
 
 pub async fn operator_usage(

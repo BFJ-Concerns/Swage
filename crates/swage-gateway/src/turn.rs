@@ -30,7 +30,7 @@ use swage_storage::model::{
 use swage_config::{HierarchyLevel, prompt_rule::PromptRule};
 use swage_context::element::ContextElement;
 use swage_context::history::HistoryElement;
-use swage_context::memory::MemoryElement;
+use swage_context::memory::MemoryIndexElement;
 use swage_context::prompts::PromptsElement;
 use swage_context::skills::{ActiveSkill, SkillsElement};
 use swage_context::tokeniser::TiktokenTokeniser;
@@ -516,10 +516,15 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
     let assembly_name = context_choices.assembly_name;
-    let memory_content = load_memory_for_assembly(&assembly_name, || async {
-        load_topic_memory(swage_root, &scope).await
-    })
-    .await;
+    let memory_index = if session_carries_memory(&session) {
+        Some(
+            crate::memory::load_memory_index(swage_root, &scope)
+                .await
+                .into_element(),
+        )
+    } else {
+        None
+    };
     let mut session_variables: std::collections::BTreeMap<String, String> =
         record_failed_turn_and_release_on_error(
             state,
@@ -577,7 +582,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         operator_guidance,
         active_skills,
         history_messages,
-        memory_content.map(|content| (content, topic.name.clone())),
+        memory_index,
         environment,
         available_skills,
         config.default_model_id(),

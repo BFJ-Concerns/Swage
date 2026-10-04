@@ -8,7 +8,7 @@
 //!    session routes, topic API handlers).
 //!
 //! 2. **Memory scoping** — memory written in Topic A's context is inaccessible
-//!    from Topic B's context (spans: MemoryTool, topic context in turn
+//!    from Topic B's context (spans: memory tools, topic context in turn
 //!    executor, topic CRUD).
 //!
 //! 3. **Per-topic config resolution** — different topics resolve different
@@ -793,7 +793,7 @@ async fn a_conversation_without_a_topic_runs_in_the_general_scope() {
 // ---------------------------------------------------------------------------
 // Test 2: Memory scoping between topics
 // ---------------------------------------------------------------------------
-// Spans: [3wjo] MemoryTool, [cg5i] topic context, [k2zw] topic CRUD,
+// Spans: [3wjo] memory tools, [cg5i] topic context, [k2zw] topic CRUD,
 //        [ybvv] memory registration
 //
 // Proves: Delivery Closure — memory written in Topic A is not accessible

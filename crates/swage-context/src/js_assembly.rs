@@ -1703,21 +1703,21 @@ mod tests {
     }
 
     #[test]
-    fn memory_is_not_part_of_the_floor() {
+    fn memory_is_part_of_the_floor() {
         let mut elements = baseline_bearing_elements();
-        elements.push(Box::new(crate::memory::MemoryElement::new(
-            "remembered material".into(),
-            "Atelier".into(),
+        elements.push(Box::new(crate::memory::MemoryIndexElement::new(
+            Some("remembered material".into()),
+            Vec::new(),
         )));
         let output = assemble_source(HISTORY_AND_PROMPTS_ONLY, &elements);
 
         assert!(
-            !output
+            output
                 .report
                 .elements
                 .iter()
                 .any(|element| element.name == "memory"),
-            "the floor is what the default assembly carries, and it discards memory"
+            "the floor is what the default assembly carries, and that includes memory"
         );
     }
 

@@ -31,8 +31,7 @@ use crate::{
         QueuedAttachmentResponse,
     },
     audit::{
-        AgentMemoryListQuery, AgentMemoryListResponse, OperatorSearchQuery, OperatorSearchResponse,
-        OperatorUsageQuery, OperatorUsageResponse,
+        OperatorSearchQuery, OperatorSearchResponse, OperatorUsageQuery, OperatorUsageResponse,
     },
     capabilities::WorkflowCapabilitiesResponse,
     channel_gateway::{
@@ -450,27 +449,6 @@ pub async fn operator_search(
     Query(query): Query<OperatorSearchQuery>,
 ) -> Result<Json<OperatorSearchResponse>, ApiError> {
     Ok(Json(crate::audit::operator_search(&state, query).await?))
-}
-
-/// `GET /api/operator/memories` — inspect durable agent memories with provenance.
-pub async fn list_operator_memories(
-    State(state): State<AppState>,
-    Query(query): Query<AgentMemoryListQuery>,
-) -> Result<Json<AgentMemoryListResponse>, ApiError> {
-    Ok(Json(
-        crate::audit::list_agent_memories(&state, query).await?,
-    ))
-}
-
-/// `GET /api/operator/memories/:id` — inspect one durable agent-memory record.
-pub async fn get_operator_memory(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<swage_storage::AgentMemoryRecord>, ApiError> {
-    let memory = crate::audit::get_agent_memory(&state, id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("agent memory", id))?;
-    Ok(Json(memory))
 }
 
 /// `GET /api/operator/usage` — inspect run and aggregate token/cost usage.

@@ -732,16 +732,15 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, agent_memory::AgentMemoryTool, browser::browser_tools, docs_read::DocsReadTool,
-        hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
-        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
-        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
-        knowledge::KnowledgeSearchTool, memory::MemoryTool, plugin::discover_plugin_tools,
-        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
-        schedule::WakeMeLaterTool, session_variable::SessionVariableTool,
-        surface::SurfaceLibraryTool, surface::SurfaceReadTool, surface::SurfaceWriteTool,
-        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
-        url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        Tool, browser::browser_tools, docs_read::DocsReadTool, hold::WorkflowHoldTool,
+        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
+        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
+        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryReadTool,
+        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
+        session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
+        surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
+        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
 
     let max_output = config.tools.max_output_bytes;
@@ -770,9 +769,11 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(crate::tool::workflow_run_account::WorkflowRunAccountTool),
         Arc::new(crate::tool::workflow_run_status::WorkflowRunStatusTool),
         Arc::new(crate::tool::workflow_save::WorkflowSaveTool),
-        // Shared memory follows the calling session's scope on the gateway host.
-        Arc::new(MemoryTool),
-        Arc::new(AgentMemoryTool),
+        // The operator's memory follows the calling session's scope on the
+        // gateway host: every session may read; the curator alone holds the
+        // write tool (`Tool::platform_holder`).
+        Arc::new(MemoryReadTool),
+        Arc::new(MemoryWriteTool),
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),

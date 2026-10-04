@@ -34,7 +34,7 @@ use crate::tokeniser::Tokeniser;
 /// | Priority | Element |
 /// |----------|---------|
 /// | 100      | `"prompts"` — system instructions |
-/// | 50       | `"memory"` — **skipped by the default assembly** |
+/// | 103      | `"memory"` — the operator profile and memory index |
 /// | 0        | `"history"` — conversation messages |
 ///
 /// ## Budget enforcement
@@ -224,14 +224,11 @@ fn default_assembly_inner(
 /// Returns `Some("name1, name2")` when skills are present, `None` otherwise.
 /// The parenthesised level/token annotations are stripped; only the bare names remain.
 /// Whether the default assembly carries this element's content into the
-/// assembled context.
-///
-/// Memory stays tool-accessible rather than prepended to the prompt; named
-/// assemblies can opt in by adding it themselves. This is the single
-/// statement of the default assembly's disposition — the baseline floor a
-/// named assembly is held to reads it rather than restating the list.
-pub fn default_assembly_carries(name: &str) -> bool {
-    name != "memory"
+/// assembled context. Every element the builder supplies is carried; this is
+/// the single statement of the default assembly's disposition — the baseline
+/// floor a named assembly is held to reads it rather than restating the list.
+pub fn default_assembly_carries(_name: &str) -> bool {
+    true
 }
 
 pub(crate) fn safe_metadata_preview(name: &str, source: &str) -> Option<String> {
@@ -352,9 +349,9 @@ mod tests {
     fn memory_element() -> Box<dyn ContextElement> {
         Box::new(MockElement {
             name: "memory",
-            priority: 50,
-            messages: vec![ChatMessage::new(Role::User, "some memory content")],
-            source: "agent memory",
+            priority: 103,
+            messages: vec![ChatMessage::new(Role::System, "some memory content")],
+            source: "operator profile and memory index",
         })
     }
 
@@ -427,7 +424,7 @@ mod tests {
     // ── Memory is skipped ─────────────────────────────────────────────────────
 
     #[test]
-    fn memory_element_is_excluded_from_assembled_messages() {
+    fn the_memory_element_is_carried_ahead_of_the_prompts() {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             prompts_element("Instructions."),
             memory_element(),
@@ -436,20 +433,12 @@ mod tests {
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
-        // Only system + 2 history messages; memory content absent.
-        assert_eq!(
-            output.messages.len(),
-            3,
-            "memory content should be excluded"
-        );
-        // No message should come from the memory element.
-        for msg in &output.messages {
-            let is_memory = matches!(
-                msg.content().first(),
-                Some(swage_core::ContentPart::Text { text }) if text.contains("memory content")
-            );
-            assert!(!is_memory, "memory content appeared in assembled messages");
-        }
+        // memory + system + 2 history messages, memory first by priority.
+        assert_eq!(output.messages.len(), 4);
+        assert!(matches!(
+            output.messages[0].content().first(),
+            Some(swage_core::ContentPart::Text { text }) if text.contains("memory content")
+        ));
     }
 
     // ── Report population ─────────────────────────────────────────────────────
@@ -468,13 +457,13 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             prompts_element("Instructions."),
             history_element(&[("Hi", "Hello")]),
-            memory_element(), // skipped — should not appear in element reports
+            memory_element(),
         ];
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
-        // Two active elements: prompts + history. Memory is excluded.
-        assert_eq!(output.report.elements.len(), 2);
+        // Every supplied element is active and reported.
+        assert_eq!(output.report.elements.len(), 3);
         let names: Vec<&str> = output
             .report
             .elements
@@ -483,7 +472,7 @@ mod tests {
             .collect();
         assert!(names.contains(&"prompts"));
         assert!(names.contains(&"history"));
-        assert!(!names.contains(&"memory"));
+        assert!(names.contains(&"memory"));
     }
 
     #[test]
@@ -743,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_remains_excluded_when_skills_element_present() {
+    fn memory_is_carried_beside_the_skills_element() {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             prompts_element("Instructions."),
             skills_element(
@@ -756,8 +745,8 @@ mod tests {
         let tokeniser = FixedCostTokeniser { cost: 10 };
         let output = default_assembly(&elements, &no_budget_config(), &tokeniser);
 
-        // Prompts (1) + skills (1) + history (2) = 4. Memory excluded.
-        assert_eq!(output.messages.len(), 4, "memory must remain excluded");
+        // Memory (1) + prompts (1) + skills (1) + history (2) = 5.
+        assert_eq!(output.messages.len(), 5, "memory is carried");
 
         let report_names: Vec<&str> = output
             .report
@@ -766,8 +755,8 @@ mod tests {
             .map(|e| e.name.as_str())
             .collect();
         assert!(
-            !report_names.contains(&"memory"),
-            "memory must not appear in report"
+            report_names.contains(&"memory"),
+            "memory appears in the report"
         );
         assert!(
             report_names.contains(&"skills"),

@@ -1,88 +1,83 @@
-//! MemoryTool — read and write a session scope's shared memory files.
+//! The two memory tools: `memory_read`, offered to every session, and
+//! `memory_write`, held by the platform's curator alone.
 //!
-//! The calling session's scope owns the directory beneath the Swage data root.
-//!
-//! Operations:
-//!   - **read**: read a specific file (with "file" param) or all files (no param)
-//!   - **write**: create or overwrite a named file
-//!   - **list**: return names of all memory files in sorted order
-
-use std::path::Path;
+//! Both resolve the calling session's scope on the gateway host and address
+//! entries by the reference the index spells (`general/people/alice`,
+//! `topic/conventions`). A conversing agent reads what the curator recorded;
+//! it is never offered a way to write, so the write tool declares its holder
+//! and the per-turn dispatcher withholds it from every other agent.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
+use crate::memory::{
+    MEMORY_CURATOR_AGENT_ID, MemoryReference, read_entry, scope_location_for, write_entry,
+};
 use crate::tool::Tool;
 
-// ---------------------------------------------------------------------------
-// File name validation
-// ---------------------------------------------------------------------------
+fn invalid(tool: &str, message: impl Into<String>) -> ToolError {
+    ToolError::InvalidParameters {
+        name: tool.to_owned(),
+        message: message.into(),
+    }
+}
 
-/// Validate a memory file name — returns an error string if invalid.
-///
-/// Allowed: alphanumeric, hyphens, underscores. Dots, slashes, and ".." are
-/// rejected to prevent path traversal.  The ".md" extension is appended by
-/// the tool; callers must not include it.
-fn validate_file_name(name: &str) -> Option<String> {
-    if name.is_empty() {
-        return Some("file name must not be empty".into());
+fn failed(tool: &str, message: impl std::fmt::Display) -> ToolError {
+    ToolError::ExecutionFailed {
+        name: tool.to_owned(),
+        message: message.to_string(),
     }
-    // Block path traversal regardless of character set.
-    if name.contains("..") || name.contains('/') || name.contains('\\') {
-        return Some(format!(
-            "file name '{name}' is invalid: must not contain path separators or '..'"
-        ));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Some(format!(
-            "file name '{name}' is invalid: only alphanumeric characters, \
-             hyphens, and underscores are allowed"
-        ));
-    }
-    None
+}
+
+fn required_str<'a>(tool: &str, params: &'a Value, key: &str) -> Result<&'a str, ToolError> {
+    params[key]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid(tool, format!("Missing required argument: {key}")))
+}
+
+/// The calling session's scope and the config root the store lives under.
+async fn session_memory_scope(
+    tool: &str,
+    ctx: &dyn ToolContext,
+) -> Result<(std::path::PathBuf, swage_core::ScopeLocation), ToolError> {
+    let state = super::require_gateway_state(
+        ctx,
+        tool,
+        format!("{tool} runs on the gateway host, inside a session"),
+    )?;
+    let (_, scope, _) = super::knowledge::session_topic(tool, state, ctx).await?;
+    Ok((state.config_root.clone(), scope))
 }
 
 // ---------------------------------------------------------------------------
-// MemoryTool
+// memory_read
 // ---------------------------------------------------------------------------
 
-pub struct MemoryTool;
+pub struct MemoryReadTool;
 
 #[async_trait]
-impl Tool for MemoryTool {
+impl Tool for MemoryReadTool {
     fn name(&self) -> &str {
-        "memory"
+        "memory_read"
     }
 
     fn description(&self) -> &str {
-        "Read and write the shared memory files of this session's scope — its topic's, or the general memory when no topic is selected: named markdown notes that persist there and are visible to every agent working in that scope. For private records only you will search later, use the agent_memory tool instead."
+        "Read one entry of your operator's memory by the reference the memory index in your context gives it — general/<entry> for what the operator has stated about themselves, topic/<entry> for what they have stated about this topic. Returns the entry's summary and body as the curator recorded them. Read an entry when its index summary bears on the conversation; the index is the only list there is, so a reference not in it does not exist."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "operation": {
+                "reference": {
                     "type": "string",
-                    "enum": ["read", "write", "list"],
-                    "description": "The operation to perform."
-                },
-                "file": {
-                    "type": "string",
-                    "description": "Memory file name without the .md extension. \
-                                    Required for write; optional for read (reads all files if omitted)."
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Markdown content to write. Required for write."
+                    "description": "The entry's reference as the memory index spells it, such as general/people/alice or topic/conventions."
                 }
             },
-            "required": ["operation"]
+            "required": ["reference"]
         })
     }
 
@@ -91,214 +86,97 @@ impl Tool for MemoryTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        let state = super::require_gateway_state(
-            ctx,
-            self.name(),
-            "memory requires gateway execution context",
-        )?;
-        let (_, scope, _) = super::knowledge::session_topic(self.name(), state, ctx).await?;
-        let memory_dir = scope.data_dir(&state.config_root).join("memory");
-
-        let operation =
-            params["operation"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidParameters {
-                    name: self.name().to_owned(),
-                    message: "Missing required argument: operation".to_owned(),
-                })?;
-
-        match operation {
-            "read" => self.read(&memory_dir, &params).await,
-            "write" => self.write(&memory_dir, &params).await,
-            "list" => self.list(&memory_dir).await,
-            other => Err(ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: format!("Unknown operation '{other}': must be read, write, or list"),
-            }),
+        let tool = self.name();
+        let reference = MemoryReference::parse(required_str(tool, &params, "reference")?)
+            .map_err(|error| invalid(tool, error.to_string()))?;
+        let (root, session_scope) = session_memory_scope(tool, ctx).await?;
+        let location = scope_location_for(&reference, &session_scope)
+            .map_err(|error| invalid(tool, error.to_string()))?;
+        match read_entry(&root, &location, &reference).await {
+            Ok(Some(entry)) => Ok(json!({
+                "reference": reference.to_string(),
+                "summary": entry.summary,
+                "body": entry.body,
+            })),
+            Ok(None) => Err(failed(
+                tool,
+                format!("no memory entry is recorded at '{reference}'"),
+            )),
+            Err(error) => Err(failed(tool, error)),
         }
     }
 }
 
-impl MemoryTool {
-    // -----------------------------------------------------------------------
-    // read
-    // -----------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// memory_write
+// ---------------------------------------------------------------------------
 
-    async fn read(&self, memory_dir: &Path, params: &Value) -> Result<Value, ToolError> {
-        match params["file"].as_str() {
-            Some(name) => {
-                // Read a specific named file.
-                if let Some(err) = validate_file_name(name) {
-                    return Err(ToolError::InvalidParameters {
-                        name: self.name().to_owned(),
-                        message: err,
-                    });
-                }
-                let path = memory_dir.join(format!("{name}.md"));
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(content) => Ok(json!({"output": content})),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        Err(ToolError::ExecutionFailed {
-                            name: self.name().to_owned(),
-                            message: format!("Memory file '{name}.md' not found"),
-                        })
-                    }
-                    Err(e) => Err(ToolError::ExecutionFailed {
-                        name: self.name().to_owned(),
-                        message: format!("Failed to read '{name}.md': {e}"),
-                    }),
-                }
-            }
-            None => {
-                // Read all .md files, prefixed by their filename as a header.
-                self.read_all(memory_dir).await
-            }
-        }
+pub struct MemoryWriteTool;
+
+#[async_trait]
+impl Tool for MemoryWriteTool {
+    fn name(&self) -> &str {
+        "memory_write"
     }
 
-    async fn read_all(&self, memory_dir: &Path) -> Result<Value, ToolError> {
-        let mut dir = match tokio::fs::read_dir(memory_dir).await {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(json!({
-                    "output": "No memory files found (memory directory does not exist yet)"
-                }));
-            }
-            Err(e) => {
-                return Err(ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to read memory directory: {e}"),
-                });
-            }
-            Ok(d) => d,
-        };
-
-        let mut parts: Vec<(String, String)> = Vec::new();
-        loop {
-            match dir.next_entry().await {
-                Err(_) | Ok(None) => break,
-                Ok(Some(entry)) => {
-                    let fname = entry.file_name();
-                    let name = fname.to_string_lossy();
-                    if !name.ends_with(".md") {
-                        continue;
-                    }
-                    if let Ok(content) = tokio::fs::read_to_string(entry.path()).await {
-                        parts.push((name.into_owned(), content));
-                    }
-                }
-            }
-        }
-
-        if parts.is_empty() {
-            return Ok(json!({"output": "No memory files found"}));
-        }
-
-        // Sort by filename for deterministic output.
-        parts.sort_by(|a, b| a.0.cmp(&b.0));
-        let combined = parts
-            .into_iter()
-            .map(|(name, content)| format!("# {name}\n\n{content}"))
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n");
-
-        Ok(json!({"output": combined}))
+    fn description(&self) -> &str {
+        "Record or replace one entry of the operator's memory, whole: its reference (general/<entry> for a fact about the operator, topic/<entry> for a fact about this topic), the one-sentence summary the index will show, and the body. Writing replaces the entry's summary and body entirely, so read the entry first and carry forward what still holds. Record only what the operator stated, in their words, each fact with a reference to the conversation it came from."
     }
 
-    // -----------------------------------------------------------------------
-    // write
-    // -----------------------------------------------------------------------
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "reference": {
+                    "type": "string",
+                    "description": "The entry's reference: general/<entry> or topic/<entry>; path segments use letters, digits, hyphens and underscores."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One sentence the index shows for this entry — enough to pick it from the index alone."
+                },
+                "body": {
+                    "type": "string",
+                    "description": "The entry's whole body: what is currently true about the subject, each fact with its conversation reference."
+                }
+            },
+            "required": ["reference", "summary", "body"]
+        })
+    }
 
-    async fn write(&self, memory_dir: &Path, params: &Value) -> Result<Value, ToolError> {
-        let name = params["file"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: "write requires a 'file' argument".to_owned(),
-            })?;
+    fn requires_device_execution(&self) -> bool {
+        true
+    }
 
-        let content = params["content"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: "write requires a 'content' argument".to_owned(),
-            })?;
+    fn platform_holder(&self) -> Option<&'static str> {
+        Some(MEMORY_CURATOR_AGENT_ID)
+    }
 
-        if let Some(err) = validate_file_name(name) {
-            return Err(ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: err,
-            });
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        let tool = self.name();
+        let reference = MemoryReference::parse(required_str(tool, &params, "reference")?)
+            .map_err(|error| invalid(tool, error.to_string()))?;
+        let summary = required_str(tool, &params, "summary")?;
+        let body = required_str(tool, &params, "body")?;
+        if summary.contains('\n') {
+            return Err(invalid(tool, "summary must be a single line"));
         }
-
-        // Create the memory directory on first write if it doesn't exist.
-        tokio::fs::create_dir_all(memory_dir)
+        let (root, session_scope) = session_memory_scope(tool, ctx).await?;
+        let location = scope_location_for(&reference, &session_scope)
+            .map_err(|error| invalid(tool, error.to_string()))?;
+        write_entry(&root, &location, &reference, summary, body)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!("Failed to create memory directory: {e}"),
-            })?;
-
-        let path = memory_dir.join(format!("{name}.md"));
-        tokio::fs::write(&path, content)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!("Failed to write '{name}.md': {e}"),
-            })?;
-
-        Ok(json!({"output": format!("Wrote {name}.md ({} bytes)", content.len())}))
-    }
-
-    // -----------------------------------------------------------------------
-    // list
-    // -----------------------------------------------------------------------
-
-    async fn list(&self, memory_dir: &Path) -> Result<Value, ToolError> {
-        let mut dir = match tokio::fs::read_dir(memory_dir).await {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(json!({
-                    "output": "No memory files found (memory directory does not exist yet)"
-                }));
-            }
-            Err(e) => {
-                return Err(ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to read memory directory: {e}"),
-                });
-            }
-            Ok(d) => d,
-        };
-
-        let mut names: Vec<String> = Vec::new();
-        loop {
-            match dir.next_entry().await {
-                Err(_) | Ok(None) => break,
-                Ok(Some(entry)) => {
-                    let fname = entry.file_name();
-                    let name = fname.to_string_lossy();
-                    if name.ends_with(".md") {
-                        names.push(name.into_owned());
-                    }
-                }
-            }
-        }
-
-        if names.is_empty() {
-            return Ok(json!({"output": "No memory files found"}));
-        }
-
-        names.sort();
-        Ok(json!({"output": names.join("\n")}))
+            .map_err(|error| failed(tool, error))?;
+        Ok(json!({
+            "reference": reference.to_string(),
+            "recorded": true,
+            "bytes": body.len(),
+        }))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use tempfile::TempDir;
@@ -313,12 +191,11 @@ mod tests {
 
     use crate::state::AppState;
     use crate::tool_executor::GatewayToolContext;
-    use crate::turn::load_topic_memory;
     use crate::turn::tests::MockProvider;
 
     use super::*;
 
-    /// A real session and scope row, with a distinct scratch working directory.
+    /// A real session and scope row under a temporary config root.
     async fn ctx_for_scope(dir: &TempDir, named_topic: bool) -> GatewayToolContext {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let topic = if named_topic {
@@ -368,443 +245,145 @@ mod tests {
             .with_app_state(Some(state))
     }
 
-    async fn ctx_with_root(dir: &TempDir) -> GatewayToolContext {
-        ctx_for_scope(dir, false).await
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_written_entry_is_read_back_by_its_reference_in_either_scope() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_for_scope(&dir, true).await;
+
+        let written = MemoryWriteTool
+            .execute(
+                json!({
+                    "reference": "topic/conventions",
+                    "summary": "This topic uses metric units only.",
+                    "body": "Metric only (conversation 2026-10-04)."
+                }),
+                &ctx,
+            )
+            .await
+            .expect("write");
+        assert_eq!(written["recorded"], true);
+        assert!(
+            dir.path()
+                .join("topics/my-topic/memory/conventions.md")
+                .exists(),
+            "topic memory lives under the topic's data directory"
+        );
+
+        MemoryWriteTool
+            .execute(
+                json!({
+                    "reference": "general/people/alice",
+                    "summary": "Alice is the operator's sister.",
+                    "body": "Alice lives in Leeds (conversation 2026-10-04)."
+                }),
+                &ctx,
+            )
+            .await
+            .expect("write general");
+
+        let read = MemoryReadTool
+            .execute(json!({ "reference": "topic/conventions" }), &ctx)
+            .await
+            .expect("read");
+        assert_eq!(read["summary"], "This topic uses metric units only.");
+        assert_eq!(read["body"], "Metric only (conversation 2026-10-04).");
+        let read = MemoryReadTool
+            .execute(json!({ "reference": "general/people/alice" }), &ctx)
+            .await
+            .expect("read general");
+        assert_eq!(read["reference"], "general/people/alice");
     }
 
-    /// Path where MemoryTool will look for files given ctx_with_root.
-    fn memory_dir(dir: &TempDir) -> PathBuf {
-        dir.path().join("general").join("memory")
-    }
-
-    /// Convenience: create the memory directory and write a file into it.
-    fn seed_file(dir: &TempDir, name: &str, content: &[u8]) {
-        let mdir = memory_dir(dir);
-        std::fs::create_dir_all(&mdir).unwrap();
-        std::fs::write(mdir.join(name), content).unwrap();
-    }
-
-    // -----------------------------------------------------------------------
-    // validate_file_name
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn valid_file_names_pass() {
-        assert!(validate_file_name("notes").is_none());
-        assert!(validate_file_name("my-context").is_none());
-        assert!(validate_file_name("user_prefs").is_none());
-        assert!(validate_file_name("abc123").is_none());
-    }
-
-    #[test]
-    fn invalid_file_names_rejected() {
-        assert!(validate_file_name("").is_some(), "empty should be rejected");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_without_a_topic_has_no_topic_memory_to_read_or_write() {
+        let dir = TempDir::new().unwrap();
+        let ctx = ctx_for_scope(&dir, false).await;
+        let error = MemoryReadTool
+            .execute(json!({ "reference": "topic/conventions" }), &ctx)
+            .await
+            .expect_err("refused");
         assert!(
-            validate_file_name("../etc/passwd").is_some(),
-            ".. should be rejected"
+            matches!(error, ToolError::InvalidParameters { ref message, .. } if message.contains("no topic"))
         );
+        let error = MemoryWriteTool
+            .execute(
+                json!({ "reference": "topic/x", "summary": "s", "body": "b" }),
+                &ctx,
+            )
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, ToolError::InvalidParameters { .. }));
         assert!(
-            validate_file_name("foo/bar").is_some(),
-            "slash should be rejected"
-        );
-        assert!(
-            validate_file_name("foo\\bar").is_some(),
-            "backslash should be rejected"
-        );
-        assert!(
-            validate_file_name("foo.bar").is_some(),
-            "dot should be rejected"
-        );
-        assert!(
-            validate_file_name("hello world").is_some(),
-            "topic should be rejected"
+            !dir.path().join("general/memory").exists(),
+            "nothing was written"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn general_memory_written_by_one_session_is_read_by_another() {
+    async fn an_unrecorded_reference_and_a_malformed_one_are_refused_distinctly() {
         let dir = TempDir::new().unwrap();
-        let first = ctx_with_root(&dir).await;
-        MemoryTool.execute(
-            json!({"operation": "write", "file": "general_note", "content": "General scope note"}),
-            &first,
-        ).await.unwrap();
-
-        let second = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({"operation": "list"}), &second)
+        let ctx = ctx_for_scope(&dir, true).await;
+        let missing = MemoryReadTool
+            .execute(json!({ "reference": "general/people/nobody" }), &ctx)
             .await
-            .unwrap();
-        assert_eq!(result["output"], "general_note.md");
-        let result = MemoryTool
+            .expect_err("missing");
+        assert!(
+            matches!(missing, ToolError::ExecutionFailed { ref message, .. } if message.contains("no memory entry"))
+        );
+        for bad in ["people/alice", "general/../x", "general/a b"] {
+            let error = MemoryReadTool
+                .execute(json!({ "reference": bad }), &ctx)
+                .await
+                .expect_err(bad);
+            assert!(
+                matches!(error, ToolError::InvalidParameters { .. }),
+                "{bad}"
+            );
+        }
+        let error = MemoryWriteTool
             .execute(
-                json!({"operation": "read", "file": "general_note"}),
-                &second,
+                json!({ "reference": "general/x", "summary": "two\nlines", "body": "b" }),
+                &ctx,
             )
             .await
-            .unwrap();
-        assert_eq!(result["output"], "General scope note");
+            .expect_err("multi-line summary");
+        assert!(matches!(error, ToolError::InvalidParameters { .. }));
+    }
+
+    #[test]
+    fn only_the_curator_holds_the_write_tool() {
         assert_eq!(
-            load_topic_memory(dir.path(), &swage_core::ScopeLocation::General).await,
-            "General scope note",
+            MemoryWriteTool.platform_holder(),
+            Some(MEMORY_CURATOR_AGENT_ID)
         );
-        assert!(memory_dir(&dir).join("general_note.md").exists());
-        assert!(
-            !dir.path()
-                .join("scratch/.swage/memory/general_note.md")
-                .exists()
-        );
+        assert_eq!(MemoryReadTool.platform_holder(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn topic_memory_is_read_only_by_sessions_in_that_topic() {
-        let dir = TempDir::new().unwrap();
-        let general = ctx_with_root(&dir).await;
-        let topic = ctx_for_scope(&dir, true).await;
-        MemoryTool
-            .execute(
-                json!({"operation": "write", "file": "general_note", "content": "General note"}),
-                &general,
-            )
-            .await
-            .unwrap();
-        MemoryTool
-            .execute(
-                json!({"operation": "write", "file": "topic_note", "content": "Topic note"}),
-                &topic,
-            )
-            .await
-            .unwrap();
-
-        let next_topic_session = ctx_for_scope(&dir, true).await;
-        let topic_list = MemoryTool
-            .execute(json!({"operation": "list"}), &next_topic_session)
-            .await
-            .unwrap();
-        assert_eq!(topic_list["output"], "topic_note.md");
-        let topic_read = MemoryTool
-            .execute(
-                json!({"operation": "read", "file": "topic_note"}),
-                &next_topic_session,
-            )
-            .await
-            .unwrap();
-        assert_eq!(topic_read["output"], "Topic note");
-        let general_list = MemoryTool
-            .execute(json!({"operation": "list"}), &general)
-            .await
-            .unwrap();
-        assert_eq!(general_list["output"], "general_note.md");
+    async fn both_tools_refuse_to_run_outside_the_host() {
+        let base = MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            working_directory: std::env::temp_dir(),
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
         assert!(
-            MemoryTool
+            MemoryReadTool
+                .execute(json!({ "reference": "general/profile" }), &base)
+                .await
+                .is_err()
+        );
+        assert!(
+            MemoryWriteTool
                 .execute(
-                    json!({"operation": "read", "file": "general_note"}),
-                    &next_topic_session
+                    json!({ "reference": "general/profile", "summary": "s", "body": "b" }),
+                    &base
                 )
                 .await
                 .is_err()
         );
-        assert_eq!(
-            load_topic_memory(dir.path(), &swage_core::ScopeLocation::topic("my-topic")).await,
-            "Topic note",
-        );
-        assert!(
-            dir.path()
-                .join("topics/my-topic/memory/topic_note.md")
-                .exists()
-        );
-        assert!(
-            !dir.path()
-                .join("scratch/.swage/memory/topic_note.md")
-                .exists()
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // write
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_creates_file_with_md_extension() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(
-                json!({ "operation": "write", "file": "notes", "content": "# My Notes\n\nHello!" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        let output = result["output"].as_str().unwrap();
-        assert!(
-            output.contains("notes.md"),
-            "confirmation should mention the file"
-        );
-
-        let written = std::fs::read_to_string(memory_dir(&dir).join("notes.md")).unwrap();
-        assert_eq!(written, "# My Notes\n\nHello!");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_overwrites_existing_file() {
-        let dir = TempDir::new().unwrap();
-        seed_file(&dir, "notes.md", b"old content");
-
-        let ctx = ctx_with_root(&dir).await;
-        MemoryTool
-            .execute(
-                json!({ "operation": "write", "file": "notes", "content": "new content" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        let written = std::fs::read_to_string(memory_dir(&dir).join("notes.md")).unwrap();
-        assert_eq!(written, "new content");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_creates_directory_if_missing() {
-        let dir = TempDir::new().unwrap();
-        // The .swage/memory directory must not exist yet.
-        assert!(!memory_dir(&dir).exists());
-
-        let ctx = ctx_with_root(&dir).await;
-        MemoryTool
-            .execute(
-                json!({ "operation": "write", "file": "context", "content": "data" }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-
-        assert!(memory_dir(&dir).join("context.md").exists());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_error_when_file_missing() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool
-            .execute(json!({ "operation": "write", "content": "data" }), &ctx)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParameters { .. }));
-        assert!(err.to_string().contains("file"), "got: {err}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_error_when_content_missing() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool
-            .execute(json!({ "operation": "write", "file": "notes" }), &ctx)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParameters { .. }));
-        assert!(err.to_string().contains("content"), "got: {err}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn write_rejects_invalid_file_name() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool
-            .execute(
-                json!({ "operation": "write", "file": "../evil", "content": "bad" }),
-                &ctx,
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParameters { .. }));
-    }
-
-    // -----------------------------------------------------------------------
-    // read — specific file
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_specific_file_returns_content() {
-        let dir = TempDir::new().unwrap();
-        seed_file(&dir, "facts.md", b"Important fact.");
-
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "read", "file": "facts" }), &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(result["output"].as_str().unwrap(), "Important fact.");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_specific_file_not_found_returns_error() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool
-            .execute(json!({ "operation": "read", "file": "nonexistent" }), &ctx)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
-        assert!(err.to_string().contains("nonexistent.md"), "got: {err}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_rejects_invalid_file_name() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool
-            .execute(json!({ "operation": "read", "file": "foo/bar" }), &ctx)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParameters { .. }));
-    }
-
-    // -----------------------------------------------------------------------
-    // read — all files
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_all_returns_all_md_files_with_headers() {
-        let dir = TempDir::new().unwrap();
-        seed_file(&dir, "alpha.md", b"A content");
-        seed_file(&dir, "beta.md", b"B content");
-        // Non-.md file — should be ignored.
-        std::fs::write(memory_dir(&dir).join("ignored.txt"), b"ignored").unwrap();
-
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "read" }), &ctx)
-            .await
-            .unwrap();
-
-        let output = result["output"].as_str().unwrap();
-        assert!(output.contains("alpha.md"), "should include alpha filename");
-        assert!(output.contains("A content"), "should include alpha content");
-        assert!(output.contains("beta.md"), "should include beta filename");
-        assert!(output.contains("B content"), "should include beta content");
-        assert!(!output.contains("ignored"), "txt file should be skipped");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_all_empty_directory_returns_no_files_message() {
-        let dir = TempDir::new().unwrap();
-        // Create the memory dir but leave it empty.
-        std::fs::create_dir_all(memory_dir(&dir)).unwrap();
-
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "read" }), &ctx)
-            .await
-            .unwrap();
-        assert!(
-            result["output"]
-                .as_str()
-                .unwrap()
-                .contains("No memory files")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn read_all_missing_directory_returns_friendly_message() {
-        let dir = TempDir::new().unwrap();
-        // Don't create the memory dir — it shouldn't exist.
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "read" }), &ctx)
-            .await
-            .unwrap();
-        assert!(
-            result["output"]
-                .as_str()
-                .unwrap()
-                .contains("does not exist")
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // list
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn list_returns_sorted_md_filenames() {
-        let dir = TempDir::new().unwrap();
-        seed_file(&dir, "zebra.md", b"z");
-        seed_file(&dir, "alpha.md", b"a");
-        std::fs::write(memory_dir(&dir).join("ignored.txt"), b"x").unwrap();
-
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "list" }), &ctx)
-            .await
-            .unwrap();
-
-        let output = result["output"].as_str().unwrap();
-        let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines, ["alpha.md", "zebra.md"], "should be sorted, no txt");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn list_empty_directory_returns_no_files_message() {
-        let dir = TempDir::new().unwrap();
-        std::fs::create_dir_all(memory_dir(&dir)).unwrap();
-
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "list" }), &ctx)
-            .await
-            .unwrap();
-        assert!(
-            result["output"]
-                .as_str()
-                .unwrap()
-                .contains("No memory files")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn list_missing_directory_returns_friendly_message() {
-        let dir = TempDir::new().unwrap();
-        // Don't create the memory dir.
-        let ctx = ctx_with_root(&dir).await;
-        let result = MemoryTool
-            .execute(json!({ "operation": "list" }), &ctx)
-            .await
-            .unwrap();
-        assert!(
-            result["output"]
-                .as_str()
-                .unwrap()
-                .contains("does not exist")
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // missing operation
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn missing_operation_returns_error() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool.execute(json!({}), &ctx).await.unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParameters { .. }));
-    }
-
-    // -----------------------------------------------------------------------
-    // unknown operation
-    // -----------------------------------------------------------------------
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn unknown_operation_returns_error() {
-        let dir = TempDir::new().unwrap();
-        let ctx = ctx_with_root(&dir).await;
-        let err = MemoryTool
-            .execute(json!({ "operation": "delete" }), &ctx)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidParameters { .. }));
-        assert!(err.to_string().contains("delete"), "got: {err}");
     }
 }
