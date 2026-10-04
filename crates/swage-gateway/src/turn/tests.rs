@@ -5849,6 +5849,12 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
 // Test helpers
 // -----------------------------------------------------------------------
 
+pub(crate) fn sandboxed_turn_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = true;
+    config
+}
+
 /// Build an AppState with a pre-populated session and its default thread.
 ///
 /// Returns the state and the session_id. The thread is created automatically
@@ -6251,7 +6257,8 @@ fn codex_turn_config() -> swage_config::ResolvedConfig {
 #[tokio::test]
 async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit() {
     let _guard = SwageHomeGuard::isolate();
-    let config = codex_turn_config();
+    let mut config = codex_turn_config();
+    config.sandbox.enabled = true;
     assert!(!config.sandbox.allow_degraded_execution);
     let (mut state, session_id) = make_state_with_config(Vec::new(), config).await;
 
@@ -6431,6 +6438,51 @@ async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
         state.active_turns.lock().await.is_empty(),
         "a refused ordinary provider turn must not remain active"
     );
+}
+
+#[tokio::test]
+async fn default_turn_persists_configuration_disabled_boundary() {
+    let _home = SwageHomeGuard::isolate();
+    let (state, session_id) = make_state_with_session(vec![StreamChunk::Done {
+        finish_reason: None,
+    }])
+    .await;
+    // If the default enables sandboxing, exercise the existing sandbox path
+    // without depending on bubblewrap being available on the test machine.
+    let state = state.with_test_sandbox();
+
+    Box::pin(process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello",
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    ))
+    .await
+    .expect("a default turn should complete");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        turn.execution_isolation,
+        Some(swage_storage::TurnIsolation::Degraded {
+            reason: "sandbox_disabled_by_configuration".into(),
+        }),
+        "the turn must persist the boundary selected from default configuration"
+    );
+    assert_eq!(turn.state, TurnState::Completed);
 }
 
 #[tokio::test]
@@ -7405,7 +7457,7 @@ async fn session_variable_read_failure_clears_active_turn() {
 
 #[tokio::test]
 async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
-    let (state, session_id) = make_state_with_session(vec![]).await;
+    let (state, session_id) = make_state_with_config(vec![], sandboxed_turn_config()).await;
     state.fail_next_dispatcher_builds(2);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -7487,6 +7539,7 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
         ],
     ];
     let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    state.runtime_config.write().unwrap().sandbox.enabled = true;
     state.fail_next_dispatcher_builds(1);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -11228,7 +11281,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        sandboxed_turn_config(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(SandboxedFileTool::new("file_read")) as Arc<dyn Tool>,
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
@@ -12193,7 +12246,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        sandboxed_turn_config(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
