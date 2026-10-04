@@ -13,7 +13,7 @@ export const defaults = {
   effort: "medium",
 };
 
-const JUDGE_MODEL_BY_DRIVER_FAMILY = { gpt: "claude-opus-5", claude: "gpt-5.6-terra" };
+const JUDGE_MODEL_BY_DRIVER_FAMILY = { gpt: "claude-opus-5-5", claude: "gpt-6.1-sol" };
 
 // INPUT (workflow args):
 // {

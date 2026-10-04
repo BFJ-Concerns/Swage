@@ -72,7 +72,7 @@ A model entry with a default effort looks like this:
 ```toml
 [models.entries.sonnet]
 provider_id = "anthropic"
-model_id = "claude-sonnet-5"
+model_id = "claude-sonnet-5-5"
 default_effort = "high"
 ```
 

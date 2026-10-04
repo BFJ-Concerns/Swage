@@ -16,8 +16,8 @@
 // floor — the brief decides the path. Pin model and effort together on every
 // call: an unpinned call has no model to ride.
 const FAMILY = {
-  gpt: { model: "gpt-5.6-luna", effort: "low" },
-  claude: { model: "claude-sonnet-5", effort: "low" },
+  gpt: { model: "gpt-6-luna", effort: "low" },
+  claude: { model: "claude-sonnet-5-5", effort: "low" },
 };
 
 // Run this before the sign-off read of any round that worked product intent
@@ -91,12 +91,12 @@ const hollowScope = hollowIds
 // adversarial judgement whose miss signs a vacuous contract — the named
 // residue that earns the flagship/opus step.
 const DIFF_OPTS = {
-  gpt: { model: "gpt-5.6-terra", effort: "medium" },
-  claude: { model: "claude-sonnet-5", effort: "medium" },
+  gpt: { model: "gpt-6.1-sol", effort: "medium" },
+  claude: { model: "claude-sonnet-5-5", effort: "medium" },
 };
 const HOLLOW_OPTS = {
-  gpt: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "claude-opus-5", effort: "medium" },
+  gpt: { model: "gpt-6.1-sol", effort: "medium" },
+  claude: { model: "claude-opus-5-5", effort: "medium" },
 };
 
 // Keep reply schemas an object with additionalProperties:false and every

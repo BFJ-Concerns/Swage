@@ -19,7 +19,7 @@ export const defaults = {
   // call; the verifier is held too, so every re-verification returns to the
   // reader that derived the claims. Pinned because per-model effort
   // defaults are uneven.
-  model: "gpt-5.6-sol",
+  model: "gpt-6.1-sol",
   effort: "low",
 };
 
@@ -252,7 +252,7 @@ Reply with a single JSON value conforming to the schema. Reason first if you nee
 // builder's session, then continued for every re-verification, so the
 // claims it derived before reading the report are what it re-examines.
 const verifier = await session({
-  model: "claude-opus-5", effort: "medium", cwd: worktree, label: "verifier",
+  model: "claude-opus-5-5", effort: "medium", cwd: worktree, label: "verifier",
 });
 dispatching("verify", "re-briefed", "cross-family verification is independent by design: a fresh reader of the opposite family, sharing nothing with the builder's session; its re-verifications continue this worker");
 let verdict = await send(verifier, verifyPrompt(null, null), { schema: findingsSchema, label: "verify" });

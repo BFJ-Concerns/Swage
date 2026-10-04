@@ -12,8 +12,8 @@
 // retrieval-shaped code-reading at the resting level. Pin model and effort
 // together on every call: an unpinned call has no model to ride.
 const FAMILY = {
-  gpt: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "claude-sonnet-5", effort: "medium" },
+  gpt: { model: "gpt-6.1-sol", effort: "medium" },
+  claude: { model: "claude-sonnet-5-5", effort: "medium" },
 };
 
 // This is shedding's beat 2 (see references/shedding-workflow.md).
@@ -76,7 +76,7 @@ const opposite = (family) => (family === "gpt" ? "claude" : "gpt");
 // family pins.
 const VERIFY_OPTS = {
   gpt: { effort: "high" },
-  claude: { model: "claude-opus-5", effort: "high" },
+  claude: { model: "claude-opus-5-5", effort: "high" },
 };
 
 // Keep reply schemas an object with additionalProperties:false and every

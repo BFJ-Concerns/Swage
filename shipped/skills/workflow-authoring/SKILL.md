@@ -57,14 +57,14 @@ export const meta = {
     "properties": { "subject": { "type": "string" } }
   }
 };
-export const defaults = { model: "gpt-5.6-terra", effort: "low" };
+export const defaults = { model: "gpt-6.1-sol", effort: "low" };
 
 // The injected `args` global holds the value supplied when this run was
 // started — the `args` field of workflow_run, or the parent's second
 // argument to workflow(). It is null when nothing was supplied.
 
 const reply = await agent(`Summarise the README's coverage of ${args.subject}.`, {
-  model: "claude-sonnet-5",
+  model: "claude-sonnet-5-5",
   effort: "low",
 });
 return { reply };
@@ -370,7 +370,7 @@ treat every payload as a worker-reported claim.
   const verdict = await gate({ criteria: "a worker failed, or every worker has finished" });
   if (verdict.wake) {
     const lead = await agent(`Events since your last wake:\n${JSON.stringify(verdict.events)}`, {
-      model: "claude-opus-5", effort: "medium", label: "lead",
+      model: "claude-opus-5-5", effort: "medium", label: "lead",
     });
     await deliverEvents(verdict.read_up_to_seq);
   }
@@ -442,7 +442,7 @@ phase("find");
 const finding = await agent(
   "Find one candidate defect in this repository's request validation. " +
     "Reply with exactly one ```json fence holding {file, line, claim}.",
-  { model: "gpt-5.6-sol", effort: "medium", schema: findingSchema, cwd: repo, label: "finder" },
+  { model: "gpt-6.1-sol", effort: "medium", schema: findingSchema, cwd: repo, label: "finder" },
 );
 if (finding === null) return { finding: null, verdict: null };
 
@@ -451,7 +451,7 @@ const verdict = await agent(
   "Hunt for evidence this finding is WRONG; unproven is a failing grade. " +
     "Read the evidence yourself in the tree. Finding: " + JSON.stringify(finding) + ". " +
     'Reply with exactly one ```json fence holding {"real": boolean, "reason": "…", "outOfScopeConcerns": "…"}.',
-  { model: "claude-opus-5", effort: "medium", schema: verdictSchema, cwd: repo, label: "verifier" },
+  { model: "claude-opus-5-5", effort: "medium", schema: verdictSchema, cwd: repo, label: "verifier" },
 );
 return { finding, verdict, confirmed: verdict?.real === true };
 ```

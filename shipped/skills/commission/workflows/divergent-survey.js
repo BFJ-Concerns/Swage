@@ -21,8 +21,8 @@ if (typeof run_dir !== "string" || !run_dir.startsWith("/"))
   );
 
 const FAMILY = {
-  gpt: { model: "gpt-5.6-sol", effort: "medium", cwd: run_dir },
-  claude: { model: "claude-opus-5", effort: "high", cwd: run_dir },
+  gpt: { model: "gpt-6.1-sol", effort: "medium", cwd: run_dir },
+  claude: { model: "claude-opus-5-5", effort: "high", cwd: run_dir },
 };
 
 // Run this when an important part's option space has not been walked, or when the
@@ -98,7 +98,7 @@ const opposite = (family) => (family === "gpt" ? "claude" : "gpt");
 // previews the weakest reader who will execute the finished text.
 const PROPOSE_OPTS = {
   gpt: { effort: "high" },
-  claude: { model: "claude-fable-5", effort: "high" },
+  claude: { model: "claude-fable-5-1", effort: "high" },
 };
 
 // Stage 0 surveys the published theory of the OUTCOME — how outcomes of this kind

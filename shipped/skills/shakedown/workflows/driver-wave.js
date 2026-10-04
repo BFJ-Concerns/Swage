@@ -11,7 +11,7 @@ export const defaults = {
   // the wave input as the model id (the id names the family). The floor
   // tier never drives, and text-only tiers never drive — a driver must see
   // the product's surfaces.
-  model: "gpt-5.6-terra",
+  model: "gpt-6.1-sol",
   effort: "medium",
 };
 
