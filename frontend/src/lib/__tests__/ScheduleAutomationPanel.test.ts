@@ -90,6 +90,39 @@ describe("ScheduleAutomationPanel", () => {
     vi.clearAllMocks();
   });
 
+  it.each([false, true])("hides a paused schedule's next run while retaining an active schedule's (gated: %s)", async (gated) => {
+    const nextRun = "2026-01-01T01:00:00Z";
+    const paused = makeSchedule({
+      id: "paused-schedule",
+      message: "Paused reminder",
+      status: "paused",
+      spec: { kind: "interval", every: "every 1 minutes" },
+      gate: gated ? { model: "cheap", criteria: null } : null,
+      next_run_at: nextRun,
+    });
+    const active = {
+      ...paused,
+      id: "active-schedule",
+      message: "Active reminder",
+      status: "active" as const,
+    };
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [paused, active] });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const rows = [...document.querySelectorAll(".schedule-row")];
+    const pausedRow = rows.find((row) => row.textContent?.includes("Paused reminder"));
+    const activeRow = rows.find((row) => row.textContent?.includes("Active reminder"));
+    expect(pausedRow).toBeDefined();
+    expect(activeRow).toBeDefined();
+    expect(activeRow?.textContent).toContain(new Date(nextRun).toLocaleString());
+    expect(pausedRow?.textContent).not.toContain(new Date(nextRun).toLocaleString());
+    expect(pausedRow?.textContent).not.toContain("next");
+  });
+
   it("lists schedules with their status and run history", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
