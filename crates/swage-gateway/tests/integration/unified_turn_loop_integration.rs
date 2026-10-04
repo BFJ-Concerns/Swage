@@ -52,6 +52,7 @@ struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
     detached_comparison: bool,
     parent_started: std::sync::atomic::AtomicBool,
+    child_release: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl MockProvider {
@@ -61,6 +62,7 @@ impl MockProvider {
         Self {
             rounds: std::sync::Mutex::new(rounds),
             detached_comparison: false,
+            child_release: None,
             parent_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -91,11 +93,11 @@ impl LlmProvider for MockProvider {
         request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         if self.detached_comparison {
-            let chunks = if request
+            let is_child = request
                 .messages
                 .iter()
-                .any(|m| m.text_content() == "Delegated Task\n\nCompare")
-            {
+                .any(|m| m.text_content() == "Delegated Task\n\nCompare");
+            let chunks = if is_child {
                 vec![
                     StreamChunk::Delta {
                         content: "The detached child ends at a".into(),
@@ -128,6 +130,16 @@ impl LlmProvider for MockProvider {
                     },
                 ]
             };
+            if is_child && let Some(release) = &self.child_release {
+                let release = release.clone();
+                return Box::pin(
+                    futures::stream::once(async move {
+                        let _permit = release.acquire().await.unwrap();
+                        chunks
+                    })
+                    .flat_map(futures::stream::iter),
+                );
+            }
             return Box::pin(futures::stream::iter(chunks));
         }
         let mut rounds = self.rounds.lock().unwrap();
@@ -1006,9 +1018,11 @@ async fn output_limit_marks_a_delegated_reply_and_parent_event_incomplete() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
-    use swage_storage::store::{AgentDefinitionStore, AgentMessageStore};
+    use swage_storage::store::{AgentDefinitionStore, AgentMessageStore, ToolCallStore, TurnStore};
     let mut provider = MockProvider::new(vec![]);
     provider.detached_comparison = true;
+    let child_release = Arc::new(tokio::sync::Semaphore::new(0));
+    provider.child_release = Some(child_release.clone());
     let (router, addr, storage) = start_test_server_with_config(
         provider,
         ResolvedConfig::default(),
@@ -1042,6 +1056,47 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
     )
     .await;
     let _ = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+    let (_, parent) = http(&router, "GET", &format!("/api/conversations/{id}")).await;
+    let parent_thread = uuid::Uuid::parse_str(parent["root_thread_id"].as_str().unwrap()).unwrap();
+    let parent_turns = storage.list_turns_by_thread(parent_thread).await.unwrap();
+    let calls = storage
+        .list_tool_calls_by_turn(parent_turns[0].id)
+        .await
+        .unwrap();
+    let detached: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
+    let open_child_id = detached["child_session_id"].as_str().unwrap();
+    let (_child_sink, mut child_stream) = connect_ws(addr, open_child_id).await;
+    child_release.add_permits(1);
+    let mut child_events = Vec::new();
+    // The child view is connected before its provider can finish. The
+    // deadline only bounds observation; missing delivery fails our assertion.
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = crate::support::ws_recv_lenient(&mut child_stream).await {
+            let is_account =
+                event["type"] == "message_appended" && event["message"]["origin"] == "platform";
+            child_events.push(event);
+            if is_account {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        child_events.iter().any(|e| e["type"] == "message_appended"
+            && e["message"]["origin"] == "assistant"
+            && e["message"]["turn_state"] == "incomplete"
+            && e["message"]["content"] == "The detached child ends at a"),
+        "the open child must receive its incomplete reply: {child_events:?}"
+    );
+    assert!(
+        child_events.iter().any(|e| e["type"] == "message_appended"
+            && e["message"]["origin"] == "platform"
+            && e["message"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("output token limit reached (length)")),
+        "the open child must receive its cause: {child_events:?}"
+    );
     let results = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let results = storage.list_pending_for_agent("gateway").await.unwrap();
