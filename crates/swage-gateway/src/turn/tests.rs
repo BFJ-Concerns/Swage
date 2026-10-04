@@ -7019,6 +7019,93 @@ async fn cancelled_hook_approval_persists_completed_round_text() {
 }
 
 #[tokio::test]
+async fn provider_retry_events_name_the_requested_turn_model() {
+    let (provider, captured_request) = CapturingProvider::new(vec![StreamChunk::Error {
+        message: "provider overloaded".into(),
+    }]);
+    let provider = swage_provider::retry::RetryProvider::new(
+        provider,
+        swage_provider::retry::RetryConfig {
+            max_retries: 3,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        },
+    );
+    let (storage, session_id) = make_storage_with_session().await;
+    storage
+        .set_session_selected_model(session_id, Some("selected-catalogue-entry".into()))
+        .await
+        .expect("select session model");
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "agent-default".into();
+    for (id, model_id) in [
+        ("agent-default", "claude-sonnet-5-5"),
+        (
+            "selected-catalogue-entry",
+            "gpt-model-access-does-not-exist",
+        ),
+    ] {
+        config.models.entries.insert(
+            id.into(),
+            swage_config::ModelEndpointConfig {
+                model_id: model_id.into(),
+                ..Default::default()
+            },
+        );
+    }
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider),
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("Hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("provider failure is surfaced as an event");
+
+    let requested_model = captured_request
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("provider received a request")
+        .model
+        .clone()
+        .expect("turn selected a model");
+    assert_eq!(requested_model, "gpt-model-access-does-not-exist");
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let retry_models: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::ProviderRetryStarted { provider, .. }
+            | ServerEvent::ProviderRetrySettled { provider, .. } => Some(provider.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        retry_models.len(),
+        4,
+        "three retry starts and final settlement"
+    );
+    for model in retry_models {
+        assert_eq!(
+            model, requested_model,
+            "retry status must name the request model"
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_error_marks_turn_failed() {
     let (state, session_id) = make_state_with_session(vec![StreamChunk::Error {
         message: "provider overloaded".to_string(),
