@@ -178,6 +178,47 @@ describe("streaming store → conversation store: turn lifecycle", () => {
     );
   });
 
+  it("settles a stopped reply-less turn on its request with the running call interrupted", async () => {
+    const conversationStore = createConversationStore();
+    await seedActiveConversation(conversationStore);
+    const streamingStore = createStreamingStore({ conversationStore });
+
+    streamingStore.startTurn("Run sleep 30");
+    streamingStore.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-done",
+      tool: "file_read",
+      arguments: { path: "README.md" },
+    });
+    streamingStore.handleServerEvent({
+      type: "tool_end",
+      call_id: "call-done",
+      tool: "file_read",
+      result: "contents",
+      status: "success",
+      duration_ms: 8,
+      truncated: false,
+      total_bytes: 8,
+    });
+    streamingStore.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-sleep",
+      tool: "shell",
+      arguments: { command: "sleep 30" },
+    });
+    streamingStore.handleServerEvent({ type: "cancelled" });
+
+    const request = conversationStore.activeConversation!.messages.at(-1);
+    expect(request).toEqual(
+      expect.objectContaining({ role: "user", content: "Run sleep 30", turn_state: "interrupted" }),
+    );
+    expect(request?.tool_calls?.map((call) => [call.call_id, call.status])).toEqual([
+      ["call-done", "success"],
+      ["call-sleep", "interrupted"],
+    ]);
+    expect(streamingStore.activeToolCalls).toEqual([]);
+  });
+
   it("preserves partial response in conversation store on error", async () => {
     const conversationStore = createConversationStore();
     await seedActiveConversation(conversationStore);

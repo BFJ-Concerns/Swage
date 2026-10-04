@@ -320,6 +320,54 @@ describe("turns that ended without a reply, as loaded", () => {
     expect(startTurn).toHaveBeenCalledWith("Hello?");
   });
 
+  it("keeps the explanation and Retry for a failed turn under its partial reply", () => {
+    const startTurn = vi.fn();
+    const partial = {
+      ...makeAssistantMessage("Partial answer", undefined, undefined, "failed", "turn-1"),
+      failure_message: "stream reset by provider",
+    };
+    const store = makeConversationStore([
+      makeRequest({ content: "Explain it", turn_state: "failed" }),
+      partial,
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: { ...makeStreamingStore(), startTurn } },
+    });
+
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
+      "stream reset by provider",
+    );
+    const retries = [...document.body.querySelectorAll("button")].filter(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retries).toHaveLength(1);
+    retries[0].click();
+    expect(startTurn).toHaveBeenCalledWith("Explain it");
+  });
+
+  it("shows a stopped request settled live, before it has a turn id, as interrupted", () => {
+    const store = makeConversationStore([
+      {
+        role: "user",
+        content: "Run sleep 30",
+        timestamp: "2026-03-20T10:00:59Z",
+        turn_state: "interrupted",
+        tool_calls: [makeToolCall({ call_id: "sleep", tool: "shell", status: "interrupted", result: null })],
+      },
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    const request = document.body.querySelector('[aria-label="Your message"]');
+    expect(request?.querySelectorAll(".tool-call")).toHaveLength(1);
+    expect(request?.textContent).toContain("Interrupted before a reply");
+  });
+
   it("leaves a request whose turn replied without a failure account", () => {
     const store = makeConversationStore([
       makeRequest({ content: "Hi", turn_state: "failed" }),
