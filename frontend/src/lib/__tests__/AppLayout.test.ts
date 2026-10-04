@@ -51,6 +51,8 @@ function mockConversationStore(): ConversationStore {
     appendOptimisticUserMessage: () => {},
     appendAssistantMessage: () => {},
     appendRecordedMessage: () => {},
+    appendQueuedMessage: () => {},
+    clearQueuedMessages: () => {},
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
   };

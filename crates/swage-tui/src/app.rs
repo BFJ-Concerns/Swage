@@ -450,6 +450,8 @@ pub fn handle_server_event(state: &mut ConversationState, event: ServerEvent) ->
         // client ignores them and the work-surface lag signal alike.
         ServerEvent::SurfaceUpdated { .. }
         | ServerEvent::MessageAppended { .. }
+        | ServerEvent::MessageQueued { .. }
+        | ServerEvent::QueueDrained { .. }
         | ServerEvent::LibraryUpdated { .. }
         | ServerEvent::Lagged { .. } => EventOutcome::Continue,
 

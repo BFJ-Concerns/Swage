@@ -1391,31 +1391,41 @@ pub async fn submit_turn(
         &req.attachments,
     )
     .map_err(ApiError::from)?;
-    if state
-        .active_turns
-        .lock()
-        .await
-        .contains_key(&req.conversation_id)
-    {
-        return Err(GatewayError::TurnInProgress {
-            session_id: req.conversation_id,
-        }
-        .into());
-    }
-
+    // A message that arrives while a turn is running is held for the next
+    // turn, never refused (C60). The persisted check comes first: REST
+    // submit creates a durable pending placeholder before the background
+    // worker registers `active_turns`, so every non-terminal persisted state
+    // counts as in-flight here.
     let existing_turns = state
         .storage
         .list_turns_by_thread(thread.id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    // REST submit creates a durable pending placeholder before the background
-    // worker has a chance to register `active_turns`, so every non-terminal
-    // persisted state must count as in-flight here to close that race.
-    if existing_turns.iter().any(|turn| !turn.state.is_terminal()) {
-        return Err(GatewayError::TurnInProgress {
-            session_id: req.conversation_id,
-        }
-        .into());
+    let running_turn = existing_turns
+        .iter()
+        .find(|turn| !turn.state.is_terminal())
+        .map(|turn| turn.id);
+    let guard_held = state
+        .active_turns
+        .lock()
+        .await
+        .contains_key(&req.conversation_id);
+    if running_turn.is_some() || guard_held {
+        let queued = crate::turn_queue::queue_input(
+            &state,
+            req.conversation_id,
+            thread.id,
+            crate::turn::TurnInput::with_attachments(req.message, req.attachments),
+        )
+        .await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(SubmitTurnResponse {
+                turn_id: running_turn.unwrap_or(req.conversation_id),
+                status: "queued".into(),
+                queued: Some(queued),
+            }),
+        ));
     }
 
     // Create a placeholder turn in Pending state — visible to the poller
@@ -1431,14 +1441,28 @@ pub async fn submit_turn(
             user_input: Some(req.message.clone()),
             parent_turn_id: None,
         })
-        .await
-        .map_err(|error| match error {
-            swage_core::StorageError::ConstraintViolation(_) => GatewayError::TurnInProgress {
-                session_id: req.conversation_id,
-            }
-            .into(),
-            other => ApiError::internal(other.to_string()),
-        })?;
+        .await;
+    let turn = match turn {
+        Ok(turn) => turn,
+        Err(swage_core::StorageError::ConstraintViolation(_)) => {
+            let queued = crate::turn_queue::queue_input(
+                &state,
+                req.conversation_id,
+                thread.id,
+                crate::turn::TurnInput::with_attachments(req.message, req.attachments),
+            )
+            .await?;
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(SubmitTurnResponse {
+                    turn_id: req.conversation_id,
+                    status: "queued".into(),
+                    queued: Some(queued),
+                }),
+            ));
+        }
+        Err(other) => return Err(ApiError::internal(other.to_string())),
+    };
 
     let turn_id = turn.id;
     let thread_id = thread.id;
@@ -1498,6 +1522,7 @@ pub async fn submit_turn(
         Json(SubmitTurnResponse {
             turn_id,
             status: "pending".into(),
+            queued: None,
         }),
     ))
 }
@@ -3483,9 +3508,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_turns_returns_409_when_thread_has_pending_placeholder_turn() {
+    async fn post_turns_queues_a_message_behind_a_pending_turn() {
         use swage_storage::model::{NewTurn, TurnState};
-        use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
+        use swage_storage::store::{SessionStore, ThreadStore, TurnQueueStore, TurnStore};
 
         let (router, storage) = make_router();
 
@@ -3551,9 +3576,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // Never refused: accepted, held for the next turn, and named as such.
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = body_json(resp).await;
-        assert_eq!(body["code"], "turn_in_progress");
+        assert_eq!(body["status"], "queued");
+        assert_eq!(body["queued"]["content"], "second message");
+        assert_eq!(body["queued"]["origin"], "user");
+        let queued = storage
+            .list_queued_turn_inputs(conversation_id)
+            .await
+            .expect("list queue");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].content, "second message");
     }
 
     #[tokio::test]

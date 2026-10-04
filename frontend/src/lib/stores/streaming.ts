@@ -109,6 +109,13 @@ export interface StreamingStoreOptions {
       message: import("../protocol/MessageView").MessageView,
       conversationId: string,
     ): void;
+    /** Shows a message the gateway holds for the conversation's next turn. */
+    appendQueuedMessage?(
+      queued: import("../protocol/QueuedMessageView").QueuedMessageView,
+      conversationId: string,
+    ): void;
+    /** The held messages became the next turn's input. */
+    clearQueuedMessages?(conversationId: string): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
@@ -525,6 +532,27 @@ export function createStreamingStore(
           stream.pendingApprovalStore.set(null);
           break;
 
+        case "message_queued":
+          // The message found a turn running and waits for the next one; the
+          // gateway holds it, every open view shows it as queued.
+          options?.conversationStore?.appendQueuedMessage?.(event.queued, event.session_id);
+          break;
+
+        case "queue_drained":
+          // The held messages are now recorded messages (each announced on
+          // its own) and a new turn is running on them: this is that turn
+          // starting, as far as this view is concerned — no client called
+          // startTurn for it.
+          options?.conversationStore?.clearQueuedMessages?.(event.session_id);
+          stream.streamedContentStore.set("");
+          stream.turnErrorStore.set(null);
+          stream.activeToolCallsStore.set([]);
+          stream.providerRetryStore.set(null);
+          stream.activeTurnGeneration += 1;
+          stream.turnStartedAtStore.set(new Date().toISOString());
+          setStreamActive(ownerId, stream, true);
+          break;
+
         case "message_appended":
           // A row the gateway recorded on this conversation that nobody here
           // typed — a schedule's brief, a delegation's notice — joins the view
@@ -583,6 +611,16 @@ export function createStreamingStore(
     startTurn(content: string, selectedModelId?: string | null): void {
       const conversationId = currentConversationId();
       const stream = streamStateFor(conversationId);
+      if (stream.isStreamingState.current) {
+        // A turn is running: the message is sent and the gateway holds it
+        // for the next turn, announcing it as queued. The live stream and
+        // the message list are left as they are.
+        const threadId = options?.conversationStore?.activeThreadId ?? null;
+        if (conversationId) {
+          options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId);
+        }
+        return;
+      }
       // Clear state from any previous turn.
       stream.streamedContentStore.set("");
       stream.turnErrorStore.set(null);

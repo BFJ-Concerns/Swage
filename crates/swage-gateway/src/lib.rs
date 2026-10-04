@@ -91,6 +91,7 @@ pub mod thread_selection;
 pub mod tool;
 pub mod tool_executor;
 pub mod turn;
+pub mod turn_queue;
 pub mod voice;
 pub mod websocket;
 pub mod workflow;

@@ -113,15 +113,19 @@ export type ConversationSummary = Omit<WireConversationSummary, "selected_model_
 export type ConversationResponse = Omit<WireConversationResponse, "selected_model_id"> & {
   selected_model_id?: string | null;
 };
+export type { QueuedMessageView } from "./protocol/QueuedMessageView";
+import type { QueuedMessageView as WireQueuedMessageView } from "./protocol/QueuedMessageView";
 export type ConversationDetail = Omit<
   WireConversationDetail,
-  "messages" | "selected_model_id" | "root_thread_id"
+  "messages" | "selected_model_id" | "root_thread_id" | "queued"
 > & {
   selected_model_id?: string | null;
   // The thread the detail's messages belong to; a detail built locally for
   // a just-created conversation learns it on the first fetch.
   root_thread_id?: string;
   messages: MessageView[];
+  // Messages held behind a running turn; absent when nothing waits.
+  queued?: WireQueuedMessageView[];
   input_tokens?: number | null;
   output_tokens?: number | null;
 };

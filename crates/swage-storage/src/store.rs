@@ -25,6 +25,7 @@ use crate::model::{
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
+use crate::model::{NewQueuedTurnInput, QueuedTurnInput};
 
 // ---------------------------------------------------------------------------
 // Store sub-traits
@@ -269,6 +270,29 @@ pub trait TaskDefinitionStore: Send + Sync {
     async fn get_task_definition(&self, id: &str) -> Result<Option<TaskDefinition>, StorageError>;
     async fn list_task_definitions(&self) -> Result<Vec<TaskDefinition>, StorageError>;
     async fn delete_task_definition(&self, id: &str) -> Result<bool, StorageError>;
+}
+
+/// The turn queue: messages held durably while a session's turn runs, taken
+/// as one batch by the drain that starts the next turn.
+#[async_trait]
+pub trait TurnQueueStore: Send + Sync {
+    async fn enqueue_turn_input(
+        &self,
+        input: NewQueuedTurnInput,
+    ) -> Result<QueuedTurnInput, StorageError>;
+    /// Everything queued for a session, in arrival order.
+    async fn list_queued_turn_inputs(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<QueuedTurnInput>, StorageError>;
+    /// Remove and return everything queued for a session, in arrival order,
+    /// atomically: the queue hands over to one taker.
+    async fn take_queued_turn_inputs(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<QueuedTurnInput>, StorageError>;
+    /// Every session with something queued.
+    async fn sessions_with_queued_turn_inputs(&self) -> Result<Vec<Uuid>, StorageError>;
 }
 
 #[async_trait]
@@ -1508,6 +1532,7 @@ pub trait Storage:
     + ChannelLinkStore
     + DeliveryStore
     + AuditStore
+    + TurnQueueStore
     + AgentDefinitionStore
     + TaskDefinitionStore
     + SessionVariableStore
@@ -1546,6 +1571,7 @@ impl<T> Storage for T where
         + ChannelLinkStore
         + DeliveryStore
         + AuditStore
+        + TurnQueueStore
         + AgentDefinitionStore
         + TaskDefinitionStore
         + SessionVariableStore
@@ -1894,6 +1920,31 @@ mod tests {
             unimplemented!()
         }
         async fn delete_task_definition(&self, _: &str) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TurnQueueStore for StubStorage {
+        async fn enqueue_turn_input(
+            &self,
+            _: NewQueuedTurnInput,
+        ) -> Result<QueuedTurnInput, StorageError> {
+            unimplemented!()
+        }
+        async fn list_queued_turn_inputs(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+            unimplemented!()
+        }
+        async fn take_queued_turn_inputs(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+            unimplemented!()
+        }
+        async fn sessions_with_queued_turn_inputs(&self) -> Result<Vec<Uuid>, StorageError> {
             unimplemented!()
         }
     }

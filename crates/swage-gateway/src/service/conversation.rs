@@ -343,7 +343,15 @@ impl ConversationService {
                 .ok_or(GatewayError::TopicNotFound {
                     id: session.topic_id,
                 })?;
+        let queued = self
+            .storage
+            .list_queued_turn_inputs(session.id)
+            .await?
+            .iter()
+            .map(crate::turn_queue::queued_message_view)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ConversationDetail {
+            queued,
             id: session.id,
             topic_id: topic.client_topic_id(),
             agent_id: session.agent_id.clone(),

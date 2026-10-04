@@ -77,8 +77,9 @@
 
   function send() {
     const trimmed = content.trim();
-    // Guard: no-op when there is nothing to send or a turn is in progress.
-    if (!store || !trimmed || isStreamingHere || hasNoConfiguredModels) return;
+    // Guard: no-op when there is nothing to send. A turn in progress is not
+    // a reason to refuse: the gateway queues the message for the next turn.
+    if (!store || !trimmed || hasNoConfiguredModels) return;
 
     store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
 

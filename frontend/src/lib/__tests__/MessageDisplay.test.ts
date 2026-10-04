@@ -106,6 +106,8 @@ function makeConversationStore(
       messages.push({ role: "assistant", ...message });
     },
     appendRecordedMessage: () => {},
+    appendQueuedMessage: () => {},
+    clearQueuedMessages: () => {},
     clearActiveConversation: () => {},
     refreshActiveConversation: async () => {},
     ...(branchFrom ? { branchFrom } : {}),
@@ -672,6 +674,30 @@ describe("branching from a message", () => {
     expect(briefElement!.classList.contains("user")).toBe(false);
     expect(briefElement!.querySelector("strong")?.textContent).toBe("inbox");
     expect(document.querySelector('[aria-label="Your message"]')).not.toBeNull();
+  });
+
+  it("shows messages held for the next turn after the recorded ones, labelled as queued", () => {
+    const store = makeConversationStore([makeAssistantMessage("so far")]);
+    const detail = store.activeConversation!;
+    detail.queued = [
+      {
+        id: "q-1",
+        origin: "user",
+        content: "and one more thing",
+        queued_at: "2026-03-20T11:05:00Z",
+      },
+    ];
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    const held = document.querySelector('[aria-label="Queued message"]');
+    expect(held).not.toBeNull();
+    expect(held!.querySelector(".role-label")?.textContent?.trim()).toBe("You · queued");
+    expect(held!.textContent).toContain("and one more thing");
+    // Not a recorded message: nothing to branch from.
+    expect(held!.querySelector('button[aria-label="Branch from this message"]')).toBeNull();
   });
 
   it("offers no branch action when the store cannot branch", () => {

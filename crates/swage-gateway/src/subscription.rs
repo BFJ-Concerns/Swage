@@ -136,7 +136,9 @@ impl SubscriptionState {
 
             // A recorded message joining the conversation is primary UI,
             // never observability: always delivered.
-            ServerEvent::MessageAppended { .. } => true,
+            ServerEvent::MessageAppended { .. }
+            | ServerEvent::MessageQueued { .. }
+            | ServerEvent::QueueDrained { .. } => true,
 
             // Surface and library updates and the work-surface lag signal are
             // primary UI signals for the work surfaces, not observability:

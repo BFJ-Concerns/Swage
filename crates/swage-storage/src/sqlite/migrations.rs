@@ -104,8 +104,26 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "063_session_surfaces_and_library",
             SESSION_SURFACES_AND_LIBRARY,
         ),
+        ("064_turn_queue", CREATE_TURN_QUEUE),
     ]
 }
+
+/// Messages accepted while a session's turn was running, held in arrival
+/// order until the next turn takes them as its input. A row carries the
+/// origin it arrived with, so the message it becomes is labelled truthfully.
+const CREATE_TURN_QUEUE: &str = "
+    CREATE TABLE turn_queue (
+        id          TEXT    NOT NULL PRIMARY KEY,
+        session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        thread_id   TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        seq         INTEGER NOT NULL,
+        origin      TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
+        content     TEXT    NOT NULL,
+        attachments TEXT    NOT NULL DEFAULT '[]',
+        created_at  TEXT    NOT NULL,
+        UNIQUE (session_id, seq)
+    );
+";
 
 /// Surfaces belong to sessions, and the shared surface library replaces the
 /// topic-local templates. A surface row names the session it opens with;

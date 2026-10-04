@@ -66,6 +66,9 @@ pub struct AppState {
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
     pub active_connections: Arc<AsyncMutex<HashSet<Uuid>>>,
+    /// Turn events for a session that no single connection owns — a turn the
+    /// queue started — delivered to every connection open on that session.
+    pub session_events: broadcast::Sender<(Uuid, ServerEvent)>,
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
@@ -285,6 +288,7 @@ impl AppState {
         config_root: PathBuf,
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
+        let (session_events, _) = broadcast::channel(256);
         let workflow_capabilities =
             WorkflowCapabilities::for_protocol(config.default_provider_protocol());
         let tool_dispatcher = Arc::new(tool_dispatcher);
@@ -327,6 +331,7 @@ impl AppState {
             active_workflow_runs: Arc::new(AsyncMutex::new(HashMap::new())),
             active_workflow_workers: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
+            session_events,
             tool_dispatcher: tool_dispatcher.clone(),
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,

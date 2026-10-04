@@ -102,6 +102,9 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     // Subscribe to the server-wide broadcast channel before spawning the
     // forwarding task so no broadcast events (e.g. Shutdown) are missed.
     let mut bcast_rx = state.broadcast.subscribe();
+    // Turn events the queue's drain produces for this session: no connection
+    // owns that turn, so every connection open on the session receives them.
+    let mut session_rx = state.session_events.subscribe();
 
     // Channel that turn processing uses to send events back to this connection.
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -132,6 +135,30 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
                                 }
                             }
                         }
+                    }
+                }
+
+                result = session_rx.recv() => {
+                    match result {
+                        Ok((target, event)) => {
+                            if target != session_id {
+                                continue;
+                            }
+                            match serde_json::to_string(&event) {
+                                Ok(json) => {
+                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to serialise session event");
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(n, "session event receiver lagged, {n} event(s) dropped");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
 
@@ -265,6 +292,12 @@ pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEv
     match event {
         // A recorded message is for the conversation it joined and no other.
         ServerEvent::MessageAppended {
+            session_id: target, ..
+        }
+        | ServerEvent::MessageQueued {
+            session_id: target, ..
+        }
+        | ServerEvent::QueueDrained {
             session_id: target, ..
         } => *target == session_id,
         ServerEvent::Shutdown { .. }

@@ -246,6 +246,10 @@
       conversationStore.appendAssistantMessage(msg, conversationId),
     appendRecordedMessage: (msg, conversationId) =>
       conversationStore.appendRecordedMessage(msg, conversationId),
+    appendQueuedMessage: (queued, conversationId) =>
+      conversationStore.appendQueuedMessage(queued, conversationId),
+    clearQueuedMessages: (conversationId) =>
+      conversationStore.clearQueuedMessages(conversationId),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
     selectThread: (threadId) => conversationStore.selectThread!(threadId),

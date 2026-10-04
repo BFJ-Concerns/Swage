@@ -4,6 +4,7 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use swage_agent::approval::ApprovalDecisionValue;
+use swage_core::GatewayError;
 
 use crate::{state::AppState, subscription::SubscriptionState, turn};
 
@@ -65,6 +66,62 @@ fn skill_root_for_session(_session_id: Uuid) -> Option<std::path::PathBuf> {
 /// Subscribe/Unsubscribe update per-connection [`SubscriptionState`].
 /// SendMessage intercepts slash commands before spawning a turn.
 /// ActivateSkill and DeactivateSkill delegate to [`crate::skill::SkillManager`].
+/// Run a person's message as a turn on its own task. A message that finds a
+/// turn already running is not an error to the person: it is queued for the
+/// next turn and announced as queued (C60).
+fn spawn_person_turn(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Option<Uuid>,
+    input: turn::TurnInput,
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    subscription: Arc<Mutex<SubscriptionState>>,
+) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let queued_copy = input.clone();
+        match turn::process_turn(
+            &state,
+            session_id,
+            thread_id,
+            input,
+            tx.clone(),
+            subscription,
+            None,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(GatewayError::TurnInProgress { .. }) => {
+                let thread = match crate::thread_selection::resolve_thread_for_session(
+                    state.storage.as_ref(),
+                    session_id,
+                    thread_id,
+                )
+                .await
+                {
+                    Ok(thread) => thread,
+                    Err(e) => {
+                        let (code, message) = classify_gateway_error(&e);
+                        let _ = tx.send(ServerEvent::Error { code, message });
+                        return;
+                    }
+                };
+                if let Err(e) =
+                    crate::turn_queue::queue_input(&state, session_id, thread.id, queued_copy).await
+                {
+                    let (code, message) = classify_gateway_error(&e);
+                    let _ = tx.send(ServerEvent::Error { code, message });
+                }
+            }
+            Err(e) => {
+                let (code, message) = classify_gateway_error(&e);
+                let _ = tx.send(ServerEvent::Error { code, message });
+            }
+        }
+    });
+}
+
 pub(super) async fn dispatch_client_message(
     text: &str,
     state: &AppState,
@@ -187,66 +244,36 @@ pub(super) async fn dispatch_client_message(
                         // a bare command is itself the message so it is persisted and settles
                         // through the same terminal event path as every other submission.
                         let turn_content = remaining_text.unwrap_or(content);
-                        let state = state.clone();
-                        let sub = Arc::clone(&subscription);
-                        tokio::spawn(async move {
-                            if let Err(e) = turn::process_turn(
-                                &state,
-                                session_id,
-                                thread_id,
-                                turn::TurnInput::with_attachments(turn_content, attachments),
-                                tx.clone(),
-                                sub,
-                                None,
-                            )
-                            .await
-                            {
-                                let (code, message) = classify_gateway_error(&e);
-                                let _ = tx.send(ServerEvent::Error { code, message });
-                            }
-                        });
+                        spawn_person_turn(
+                            state,
+                            session_id,
+                            thread_id,
+                            turn::TurnInput::with_attachments(turn_content, attachments),
+                            tx.clone(),
+                            Arc::clone(&subscription),
+                        );
                     } else {
                         // Unknown skill — pass the original message through unchanged.
-                        let state = state.clone();
-                        let sub = Arc::clone(&subscription);
-                        tokio::spawn(async move {
-                            if let Err(e) = turn::process_turn(
-                                &state,
-                                session_id,
-                                thread_id,
-                                turn::TurnInput::with_attachments(content, attachments),
-                                tx.clone(),
-                                sub,
-                                None,
-                            )
-                            .await
-                            {
-                                let (code, message) = classify_gateway_error(&e);
-                                let _ = tx.send(ServerEvent::Error { code, message });
-                            }
-                        });
-                    }
-                }
-                SlashCommandResult::NotACommand => {
-                    // Regular message — spawn the turn as normal.
-                    let state = state.clone();
-                    let sub = Arc::clone(&subscription);
-                    tokio::spawn(async move {
-                        if let Err(e) = turn::process_turn(
-                            &state,
+                        spawn_person_turn(
+                            state,
                             session_id,
                             thread_id,
                             turn::TurnInput::with_attachments(content, attachments),
                             tx.clone(),
-                            sub,
-                            None,
-                        )
-                        .await
-                        {
-                            let (code, message) = classify_gateway_error(&e);
-                            let _ = tx.send(ServerEvent::Error { code, message });
-                        }
-                    });
+                            Arc::clone(&subscription),
+                        );
+                    }
+                }
+                SlashCommandResult::NotACommand => {
+                    // Regular message — spawn the turn as normal.
+                    spawn_person_turn(
+                        state,
+                        session_id,
+                        thread_id,
+                        turn::TurnInput::with_attachments(content, attachments),
+                        tx.clone(),
+                        Arc::clone(&subscription),
+                    );
                 }
             }
         }

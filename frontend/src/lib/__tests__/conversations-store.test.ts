@@ -443,6 +443,33 @@ describe("durable local updates", () => {
     expect(store.conversations[0].message_preview).toBe("Summarise the inbox.");
   });
 
+  it("shows a message the gateway holds for the next turn, once, until the queue drains", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+
+    const queued = {
+      id: "q-1",
+      origin: "user" as const,
+      content: "while you were answering…",
+      queued_at: "2026-01-01T00:02:00Z",
+    };
+    store.appendQueuedMessage(queued, "conv-1");
+    store.appendQueuedMessage(queued, "conv-1");
+    expect(store.activeConversation!.queued).toEqual([queued]);
+    expect(store.activeConversation!.messages).toHaveLength(0);
+
+    store.appendQueuedMessage({ ...queued, id: "q-other" }, "conv-2");
+    expect(store.activeConversation!.queued).toHaveLength(1);
+
+    store.clearQueuedMessages("conv-1");
+    expect(store.activeConversation!.queued).toEqual([]);
+  });
+
   it("a recorded message for another conversation updates only that conversation's summary", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([

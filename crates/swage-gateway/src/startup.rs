@@ -253,6 +253,13 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    // Messages queued behind turns the restart orphaned run now that those
+    // turns are settled.
+    match crate::turn_queue::drain_queues_at_startup(&state).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "draining turn queues left by the previous process"),
+        Err(error) => tracing::warn!(%error, "turn queues could not be drained at startup"),
+    }
     // Memory curation: the platform's curator reads each attended
     // conversation into the operator's memory once it has fallen quiet.
     let curation_handle = crate::memory_curation::spawn_curation_loop_until_cancelled(
