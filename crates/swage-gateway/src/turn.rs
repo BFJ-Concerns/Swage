@@ -795,9 +795,17 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
         Err(join_err) => {
             tracing::error!(error = %join_err, "agent task panicked");
+            let message = "agent task panicked".to_string();
+            let failed_turn_id = turn_id.unwrap_or(prepared_turn_id);
+            if let Some(reason) =
+                projection::record_failure_explanation(state, session_id, failed_turn_id, &message)
+                    .await
+            {
+                tracing::error!(%reason, turn_id = %failed_turn_id, "turn record integrity lost");
+            }
             let _ = ws_tx.send(ServerEvent::Error {
                 code: "internal_error".to_string(),
-                message: "agent task panicked".to_string(),
+                message,
             });
         }
     }

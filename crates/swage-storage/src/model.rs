@@ -1291,6 +1291,9 @@ pub struct Turn {
     /// The execution boundary the turn ran inside, recorded when its
     /// dispatcher settled; `None` for a turn that never reached that point.
     pub execution_isolation: Option<TurnIsolation>,
+    /// The explanation the person was shown when the turn ended without a
+    /// reply; `None` for a turn that never failed with one.
+    pub failure_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -3262,6 +3265,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3318,6 +3322,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
@@ -3348,6 +3353,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -3381,6 +3387,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3412,6 +3419,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
