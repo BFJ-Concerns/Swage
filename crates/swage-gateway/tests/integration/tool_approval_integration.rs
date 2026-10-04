@@ -1286,7 +1286,7 @@ async fn native_approval_scope(scope: &str, read: bool) {
         native_call(
             "search",
             "file_search",
-            json!({"path": "../project-Annexe", "pattern": "native approval marker"}),
+            json!({"path": if read { "../project-Annexe" } else { "../project-Annexe/build/reviews" }, "pattern": "native approval marker"}),
         )
     };
     let next = || {
@@ -1296,20 +1296,30 @@ async fn native_approval_scope(scope: &str, read: bool) {
             native_call(
                 "next",
                 "file_write",
-                json!({"path": "../project-Annexe/VERIFICATION.md", "content": "new session write"}),
+                json!({"path": "../project-Annexe/build/reviews/VERIFICATION.md", "content": "new session write"}),
             )
         }
     };
-    let provider = MockProvider::new(vec![
+    let mut responses = vec![
         if read { list() } else { write() },
         native_done(),
         if read { search() } else { list() },
         native_done(),
         if read { list() } else { search() },
         native_done(),
-        next(),
-        native_done(),
-    ]);
+    ];
+    if !read {
+        responses.extend([
+            native_call(
+                "outside",
+                "file_write",
+                json!({"path": "../project-Annexe/outside.md", "content": "must not be written"}),
+            ),
+            native_done(),
+        ]);
+    }
+    responses.extend([next(), native_done()]);
+    let provider = MockProvider::new(responses);
     let mut config = ResolvedConfig::default();
     config.sandbox.enabled = false;
     config.sandbox.allow_degraded_execution = true;
@@ -1342,6 +1352,12 @@ async fn native_approval_scope(scope: &str, read: bool) {
                         "matching {scope} grant must suppress another prompt: {event}"
                     );
                     assert_eq!(event["kind"], "location");
+                    if !read && index == 0 {
+                        assert_eq!(
+                            event["context"]["path"],
+                            annexe.join("build/reviews").to_string_lossy().as_ref()
+                        );
+                    }
                     let (status, body) = live_http_json(
                         addr,
                         reqwest::Method::POST,
@@ -1390,6 +1406,37 @@ async fn native_approval_scope(scope: &str, read: bool) {
             );
         }
     }
+    if !read {
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "outside"}),
+        )
+        .await;
+        let mut prompts = 0;
+        let complete = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let event = ws_recv_lenient(&mut stream).await.unwrap();
+                if event["type"] == "approval_required" {
+                    prompts += 1;
+                    ws_send(&mut sink, json!({"type": "approval_decision", "approval_id": event["approval_id"], "decision": "rejected"})).await;
+                }
+                if event["type"] == "turn_complete" { break event; }
+                assert_ne!(event["type"], "error", "{event}");
+            }
+        }).await.expect("outside-root turn completes");
+        assert_eq!(
+            prompts, 1,
+            "a directory grant must not authorise its parent"
+        );
+        assert_eq!(
+            native_result(&storage, &complete, "outside")
+                .await
+                .status
+                .as_deref(),
+            Some("rejected")
+        );
+        assert!(!annexe.join("outside.md").exists());
+    }
     // A fresh gateway has no session grant cache: permanent access must load from storage.
     let (router, addr) = if scope == "permanent" {
         let provider = MockProvider::new(vec![next(), native_done()]);
@@ -1437,7 +1484,7 @@ async fn native_approval_scope(scope: &str, read: bool) {
             assert!(call.result.as_deref().unwrap().contains("source.txt"));
         } else {
             assert_eq!(
-                std::fs::read_to_string(annexe.join("VERIFICATION.md")).unwrap(),
+                std::fs::read_to_string(annexe.join("build/reviews/VERIFICATION.md")).unwrap(),
                 "new session write"
             );
         }
@@ -1447,7 +1494,7 @@ async fn native_approval_scope(scope: &str, read: bool) {
             "once and session grants must not reach another session"
         );
         assert_eq!(call.status.as_deref(), Some("rejected"));
-        assert!(!annexe.join("VERIFICATION.md").exists());
+        assert!(!annexe.join("build/reviews/VERIFICATION.md").exists());
     }
 }
 
