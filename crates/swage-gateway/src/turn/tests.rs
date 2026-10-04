@@ -18594,7 +18594,7 @@ async fn operation_outcome_turn(
     (storage, turn, events, requests)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn operation_outcome_shell_failure_is_recorded_and_streamed_without_losing_detail() {
     let (storage, turn, events, requests) = operation_outcome_turn(vec![
         (
@@ -18649,7 +18649,7 @@ async fn operation_outcome_shell_failure_is_recorded_and_streamed_without_losing
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn operation_outcome_failed_workflow_is_recorded_and_streamed() {
     let (storage, turn, events, _) = operation_outcome_turn(vec![
         ("failed-workflow", "workflow_run", serde_json::json!({"source": "return await agent('work', { task: 'nonexistent-outcome-task' });", "wait": true})),
