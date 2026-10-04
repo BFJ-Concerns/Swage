@@ -17035,194 +17035,178 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn answering_either_concurrent_hold_advances_the_workflow() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.general_scope().await.expect("topic");
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let source = r#"
-            const first = hold({ content: "Choose the release channel", verdicts: ["stable", "beta"] });
-            const second = hold({ content: "Choose the announcement", verdicts: ["publish", "quiet"] });
-            const answer = await Promise.race([first, second]);
-            return { content: answer.content, verdict: answer.verdict };
-        "#;
-        let Json(started) = start_inline_run(
-            State(state.clone()),
-            Path(topic.id),
-            Json(StartInlineWorkflowRunRequest {
-                source: source.into(),
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start concurrently held run");
-        wait_for_run_state(&storage, started.id, "parked").await;
+        workflow_journey(async {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let topic = storage.general_scope().await.expect("topic");
+            let root = tempfile::tempdir().expect("isolated concurrent hold root");
+            let state = AppState::new_with_config_root(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn TopicStore>,
+                Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+                root.path().to_path_buf(),
+            );
+            let api = WorkflowTestApi::start(state.clone()).await;
+            let source = r#"
+                const first = hold({ content: "Choose the release channel", verdicts: ["stable", "beta"] });
+                const second = hold({ content: "Choose the announcement", verdicts: ["publish", "quiet"] });
+                const answer = await Promise.race([first, second]);
+                return { content: answer.content, verdict: answer.verdict };
+            "#;
+            let started = api.start_inline(
+                topic.id,
+                StartInlineWorkflowRunRequest {
+                    source: source.into(),
+                    args: Value::Null,
+                    budget: None,
+                },
+            )
+            .await;
+            wait_for_run_state(&storage, started.id, "parked").await;
 
-        let holds = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let holds = storage
-                    .list_workflow_run_holds(started.id)
-                    .await
-                    .expect("list concurrent holds");
+            let holds = loop {
+                let holds = api.detail(started.id).await.holds;
                 if holds.len() == 2 {
-                    return holds;
+                    break holds;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("both concurrent holds are opened");
-        let second = &holds[1];
+                tokio::task::yield_now().await;
+            };
+            let second = &holds[1];
 
-        answer_run_hold(
-            &state,
-            AnswerWorkflowRunHoldRequest {
-                hold_id: second.id,
-                verdict: "publish".into(),
-            },
-            None,
-            RunEventSource {
-                surface: "operator",
-                agent_id: None,
-                session_id: None,
-                turn_id: None,
-            },
-        )
-        .await
-        .expect("answer the later concurrent hold");
-
-        let completed = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            wait_for_run_state(&storage, started.id, "completed"),
-        )
-        .await
-        .expect("answering either concurrent hold advances the workflow");
-        assert_eq!(
-            completed.final_output,
-            Some(serde_json::json!({
-                "content": "Choose the announcement",
-                "verdict": "publish",
-            }))
-        );
-        let holds = storage
-            .list_workflow_run_holds(started.id)
+            answer_run_hold(
+                &state,
+                AnswerWorkflowRunHoldRequest {
+                    hold_id: second.id,
+                    verdict: "publish".into(),
+                },
+                None,
+                RunEventSource {
+                    surface: "operator",
+                    agent_id: None,
+                    session_id: None,
+                    turn_id: None,
+                },
+            )
             .await
-            .expect("read terminal holds");
-        assert!(
-            holds.iter().any(|hold| hold.state == "closed"),
-            "the losing concurrent hold closes when the run completes"
-        );
-        assert!(
-            storage
-                .list_open_workflow_run_holds(topic.id)
+            .expect("answer the later concurrent hold");
+
+            wait_for_run_state(&storage, started.id, "completed").await;
+            let completed = api.detail(started.id).await.run;
+            assert_eq!(
+                completed.final_output,
+                Some(serde_json::json!({
+                    "content": "Choose the announcement",
+                    "verdict": "publish",
+                }))
+            );
+            let holds = storage
+                .list_workflow_run_holds(started.id)
                 .await
-                .expect("list open holds")
-                .is_empty(),
-            "completed runs leave no answerable holds"
-        );
-        let Json(detail) = get_run(State(state.clone()), Path(started.id))
-            .await
-            .expect("terminal run detail");
-        assert!(
-            detail
-                .holds
-                .iter()
-                .any(|hold| matches!(hold.state, WorkflowRunHoldState::Closed))
-        );
-        assert_eq!(detail.hold_metrics.holds_open, 0);
-        assert_eq!(detail.hold_metrics.holds_answered, 1);
-        assert_eq!(detail.hold_metrics.answers_rejected, 0);
+                .expect("read terminal holds");
+            assert!(
+                holds.iter().any(|hold| hold.state == "closed"),
+                "the losing concurrent hold closes when the run completes"
+            );
+            assert!(
+                storage
+                    .list_open_workflow_run_holds(topic.id)
+                    .await
+                    .expect("list open holds")
+                    .is_empty(),
+                "completed runs leave no answerable holds"
+            );
+            let detail = api.detail(started.id).await;
+            assert!(
+                detail
+                    .holds
+                    .iter()
+                    .any(|hold| matches!(hold.state, WorkflowRunHoldState::Closed))
+            );
+            assert_eq!(detail.hold_metrics.holds_open, 0);
+            assert_eq!(detail.hold_metrics.holds_answered, 1);
+            assert_eq!(detail.hold_metrics.answers_rejected, 0);
+        })
+        .await;
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn answering_the_first_concurrent_hold_advances_the_workflow() {
-        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let topic = storage.general_scope().await.expect("topic");
-        let state = AppState::new(
-            Arc::clone(&storage) as Arc<dyn Storage>,
-            Arc::clone(&storage) as Arc<dyn TopicStore>,
-            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-            swage_config::ResolvedConfig::default(),
-            crate::tool::ToolDispatcher::allow_all(vec![]),
-            None,
-        );
-        let source = r#"
-            const first = hold({ content: "Choose the release channel", verdicts: ["stable", "beta"] });
-            const second = hold({ content: "Choose the announcement", verdicts: ["publish", "quiet"] });
-            const answer = await Promise.race([first, second]);
-            return { content: answer.content, verdict: answer.verdict };
-        "#;
-        let Json(started) = start_inline_run(
-            State(state.clone()),
-            Path(topic.id),
-            Json(StartInlineWorkflowRunRequest {
-                source: source.into(),
-                args: Value::Null,
-                budget: None,
-            }),
-        )
-        .await
-        .expect("start concurrently held run");
-        wait_for_run_state(&storage, started.id, "parked").await;
+        workflow_journey(async {
+            let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+            let topic = storage.general_scope().await.expect("topic");
+            let root = tempfile::tempdir().expect("isolated concurrent hold root");
+            let state = AppState::new_with_config_root(
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Arc::clone(&storage) as Arc<dyn TopicStore>,
+                Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+                root.path().to_path_buf(),
+            );
+            let api = WorkflowTestApi::start(state.clone()).await;
+            let source = r#"
+                const first = hold({ content: "Choose the release channel", verdicts: ["stable", "beta"] });
+                const second = hold({ content: "Choose the announcement", verdicts: ["publish", "quiet"] });
+                const answer = await Promise.race([first, second]);
+                return { content: answer.content, verdict: answer.verdict };
+            "#;
+            let started = api.start_inline(
+                topic.id,
+                StartInlineWorkflowRunRequest {
+                    source: source.into(),
+                    args: Value::Null,
+                    budget: None,
+                },
+            )
+            .await;
+            wait_for_run_state(&storage, started.id, "parked").await;
 
-        let holds = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let holds = storage
-                    .list_workflow_run_holds(started.id)
-                    .await
-                    .expect("list concurrent holds");
+            let holds = loop {
+                let holds = api.detail(started.id).await.holds;
                 if holds.len() == 2 {
-                    return holds;
+                    break holds;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+                tokio::task::yield_now().await;
+            };
+            let first = &holds[0];
+            assert!(
+                matches!(holds[1].state, WorkflowRunHoldState::Open),
+                "the second hold is still open when the first decision is answered"
+            );
+
+            answer_run_hold(
+                &state,
+                AnswerWorkflowRunHoldRequest {
+                    hold_id: first.id,
+                    verdict: "stable".into(),
+                },
+                None,
+                RunEventSource {
+                    surface: "operator",
+                    agent_id: None,
+                    session_id: None,
+                    turn_id: None,
+                },
+            )
+            .await
+            .expect("answer the first concurrent hold");
+
+            wait_for_run_state(&storage, started.id, "completed").await;
+            let completed = api.detail(started.id).await.run;
+            assert_eq!(
+                completed.final_output,
+                Some(serde_json::json!({
+                    "content": "Choose the release channel",
+                    "verdict": "stable",
+                }))
+            );
         })
-        .await
-        .expect("both concurrent holds are opened");
-        let first = &holds[0];
-        assert!(
-            holds[1].state == "open",
-            "the second hold is still open when the first decision is answered"
-        );
-
-        answer_run_hold(
-            &state,
-            AnswerWorkflowRunHoldRequest {
-                hold_id: first.id,
-                verdict: "stable".into(),
-            },
-            None,
-            RunEventSource {
-                surface: "operator",
-                agent_id: None,
-                session_id: None,
-                turn_id: None,
-            },
-        )
-        .await
-        .expect("answer the first concurrent hold");
-
-        let completed = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            wait_for_run_state(&storage, started.id, "completed"),
-        )
-        .await
-        .expect("answering the first concurrent hold advances the workflow");
-        assert_eq!(
-            completed.final_output,
-            Some(serde_json::json!({
-                "content": "Choose the release channel",
-                "verdict": "stable",
-            }))
-        );
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
