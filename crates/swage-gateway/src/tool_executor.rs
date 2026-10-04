@@ -223,6 +223,12 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             .as_ref()
             .filter(|host| host.kind != crate::device::DeviceKind::Local)
         {
+            crate::tool::workspace::require_native_file_write_access(
+                tool_name,
+                &resolved_params,
+                &gateway_ctx,
+            )
+            .await?;
             let state = self
                 .app_state
                 .as_ref()

@@ -1111,3 +1111,258 @@ async fn the_recent_list_spans_topics_and_the_general_scope_and_narrows_by_topic
         "nothing is archived on a fresh install"
     );
 }
+
+// Native file tools must enforce the attachment's access even when a turn
+// has an inner sandbox strategy: device-executed tools run on the host.
+struct UnexpectedSandboxExecution;
+
+#[async_trait::async_trait]
+impl swage_tool::dispatch::ToolExecutionStrategy for UnexpectedSandboxExecution {
+    async fn execute(
+        &self,
+        _tool: &dyn swage_tool::tool::Tool,
+        name: &str,
+        _params: &Value,
+        _ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<Value, swage_core::ToolError> {
+        Err(swage_core::ToolError::ExecutionFailed {
+            name: name.into(),
+            message: "native file tool incorrectly entered the inner sandbox".into(),
+        })
+    }
+}
+
+async fn native_file_fixture(
+    root: &std::path::Path,
+    writable: bool,
+    sandboxed_turn: bool,
+    remote: bool,
+) -> (
+    swage_tool::context::MockToolContext,
+    swage_gateway::tool_executor::GatewayExecutionStrategy,
+) {
+    use swage_storage::{NewSession, SessionOrigin, SessionStore};
+    let (router, storage) = make_test_router();
+    let (status, topic) = http_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({ "name": "File access" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let topic_id = topic["id"].as_str().unwrap();
+    let permissions = if writable {
+        vec!["read", "write"]
+    } else {
+        vec!["read"]
+    };
+    let (status, attachment) = http_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/workspaces"),
+        Some(json!({ "path": root, "permissions": permissions,
+            "is_trusted": true, "set_as_default": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let session = storage
+        .create_session(NewSession {
+            topic_id: Uuid::parse_str(topic_id).unwrap(),
+            agent_id: "default".into(),
+            origin: SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: Some(
+                Uuid::parse_str(attachment["id"].as_str().unwrap()).unwrap(),
+            ),
+        })
+        .await
+        .unwrap();
+    let mut context = swage_tool::context::MockToolContext::new("default", session.id.to_string());
+    context.working_directory = root.to_path_buf();
+    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let inner = sandboxed_turn.then(|| {
+        Arc::new(UnexpectedSandboxExecution) as Arc<dyn swage_tool::dispatch::ToolExecutionStrategy>
+    });
+    let device = remote.then(|| swage_gateway::device::RegisteredDevice {
+        device_id: "remote-file-device".into(),
+        label: None,
+        kind: swage_gateway::device::DeviceKind::AttachedDevice,
+        shared_token_secret_ref: None,
+        workspace_root: root.to_path_buf(),
+        workspace_roots: vec![root.to_path_buf()],
+        capabilities: vec!["file_write".into(), "file_edit".into()],
+        registered_at: chrono::Utc::now(),
+    });
+    let strategy = swage_gateway::tool_executor::GatewayExecutionStrategy::new(
+        inner,
+        tx,
+        device,
+        Arc::new(swage_gateway::secret::SecretManager::new(storage.clone())),
+        storage,
+        None,
+    );
+    (context, strategy)
+}
+
+#[tokio::test]
+async fn native_file_write_respects_attachment_access_on_local_and_sandboxed_turns() {
+    use swage_gateway::tool::file_write::FileWriteTool;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    for sandboxed in [false, true] {
+        for writable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+            let (ctx, strategy) =
+                native_file_fixture(root.path(), writable, sandboxed, false).await;
+            for path in ["nested/denied-probe.txt", "existing.txt"] {
+                let result = strategy
+                    .execute(
+                        &FileWriteTool,
+                        "file_write",
+                        &json!({"path": path, "content": "denied-probe\n"}),
+                        &ctx,
+                    )
+                    .await;
+                if writable {
+                    assert_eq!(
+                        result.unwrap()["output"],
+                        format!("Wrote 13 bytes to {path}")
+                    );
+                    assert_eq!(
+                        std::fs::read_to_string(root.path().join(path)).unwrap(),
+                        "denied-probe\n"
+                    );
+                } else {
+                    let error = result.expect_err("read-only attachment must refuse file_write");
+                    assert!(error.to_string().contains("read-only access"), "{error}");
+                    assert!(!root.path().join("nested").exists());
+                    assert_eq!(
+                        std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+                        "original"
+                    );
+                    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_file_edit_respects_attachment_access_on_local_and_sandboxed_turns() {
+    use swage_gateway::tool::file_edit::FileEditTool;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    for sandboxed in [false, true] {
+        for writable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            for path in ["first.txt", "second.txt"] {
+                std::fs::write(root.path().join(path), "original").unwrap();
+            }
+            let (ctx, strategy) =
+                native_file_fixture(root.path(), writable, sandboxed, false).await;
+            let result = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+                {"path": "first.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "changed"}]},
+                {"path": "second.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "changed"}]}
+            ]}), &ctx).await;
+            if writable {
+                assert_eq!(result.unwrap()["output"], "Applied 2 edit(s) to 2 file(s)");
+            } else {
+                let error = result.expect_err("read-only attachment must refuse file_edit");
+                assert!(error.to_string().contains("read-only access"), "{error}");
+            }
+            for path in ["first.txt", "second.txt"] {
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join(path)).unwrap(),
+                    if writable { "changed" } else { "original" }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_file_mutations_without_attachment_authority_refuse() {
+    use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
+    use swage_tool::tool::Tool;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+    let mut ctx = swage_tool::context::MockToolContext::new("unknown", "unknown");
+    ctx.working_directory = root.path().to_path_buf();
+    let ctx = swage_tool::context::serialise_tool_context(&ctx);
+    let error = FileWriteTool
+        .execute(json!({"path": "probe.txt", "content": "bad"}), &ctx)
+        .await
+        .expect_err("context without attachment authority must refuse writes");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot establish workspace write access"),
+        "{error}"
+    );
+    let error = FileEditTool
+        .execute(
+            json!({"changes": [{"path": "existing.txt", "edits": [
+                {"type": "replace", "old_text": "original", "new_text": "bad"}
+            ]}]}),
+            &ctx,
+        )
+        .await
+        .expect_err("context without attachment authority must refuse edits");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot establish workspace write access"),
+        "{error}"
+    );
+    assert!(!root.path().join("probe.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+        "original"
+    );
+}
+
+#[tokio::test]
+async fn native_file_mutations_refuse_read_only_targets_before_remote_dispatch() {
+    use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+    let (ctx, strategy) = native_file_fixture(root.path(), false, false, true).await;
+    let error = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "probe.txt", "content": "bad"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("read-only access"), "{error}");
+    let error = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": "existing.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "bad"}]}
+    ]}), &ctx).await.unwrap_err();
+    assert!(error.to_string().contains("read-only access"), "{error}");
+    assert!(!root.path().join("probe.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+        "original"
+    );
+    // A device's own path is not a gateway attachment. The request reaches
+    // the transport boundary instead of being denied as a read-only target.
+    let other = tempfile::tempdir().unwrap();
+    let error = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": other.path().join("own.txt"), "content": "device"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("device execution needs the live gateway state"),
+        "{error}"
+    );
+}
