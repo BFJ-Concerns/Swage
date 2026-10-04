@@ -742,6 +742,13 @@ pub const INTERRUPTED_TOOL_STATUS: &str = "interrupted";
 pub const INTERRUPTED_TOOL_RESULT: &str =
     "tool call did not report a result; its outcome is unknown";
 
+/// Status for a started call whose turn was stopped while it ran.
+pub const CANCELLED_TOOL_STATUS: &str = "cancelled";
+
+/// Result a started tool call settles with when its turn was stopped; the
+/// call's execution was dropped, which stops the work it started.
+pub const CANCELLED_TOOL_RESULT: &str = "tool call was cancelled when its turn was stopped";
+
 /// Status for a call that ran but whose result could not be recorded.
 pub const TOOL_RESULT_UNAVAILABLE_STATUS: &str = "result_unavailable";
 
