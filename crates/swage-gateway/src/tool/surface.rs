@@ -228,7 +228,7 @@ impl Tool for SurfaceWriteTool {
                 },
                 "module_id": {
                     "type": "string",
-                    "description": "The module to act on: replace its source, remove it, move it, or hang an annotation on it. Omit only when appending a new module."
+                    "description": "The module to act on: replace its source, remove it, move it, or hang an annotation on it. Omit when appending a new module or saving the surface."
                 },
                 "kind": {
                     "type": "string",

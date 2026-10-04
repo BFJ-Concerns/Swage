@@ -324,9 +324,12 @@ treat every payload as a worker-reported claim.
   distinct strings, or the hold is refused when raised and never reaches a
   decider. The run resumes with `{ verdict }`, one of your set. A hold is
   registered on the run: the run page lists it with its question and its
-  verdicts, and an agent granted the `workflow_hold` tool lists open holds
-  and answers one; an answer outside the set is refused with feedback
-  while the hold keeps waiting. The raise, the answer and every refused
+  verdicts, and an agent granted the `workflow_hold` tool lists the open
+  holds in its topic (`action: "list"`) and answers one (`action:
+  "answer"` with the `hold_id` and a `verdict` from the set); the script
+  names no decider — whoever holds that grant in the run's topic, or the
+  person at the run page, may answer. An answer outside the set is refused
+  with feedback while the hold keeps waiting. The raise, the answer and every refused
   answer land in the run record, and a replayed `hold` returns its
   recorded verdict. Reach for `hold` on the first attempt whenever the run
   needs an approve/postpone, yes/no or pick-one answer — never a
