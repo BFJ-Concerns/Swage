@@ -84,6 +84,24 @@ pub struct GateConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, as = "Option<_>")]
     pub criteria: Option<String>,
+    /// State the gate is shown before it decides, beyond the schedule's own
+    /// record: what the criteria name. Declared here so a criterion about a
+    /// file is decidable against that file, and refused at declaration when
+    /// the schedule's session has nowhere to read it from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub observations: Vec<GateObservation>,
+}
+
+/// One thing a gate observes before deciding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
+pub enum GateObservation {
+    /// A file under the scheduled session's trusted workspace, by a path
+    /// relative to it: the gate sees whether it exists, its size, and its
+    /// opening excerpt.
+    File { path: String },
 }
 
 /// How an update touches a schedule's gate.

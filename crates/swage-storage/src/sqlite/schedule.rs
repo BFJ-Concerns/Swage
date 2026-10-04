@@ -130,8 +130,43 @@ fn creator_columns(creator: &ScheduleCreator) -> (&'static str, Option<String>) 
     }
 }
 
-fn gate_from_columns(model: Option<String>, criteria: Option<String>) -> Option<GateConfig> {
-    model.map(|model| GateConfig { model, criteria })
+fn gate_from_columns(
+    model: Option<String>,
+    criteria: Option<String>,
+    observations: Option<String>,
+) -> rusqlite::Result<Option<GateConfig>> {
+    let Some(model) = model else {
+        return Ok(None);
+    };
+    let observations = match observations {
+        Some(json) => serde_json::from_str(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                18,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        None => Vec::new(),
+    };
+    Ok(Some(GateConfig {
+        model,
+        criteria,
+        observations,
+    }))
+}
+
+/// The gate's three columns from its config: model, criteria, and the
+/// observations as a JSON array (absent when there are none).
+fn gate_columns(gate: Option<&GateConfig>) -> (Option<String>, Option<String>, Option<String>) {
+    match gate {
+        Some(gate) => (
+            Some(gate.model.clone()),
+            gate.criteria.clone(),
+            (!gate.observations.is_empty())
+                .then(|| serde_json::to_string(&gate.observations).unwrap_or_else(|_| "[]".into())),
+        ),
+        None => (None, None, None),
+    }
 }
 
 /// A gate decision is stored as three columns that are always written
@@ -155,7 +190,7 @@ fn gate_decision_from_columns(
 
 const SCHEDULE_COLUMNS: &str = "id, message, status, kind, expression, session_policy, topic_id, \
      agent_id, session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at, \
-     created_at, updated_at, creator_kind, creator_agent_id";
+     created_at, updated_at, creator_kind, creator_agent_id, gate_observations";
 
 fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let id: String = row.get(0)?;
@@ -176,6 +211,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let updated_at: String = row.get(15)?;
     let creator_kind: String = row.get(16)?;
     let creator_agent_id: Option<String> = row.get(17)?;
+    let gate_observations: Option<String> = row.get(18)?;
 
     Ok(Schedule {
         id: parse_uuid(&id)?,
@@ -192,7 +228,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
                 Box::new(error),
             )
         })?,
-        gate: gate_from_columns(gate_model, gate_criteria),
+        gate: gate_from_columns(gate_model, gate_criteria, gate_observations)?,
         next_run_at: parse_optional_dt(next_run_at)?,
         last_run_at: parse_optional_dt(last_run_at)?,
         created_at: parse_dt(&created_at)?,
@@ -264,18 +300,17 @@ impl ScheduleStore for SqliteStorage {
             let (creator_kind, creator_agent_id) = creator_columns(&schedule.creator);
             let next_run_at = serialise_optional_dt(schedule.next_run_at);
             let last_run_at = serialise_optional_dt(schedule.last_run_at);
-            let (gate_model, gate_criteria) = match &schedule.gate {
-                Some(gate) => (Some(gate.model.clone()), gate.criteria.clone()),
-                None => (None, None),
-            };
+            let (gate_model, gate_criteria, gate_observations) =
+                gate_columns(schedule.gate.as_ref());
 
             conn.execute(
                 "INSERT INTO schedules
                  (id, message, status, kind, expression, session_policy, topic_id, agent_id,
                   session_id, creator_kind, creator_agent_id, delivery_json, gate_model,
-                  gate_criteria, next_run_at, last_run_at, created_at, updated_at)
+                  gate_criteria, next_run_at, last_run_at, created_at, updated_at,
+                  gate_observations)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                  ?17, ?17)",
+                  ?17, ?17, ?18)",
                 params![
                     id.to_string(),
                     &schedule.message,
@@ -293,7 +328,8 @@ impl ScheduleStore for SqliteStorage {
                     &gate_criteria,
                     &next_run_at,
                     &last_run_at,
-                    &now_str
+                    &now_str,
+                    &gate_observations
                 ],
             )?;
 
@@ -381,10 +417,7 @@ impl ScheduleStore for SqliteStorage {
             .map(serialise_json)
             .transpose()?;
         let gate = update.gate.flatten();
-        let (gate_model, gate_criteria) = match gate {
-            Some(gate) => (Some(gate.model.clone()), gate.criteria.clone()),
-            None => (None, None),
-        };
+        let (gate_model, gate_criteria, gate_observations) = gate_columns(gate.as_ref());
         let next_run_at = update.next_run_at.map(serialise_optional_dt);
         let last_run_at = update.last_run_at.map(serialise_optional_dt);
         let updated_at = Utc::now().to_rfc3339();
@@ -401,6 +434,7 @@ impl ScheduleStore for SqliteStorage {
                      delivery_json = CASE WHEN ?9 THEN ?10 ELSE delivery_json END,
                      gate_model = CASE WHEN ?11 THEN ?12 ELSE gate_model END,
                      gate_criteria = CASE WHEN ?11 THEN ?13 ELSE gate_criteria END,
+                     gate_observations = CASE WHEN ?11 THEN ?20 ELSE gate_observations END,
                      next_run_at = CASE WHEN ?14 THEN ?15 ELSE next_run_at END,
                      last_run_at = CASE WHEN ?16 THEN ?17 ELSE last_run_at END,
                      updated_at = ?18
@@ -425,6 +459,7 @@ impl ScheduleStore for SqliteStorage {
                         &last_run_at,
                         &updated_at,
                         &id_text,
+                        &gate_observations,
                     ],
                 )
             })
@@ -671,11 +706,70 @@ impl ScheduleStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use crate::model::{
-        GateVerdict, NewTopic, ScheduleKind, ScheduleRunTrigger, ScheduleStatus, SkipReason,
+        GateObservation, GateVerdict, NewTopic, ScheduleKind, ScheduleRunTrigger, ScheduleStatus,
+        SkipReason,
     };
     use crate::store::{SessionStore, TopicStore};
 
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gates_observations_are_stored_with_it_and_cleared_with_it() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let topic = storage.general_scope().await.unwrap();
+        let created = storage
+            .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
+                message: "Clear the inbox.".into(),
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 minutes".into(),
+                session_policy: SessionPolicy::Fresh {
+                    topic_id: Some(topic.id),
+                    agent_id: "gateway".into(),
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: Some(GateConfig {
+                    model: "small".into(),
+                    criteria: Some("Only when inbox/todo.txt has lines.".into()),
+                    observations: vec![GateObservation::File {
+                        path: "inbox/todo.txt".into(),
+                    }],
+                }),
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let read = storage.get_schedule(created.id).await.unwrap().unwrap();
+        assert_eq!(
+            read.gate.as_ref().unwrap().observations,
+            vec![GateObservation::File {
+                path: "inbox/todo.txt".into()
+            }]
+        );
+
+        storage
+            .update_schedule(
+                created.id,
+                UpdateSchedule {
+                    gate: Some(Some(GateConfig {
+                        model: "small".into(),
+                        criteria: None,
+                        observations: Vec::new(),
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let read = storage.get_schedule(created.id).await.unwrap().unwrap();
+        assert!(
+            read.gate.as_ref().unwrap().observations.is_empty(),
+            "a replaced gate carries only its own observations"
+        );
+    }
 
     async fn make_storage_with_session() -> (SqliteStorage, Uuid, Uuid) {
         let storage = SqliteStorage::in_memory().unwrap();
@@ -740,6 +834,7 @@ mod tests {
                 gate: Some(GateConfig {
                     model: "small".into(),
                     criteria: Some("only when the queue is non-empty".into()),
+                    observations: Vec::new(),
                 }),
                 ..fresh_schedule(topic_id)
             })
@@ -841,6 +936,7 @@ mod tests {
                 gate: Some(GateConfig {
                     model: "small".into(),
                     criteria: None,
+                    observations: Vec::new(),
                 }),
                 ..fresh_schedule(topic_id)
             })

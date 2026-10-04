@@ -212,7 +212,7 @@ impl Tool for ScheduleTool {
                     "enum": ["create", "list", "update", "pause", "resume", "remove"],
                     "description": "create: define a new schedule. list: return every schedule \
                                     with its status, next run time, and creator. update: change an \
-                                    existing schedule's task, timing, or gate. pause: stop future \
+                                    existing schedule's task, timing, or gate (a gate may name files under the session's workspace to look at before deciding). pause: stop future \
                                     runs without deleting the schedule. resume: re-arm a paused \
                                     schedule from its stored timing. remove: delete a schedule \
                                     permanently."
@@ -301,6 +301,16 @@ impl Tool for ScheduleTool {
                     "description": "Optional, only meaningful with gate_model: a sentence telling \
                                     the gate what counts as work needed. Omitted, the gate judges \
                                     from the task and the previous outcome alone."
+                },
+                "gate_observe_files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional, with gate_model: paths, relative to the session's \
+                                    workspace, whose presence, size and opening lines the gate is \
+                                    shown before it decides — what makes a criterion like 'only \
+                                    when inbox/todo.txt is non-empty' decidable rather than \
+                                    guessed. The schedule's session must have a trusted \
+                                    workspace to read them from, or the gate is refused."
                 },
                 "gate_action": {
                     "type": "string",
@@ -648,6 +658,27 @@ fn build_gate(params: &Value) -> Result<Option<wire::GateConfig>, ToolError> {
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .map(str::to_owned),
+            observations: match params.get("gate_observe_files") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(paths)) => paths
+                    .iter()
+                    .map(|path| {
+                        path.as_str()
+                            .map(|path| wire::GateObservation::File {
+                                path: path.trim().to_owned(),
+                            })
+                            .ok_or_else(|| {
+                                invalid(SCHEDULE_TOOL, "gate_observe_files holds paths as strings")
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) => {
+                    return Err(invalid(
+                        SCHEDULE_TOOL,
+                        "gate_observe_files is an array of workspace-relative paths",
+                    ));
+                }
+            },
         })),
         _ => Ok(None),
     }
