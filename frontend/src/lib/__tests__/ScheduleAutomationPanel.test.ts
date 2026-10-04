@@ -241,6 +241,45 @@ describe("ScheduleAutomationPanel", () => {
     expect(request?.session).toEqual({ policy: "fresh", agent_id: "gateway" });
   });
 
+  it("sends the files a gate should look at, one per line, relative to the workspace", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(SCHEDULE);
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    setFieldValue(
+      document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!,
+      "Work the inbox.",
+    );
+    const gateToggle = document.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    if (!gateToggle) throw new Error("missing gate toggle");
+    gateToggle.click();
+    await flushUi();
+    setFieldValue(
+      document.querySelector<HTMLInputElement>('input[placeholder="model id or alias"]')!,
+      "cheap",
+    );
+    setFieldValue(
+      document.querySelector<HTMLTextAreaElement>('textarea[placeholder^="inbox/todo.txt"]')!,
+      "inbox/todo.txt\n\n  notes.md  \n",
+    );
+    clickButton("Create schedule");
+    await flushUi();
+
+    const request = vi.mocked(workflowApi.createSchedule).mock.calls[0]?.[0];
+    expect(request?.gate).toEqual({
+      model: "cheap",
+      criteria: null,
+      observations: [
+        { kind: "file", path: "inbox/todo.txt" },
+        { kind: "file", path: "notes.md" },
+      ],
+    });
+  });
+
   it("blocks a ticked gate with a blank model before submitting", async () => {
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
     component = mount(ScheduleAutomationPanel, {

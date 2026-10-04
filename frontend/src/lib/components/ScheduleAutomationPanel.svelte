@@ -33,6 +33,9 @@
   let gateEnabled = $state(false);
   let gateModel = $state("");
   let gateCriteria = $state("");
+  // Files the gate looks at before deciding, one workspace-relative path per
+  // line: what makes a criterion about a file decidable.
+  let gateObservedFiles = $state("");
   let isCreating = $state(false);
 
   // Listing.
@@ -127,7 +130,15 @@
         session,
         routing: null,
         gate: gateEnabled
-          ? { model: gateModel.trim(), criteria: gateCriteria.trim() || null }
+          ? {
+              model: gateModel.trim(),
+              criteria: gateCriteria.trim() || null,
+              observations: gateObservedFiles
+                .split("\n")
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .map((path) => ({ kind: "file" as const, path })),
+            }
           : null,
       });
       scheduleMessage = "";
@@ -299,6 +310,14 @@
           placeholder="Only when there is something new to act on."
         ></textarea>
       </label>
+      <label>
+        <span>Files to look at first</span>
+        <textarea
+          bind:value={gateObservedFiles}
+          rows="2"
+          placeholder="inbox/todo.txt — one path per line, relative to the workspace"
+        ></textarea>
+      </label>
     {/if}
     <button
       type="button"
@@ -317,7 +336,13 @@
           <strong>{schedule.message}</strong>
           <span class="schedule-sub">
             {describeSpec(schedule.spec)} · {describeSession(schedule.session)}
-            {schedule.gate ? ` · gate ${schedule.gate.model}` : ""}
+            {schedule.gate
+              ? ` · gate ${schedule.gate.model}${
+                  schedule.gate.observations?.length
+                    ? ` watching ${schedule.gate.observations.length} file${schedule.gate.observations.length === 1 ? "" : "s"}`
+                    : ""
+                }`
+              : ""}
           </span>
         </div>
         <div class="schedule-facts">

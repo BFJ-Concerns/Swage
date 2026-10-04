@@ -1030,6 +1030,7 @@ const COMPLETE_SCHEMA: &str = "
         delivery_json  TEXT NOT NULL,
         gate_model     TEXT,
         gate_criteria  TEXT,
+        gate_observations TEXT,
         next_run_at    TEXT,
         last_run_at    TEXT,
         created_at     TEXT NOT NULL,

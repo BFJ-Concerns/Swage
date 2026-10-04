@@ -805,6 +805,7 @@ async fn a_panicking_spawned_run_is_caught_and_the_tick_survives() {
             gate: Some(GateConfig {
                 model: GATE_MODEL.into(),
                 criteria: None,
+                observations: Vec::new(),
             }),
             ..create_request(
                 "this run panics in the gate",
@@ -1147,6 +1148,7 @@ async fn gate_skip_verdict_records_the_run_without_waking_the_main_model() {
             gate: Some(GateConfig {
                 model: GATE_MODEL.into(),
                 criteria: Some("Run only when there are unreviewed alerts.".into()),
+                observations: Vec::new(),
             }),
         },
         ScheduleCreator::User,
@@ -1240,6 +1242,7 @@ async fn gate_run_verdict_proceeds_to_execution() {
             gate: Some(GateConfig {
                 model: GATE_MODEL.into(),
                 criteria: None,
+                observations: Vec::new(),
             }),
         },
         ScheduleCreator::User,
@@ -1287,6 +1290,7 @@ async fn gate_failure_fails_the_run_instead_of_waking_the_main_model() {
             gate: Some(GateConfig {
                 model: GATE_MODEL.into(),
                 criteria: None,
+                observations: Vec::new(),
             }),
         },
         ScheduleCreator::User,
@@ -1339,6 +1343,7 @@ async fn gate_model_must_exist_in_the_catalogue() {
             gate: Some(GateConfig {
                 model: "no-such-model".into(),
                 criteria: None,
+                observations: Vec::new(),
             }),
         },
         ScheduleCreator::User,

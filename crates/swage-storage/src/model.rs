@@ -1659,8 +1659,8 @@ pub struct ActiveSkillRecord {
 // Wire-visible schedule types come from the protocol crate — one
 // definition, stored as TEXT columns via their string forms.
 pub use swage_protocol::client::schedule::{
-    GateConfig, GateDecision, GateVerdict, ScheduleCreator, ScheduleRunState, ScheduleRunTrigger,
-    ScheduleStatus, SessionPolicy, SkipReason,
+    GateConfig, GateDecision, GateObservation, GateVerdict, ScheduleCreator, ScheduleRunState,
+    ScheduleRunTrigger, ScheduleStatus, SessionPolicy, SkipReason,
 };
 
 /// Canonical schedule kinds supported by the scheduler.

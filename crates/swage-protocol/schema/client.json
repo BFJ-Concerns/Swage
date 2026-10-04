@@ -2309,6 +2309,13 @@
         "model": {
           "description": "Model id or alias from the configured model catalogue.",
           "type": "string"
+        },
+        "observations": {
+          "description": "State the gate is shown before it decides, beyond the schedule's own\nrecord: what the criteria name. Declared here so a criterion about a\nfile is decidable against that file, and refused at declaration when\nthe schedule's session has nowhere to read it from.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GateObservation"
+          }
         }
       },
       "required": [
@@ -2333,6 +2340,28 @@
         "model",
         "verdict",
         "reasoning"
+      ]
+    },
+    "GateObservation": {
+      "description": "One thing a gate observes before deciding.",
+      "oneOf": [
+        {
+          "description": "A file under the scheduled session's trusted workspace, by a path\nrelative to it: the gate sees whether it exists, its size, and its\nopening excerpt.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
+        }
       ]
     },
     "GateVerdict": {
