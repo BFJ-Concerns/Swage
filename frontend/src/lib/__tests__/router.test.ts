@@ -35,7 +35,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -50,7 +50,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -65,7 +65,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -80,7 +80,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -95,7 +95,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -110,7 +110,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -125,7 +125,7 @@ describe("parseRoute", () => {
       settingsTab: "generation",
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -135,13 +135,17 @@ describe("parseRoute", () => {
   });
 
   it("maps the memory settings route and the page its notice link names", () => {
-    expect(parseRoute("/settings/memory")).toMatchObject({ settingsTab: "memory", settingsMemoryReference: null });
+    expect(parseRoute("/settings/memory")).toMatchObject({ settingsTab: "memory", settingsMemoryPage: null });
     expect(parseRoute("/settings/memory?reference=general%2Fpeople%2Falice")).toMatchObject({
       path: "/settings/memory",
       settingsTab: "memory",
-      settingsMemoryReference: "general/people/alice",
+      settingsMemoryPage: { scope: null, reference: "general/people/alice" },
     });
-    expect(parseRoute("/settings/agents?reference=general%2Fprofile").settingsMemoryReference).toBeNull();
+    expect(parseRoute("/settings/memory?scope=topic-1&reference=topic%2Fconventions").settingsMemoryPage).toEqual({
+      scope: "topic-1",
+      reference: "topic/conventions",
+    });
+    expect(parseRoute("/settings/agents?reference=general%2Fprofile").settingsMemoryPage).toBeNull();
   });
 
   it("maps command and skill settings routes", () => {
@@ -159,7 +163,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: "research",
       settingsTopicTab: "workspaces",
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
     expect(parseRoute("/settings/topic/research/surfaces")).toEqual({
@@ -171,7 +175,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: "research",
       settingsTopicTab: "surfaces",
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });
@@ -198,7 +202,7 @@ describe("createRouter initial state", () => {
     window.history.replaceState(null, "", "/settings/memory?reference=general%2Fpeople%2Falice");
     const router = createRouter();
     expect(router.currentRoute.settingsTab).toBe("memory");
-    expect(router.currentRoute.settingsMemoryReference).toBe("general/people/alice");
+    expect(router.currentRoute.settingsMemoryPage).toEqual({ scope: null, reference: "general/people/alice" });
   });
 
   it("starts at root when URL is '/'", () => {
@@ -459,7 +463,7 @@ describe("init with conversation store", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
 
@@ -506,7 +510,7 @@ describe("init with conversation store", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
-      settingsMemoryReference: null,
+      settingsMemoryPage: null,
       notFound: false,
     });
   });

@@ -3,13 +3,14 @@
   import type { MemoryInstructionResponse } from "../protocol/MemoryInstructionResponse";
   import type { MemoryPageResponse } from "../protocol/MemoryPageResponse";
   import type { MemoryPageSummary } from "../protocol/MemoryPageSummary";
+  import type { MemoryPageAddress } from "../router";
   import type { Topic } from "../types";
 
   interface Props {
     // Every topic whose memory is listed beside the general scope.
     topics: Topic[];
-    // The page to open on load — the reference a curator notice links to.
-    reference: string | null;
+    // The page to open on load — the one a curator notice links to.
+    page: MemoryPageAddress | null;
   }
 
   interface ScopeGroup {
@@ -18,7 +19,7 @@
     pages: MemoryPageSummary[];
   }
 
-  let { topics, reference }: Props = $props();
+  let { topics, page }: Props = $props();
   let groups = $state<ScopeGroup[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
@@ -53,7 +54,7 @@
       { topicId: null, label: "General" },
       ...topics.map((topic) => ({ topicId: topic.id, label: topic.name })),
     ];
-    const requested = reference;
+    const requested = page;
     const generation = ++loadGeneration;
     loading = true;
     error = null;
@@ -62,12 +63,16 @@
       .then((loaded) => {
         if (generation !== loadGeneration) return;
         groups = loaded;
-        // A reference spells its scope kind but not which topic; a notice's
-        // link opens the first scope listing it.
+        // A reference spells its scope kind but not which topic, so a link
+        // names the scope; one naming none opens the first scope listing it.
         const holder = requested
-          ? loaded.find((group) => group.pages.some((page) => page.reference === requested))
+          ? loaded.find(
+              (group) =>
+                (requested.scope === null || (group.topicId ?? "general") === requested.scope) &&
+                group.pages.some((listed) => listed.reference === requested.reference),
+            )
           : undefined;
-        if (holder && requested) void openPage(holder.topicId, requested);
+        if (holder && requested) void openPage(holder.topicId, requested.reference);
       })
       .catch((err: unknown) => {
         if (generation !== loadGeneration) return;

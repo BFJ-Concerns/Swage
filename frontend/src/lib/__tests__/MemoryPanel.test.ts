@@ -75,7 +75,7 @@ describe("MemoryPanel", () => {
       secondTopic: [{ reference: "topic/stock", summary: "What the pantry holds." }],
       bodies: { [`${TOPIC_ID}:topic/conventions`]: "Beds are labelled north to south." },
     });
-    component = mount(MemoryPanel, { target: document.body, props: { topics, reference: null } });
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: null } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("topic/conventions"));
 
     const general = document.querySelector('[aria-label="General memory pages"]');
@@ -112,7 +112,7 @@ describe("MemoryPanel", () => {
     });
     component = mount(MemoryPanel, {
       target: document.body,
-      props: { topics, reference: "general/people/alice" },
+      props: { topics, page: { scope: null, reference: "general/people/alice" } },
     });
 
     await vi.waitFor(() =>
@@ -120,6 +120,28 @@ describe("MemoryPanel", () => {
         .toContain("Alice is the operator's sister"),
     );
     expect(document.body.textContent).not.toContain("Ben works in Leeds.");
+  });
+
+  it("opens a notice link's page from the scope it names when two topics share the reference", async () => {
+    gateway({
+      general: [],
+      topic: [{ reference: "topic/conventions", summary: null }],
+      secondTopic: [{ reference: "topic/conventions", summary: null }],
+      bodies: {
+        [`${TOPIC_ID}:topic/conventions`]: "Beds are labelled north to south.",
+        [`${SECOND_TOPIC_ID}:topic/conventions`]: "Jars are labelled with the date opened.",
+      },
+    });
+    component = mount(MemoryPanel, {
+      target: document.body,
+      props: { topics, page: { scope: SECOND_TOPIC_ID, reference: "topic/conventions" } },
+    });
+
+    await vi.waitFor(() =>
+      expect(document.querySelector('[aria-label="Memory page topic/conventions"]')?.textContent)
+        .toContain("Jars are labelled with the date opened."),
+    );
+    expect(document.body.textContent).not.toContain("Beds are labelled north to south.");
   });
 
   it("sends an instruction to the curator for the chosen scope and shows its reply and the changed page", async () => {
@@ -143,7 +165,7 @@ describe("MemoryPanel", () => {
         });
       },
     });
-    component = mount(MemoryPanel, { target: document.body, props: { topics, reference: null } });
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: null } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("topic/conventions"));
 
     const scope = document.querySelector<HTMLSelectElement>('select[aria-label="Memory to instruct about"]');
@@ -167,7 +189,15 @@ describe("MemoryPanel", () => {
     expect(changed?.textContent).toContain("topic/conventions");
     expect(changed?.textContent).toContain("Beds are labelled south to north.");
     expect(changed?.textContent).toContain("Beans are picked in August.");
-    expect(changed?.querySelectorAll("article")).toHaveLength(2);
+    // Each changed page is shown under its own reference.
+    const articles = Array.from(changed?.querySelectorAll("article") ?? []).map((article) => [
+      article.querySelector("code")?.textContent,
+      article.querySelector("pre")?.textContent,
+    ]);
+    expect(articles).toEqual([
+      ["topic/conventions", "Beds are labelled south to north."],
+      ["topic/harvest", "Beans are picked in August."],
+    ]);
     // A page the instruction created joins the listing without a reload.
     await vi.waitFor(() =>
       expect(document.querySelector('[aria-label="Garden memory pages"]')?.textContent).toContain("topic/harvest"),
@@ -187,7 +217,7 @@ describe("MemoryPanel", () => {
           : json({ error: "curator pass failed" }, 502);
       },
     });
-    component = mount(MemoryPanel, { target: document.body, props: { topics: [], reference: null } });
+    component = mount(MemoryPanel, { target: document.body, props: { topics: [], page: null } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("No memory pages yet"));
 
     const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Instruction to the curator"]')!;
