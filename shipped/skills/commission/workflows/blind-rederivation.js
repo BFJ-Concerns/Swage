@@ -15,8 +15,8 @@
 // references/model-selection.md). Pin model and effort together on every
 // call: an unpinned call has no model to ride.
 const FAMILY = {
-  gpt: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "claude-opus-5", effort: "high" },
+  gpt: { model: "gpt-6.1-sol", effort: "medium" },
+  claude: { model: "claude-opus-5-5", effort: "high" },
 };
 
 // THE BLINDNESS IS ISOLATION BY CONSTRUCTION, NOT INSTRUCTION.
@@ -275,7 +275,7 @@ for (const chunk of chunks) {
     : "the first designer opens blind by construction in the empty run directory");
   const result = await agent(designPrompt(chunk, designs), {
     // Top Claude tier: leverage prices the top tier for whole-design drafting.
-    model: "claude-fable-5",
+    model: "claude-fable-5-1",
     effort: "high",
     cwd: runDir,
     schema: designSchema,

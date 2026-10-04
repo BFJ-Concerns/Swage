@@ -18,7 +18,7 @@ export const defaults = {
   // single session — and so is the verifier, so each re-verification
   // returns to the reader that derived the claim list; the landing is a
   // different model's job and re-briefs.
-  model: "claude-opus-4-6",
+  model: "claude-opus-5-5",
   effort: "medium",
 };
 
@@ -214,7 +214,7 @@ Reply with a single JSON value conforming to the schema. Reason first if you nee
 
 // The verifier is a held worker of the opposite family: opened blind to the
 // writer's session, then continued for every re-verification.
-const verifier = await session({ model: "gpt-5.6-terra", cwd: worktree, label: "verifier" });
+const verifier = await session({ model: "gpt-6.1-sol", cwd: worktree, label: "verifier" });
 dispatching("verify", "re-briefed", "cross-family accuracy audit is independent by design: a fresh reader of the opposite family, sharing nothing with the writer's session; its re-verifications continue this worker");
 let verdict = await send(verifier, verifyPrompt(null, null), { schema: findingsSchema, label: "verify" });
 if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
@@ -411,7 +411,7 @@ const landTarget =
 dispatching("land", "re-briefed", "a merge needs no memory of the writing or the audit — report.md carries what it needs, and a fresh worker cannot mistake a draft it remembers for what actually landed");
 const landing = await agent(
   `Land the finished documentation unit by direct merge — open no PR. First read ${annexeConfigPath} for push_policy. The unit branch is checked out in ${worktree}; note its head sha, then merge that head into ${landTarget}. Perform the merge in a checkout of the target branch: the repository worktree where it is already checked out, or a temporary worktree you create (git worktree add) and remove afterwards — never rewrite the target ref without a checkout. A conflicted merge is yours to resolve: keep both sides' content, then run the project's full gate on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine contradiction the sides cannot both keep, or a resolution whose gate stays red; abort the merge before reporting. A fast-forward is a normal success. Push the target branch only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, target_head} — landed true only if the unit head is an ancestor of the target branch head (verify with git merge-base --is-ancestor). Reply with the JSON last.`,
-  { model: "gpt-5.6-terra", schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
+  { model: "gpt-6.1-sol", schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 }
 );
 
 // Closed on the success path so the journal records intent; a run ending

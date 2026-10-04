@@ -9,7 +9,7 @@ export const defaults = {
   // Cheap volume for the blind sweep; adjudication compares finished lists
   // against records, so it rides a mid tier. Pinned because per-model effort
   // defaults are uneven.
-  model: "gpt-5.6-luna",
+  model: "gpt-6-luna",
   effort: "low",
 };
 
@@ -56,8 +56,8 @@ const SWEEP_OPTS = auditFamily === "gpt"
   ? {}                                                     // rides defaults: luna/low
   : { model: "claude-haiku-4-5", effort: "low" };
 const ADJ_OPTS = auditFamily === "gpt"
-  ? { model: "gpt-5.6-terra", effort: "medium" }
-  : { model: "claude-opus-5", effort: "medium" };
+  ? { model: "gpt-6.1-sol", effort: "medium" }
+  : { model: "claude-opus-5-5", effort: "medium" };
 const sweeps = Number(args.sweeps) || 3;
 
 // Every dispatch records on the run journal whether it continued a held

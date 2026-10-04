@@ -5,7 +5,7 @@
 // writes the ledger header or the obligation records.
 
 export const defaults = {
-  model: "gpt-5.6-luna",
+  model: "gpt-6-luna",
   effort: "low",
 };
 
@@ -102,7 +102,7 @@ Write the merged document to ${outPath} as markdown:
 
 Do not write to ${ledgerPath} — the proposal is judged and landed by the orchestrator, never by this workflow. Reply with a three-line summary of the document you wrote.`,
   {
-    model: "gpt-5.6-terra",
+    model: "gpt-6.1-sol",
     effort: "medium",
     cwd: repo,
     label: "reduce",

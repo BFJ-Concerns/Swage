@@ -15,8 +15,8 @@
 // flagship (references/model-selection.md). Pin model and effort together on
 // every call: an unpinned call has no model to ride.
 const FAMILY = {
-  gpt: { model: "gpt-5.6-sol", effort: "medium" },
-  claude: { model: "claude-opus-5", effort: "high" },
+  gpt: { model: "gpt-6.1-sol", effort: "medium" },
+  claude: { model: "claude-opus-5-5", effort: "high" },
 };
 
 // Run this shortly before the sign-off read, scaled by the size of the change.
