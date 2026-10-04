@@ -138,6 +138,37 @@ pub async fn start_live_server(
     (address, task)
 }
 
+/// Own a listening gateway and its filesystem root for one journey.
+pub struct LiveTestGateway {
+    pub address: std::net::SocketAddr,
+    server: tokio::task::JoinHandle<()>,
+    _root: tempfile::TempDir,
+}
+
+impl LiveTestGateway {
+    pub async fn start(router: Router, root: tempfile::TempDir) -> Self {
+        let (address, server) = start_live_server(router).await;
+        Self {
+            address,
+            server,
+            _root: root,
+        }
+    }
+}
+
+impl Drop for LiveTestGateway {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+/// Events and state decide completion; this bound reports a hung journey.
+pub async fn journey<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(std::time::Duration::from_secs(180), future)
+        .await
+        .expect("journey hung before its required event or state")
+}
+
 pub async fn live_http_json(
     address: std::net::SocketAddr,
     method: reqwest::Method,
@@ -187,7 +218,7 @@ pub async fn ws_collect_until_with<F>(
     stream: &mut WsStream,
     terminal_event: &str,
     timeout: std::time::Duration,
-    mut receive: F,
+    receive: F,
 ) -> Vec<Value>
 where
     F: for<'stream> FnMut(
@@ -195,21 +226,45 @@ where
     ) -> futures::future::BoxFuture<'stream, Option<Value>>,
 {
     let mut events = Vec::new();
-    tokio::time::timeout(timeout, async {
-        loop {
-            let event = receive(stream)
-                .await
-                .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
-            let reached_terminal = event["type"] == terminal_event;
-            events.push(event);
-            if reached_terminal {
-                break;
-            }
-        }
-    })
+    tokio::time::timeout(
+        timeout,
+        receive_through(stream, terminal_event, &mut events, receive),
+    )
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {terminal_event}: {events:?}"));
     events
+}
+
+/// Await the terminal event; the enclosing journey owns the hang guard.
+pub async fn ws_collect_through(stream: &mut WsStream, terminal_event: &str) -> Vec<Value> {
+    let mut events = Vec::new();
+    receive_through(stream, terminal_event, &mut events, |stream| {
+        Box::pin(ws_recv_lenient(stream))
+    })
+    .await;
+    events
+}
+
+async fn receive_through<F>(
+    stream: &mut WsStream,
+    terminal_event: &str,
+    events: &mut Vec<Value>,
+    mut receive: F,
+) where
+    F: for<'stream> FnMut(
+        &'stream mut WsStream,
+    ) -> futures::future::BoxFuture<'stream, Option<Value>>,
+{
+    loop {
+        let event = receive(stream)
+            .await
+            .unwrap_or_else(|| panic!("websocket closed before {terminal_event}: {events:?}"));
+        let reached_terminal = event["type"] == terminal_event;
+        events.push(event);
+        if reached_terminal {
+            return;
+        }
+    }
 }
 
 pub struct ProcessEnvGuard {

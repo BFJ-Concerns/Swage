@@ -31,8 +31,35 @@ fn test_config(temp_dir: &tempfile::TempDir) -> SandboxConfig {
 
 #[tokio::test]
 async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_shell() {
-    if find_bwrap().is_err() {
-        eprintln!("skipping real bubblewrap integration test: bwrap is not installed");
+    let bwrap = match find_bwrap() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("bubblewrap consumer unavailable: {error}");
+            return;
+        }
+    };
+    // Presence does not imply this host permits the namespaces the sandbox uses.
+    let probe = std::process::Command::new(bwrap)
+        .args([
+            "--unshare-all",
+            "--die-with-parent",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "true",
+        ])
+        .output()
+        .expect("invoke real bubblewrap namespace probe");
+    if !probe.status.success() {
+        eprintln!(
+            "bubblewrap consumer unavailable: namespace probe {}: {}",
+            probe.status,
+            String::from_utf8_lossy(&probe.stderr)
+        );
         return;
     }
 
