@@ -50,16 +50,10 @@ pub(crate) enum ApprovalGateOutcome {
 }
 
 /// Model-facing tool result for a call the person denied. The decision is
-/// stated in fixed words so a UI-supplied reason (e.g. which control was
-/// used) can never read as the outcome; any reason follows as the user's note.
-pub(crate) fn user_denied_feedback(reason: Option<&str>) -> String {
-    let mut feedback =
-        String::from("The user denied this tool call. It did not run, and no approval is pending.");
-    if let Some(reason) = reason.map(str::trim).filter(|r| !r.is_empty()) {
-        feedback.push_str(" User's note: ");
-        feedback.push_str(reason);
-    }
-    feedback
+/// stated in fixed words; the UI's reason string describes which control was
+/// used, not anything the person said, so it never reaches the model.
+pub(crate) fn user_denied_feedback() -> String {
+    String::from("The user denied this tool call. It did not run, and no approval is pending.")
 }
 
 /// Prefix an approved call's model-facing result with how the person

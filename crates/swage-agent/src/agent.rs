@@ -357,13 +357,9 @@ mod approval_tests {
         let crate::approval::ApprovalGateOutcome::Rejected { feedback } = outcome else {
             panic!("expected a rejected outcome, got {outcome:?}");
         };
-        assert!(
-            feedback.starts_with("The user denied this tool call."),
-            "the decision must lead, independent of the UI's reason string: {feedback}"
-        );
-        assert!(
-            feedback.contains("did not run") && feedback.contains("no approval is pending"),
-            "the denial must read as final: {feedback}"
+        assert_eq!(
+            feedback, "The user denied this tool call. It did not run, and no approval is pending.",
+            "the denial must read as final and carry no UI reason string"
         );
     }
 
@@ -451,20 +447,23 @@ mod approval_tests {
             dispatch_echo_approved_with(crate::approval::ApprovalDecisionScope::Once).await;
         assert!(!is_error, "approved call must succeed: {text}");
         assert_eq!(status, "success");
-        assert!(
-            text.contains("The user approved this tool call once"),
-            "once-approved result must note the approval: {text}"
+        let (note, output) = text
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("once-approved result must note the approval: {text}"));
+        assert_eq!(
+            note, "[The user approved this tool call once; it ran after approval.]",
+            "the approval note must lead the result"
         );
-        assert!(
-            text.contains("\"text\":\"ran\""),
-            "tool output must follow: {text}"
-        );
+        let output: Value = serde_json::from_str(output).expect("tool output follows the note");
+        assert_eq!(output, serde_json::json!({ "text": "ran" }));
 
         let (text, _, _) =
             dispatch_echo_approved_with(crate::approval::ApprovalDecisionScope::Session).await;
         assert!(
-            text.contains("The user approved this tool call for this session"),
-            "session-approved result must note the approval scope: {text}"
+            text.starts_with(
+                "[The user approved this tool call for this session; it ran after approval.]\n"
+            ),
+            "session-approved result must lead with the approval scope: {text}"
         );
     }
 }
@@ -2498,7 +2497,7 @@ impl Agent {
                     .reason
                     .clone()
                     .unwrap_or_else(|| "rejected by reviewer".into());
-                let feedback = crate::approval::user_denied_feedback(d.reason.as_deref());
+                let feedback = crate::approval::user_denied_feedback();
                 self.resume_after_approval_decision(
                     approval.id,
                     execution.turn_id,
