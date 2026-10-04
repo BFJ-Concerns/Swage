@@ -287,11 +287,12 @@
           </div>
         {/if}
         {#if message.origin === "platform" && message.turn_state === "refused" && streamingStore}
-          <!-- Recorded requests carry the turn id; an optimistic request is
-               still the person's preceding message until the history is read. -->
-          {@const request = messages.find(candidate => isPersonsMessage(candidate) && candidate.turn_id === message.turn_id) ?? messages.slice(0, messageIndex).reverse().find(candidate => isPersonsMessage(candidate) && !candidate.turn_id)}
-          {#if request}
-            <button class="branch-link" disabled={isStreaming} onclick={() => streamingStore?.startTurn(request.content)}>Retry request</button>
+          <!-- Queue inputs retain their recorded order and use the same
+               separator as the gateway's drained turn input. -->
+          {@const requests = messages.filter(candidate => isPersonsMessage(candidate) && candidate.turn_id === message.turn_id)}
+          {@const input = requests.length > 0 ? requests.map(request => request.content).join("\n\n") : messages.slice(0, messageIndex).reverse().find(candidate => isPersonsMessage(candidate) && !candidate.turn_id)?.content}
+          {#if input !== undefined}
+            <button class="branch-link" disabled={isStreaming} onclick={() => streamingStore?.startTurn(input)}>Retry request</button>
           {/if}
         {/if}
         {#if shouldShowModel(message.role) && message.model}
