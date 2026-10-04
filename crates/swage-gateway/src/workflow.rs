@@ -2512,6 +2512,7 @@ struct WorkflowTurnAttempt {
     provider_failure: Option<String>,
 }
 
+#[derive(Clone, Copy)]
 enum FallbackFailure {
     Provider,
     UnknownModel,
@@ -3115,15 +3116,10 @@ async fn run_ephemeral_agent_call_with_admission(
     });
     let primary_error = match primary.outcome {
         Err(error) => {
-            if fallback_failure(&error).is_some_and(|failure| {
-                fallback_is_eligible(failure, emitted_output, dispatched_tool)
-            }) {
-                // Catalogue resolution fails before input is persisted; a
-                // provider failure occurs after the prompt is in the thread.
-                Some((
-                    error.to_string(),
-                    matches!(error, GatewayError::Provider(_)),
-                ))
+            if let Some(failure) = fallback_failure(&error)
+                && fallback_is_eligible(failure, emitted_output, dispatched_tool)
+            {
+                Some((error.to_string(), failure))
             } else {
                 return Err(error.to_string().into());
             }
@@ -3155,7 +3151,7 @@ async fn run_ephemeral_agent_call_with_admission(
             {
                 Some((
                     format!("AgentCallError: provider failed before output: {message}"),
-                    true,
+                    FallbackFailure::Provider,
                 ))
             } else if let Some(turn) =
                 turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
@@ -3172,7 +3168,7 @@ async fn run_ephemeral_agent_call_with_admission(
     };
     let final_events = match primary_error {
         None => primary.events,
-        Some((error, reuse_persisted_input)) => {
+        Some((error, failure)) => {
             let Some(fallback_model) = request
                 .session
                 .is_none()
@@ -3196,6 +3192,9 @@ async fn run_ephemeral_agent_call_with_admission(
             {
                 admission.admit(route.provider_id).await?;
             }
+            // Catalogue resolution fails before input is persisted; a
+            // provider failure occurs after the prompt is in the thread.
+            let reuse_persisted_input = matches!(failure, FallbackFailure::Provider);
             let fallback = execute_workflow_agent_turn(
                 state,
                 session_id,
