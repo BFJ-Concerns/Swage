@@ -3,6 +3,7 @@
 //! Each JSON message is written as a single line followed by `\n`.
 //! The transport handles framing, serialisation, and deserialisation.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use swage_core::SandboxError;
@@ -26,6 +27,10 @@ const MAX_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
 pub struct IpcTransport {
     reader: BufReader<OwnedReadHalf>,
     writer: BufWriter<OwnedWriteHalf>,
+    /// Tool calls the host stopped waiting for. Their results may still
+    /// arrive, and are recognised by request ID rather than mistaken for the
+    /// answer to a later call.
+    abandoned_tool_calls: HashSet<String>,
 }
 
 impl IpcTransport {
@@ -35,7 +40,19 @@ impl IpcTransport {
         Self {
             reader: BufReader::new(read_half),
             writer: BufWriter::new(write_half),
+            abandoned_tool_calls: HashSet::new(),
         }
+    }
+
+    /// Record that the host no longer waits for the result of `request_id`.
+    pub fn abandon_tool_call(&mut self, request_id: String) {
+        self.abandoned_tool_calls.insert(request_id);
+    }
+
+    /// Whether `request_id` names an abandoned call, forgetting it if so —
+    /// each abandoned call produces at most one late result.
+    pub fn take_abandoned_tool_call(&mut self, request_id: &str) -> bool {
+        self.abandoned_tool_calls.remove(request_id)
     }
 
     /// Serialise `msg` to JSON, write it as a single line, and flush.

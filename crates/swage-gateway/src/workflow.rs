@@ -15174,7 +15174,7 @@ mod tests {
                 outputs: std::sync::Mutex::new(outputs),
                 requests: std::sync::Mutex::new(vec![]),
             }),
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(crate::turn::tests::SandboxedFileTool::new("file_read"))
                     as Arc<dyn crate::tool::Tool>,

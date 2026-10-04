@@ -314,8 +314,8 @@ unexpected field.
 
 ## Sandbox isolation
 
-Local tool calls that are eligible for sandboxed execution run inside a
-two-layer sandbox that confines what the sandbox child process can reach.
+When sandboxing is enabled, eligible local tool calls run inside a two-layer
+sandbox that confines what the sandbox child process can reach.
 
 The executor chooses the host/device boundary before this sandbox path. If a
 session targets a non-local device, tool calls are sent to that device. On a
@@ -356,26 +356,25 @@ within the process.
 
 ### Configuration
 
-Sandboxing is enabled by default. Two config options govern sandbox
-behaviour:
+Sandboxing is off by default. Two config options govern sandbox behaviour:
 
 | Option | Default | Effect |
 |---|---|---|
-| `sandbox.enabled` | `true` | Whether to set up sandbox isolation for each turn |
-| `sandbox.allow_degraded_execution` | `false` | Whether to allow execution without sandbox isolation |
+| `sandbox.enabled` | `false` | Whether to set up sandbox isolation for each turn |
+| `sandbox.allow_degraded_execution` | `false` | Whether to allow unsandboxed execution after sandbox setup fails |
 
-Running without sandbox isolation is always treated as degraded execution,
-whether you chose it or whether sandbox setup failed at runtime. The
-gateway requires an explicit opt-in before it will proceed in either case:
-`sandbox.allow_degraded_execution` must be set to `true`. Without it,
-dispatcher construction fails.
+With sandboxing disabled, local gateway turns run without sandbox isolation
+and record a degraded boundary with reason
+`sandbox_disabled_by_configuration`. `allow_degraded_execution` is not
+required for this configuration choice. Installs with a declared boundary,
+such as a container image, retain that boundary instead; their sandbox
+settings do not change it.
 
-To disable sandboxing entirely, set both options together:
+To enable sandboxing for a topic, add this to its `config.toml`:
 
 ```toml
 [sandbox]
-enabled = false
-allow_degraded_execution = true
+enabled = true
 ```
 
 When sandboxing is enabled and sandbox setup fails at runtime, the recovery
