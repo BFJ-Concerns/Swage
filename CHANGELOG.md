@@ -19,7 +19,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
-- Per-turn sandboxing is off by default; a topic enables it with `[sandbox] enabled = true`. Unsandboxed turns record a degraded execution boundary.
+- Per-turn sandboxing is off by default; a topic enables it with `[sandbox] enabled = true`. Local gateway turns with sandboxing disabled record a degraded execution boundary unless the install declares its own boundary.
 
 - Voice transcription and speech synthesis request the models set in `[voice]` (`transcription_model`, `speech_model`), editable under Settings → Voice (the Voice entry in the settings navigation, which states the prerequisite: an OpenAI-protocol default provider plus the two model ids), from the default provider's endpoint; they never use the chat model. With a model unset, that capability reports itself unavailable, and the voice capabilities route (`unavailable_reason`) says what to configure.
 - Unsupported search `provider_type` values are refused when configuration loads and when settings are saved; the unused search `api_key` setting is removed.
