@@ -5853,6 +5853,12 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
 ///
 /// Returns the state and the session_id. The thread is created automatically
 /// so that `process_turn` can look it up via `list_by_session`.
+pub(crate) fn sandboxed_turn_config() -> swage_config::ResolvedConfig {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = true;
+    config
+}
+
 pub(crate) async fn make_state_with_session(provider_chunks: Vec<StreamChunk>) -> (AppState, Uuid) {
     let storage = Arc::new(MockStorage::new());
     make_state_with_storage(provider_chunks, storage).await
@@ -6251,7 +6257,8 @@ fn codex_turn_config() -> swage_config::ResolvedConfig {
 #[tokio::test]
 async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit() {
     let _guard = SwageHomeGuard::isolate();
-    let config = codex_turn_config();
+    let mut config = codex_turn_config();
+    config.sandbox.enabled = true;
     assert!(!config.sandbox.allow_degraded_execution);
     let (mut state, session_id) = make_state_with_config(Vec::new(), config).await;
 
@@ -7450,7 +7457,7 @@ async fn session_variable_read_failure_clears_active_turn() {
 
 #[tokio::test]
 async fn approved_sandbox_fallback_build_failure_clears_active_turn() {
-    let (state, session_id) = make_state_with_session(vec![]).await;
+    let (state, session_id) = make_state_with_config(vec![], sandboxed_turn_config()).await;
     state.fail_next_dispatcher_builds(2);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -7532,6 +7539,7 @@ async fn approved_sandbox_degradation_resumes_to_tool_approval_and_completion() 
         ],
     ];
     let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    state.runtime_config.write().unwrap().sandbox.enabled = true;
     state.fail_next_dispatcher_builds(1);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -11273,7 +11281,7 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        sandboxed_turn_config(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(SandboxedFileTool::new("file_read")) as Arc<dyn Tool>,
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
@@ -12238,7 +12246,7 @@ async fn placed_delegate_keeps_exact_read_only_authority_when_delegating_again()
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
+        sandboxed_turn_config(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>,
             Arc::new(SandboxedFileTool::new("file_write")) as Arc<dyn Tool>,
