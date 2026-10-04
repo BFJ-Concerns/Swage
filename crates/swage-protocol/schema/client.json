@@ -2632,6 +2632,22 @@
         "updated_at"
       ]
     },
+    "MemoryConfig": {
+      "description": "Memory curation: when the platform's curator reads an attended\nconversation into the operator's memory.",
+      "type": "object",
+      "properties": {
+        "curator_idle_minutes": {
+          "description": "Minutes a conversation the operator is in must have been idle before\nthe curator passes over what was said since its last pass.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "curator_idle_minutes"
+      ]
+    },
     "MessageAttachment": {
       "description": "Something submitted beside a message's text and carried to the model as\nits own content part. The tag names what the attachment is; a client\nsends only kinds the gateway's configured provider can consume, and the\ngateway refuses the turn otherwise rather than dropping the part.",
       "oneOf": [
@@ -3683,6 +3699,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/HitlConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "memory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryConfig"
             },
             {
               "type": "null"
@@ -5212,7 +5239,7 @@
       "type": "object",
       "properties": {
         "archive_after_days": {
-          "description": "Days without a user or assistant message after which a session leaves\nthe recent list. Only a session with a turn executing is exempt, and\na new turn on an archived session brings it back.",
+          "description": "Days without a user or assistant message after which a session leaves\nthe recent list. Only a session with a turn executing is exempt, and\na new turn on an archived session brings it back. Archiving is\nvisibility only — nothing is cancelled and nothing queued is blocked.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0
@@ -5249,6 +5276,9 @@
         },
         "hitl": {
           "$ref": "#/$defs/HitlConfig"
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryConfig"
         },
         "models": {
           "type": "object",
@@ -5302,6 +5332,7 @@
         "observability",
         "communication",
         "sessions",
+        "memory",
         "voice",
         "restart_required",
         "can_restart"

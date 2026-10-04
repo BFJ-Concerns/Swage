@@ -2,7 +2,122 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
 use crate::model::ResolvedConfig;
 use std::path::Path;
+use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+use swage_protocol::client::settings_section::{
+    SettingsProblem, SettingsSection, SettingsSectionSchema,
+};
 use toml::{Table, Value};
+
+pub use swage_protocol::client::settings::MAX_ARCHIVE_AFTER_DAYS;
+
+// ---------------------------------------------------------------------------
+// Declared sections
+// ---------------------------------------------------------------------------
+
+/// A section declared once with `settings_section!`: the walker reads its
+/// schema for unknown fields and wrong types, then runs the declaration's own
+/// semantic check over the typed value, so nothing about the section is
+/// restated here.
+trait DeclaredSection: Sync {
+    fn schema(&self) -> &'static SettingsSectionSchema;
+    /// The declaration's semantic problems for this table, or the typed
+    /// deserialisation's complaint when the table does not fit the partial.
+    fn problems(&self, table: &Table) -> Result<Vec<SettingsProblem>, String>;
+}
+
+struct Declared<S>(std::marker::PhantomData<fn() -> S>);
+
+impl<S> DeclaredSection for Declared<S>
+where
+    S: SettingsSection + Sync,
+    S::Partial: serde::de::DeserializeOwned,
+{
+    fn schema(&self) -> &'static SettingsSectionSchema {
+        &S::SCHEMA
+    }
+
+    fn problems(&self, table: &Table) -> Result<Vec<SettingsProblem>, String> {
+        let partial: S::Partial = table
+            .clone()
+            .try_into()
+            .map_err(|error| error.to_string())?;
+        Ok(S::resolve_partial(partial).problems())
+    }
+}
+
+/// Every declared section, by table name. A new declaration joins this list;
+/// `KNOWN_SECTIONS` and the hand-written field tables below are for the
+/// sections not yet declared.
+const DECLARED_SECTIONS: &[&dyn DeclaredSection] = &[
+    &Declared::<SessionsConfig>(std::marker::PhantomData),
+    &Declared::<MemoryConfig>(std::marker::PhantomData),
+];
+
+fn declared_section(name: &str) -> Option<&'static dyn DeclaredSection> {
+    DECLARED_SECTIONS
+        .iter()
+        .copied()
+        .find(|section| section.schema().name == name)
+}
+
+/// Walk a declared section's table: unknown fields, kinds, then the
+/// declaration's semantics over the typed value.
+fn validate_declared_section(
+    section: &dyn DeclaredSection,
+    table: &Table,
+    file_path: &Path,
+) -> Vec<ConfigProblem> {
+    let schema = section.schema();
+    let mut problems = Vec::new();
+    let mut shape_ok = true;
+    for (field_name, field_value) in table {
+        let field_path = format!("{}.{field_name}", schema.name);
+        let Some(field) = schema.field(field_name) else {
+            shape_ok = false;
+            problems.push(make_problem(
+                file_path,
+                Some(field_path),
+                ConfigProblemKind::UnknownField {
+                    section: schema.name.to_string(),
+                    name: field_name.clone(),
+                },
+            ));
+            continue;
+        };
+        let actual = toml_type_name(field_value);
+        if actual != field.kind.name() {
+            shape_ok = false;
+            problems.push(make_problem(
+                file_path,
+                Some(field_path),
+                ConfigProblemKind::TypeError {
+                    expected: field.kind.name().to_string(),
+                    found: actual.to_string(),
+                },
+            ));
+        }
+    }
+    if !shape_ok {
+        return problems;
+    }
+    match section.problems(table) {
+        Ok(semantic) => problems.extend(semantic.into_iter().map(|problem| {
+            make_problem(
+                file_path,
+                Some(format!("{}.{}", schema.name, problem.field)),
+                ConfigProblemKind::SemanticError {
+                    message: problem.message,
+                },
+            )
+        })),
+        Err(message) => problems.push(make_problem(
+            file_path,
+            Some(schema.name.to_string()),
+            ConfigProblemKind::SemanticError { message },
+        )),
+    }
+    problems
+}
 
 /// The threshold's unit and count rule, shared by file loading and settings saves.
 pub fn valid_compaction_threshold(unit: &str, count: i64) -> bool {
@@ -38,7 +153,6 @@ const KNOWN_SECTIONS: &[&str] = &[
     "hitl",
     "communication",
     "scheduling",
-    "sessions",
     "voice",
     "channels",
 ];
@@ -61,10 +175,6 @@ pub fn unsupported_search_provider_message(provider_type: &str) -> String {
         SUPPORTED_SEARCH_PROVIDERS.join(", ")
     )
 }
-
-/// The longest inactivity delay a session archive may be configured with —
-/// ten years, well inside what a date arithmetic library accepts.
-pub const MAX_ARCHIVE_AFTER_DAYS: i64 = 3650;
 
 /// Top-level scalar keys (i.e. fields that live above any [section] header).
 /// These are recognised alongside `KNOWN_SECTIONS` during validation.
@@ -119,7 +229,6 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
             "expiry_interval_secs",
         ],
         "scheduling" => &["run_history_max_age_days", "run_history_max_per_schedule"],
-        "sessions" => &["archive_after_days"],
         "voice" => &["transcription_model", "speech_model"],
         // telegram has a fixed nested schema validated by
         // `validate_channels_telegram_table`.
@@ -234,7 +343,6 @@ fn check_field_type(
         ("scheduling", "run_history_max_per_schedule") => {
             ("integer", matches!(value, Value::Integer(_)))
         }
-        ("sessions", "archive_after_days") => ("integer", matches!(value, Value::Integer(_))),
         ("voice", "transcription_model" | "speech_model") => {
             ("string", matches!(value, Value::String(_)))
         }
@@ -474,21 +582,6 @@ fn check_field_semantics(
                     ConfigProblemKind::SemanticError {
                         message: format!(
                             "scheduling.run_history_max_per_schedule must be a positive integer, got {t}"
-                        ),
-                    },
-                ));
-            }
-        }
-        ("sessions", "archive_after_days") => {
-            if let Value::Integer(t) = value
-                && !(1..=MAX_ARCHIVE_AFTER_DAYS).contains(t)
-            {
-                problems.push(make_problem(
-                    file_path,
-                    Some(field_path.to_string()),
-                    ConfigProblemKind::SemanticError {
-                        message: format!(
-                            "sessions.archive_after_days must be between 1 and {MAX_ARCHIVE_AFTER_DAYS}, got {t}"
                         ),
                     },
                 ));
@@ -1172,7 +1265,8 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
             continue;
         }
 
-        if !KNOWN_SECTIONS.contains(&section_name.as_str()) {
+        let declared = declared_section(section_name);
+        if declared.is_none() && !KNOWN_SECTIONS.contains(&section_name.as_str()) {
             problems.push(make_problem(
                 file_path,
                 None,
@@ -1198,6 +1292,11 @@ pub fn validate_toml_string(content: &str, file_path: &Path) -> Vec<ConfigProble
                 continue;
             }
         };
+
+        if let Some(section) = declared {
+            problems.extend(validate_declared_section(section, section_table, file_path));
+            continue;
+        }
 
         for (field_name, field_value) in section_table {
             let field_path_str = format!("{section_name}.{field_name}");
@@ -2109,6 +2208,52 @@ allowed_fields = ["user"]
         );
         let problems = validate_toml_string("[voice]\nspeech_model = 3\n", &path("config.toml"));
         assert_eq!(problems.len(), 1, "an id must be a string: {problems:?}");
+    }
+
+    #[test]
+    fn a_declared_section_validates_through_its_declaration() {
+        // [memory] is declared once with settings_section!; the walker takes
+        // its unknown-field, type and semantic checks from that declaration,
+        // reporting each at the field it names.
+        let problems = validate_toml_string(
+            "[memory]\ncurator_idle_minutes = 30\n",
+            &path("config.toml"),
+        );
+        assert!(
+            problems.is_empty(),
+            "valid [memory] should pass, got: {problems:?}"
+        );
+
+        let problems =
+            validate_toml_string("[memory]\ncurator_idle_minutes = 0\n", &path("config.toml"));
+        assert_eq!(
+            problems.len(),
+            1,
+            "zero minutes is not a wait: {problems:?}"
+        );
+        assert!(matches!(
+            &problems[0].kind,
+            ConfigProblemKind::SemanticError { message } if message.contains("memory.curator_idle_minutes")
+        ));
+        assert_eq!(
+            problems[0].field_path.as_deref(),
+            Some("memory.curator_idle_minutes")
+        );
+
+        let problems = validate_toml_string(
+            "[memory]\ncurator_idle_minutes = \"soon\"\n",
+            &path("config.toml"),
+        );
+        assert!(
+            matches!(&problems[0].kind, ConfigProblemKind::TypeError { expected, found } if expected == "integer" && found == "string"),
+            "a wrong kind is reported from the declaration's schema: {problems:?}"
+        );
+
+        let problems = validate_toml_string("[memory]\ncuration_delay = 5\n", &path("config.toml"));
+        assert!(
+            matches!(&problems[0].kind, ConfigProblemKind::UnknownField { section, name } if section == "memory" && name == "curation_delay"),
+            "an undeclared field is unknown: {problems:?}"
+        );
     }
 
     #[test]
