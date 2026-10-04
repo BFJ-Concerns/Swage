@@ -244,6 +244,26 @@ mod tests {
         }
     }
 
+    /// The authoring skill is what an agent reads before writing a run that
+    /// waits on a decision: it must name the hold primitive, its verdict
+    /// rule, and how a granted agent answers.
+    #[test]
+    fn the_authoring_skill_teaches_the_decision_hold() {
+        let skill = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
+        assert!(
+            skill.contains("`hold({ content, verdicts })`"),
+            "the authoring skill names hold() as the decision primitive"
+        );
+        assert!(
+            skill.contains("at least two") && skill.contains("distinct strings"),
+            "and its at-least-two-verdicts rule"
+        );
+        assert!(
+            skill.contains("`workflow_hold`"),
+            "and the tool a granted agent answers it with"
+        );
+    }
+
     #[test]
     fn identifiers_are_stable_and_domain_separated() {
         let topic = Uuid::from_u128(1);
