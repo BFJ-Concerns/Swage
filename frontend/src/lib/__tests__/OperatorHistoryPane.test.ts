@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
 vi.mock("../api/operator", () => ({
-  fetchAuditEvents: vi.fn(async () => ({ events: [], next_before: null })),
+  fetchAuditEvents: vi.fn(async () => ({ events: [], next_cursor: null })),
   fetchOperatorHistory: vi.fn(),
 }));
 vi.mock("../api/turns", () => ({
@@ -43,15 +43,15 @@ describe("OperatorHistoryPane", () => {
     vi.mocked(fetchAuditEvents)
       .mockResolvedValueOnce({
         events: [event("e2", "surface_module_written", "2026-10-04T10:02:00Z")],
-        next_before: "2026-10-04T10:02:00Z",
+        next_cursor: { created_at: "2026-10-04T10:02:00Z", id: "e2" },
       })
       .mockResolvedValueOnce({
         events: [event("e1", "surface_created", "2026-10-04T10:01:00Z")],
-        next_before: null,
+        next_cursor: null,
       })
       .mockResolvedValueOnce({
         events: [event("e3", "surface_annotation_created", "2026-10-04T10:03:00Z")],
-        next_before: null,
+        next_cursor: null,
       });
 
     component = mount(OperatorHistoryPane, { target: document.body });
@@ -75,7 +75,7 @@ describe("OperatorHistoryPane", () => {
     older?.click();
     await vi.waitFor(() => expect(document.querySelectorAll(".audit-entry")).toHaveLength(2));
     expect(fetchAuditEvents).toHaveBeenLastCalledWith(
-      expect.objectContaining({ before: "2026-10-04T10:02:00Z", limit: 50 }),
+      expect.objectContaining({ before: { created_at: "2026-10-04T10:02:00Z", id: "e2" }, limit: 50 }),
     );
     expect(
       Array.from(document.querySelectorAll("button")).some((button) =>

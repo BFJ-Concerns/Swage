@@ -8,9 +8,13 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{MessageOrigin, NewQueuedTurnInput, QueuedTurnInput};
+use crate::model::{
+    DrainedTurnQueue, Message, MessageOrigin, NewQueuedTurnInput, QueuedTurnInput, Turn, TurnState,
+};
 use crate::sqlite::SqliteStorage;
+use crate::sqlite::message::encode_attachments;
 use crate::store::TurnQueueStore;
+use swage_core::Role;
 
 const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at";
 
@@ -120,25 +124,128 @@ impl TurnQueueStore for SqliteStorage {
         .await
     }
 
-    async fn take_queued_turn_inputs(
+    async fn drain_queued_turn_inputs(
         &self,
         session_id: Uuid,
-    ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+        agent_id: &str,
+    ) -> Result<Option<DrainedTurnQueue>, StorageError> {
+        let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
-            // Read and delete under one lock: the queue hands its contents to
-            // exactly one drain.
+            let tx = conn.unchecked_transaction()?;
             let queued = {
-                let mut stmt = conn.prepare(&format!(
+                let mut stmt = tx.prepare(&format!(
                     "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
                 ))?;
                 let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
-            conn.execute(
+            let Some(first) = queued.first() else {
+                return Ok(None);
+            };
+            let thread_id = first.thread_id;
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+
+            // The claim: the thread's one-live-turn index refuses a second
+            // live turn, in which case nothing here happened.
+            let turn_id = Uuid::new_v4();
+            let user_input = queued
+                .iter()
+                .map(|item| item.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            match tx.execute(
+                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                params![
+                    turn_id.to_string(),
+                    thread_id.to_string(),
+                    &agent_id,
+                    &user_input,
+                    TurnState::Pending.to_string(),
+                    &now_str,
+                ],
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(failure, _))
+                    if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+
+            // One recorded message per queued input, in arrival order, each
+            // with the origin it arrived with.
+            let mut messages = Vec::with_capacity(queued.len());
+            for item in &queued {
+                let position: i32 = tx.query_row(
+                    "SELECT COALESCE(MAX(position) + 1, 0) FROM messages WHERE thread_id = ?1",
+                    params![thread_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                let message_id = Uuid::new_v4();
+                tx.execute(
+                    "INSERT INTO messages
+                         (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10)",
+                    params![
+                        message_id.to_string(),
+                        thread_id.to_string(),
+                        turn_id.to_string(),
+                        Role::User.to_string(),
+                        &item.content,
+                        position,
+                        &agent_id,
+                        &now_str,
+                        encode_attachments(&item.attachments)?,
+                        item.origin.as_str(),
+                    ],
+                )?;
+                messages.push(Message {
+                    id: message_id,
+                    thread_id,
+                    attachments: item.attachments.clone(),
+                    turn_id: Some(turn_id),
+                    role: Role::User,
+                    origin: item.origin,
+                    content: item.content.clone(),
+                    position,
+                    agent_id: agent_id.clone(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    created_at: now,
+                });
+            }
+            tx.execute(
                 "DELETE FROM turn_queue WHERE session_id = ?1",
                 params![session_id.to_string()],
             )?;
-            Ok(queued)
+            tx.commit()?;
+            let queued_ids = queued.iter().map(|item| item.id).collect();
+            Ok(Some(DrainedTurnQueue {
+                turn: Turn {
+                    id: turn_id,
+                    thread_id,
+                    agent_id,
+                    state: TurnState::Pending,
+                    user_input: Some(user_input),
+                    inbound_audit: None,
+                    assistant_response: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cost_microcents: None,
+                    structured_output: None,
+                    parent_turn_id: None,
+                    created_at: now,
+                    completed_at: None,
+                    delegated_input_tokens: None,
+                    delegated_output_tokens: None,
+                    execution_isolation: None,
+                },
+                messages,
+                queued_ids,
+            }))
         })
         .await
     }
@@ -228,8 +335,24 @@ mod tests {
             vec![session_id]
         );
 
-        let taken = storage.take_queued_turn_inputs(session_id).await.unwrap();
-        assert_eq!(taken.len(), 2);
+        let drained = storage
+            .drain_queued_turn_inputs(session_id, "gateway")
+            .await
+            .unwrap()
+            .expect("two queued inputs drain");
+        assert_eq!(drained.turn.user_input.as_deref(), Some("first\n\nsecond"));
+        assert_eq!(
+            drained
+                .messages
+                .iter()
+                .map(|message| (message.content.as_str(), message.origin, message.turn_id))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first", MessageOrigin::User, Some(drained.turn.id)),
+                ("second", MessageOrigin::Schedule, Some(drained.turn.id)),
+            ],
+            "one recorded message per input, in order, with its origin"
+        );
         assert!(
             storage
                 .list_queued_turn_inputs(session_id)
@@ -239,11 +362,11 @@ mod tests {
         );
         assert!(
             storage
-                .take_queued_turn_inputs(session_id)
+                .drain_queued_turn_inputs(session_id, "gateway")
                 .await
                 .unwrap()
-                .is_empty(),
-            "a second take finds nothing: the queue hands over once"
+                .is_none(),
+            "a second drain finds nothing: the queue hands over once"
         );
         assert!(
             storage
@@ -252,6 +375,41 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_drain_that_loses_the_claim_leaves_the_queue_exactly_as_it_was() {
+        use crate::model::NewTurn;
+        use crate::store::TurnStore;
+
+        let (storage, session_id, thread_id) = session_and_thread().await;
+        storage
+            .enqueue_turn_input(queued(session_id, thread_id, "waiting"))
+            .await
+            .unwrap();
+        // A live turn holds the thread: the one-live-turn index refuses the
+        // drain's claim and the transaction rolls back whole.
+        storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::Pending,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .drain_queued_turn_inputs(session_id, "gateway")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let still_queued = storage.list_queued_turn_inputs(session_id).await.unwrap();
+        assert_eq!(still_queued.len(), 1);
+        assert_eq!(still_queued[0].content, "waiting");
+        assert_eq!(still_queued[0].seq, 0, "the same row, not a re-insertion");
     }
 
     #[tokio::test(flavor = "multi_thread")]

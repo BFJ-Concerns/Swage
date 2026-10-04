@@ -59,7 +59,7 @@ fn parse_attachments(stored: &str) -> rusqlite::Result<Vec<serde_json::Value>> {
     })
 }
 
-fn encode_attachments(attachments: &[serde_json::Value]) -> rusqlite::Result<String> {
+pub(crate) fn encode_attachments(attachments: &[serde_json::Value]) -> rusqlite::Result<String> {
     serde_json::to_string(attachments)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }

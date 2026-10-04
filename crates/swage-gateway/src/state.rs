@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicUsize;
 
 use chrono::{DateTime, Utc};
 
-use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -79,9 +79,12 @@ pub struct AppState {
     /// Set of session_ids that currently have an active WebSocket connection.
     /// Prevents duplicate connections to the same conversation.
     pub active_connections: Arc<AsyncMutex<HashSet<Uuid>>>,
-    /// Turn events for a session that no single connection owns — a turn the
-    /// queue started — delivered to every connection open on that session.
-    pub session_events: broadcast::Sender<(Uuid, ServerEvent)>,
+    /// The connections open on each session, as senders into their own event
+    /// channels. A turn no single connection owns — one the queue started —
+    /// is delivered to every one of them through the same lossless channel
+    /// their own turns use; a closed connection's sender is dropped as it is
+    /// found.
+    pub session_listeners: Arc<AsyncMutex<HashMap<Uuid, Vec<mpsc::UnboundedSender<ServerEvent>>>>>,
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
@@ -307,7 +310,6 @@ impl AppState {
         config_root: PathBuf,
     ) -> Self {
         let (broadcast, _) = broadcast::channel(16);
-        let (session_events, _) = broadcast::channel(256);
         let workflow_capabilities =
             WorkflowCapabilities::for_protocol(config.default_provider_protocol());
         let tool_dispatcher = Arc::new(tool_dispatcher);
@@ -350,7 +352,7 @@ impl AppState {
             active_workflow_runs: Arc::new(AsyncMutex::new(HashMap::new())),
             active_workflow_workers: Arc::new(AsyncMutex::new(HashMap::new())),
             active_connections: Arc::new(AsyncMutex::new(HashSet::new())),
-            session_events,
+            session_listeners: Arc::new(AsyncMutex::new(HashMap::new())),
             tool_dispatcher: tool_dispatcher.clone(),
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,
@@ -429,6 +431,33 @@ impl AppState {
 
     pub fn restart_required(&self) -> bool {
         self.restart_required.load(Ordering::SeqCst)
+    }
+
+    /// Register a connection's event channel as a listener on a session, so
+    /// turns the connection did not start still reach it.
+    pub async fn listen_to_session(
+        &self,
+        session_id: Uuid,
+        sender: mpsc::UnboundedSender<ServerEvent>,
+    ) {
+        self.session_listeners
+            .lock()
+            .await
+            .entry(session_id)
+            .or_default()
+            .push(sender);
+    }
+
+    /// Deliver an event to every connection open on the session. A sender
+    /// whose connection has gone is dropped from the list as it is found.
+    pub async fn send_to_session(&self, session_id: Uuid, event: &ServerEvent) {
+        let mut listeners = self.session_listeners.lock().await;
+        if let Some(senders) = listeners.get_mut(&session_id) {
+            senders.retain(|sender| sender.send(event.clone()).is_ok());
+            if senders.is_empty() {
+                listeners.remove(&session_id);
+            }
+        }
     }
 
     pub fn active_config(&self) -> ResolvedConfig {

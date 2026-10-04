@@ -70,7 +70,7 @@ mod runtime_launch;
 mod sandbox_approval;
 mod succession;
 mod turn_input;
-mod turn_release;
+pub(crate) mod turn_release;
 mod workspace;
 
 pub(crate) use configuration::*;

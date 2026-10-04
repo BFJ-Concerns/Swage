@@ -138,11 +138,13 @@ impl OrientationElement {
         }
         match &self.environment.tool_root {
             ToolRoot::WorkingDirectory(dir) => {
-                place.push_str(&format!("Working directory: {dir}\n"));
+                place.push_str(&format!(
+                    "Working directory: {dir} — temporary files belong under it, not in /tmp.\n"
+                ));
             }
             ToolRoot::ManagedScratch(dir) => {
                 place.push_str(&format!(
-                    "No workspace is attached. Tool paths resolve at {dir}, a scratch directory for this work.\n"
+                    "No workspace is attached. Tool paths resolve at {dir}, a scratch directory for this work; temporary files belong under it, not in /tmp.\n"
                 ));
             }
         }

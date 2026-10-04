@@ -115,7 +115,7 @@ export interface StreamingStoreOptions {
       conversationId: string,
     ): void;
     /** The held messages became the next turn's input. */
-    clearQueuedMessages?(conversationId: string): void;
+    clearQueuedMessages?(conversationId: string, queuedIds: string[]): void;
   };
   /** Sends WebSocket events for outgoing user messages and cancellation. */
   connectionStore?: {
@@ -543,7 +543,7 @@ export function createStreamingStore(
           // its own) and a new turn is running on them: this is that turn
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
-          options?.conversationStore?.clearQueuedMessages?.(event.session_id);
+          options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);
           stream.activeToolCallsStore.set([]);

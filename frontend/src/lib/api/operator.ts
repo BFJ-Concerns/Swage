@@ -50,7 +50,8 @@ export interface AuditEventFilter {
   entityKind?: string;
   entityId?: string;
   eventKind?: string;
-  before?: string;
+  // The cursor the previous page handed back, both halves together.
+  before?: { created_at: string; id: string };
   limit?: number;
 }
 
@@ -60,7 +61,10 @@ export async function fetchAuditEvents(filter: AuditEventFilter = {}): Promise<A
   if (filter.entityKind) query.set("entity_kind", filter.entityKind);
   if (filter.entityId) query.set("entity_id", filter.entityId);
   if (filter.eventKind) query.set("event_kind", filter.eventKind);
-  if (filter.before) query.set("before", filter.before);
+  if (filter.before) {
+    query.set("before", filter.before.created_at);
+    query.set("before_id", filter.before.id);
+  }
   if (filter.limit !== undefined) query.set("limit", String(filter.limit));
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const response = await request(`/api/operator/audit-events${suffix}`, "GET");

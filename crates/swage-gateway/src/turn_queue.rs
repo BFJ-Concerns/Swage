@@ -19,11 +19,11 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
-use swage_core::{GatewayError, Role};
+use swage_core::GatewayError;
 use swage_protocol::client::conversation::QueuedMessageView;
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::TurnState;
-use swage_storage::model::{AppendMessage, NewQueuedTurnInput, NewTurn, QueuedTurnInput};
+use swage_storage::model::{MessageOrigin, NewQueuedTurnInput, QueuedTurnInput};
 
 use crate::service::{announce_appended_message, message_view, pending_turn_state};
 use crate::state::AppState;
@@ -95,104 +95,65 @@ pub fn spawn_drain(state: AppState, session_id: Uuid) {
     });
 }
 
-/// Take everything queued for the session and run it as one turn: each
-/// queued message recorded as its own message with its origin, the turn's
-/// input their texts in arrival order. `None` when nothing was queued or a
-/// turn is already running (the queue waits for that turn's end).
+/// Run everything queued for the session as one turn: the store claims the
+/// session with the turn, records each queued message as its own row with
+/// its origin, and empties the queue in one transaction, so a claim that
+/// loses to a live turn changes nothing and a failure leaves no half-state.
+/// `None` when nothing was queued or a turn is already running (the queue
+/// waits for that turn's end).
 pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uuid>, GatewayError> {
     if state.active_turns.lock().await.contains_key(&session_id) {
         return Ok(None);
     }
-    let queued = state.storage.take_queued_turn_inputs(session_id).await?;
-    let Some(first) = queued.first() else {
-        return Ok(None);
-    };
-    let thread_id = first.thread_id;
     let session = state
         .storage
         .get_session(session_id)
         .await?
         .ok_or(GatewayError::ConversationNotFound { id: session_id })?;
-
-    // The placeholder turn claims the session: the thread's one-live-turn
-    // index refuses a second claimant, in which case the queue is put back
-    // for that turn's end.
-    let joined = queued
-        .iter()
-        .map(|item| item.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let turn = match state
+    let Some(drained) = state
         .storage
-        .create_turn(NewTurn {
-            thread_id,
-            agent_id: session.agent_id.clone(),
-            state: TurnState::Pending,
-            user_input: Some(joined.clone()),
-            parent_turn_id: None,
-        })
-        .await
-    {
-        Ok(turn) => turn,
-        Err(swage_core::StorageError::ConstraintViolation(_)) => {
-            for item in queued {
-                state
-                    .storage
-                    .enqueue_turn_input(NewQueuedTurnInput {
-                        session_id,
-                        thread_id: item.thread_id,
-                        origin: item.origin,
-                        content: item.content,
-                        attachments: item.attachments,
-                    })
-                    .await?;
-            }
-            return Ok(None);
-        }
-        Err(error) => return Err(error.into()),
+        .drain_queued_turn_inputs(session_id, &session.agent_id)
+        .await?
+    else {
+        return Ok(None);
     };
+    let turn = drained.turn;
+    let thread_id = turn.thread_id;
 
-    // Every queued message becomes its own recorded row, in arrival order,
-    // and every open view learns of it; then the queue is announced empty.
-    for item in &queued {
-        let recorded = state
-            .storage
-            .append_message(AppendMessage {
-                thread_id,
-                turn_id: Some(turn.id),
-                role: Role::User,
-                origin: item.origin,
-                content: item.content.clone(),
-                attachments: item.attachments.clone(),
-                agent_id: session.agent_id.clone(),
-            })
-            .await?;
+    // Every recorded row reaches every open view; then the queue is
+    // announced empty.
+    for recorded in &drained.messages {
         announce_appended_message(
             state,
             session_id,
-            message_view(recorded, pending_turn_state(), Vec::new())?,
+            message_view(recorded.clone(), pending_turn_state(), Vec::new())?,
         );
     }
     let _ = state.broadcast.send(ServerEvent::QueueDrained {
         session_id,
         turn_id: turn.id,
+        queued_ids: drained.queued_ids.clone(),
     });
 
     // The turn's events reach every open view of the session through the
     // per-session channel: no single client owns a turn the queue started.
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
-    let session_events = state.session_events.clone();
+    let listeners = state.clone();
     tokio::spawn(async move {
         while let Some(event) = events_rx.recv().await {
-            let _ = session_events.send((session_id, event));
+            listeners.send_to_session(session_id, &event).await;
         }
     });
     let input = TurnInput {
-        text: joined,
+        text: turn.user_input.clone().unwrap_or_default(),
         // Attachments already sit on the recorded rows; the turn rebuilds
         // its history from them.
         attachments: Vec::new(),
-        origin: first.origin,
+        origin: drained
+            .messages
+            .first()
+            .map(|message| message.origin)
+            .unwrap_or(MessageOrigin::User),
     };
     Box::pin(crate::turn::process_turn_with_composition_and_model(
         state,
@@ -232,7 +193,7 @@ pub async fn drain_queues_at_startup(state: &AppState) -> Result<usize, GatewayE
 
 #[cfg(test)]
 mod tests {
-    use swage_core::{FinishReason, StreamChunk};
+    use swage_core::{FinishReason, Role, StreamChunk};
     use swage_storage::MessageOrigin;
     use tokio_util::sync::CancellationToken;
 
@@ -258,7 +219,8 @@ mod tests {
             .await
             .unwrap();
         let mut announcements = state.broadcast.subscribe();
-        let mut session_events = state.session_events.subscribe();
+        let (listener, mut session_events) = mpsc::unbounded_channel::<ServerEvent>();
+        state.listen_to_session(session_id, listener).await;
 
         // A turn is running: the session holds its guard.
         state
@@ -366,16 +328,13 @@ mod tests {
                 .count(),
             2
         );
-        assert!(later.iter().any(|e| matches!(e, ServerEvent::QueueDrained { session_id: s, turn_id: t } if *s == session_id && *t == turn_id)));
+        assert!(later.iter().any(|e| matches!(e, ServerEvent::QueueDrained { session_id: s, turn_id: t, .. } if *s == session_id && *t == turn_id)));
         let session_event_kinds: Vec<&'static str> =
             std::iter::from_fn(|| session_events.try_recv().ok())
-                .map(|(s, event)| {
-                    assert_eq!(s, session_id);
-                    match event {
-                        ServerEvent::Token { .. } => "token",
-                        ServerEvent::TurnComplete { .. } => "turn_complete",
-                        _ => "other",
-                    }
+                .map(|event| match event {
+                    ServerEvent::Token { .. } => "token",
+                    ServerEvent::TurnComplete { .. } => "turn_complete",
+                    _ => "other",
                 })
                 .collect();
         assert!(session_event_kinds.contains(&"token"));
@@ -383,6 +342,71 @@ mod tests {
 
         // Nothing left to drain.
         assert!(drain_queue(&state, session_id).await.unwrap().is_none());
+    }
+
+    /// A turn that fails before its agent runs ends through the same release
+    /// as a completed one, so the queue behind it runs rather than waiting for
+    /// an unrelated message.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_that_fails_before_running_still_hands_the_session_to_its_queue() {
+        use swage_storage::NewTurn;
+
+        let (state, session_id) = make_state_with_session(reply("Ran after the failure.")).await;
+        let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
+            .await
+            .unwrap();
+        let failing = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".into(),
+                state: TurnState::Pending,
+                user_input: Some("doomed".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, CancellationToken::new());
+        queue_input(&state, session_id, thread.id, TurnInput::text("after you"))
+            .await
+            .unwrap();
+
+        crate::turn::turn_release::record_terminal_state_and_release(
+            &state,
+            session_id,
+            failing.id,
+            TurnState::Failed,
+        )
+        .await
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let turns = state.storage.list_turns_by_thread(thread.id).await.unwrap();
+            if turns.iter().any(|turn| {
+                turn.user_input.as_deref() == Some("after you")
+                    && turn.state == TurnState::Completed
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queued message should have run as the next turn: {turns:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            state
+                .storage
+                .list_queued_turn_inputs(session_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

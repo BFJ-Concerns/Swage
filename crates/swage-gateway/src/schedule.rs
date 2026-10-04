@@ -1672,7 +1672,19 @@ async fn observe_file(root: &std::path::Path, relative: &str) -> DigestObservati
             None,
         );
     }
-    let bytes = match tokio::fs::read(&candidate_real).await {
+    // Only the opening is read from disk: the bound is on the read, not on
+    // what is kept of it afterwards.
+    let opening_bytes = async {
+        use tokio::io::AsyncReadExt;
+        let file = tokio::fs::File::open(&candidate_real).await?;
+        let mut opening = Vec::with_capacity(GATE_OBSERVATION_READ_BYTES);
+        file.take(GATE_OBSERVATION_READ_BYTES as u64)
+            .read_to_end(&mut opening)
+            .await?;
+        Ok::<_, std::io::Error>(opening)
+    }
+    .await;
+    let bytes = match opening_bytes {
         Ok(bytes) => bytes,
         Err(error) => {
             return observation(
@@ -1684,7 +1696,7 @@ async fn observe_file(root: &std::path::Path, relative: &str) -> DigestObservati
             );
         }
     };
-    let opening = String::from_utf8_lossy(&bytes[..bytes.len().min(GATE_OBSERVATION_READ_BYTES)]);
+    let opening = String::from_utf8_lossy(&bytes);
     observation(
         FileObservationStatus::Found,
         Some(metadata.len()),

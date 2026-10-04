@@ -207,14 +207,23 @@ pub struct AuditEventView {
     pub created_at: DateTime<Utc>,
 }
 
+/// Where a page of the audit record ended, handed back for the next request
+/// as `before` and `before_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct AuditEventCursor {
+    pub created_at: DateTime<Utc>,
+    pub id: String,
+}
+
 /// A page of the audit record, newest first, under the filters the request
-/// named. `next_before` is the cursor for the page after this one — absent
-/// when this page ends the record.
+/// named. `next_cursor` names the page after this one — absent when this
+/// page ends the record.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct AuditEventListResponse {
     pub events: Vec<AuditEventView>,
-    pub next_before: Option<DateTime<Utc>>,
+    pub next_cursor: Option<AuditEventCursor>,
 }
 
 /// Scope filter for durable agent-definition reads and deletes.

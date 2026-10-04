@@ -3070,6 +3070,27 @@ impl SessionStore for MockStorage {
         Ok(())
     }
 
+    async fn set_session_metadata_key(
+        &self,
+        id: Uuid,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<Session, StorageError> {
+        let mut db = self.db.lock().await;
+        let session = db
+            .sessions
+            .get_mut(&id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "session".to_string(),
+                id: id.to_string(),
+            })?;
+        let metadata = session
+            .metadata
+            .get_or_insert_with(|| serde_json::json!({}));
+        metadata[key] = value;
+        Ok(session.clone())
+    }
+
     async fn set_session_metadata(
         &self,
         id: Uuid,
@@ -4365,6 +4386,14 @@ impl swage_storage::SurfaceStore for MockStorage {
     ) -> Result<Option<swage_storage::SurfaceModule>, StorageError> {
         unimplemented!()
     }
+    async fn append_surface_module(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &str,
+    ) -> Result<swage_storage::SurfaceModule, StorageError> {
+        unimplemented!()
+    }
     async fn list_surface_modules(
         &self,
         _: Uuid,
@@ -5251,7 +5280,12 @@ impl swage_storage::store::AuditStore for MockStorage {
                     .as_deref()
                     .is_none_or(|kind| event.event_kind == kind)
             })
-            .filter(|event| filter.before.is_none_or(|before| event.created_at < before))
+            .filter(|event| {
+                filter.before.as_ref().is_none_or(|before| {
+                    event.created_at < before.created_at
+                        || (event.created_at == before.created_at && event.id < before.id)
+                })
+            })
             .cloned()
             .collect();
         events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
@@ -5303,18 +5337,56 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         Ok(queued)
     }
 
-    async fn take_queued_turn_inputs(
+    async fn drain_queued_turn_inputs(
         &self,
         session_id: Uuid,
-    ) -> Result<Vec<swage_storage::QueuedTurnInput>, StorageError> {
-        let mut db = self.db.lock().await;
-        let (mut taken, kept): (Vec<_>, Vec<_>) = db
+        agent_id: &str,
+    ) -> Result<Option<swage_storage::DrainedTurnQueue>, StorageError> {
+        let queued = self.list_queued_turn_inputs(session_id).await?;
+        let Some(first) = queued.first() else {
+            return Ok(None);
+        };
+        let thread_id = first.thread_id;
+        let user_input = queued
+            .iter()
+            .map(|item| item.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let turn = self
+            .create_turn(swage_storage::NewTurn {
+                thread_id,
+                agent_id: agent_id.to_string(),
+                state: swage_storage::TurnState::Pending,
+                user_input: Some(user_input),
+                parent_turn_id: None,
+            })
+            .await?;
+        let mut messages = Vec::new();
+        for item in &queued {
+            messages.push(
+                self.append_message(swage_storage::model::AppendMessage {
+                    thread_id,
+                    turn_id: Some(turn.id),
+                    role: Role::User,
+                    origin: item.origin,
+                    content: item.content.clone(),
+                    attachments: item.attachments.clone(),
+                    agent_id: agent_id.to_string(),
+                })
+                .await?,
+            );
+        }
+        let queued_ids = queued.iter().map(|item| item.id).collect();
+        self.db
+            .lock()
+            .await
             .turn_queue
-            .drain(..)
-            .partition(|queued| queued.session_id == session_id);
-        db.turn_queue = kept;
-        taken.sort_by_key(|queued| queued.seq);
-        Ok(taken)
+            .retain(|item| item.session_id != session_id);
+        Ok(Some(swage_storage::DrainedTurnQueue {
+            turn,
+            messages,
+            queued_ids,
+        }))
     }
 
     async fn sessions_with_queued_turn_inputs(&self) -> Result<Vec<Uuid>, StorageError> {

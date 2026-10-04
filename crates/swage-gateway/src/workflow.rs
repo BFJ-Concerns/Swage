@@ -11140,7 +11140,6 @@ mod tests {
         });
         let placeholder_tool_names = [
             "web_search",
-            "url_fetch",
             "browser_navigate",
             "browser_snapshot",
             "knowledge_curate",
@@ -11150,6 +11149,9 @@ mod tests {
             .map(|name| Arc::new(NamedTool::new(name)) as Arc<dyn crate::tool::Tool>)
             .collect::<Vec<_>>();
         tools.extend([
+            // The fetch the gatherer captures through: it retains the body
+            // and names it the way url_fetch does, without the network.
+            Arc::new(RetainingFetchStub) as Arc<dyn crate::tool::Tool>,
             Arc::new(crate::tool::knowledge::KnowledgeRecordTool) as Arc<dyn crate::tool::Tool>,
             Arc::new(crate::tool::knowledge::KnowledgeSearchTool) as Arc<dyn crate::tool::Tool>,
             Arc::new(crate::tool::knowledge::KnowledgeCiteTool) as Arc<dyn crate::tool::Tool>,
@@ -11233,7 +11235,8 @@ mod tests {
         assert_eq!(citation.quoted_text, RESEARCH_SWEEP_QUOTE);
 
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 8);
+        // Scope, gather (fetch, record, report) ×2 sources, organise ×2, synthesise ×2.
+        assert_eq!(requests.len(), 9);
         let request_text = |request: &swage_core::CompletionRequest| {
             request
                 .messages
@@ -11800,6 +11803,73 @@ mod tests {
 
     const RESEARCH_SWEEP_QUOTE: &str = "The landed source supports the purpose.";
 
+    /// A url_fetch stand-in for the contract test: no network, but the
+    /// three moves a capture depends on — the body retained as a tool-output
+    /// file, the file and media type named in the result, and the capture
+    /// hint pointing at this call.
+    struct RetainingFetchStub;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for RetainingFetchStub {
+        fn name(&self) -> &str {
+            "url_fetch"
+        }
+
+        fn description(&self) -> &str {
+            "Fetch a URL (contract stand-in)."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            })
+        }
+
+        fn requires_device_execution(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, swage_core::ToolError> {
+            use tokio::io::AsyncWriteExt;
+            let path = crate::tool::workspace::tool_output_artifact_path(ctx, "raw-body.txt");
+            let mut file = crate::tool::workspace::create_tool_output_artifact(ctx, &path.absolute)
+                .await
+                .map_err(|error| swage_core::ToolError::ExecutionFailed {
+                    name: "url_fetch".into(),
+                    message: error.to_string(),
+                })?;
+            file.write_all(RESEARCH_SWEEP_QUOTE.as_bytes())
+                .await
+                .map_err(|error| swage_core::ToolError::ExecutionFailed {
+                    name: "url_fetch".into(),
+                    message: error.to_string(),
+                })?;
+            file.flush().await.ok();
+            let turn_id = ctx
+                .turn_id()
+                .expect("the fetch runs inside a recorded turn");
+            let call_id = ctx.call_id().expect("the fetch runs as a recorded call");
+            Ok(serde_json::json!({
+                "output": RESEARCH_SWEEP_QUOTE,
+                "raw_body_artifact_path": path.relative,
+                "media_type": "text/plain",
+                "capture": {
+                    "tool": "knowledge_record",
+                    "arguments": {
+                        "fetch_call": swage_core::tool_result_reference(&turn_id.to_string(), call_id),
+                    },
+                },
+                "url": params["url"],
+            }))
+        }
+    }
+
     /// Matches responses to stage prompts so concurrent gather calls cannot
     /// consume one another's scripted outcome.
     struct ResearchSweepRecordingProvider {
@@ -12090,26 +12160,40 @@ mod tests {
                     r#"{"sources":[{"url":"https://example.test/landed","why":"primary evidence"},{"url":"https://example.test/failed","why":"comparison"}]}"#,
                 )
             } else if text.contains("Source: https://example.test/landed") {
-                match tool_result("record-landed") {
-                    Some(result) => {
+                match (tool_result("fetch-landed"), tool_result("record-landed")) {
+                    (_, Some(result)) => {
                         let observation_id = result["observation_id"]
                             .as_str()
                             .and_then(|id| Uuid::parse_str(id).ok())
                             .expect("record observation id");
+                        assert_eq!(
+                            result["citable"], true,
+                            "a capture bound to the fetch is citable"
+                        );
                         *self.observation_id.lock().expect("observation id") = Some(observation_id);
                         scripted_text_output(&format!(
                             r#"{{"url":"https://example.test/landed","recorded":true,"observation_id":"{observation_id}","note":"recorded"}}"#,
                         ))
                     }
-                    None => vec![
+                    // The fetch is in hand: capture it through the reference
+                    // its result names, and nothing else.
+                    (Some(fetched), None) => vec![
                         swage_core::StreamChunk::ToolUse {
                             call_id: "record-landed".into(),
                             name: "knowledge_record".into(),
                             arguments: serde_json::json!({
-                                "url": "https://example.test/landed",
-                                "content": RESEARCH_SWEEP_QUOTE,
-                                "extracted_text": RESEARCH_SWEEP_QUOTE,
+                                "fetch_call": fetched["capture"]["arguments"]["fetch_call"],
                             }),
+                        },
+                        swage_core::StreamChunk::Done {
+                            finish_reason: None,
+                        },
+                    ],
+                    (None, None) => vec![
+                        swage_core::StreamChunk::ToolUse {
+                            call_id: "fetch-landed".into(),
+                            name: "url_fetch".into(),
+                            arguments: serde_json::json!({ "url": "https://example.test/landed" }),
                         },
                         swage_core::StreamChunk::Done {
                             finish_reason: None,

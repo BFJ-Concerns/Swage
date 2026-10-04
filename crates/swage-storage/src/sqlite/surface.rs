@@ -261,13 +261,35 @@ impl SurfaceStore for SqliteStorage {
     }
 
     async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError> {
+        self.with_conn(move |conn| module_by_id(conn, id)).await
+    }
+
+    async fn append_surface_module(
+        &self,
+        surface_id: Uuid,
+        kind: &str,
+        source: &str,
+    ) -> Result<SurfaceModule, StorageError> {
+        let kind = kind.to_owned();
+        let source = source.to_owned();
         self.with_conn(move |conn| {
-            conn.query_row(
-                &format!("SELECT {MODULE_COLUMNS} FROM surface_modules WHERE id = ?1"),
-                params![id.to_string()],
-                row_to_module,
-            )
-            .optional()
+            let id = Uuid::new_v4();
+            let now_str = Utc::now().to_rfc3339();
+            // The position is read and written in one statement under the
+            // connection lock: two appends never share a position.
+            conn.execute(
+                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at)
+                 SELECT ?1, ?2, ?3, COALESCE(MAX(position) + 1, 0), ?4, ?5, ?5
+                 FROM surface_modules WHERE surface_id = ?2",
+                params![id.to_string(), surface_id.to_string(), &kind, &source, &now_str],
+            )?;
+            conn.execute(
+                "UPDATE surfaces SET updated_at = ?1 WHERE id = ?2",
+                params![&now_str, surface_id.to_string()],
+            )?;
+            module_by_id(conn, id)?.ok_or_else(|| {
+                rusqlite::Error::QueryReturnedNoRows
+            })
         })
         .await
     }

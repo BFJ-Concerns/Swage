@@ -159,7 +159,15 @@ pub enum ServerEvent {
     /// The session's queue became the next turn's input: the queued
     /// messages are now recorded messages (each announced) and the queue is
     /// empty.
-    QueueDrained { session_id: Uuid, turn_id: Uuid },
+    /// The queue ran as the next turn: the held messages whose ids are
+    /// listed are now recorded rows (each announced on its own); a message
+    /// queued after the drain took its batch is not among them and stays
+    /// held.
+    QueueDrained {
+        session_id: Uuid,
+        turn_id: Uuid,
+        queued_ids: Vec<Uuid>,
+    },
     /// Context assembly completed for a turn.
     ///
     /// Contains the full assembly report for diagnostics and token budget

@@ -56,7 +56,11 @@ verified, what remains. When you summarise tool outcomes — your own \
 calls or dispatched work — disclose the failures among them and what \
 they leave uncovered: a report silent about its errored calls \
 overstates its coverage. Be direct; skip filler and flattery, and state \
-genuine uncertainty plainly rather than hedging around it.";
+genuine uncertainty plainly rather than hedging around it. Temporary \
+files, scratch work and working directories go under the place your \
+orientation names for tool paths — the working directory, or the scratch \
+directory when no workspace is attached — never under /tmp or anywhere \
+outside the attached workspaces.";
 
 const CLAUDE_NORMS: &str = "\
 Act on the operator's request without asking permission for steps the \
@@ -354,6 +358,10 @@ mod tests {
                 .content()[0]
                 .text_content();
         assert!(text.contains("## Working norms"));
+        assert!(
+            text.contains("never under /tmp"),
+            "the norms place temporary output under the session's own root"
+        );
         assert!(text.contains("Work to completion"));
         assert!(text.contains("issue those tool calls together"));
         assert!(!text.contains("ending your turn"), "no GPT text on Claude");

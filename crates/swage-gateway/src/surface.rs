@@ -33,8 +33,8 @@ use swage_protocol::client::surface::{
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
     LibraryEntry, LibrarySeeding, ModuleSourceReplacement, NewAuditEvent, NewLibraryEntry,
-    NewLibraryEntryModule, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, Session, Surface,
-    SurfaceAnnotation, SurfaceModule,
+    NewLibraryEntryModule, NewSurface, NewSurfaceAnnotation, Session, Surface, SurfaceAnnotation,
+    SurfaceModule,
 };
 
 use crate::error::{ApiError, Json, Path};
@@ -568,15 +568,9 @@ pub async fn write_surface_module(
                     MODULE_KINDS.join(", ")
                 )));
             }
-            let position = state.storage.list_surface_modules(surface.id).await?.len() as i32;
             let created = state
                 .storage
-                .create_surface_module(NewSurfaceModule {
-                    surface_id: surface.id,
-                    kind: kind.to_string(),
-                    position,
-                    source: request.source.clone(),
-                })
+                .append_surface_module(surface.id, kind, &request.source)
                 .await?;
             (created, None)
         }

@@ -8,8 +8,8 @@ use swage_core::GatewayError;
 use swage_protocol::{
     client::context::AssemblyReport,
     hosting::{
-        AssemblyHistoryEntry, AuditEventListResponse, AuditEventView, ConfigurationHistoryEvent,
-        OperatorHistoryResponse, VariantSelectionHistoryEvent,
+        AssemblyHistoryEntry, AuditEventCursor, AuditEventListResponse, AuditEventView,
+        ConfigurationHistoryEvent, OperatorHistoryResponse, VariantSelectionHistoryEvent,
     },
 };
 
@@ -38,7 +38,9 @@ pub struct AuditEventQuery {
     pub entity_kind: Option<String>,
     pub entity_id: Option<String>,
     pub event_kind: Option<String>,
+    /// With `before_id`: the cursor the previous page handed back.
     pub before: Option<DateTime<Utc>>,
+    pub before_id: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -63,6 +65,16 @@ pub async fn list_audit_events(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     };
+    let before = match (query.before, blank_is_none(query.before_id)) {
+        (Some(created_at), Some(id)) => Some(swage_storage::AuditCursor { created_at, id }),
+        (None, None) => None,
+        _ => {
+            return Err(GatewayError::ValidationError(
+                "a cursor is both before and before_id, as the previous page handed them back"
+                    .into(),
+            ));
+        }
+    };
     let events = state
         .storage
         .list_audit_events_filtered(swage_storage::AuditEventFilter {
@@ -70,16 +82,21 @@ pub async fn list_audit_events(
             entity_kind: blank_is_none(query.entity_kind),
             entity_id: blank_is_none(query.entity_id),
             event_kind: blank_is_none(query.event_kind),
-            before: query.before,
+            before,
             limit,
         })
         .await?;
-    let next_before = (events.len() == limit)
-        .then(|| events.last().map(|event| event.created_at))
+    let next_cursor = (events.len() == limit)
+        .then(|| {
+            events.last().map(|event| AuditEventCursor {
+                created_at: event.created_at,
+                id: event.id.clone(),
+            })
+        })
         .flatten();
     Ok(AuditEventListResponse {
         events: events.into_iter().map(audit_event_view).collect(),
-        next_before,
+        next_cursor,
     })
 }
 
