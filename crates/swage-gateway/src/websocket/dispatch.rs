@@ -424,16 +424,29 @@ pub(super) async fn dispatch_client_message(
                 }
             };
 
-            // Step 4: Atomically transition state from Pending → decided.
-            //
-            // `update_approval_state` uses an optimistic WHERE state='pending'
-            // guard and returns false if the record was already resolved —
-            // either by a concurrent client or by the timeout mechanism.
-            let new_state = if decision == "approved" {
-                swage_storage::ApprovalState::Approved
-            } else {
-                swage_storage::ApprovalState::Rejected
-            };
+            if let Err(error) =
+                crate::approval_scope::ensure_approval_actionable(state, &approval).await
+            {
+                let current_state = match state.storage.get_approval(approval_uuid).await {
+                    Ok(approval) => approval.map(|approval| approval.state.to_string()),
+                    Err(storage_error) => {
+                        tracing::error!(%approval_uuid, %storage_error, "failed to read approval outcome");
+                        let _ = tx.send(ServerEvent::Error {
+                            code: error_codes::INTERNAL_ERROR.to_string(),
+                            message: "Failed to look up approval request.".to_string(),
+                        });
+                        return;
+                    }
+                };
+                let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                    approval_id: approval_uuid,
+                    error: "already_decided".to_string(),
+                    message: error.message().to_string(),
+                    current_state,
+                });
+                return;
+            }
+
             let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
                 tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
                 let _ = tx.send(ServerEvent::Error {
@@ -442,49 +455,46 @@ pub(super) async fn dispatch_client_message(
                 });
                 return;
             };
-            match state
-                .storage
-                .update_approval_state(approval_uuid, new_state, reason.as_deref())
-                .await
-            {
-                Ok(true) => {} // Recorded successfully.
-                Ok(false) => {
-                    // Concurrent decision or expiry beat us to it.
-                    let _ = tx.send(ServerEvent::ApprovalDecisionError {
-                        approval_id: approval_uuid,
-                        error: "already_decided".to_string(),
-                        message: "This approval request has already been resolved.".to_string(),
-                        current_state: Some(approval.state.to_string()),
-                    });
-                    return;
-                }
-                Err(e) => {
-                    tracing::error!(%session_id, %approval_uuid, err = %e, "storage error updating approval state");
+            // Taking the channel claims this decision; the waiting agent records
+            // its outcome. A failed delivery must never confirm an approval.
+            let sender = state
+                .approval_channels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&approval_uuid);
+            let delivered = sender.is_some_and(|sender| {
+                sender
+                    .send(swage_agent::ApprovalDecision {
+                        decision: decision_value,
+                        scope,
+                        reason: reason.clone(),
+                    })
+                    .is_ok()
+            });
+            if !delivered {
+                let error =
+                    match crate::approval_scope::ensure_approval_actionable(state, &approval).await
+                    {
+                        Err(error) => error,
+                        Ok(()) => crate::error::ApiError::conflict(
+                            "approval request expired; retry the operation".to_string(),
+                        ),
+                    };
+                if error.code() != swage_protocol::client::error::ErrorCode::Conflict {
+                    tracing::error!(%approval_uuid, %error, "failed to expire abandoned approval");
                     let _ = tx.send(ServerEvent::Error {
                         code: error_codes::INTERNAL_ERROR.to_string(),
                         message: "Failed to record approval decision.".to_string(),
                     });
                     return;
                 }
-            }
-
-            // Step 5: Notify the waiting agent task via the in-process oneshot.
-            //
-            // Remove (not just read) the sender so only one decision fires through.
-            // If no sender is present the agent either timed out or never registered —
-            // proceed to emit the confirmed event anyway for UI consistency.
-            {
-                let mut channels = state
-                    .approval_channels
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if let Some(sender) = channels.remove(&approval_uuid) {
-                    let _ = sender.send(swage_agent::ApprovalDecision {
-                        decision: decision_value,
-                        scope,
-                        reason: reason.clone(),
-                    });
-                }
+                let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                    approval_id: approval_uuid,
+                    error: "already_decided".to_string(),
+                    message: error.message().to_string(),
+                    current_state: None,
+                });
+                return;
             }
 
             if let Err(error) =

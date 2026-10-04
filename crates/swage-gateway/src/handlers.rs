@@ -1998,11 +1998,7 @@ pub async fn decide_approval(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("approval", approval_id))?;
-    if approval.state != swage_storage::model::ApprovalState::Pending {
-        return Err(ApiError::conflict(
-            "approval request has already been resolved".to_string(),
-        ));
-    }
+    crate::approval_scope::ensure_approval_actionable(&state, &approval).await?;
 
     // Try to fire the oneshot channel for this approval.
     let sender = state
@@ -2010,12 +2006,6 @@ pub async fn decide_approval(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&approval_id);
-
-    // Map the validated outcome to storage state once, used by all paths.
-    let new_state = match outcome {
-        ApprovalOutcome::Approved => swage_storage::model::ApprovalState::Approved,
-        ApprovalOutcome::Rejected => swage_storage::model::ApprovalState::Rejected,
-    };
 
     match sender {
         Some(tx) => {
@@ -2042,111 +2032,17 @@ pub async fn decide_approval(
                     })),
                 ))
             } else {
-                // Agent timed out or cancelled just before we sent —
-                // persist the decision to storage so it isn't lost.
-                match state
-                    .storage
-                    .update_approval_state(approval_id, new_state, req.reason.as_deref())
-                    .await
-                {
-                    Ok(true) => {
-                        crate::approval_scope::apply_approval_scope(
-                            &state,
-                            &approval,
-                            req.decision,
-                            req.scope,
-                        )
-                        .await?;
-                        Ok((
-                            StatusCode::OK,
-                            Json(serde_json::json!({
-                                "approval_id": approval_id,
-                                "decision": outcome.as_str(),
-                                "note": "agent timed out; decision persisted to storage",
-                            })),
-                        ))
-                    }
-                    Ok(false) => Err(ApiError::conflict(format!(
-                        "approval {approval_id} already resolved"
-                    ))),
-                    Err(e) => Err(ApiError::internal(e.to_string())),
-                }
+                crate::approval_scope::ensure_approval_actionable(&state, &approval).await?;
+                Err(ApiError::conflict(
+                    "approval request expired; retry the operation".to_string(),
+                ))
             }
         }
         None => {
-            // No in-memory channel — either already resolved, or the agent
-            // timed out / restarted. Persist the decision to storage directly
-            // so recovered approvals are resolvable via the REST API.
-            let existing = state
-                .storage
-                .get_approval(approval_id)
-                .await
-                .map_err(|e| ApiError::internal(e.to_string()))?;
-
-            match existing {
-                None => Err(ApiError::not_found("approval", approval_id)),
-                Some(a) if a.state != swage_storage::model::ApprovalState::Pending => Err(
-                    ApiError::conflict(format!("approval {} already {}", approval_id, a.state)),
-                ),
-                Some(a) => {
-                    // Pending in storage with no live channel — persist the
-                    // decision so the approval record reflects the outcome.
-                    // Because there is no live channel, the original waiting
-                    // agent no longer exists; interrupt the stranded turn so
-                    // the conversation is not left permanently in-progress.
-                    match state
-                        .storage
-                        .update_approval_state(approval_id, new_state, req.reason.as_deref())
-                        .await
-                    {
-                        Ok(true) => {
-                            crate::approval_scope::apply_approval_scope(
-                                &state,
-                                &a,
-                                req.decision,
-                                req.scope,
-                            )
-                            .await?;
-                            let note = match state
-                                .storage
-                                .update_turn_state(
-                                    a.turn_id,
-                                    swage_storage::TurnState::Interrupted,
-                                )
-                                .await
-                            {
-                                Ok(()) => {
-                                    "no live channel; decision persisted and stranded turn interrupted"
-                                        .to_string()
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        approval_id = %approval_id,
-                                        turn_id = %a.turn_id,
-                                        %error,
-                                        "persisted recovered approval decision but failed to interrupt stranded turn"
-                                    );
-                                    "no live channel; decision persisted, but interrupting the stranded turn failed"
-                                        .to_string()
-                                }
-                            };
-
-                            Ok((
-                                StatusCode::OK,
-                                Json(serde_json::json!({
-                                    "approval_id": approval_id,
-                                    "decision": outcome.as_str(),
-                                    "note": note,
-                                })),
-                            ))
-                        }
-                        Ok(false) => Err(ApiError::conflict(format!(
-                            "approval {approval_id} already resolved"
-                        ))),
-                        Err(e) => Err(ApiError::internal(e.to_string())),
-                    }
-                }
-            }
+            crate::approval_scope::ensure_approval_actionable(&state, &approval).await?;
+            Err(ApiError::conflict(
+                "approval request expired; retry the operation".to_string(),
+            ))
         }
     }
 }
@@ -2576,16 +2472,15 @@ mod tests {
             "approval list should include the seeded approval"
         );
 
-        let decision = client
+        let error = client
             .decide_approval(
                 approval.id,
                 swage_protocol::client::approval::ApprovalDecisionValue::Approved,
                 Some("looks safe"),
             )
             .await
-            .expect("decide approval through live gateway");
-        assert_eq!(decision["approval_id"], approval.id.to_string());
-        assert_eq!(decision["decision"], "approved");
+            .expect_err("a recovered approval without a waiter cannot release its call");
+        assert!(error.to_string().contains("expired"), "{error}");
 
         let stored_approval = storage
             .get_approval(approval.id)
@@ -2594,7 +2489,7 @@ mod tests {
             .expect("approval exists");
         assert_eq!(
             stored_approval.state,
-            swage_storage::model::ApprovalState::Approved
+            swage_storage::model::ApprovalState::Expired
         );
         let recovered_turn = storage
             .get_turn(approval_turn.id)

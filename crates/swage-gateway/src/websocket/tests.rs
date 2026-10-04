@@ -1165,7 +1165,7 @@ async fn approval_decision_already_decided_sends_error() {
 }
 
 #[tokio::test]
-async fn approval_decision_success_sends_confirmed() {
+async fn approval_decision_after_expiry_reports_expired_instead_of_confirmed() {
     use swage_storage::{ApprovalKind, NewApprovalRequest};
 
     let state = make_empty_state();
@@ -1199,23 +1199,24 @@ async fn approval_decision_success_sends_confirmed() {
     );
     dispatch_client_message(&json, &state, session_id, tx, sub).await;
 
-    let event = rx.recv().await.expect("should receive ApprovalConfirmed");
+    let event = rx.recv().await.expect("should receive decision error");
     match event {
-        ServerEvent::ApprovalConfirmed {
+        ServerEvent::ApprovalDecisionError {
             approval_id,
-            decision,
-            reason,
+            current_state,
+            message,
+            ..
         } => {
             assert_eq!(approval_id, approval.id);
-            assert_eq!(decision, "approved");
-            assert_eq!(reason, Some("Looks safe".to_string()));
+            assert_eq!(current_state.as_deref(), Some("expired"));
+            assert!(message.contains("retry"));
         }
-        other => panic!("expected ApprovalConfirmed, got {other:?}"),
+        other => panic!("late decision must report expiry, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn approval_decision_fires_oneshot_channel() {
+async fn approval_decision_after_expiry_drops_the_waiting_channel() {
     use swage_storage::{ApprovalKind, NewApprovalRequest};
 
     let state = make_empty_state();
@@ -1257,13 +1258,20 @@ async fn approval_decision_fires_oneshot_channel() {
     );
     dispatch_client_message(&json, &state, session_id, tx, sub).await;
 
-    // The oneshot should have fired with the rejection.
-    let decision = oneshot_rx.await.expect("oneshot should have fired");
-    assert_eq!(
-        decision.decision,
-        swage_agent::approval::ApprovalDecisionValue::Rejected
+    assert!(
+        oneshot_rx.await.is_err(),
+        "an expired decision must not reach the waiting call"
     );
-    assert_eq!(decision.reason, Some("Too risky".to_string()));
+    assert_eq!(
+        state
+            .storage
+            .get_approval(approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        swage_storage::ApprovalState::Expired
+    );
 }
 
 #[tokio::test]

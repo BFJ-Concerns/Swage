@@ -42,7 +42,9 @@ pub(crate) enum ApprovalGateOutcome {
     /// Human approved — proceed with tool execution. The scope is carried
     /// so the tool result can tell the model how the call was approved.
     Approved { scope: ApprovalDecisionScope },
-    /// Human rejected (or timeout treated as rejection) — deliver this
+    /// Approval timed out — deliver the existing timeout feedback with an expired status.
+    Expired { feedback: String },
+    /// Human rejected — deliver this
     /// feedback string as the tool result.
     Rejected { feedback: String },
     /// Timeout with interrupt policy — the turn must be interrupted.

@@ -471,3 +471,23 @@ describe("operation outcome indicators", () => {
     });
   }
 });
+
+
+describe("expired approval result", () => {
+  it("shows expiry as a failed call with a recovery action", () => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: {
+        toolCall: makeErrorCall({
+          status: "expired",
+          result: "Tool call rejected: approval timed out",
+        }),
+        isLive: false,
+      },
+    });
+    const root = document.querySelector(".tool-call");
+    expect(root?.classList.contains("error")).toBe(true);
+    expect(root?.textContent).toContain("Approval expired. Retry the operation.");
+    expect(root?.querySelector(".result-content")?.textContent).toBe("Tool call rejected: approval timed out");
+  });
+});

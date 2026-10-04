@@ -40,7 +40,10 @@ use swage_gateway::{server::build_router, state::AppState};
 use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
-    store::{ApprovalStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore},
+    store::{
+        ApprovalStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+        WorkspaceAttachmentStore,
+    },
 };
 
 use crate::support::{
@@ -1178,4 +1181,372 @@ async fn approvals_for_other_session_not_re_emitted_on_connect() {
         !has_approval,
         "approvals from another session must not be re-emitted to this session's client"
     );
+}
+
+fn native_file_tools() -> Vec<Arc<dyn swage_tool::tool::Tool>> {
+    vec![
+        Arc::new(swage_gateway::tool::file_write::FileWriteTool),
+        Arc::new(swage_gateway::tool::file_list::FileListTool),
+        Arc::new(swage_gateway::tool::file_search::FileSearchTool {
+            max_output_bytes: 65536,
+        }),
+    ]
+}
+
+fn native_call(id: &str, name: &str, arguments: Value) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::ToolUse {
+            call_id: id.into(),
+            name: name.into(),
+            arguments,
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::ToolUse),
+        },
+    ]
+}
+
+fn native_done() -> Vec<StreamChunk> {
+    vec![StreamChunk::Done {
+        finish_reason: Some(FinishReason::Stop),
+    }]
+}
+
+async fn attach_native_workspace(
+    storage: &SqliteStorage,
+    conversation: &str,
+    path: &std::path::Path,
+) {
+    let session_id = conversation.parse().unwrap();
+    let session = storage.get_session(session_id).await.unwrap().unwrap();
+    let workspace = match storage
+        .list_workspace_attachments_by_topic(session.topic_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|workspace| workspace.path == path.to_string_lossy())
+    {
+        Some(workspace) => workspace,
+        None => storage
+            .create_workspace_attachment(swage_storage::NewWorkspaceAttachment {
+                topic_id: session.topic_id,
+                label: "Working files".into(),
+                path: path.to_string_lossy().into_owned(),
+                permissions: vec!["read".into(), "write".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap(),
+    };
+    storage
+        .set_session_active_workspace(session_id, Some(workspace.id))
+        .await
+        .unwrap();
+}
+
+async fn native_result(
+    storage: &SqliteStorage,
+    complete: &Value,
+    call_id: &str,
+) -> swage_storage::ToolCallRecord {
+    let turn_id = complete["turn_id"].as_str().unwrap().parse().unwrap();
+    storage
+        .list_tool_calls_by_turn(turn_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.call_id == call_id)
+        .expect("native call was recorded")
+}
+
+async fn native_approval_scope(scope: &str, read: bool) {
+    let _guard = SwageHomeGuard::isolate();
+    let files = tempfile::TempDir::new().unwrap();
+    let project = files.path().join("project");
+    let annexe = files.path().join("project-Annexe");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(&annexe).unwrap();
+    // Only the input to the read is seeded; the write's effect must come from the native tool.
+    std::fs::write(annexe.join("source.txt"), "native approval marker").unwrap();
+    let write = || {
+        native_call(
+            "write",
+            "file_write",
+            json!({"path": "../project-Annexe/build/reviews/README.md", "content": "native approval marker"}),
+        )
+    };
+    let list = || {
+        native_call(
+            "list",
+            "file_list",
+            json!({"path": if read { "../project-Annexe" } else { "../project-Annexe/build/reviews" }}),
+        )
+    };
+    let search = || {
+        native_call(
+            "search",
+            "file_search",
+            json!({"path": "../project-Annexe", "pattern": "native approval marker"}),
+        )
+    };
+    let next = || {
+        if read {
+            native_call("next", "file_list", json!({"path": "../project-Annexe"}))
+        } else {
+            native_call(
+                "next",
+                "file_write",
+                json!({"path": "../project-Annexe/VERIFICATION.md", "content": "new session write"}),
+            )
+        }
+    };
+    let provider = MockProvider::new(vec![
+        if read { list() } else { write() },
+        native_done(),
+        if read { search() } else { list() },
+        native_done(),
+        if read { list() } else { search() },
+        native_done(),
+        next(),
+        native_done(),
+    ]);
+    let mut config = ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sandbox.allow_degraded_execution = true;
+    let (router, addr, storage) =
+        start_test_server_with_tools(provider, config.clone(), native_file_tools()).await;
+    let (_, conversation) = http(&router, "POST", "/api/conversations").await;
+    let id = conversation["id"].as_str().unwrap();
+    attach_native_workspace(&storage, id, &project).await;
+    let (mut sink, mut stream) = connect_ws(addr, id).await;
+    let calls = if read {
+        ["list", "search", "list"]
+    } else {
+        ["write", "list", "search"]
+    };
+    for (index, call_id) in calls.into_iter().enumerate() {
+        let needs_approval = index == 0 || scope == "once";
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": call_id}),
+        )
+        .await;
+        let mut prompts = 0;
+        let complete = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let event = ws_recv_lenient(&mut stream).await.unwrap();
+                if event["type"] == "approval_required" {
+                    prompts += 1;
+                    assert!(
+                        needs_approval,
+                        "matching {scope} grant must suppress another prompt: {event}"
+                    );
+                    assert_eq!(event["kind"], "location");
+                    let (status, body) = live_http_json(
+                        addr,
+                        reqwest::Method::POST,
+                        &format!("/api/approvals/{}", event["approval_id"].as_str().unwrap()),
+                        Some(json!({"decision": "approved", "scope": scope})),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                }
+                if event["type"] == "turn_complete" {
+                    break event;
+                }
+                assert_ne!(event["type"], "error", "{event}");
+            }
+        })
+        .await
+        .expect("native turn completes");
+        assert_eq!(
+            prompts,
+            usize::from(needs_approval),
+            "approval scope must govern matching prompts"
+        );
+        let call = native_result(&storage, &complete, call_id).await;
+        assert_eq!(
+            call.status.as_deref(),
+            Some("success"),
+            "approved native {call_id} must execute: {:?}",
+            call.result
+        );
+        let result = call.result.as_deref().unwrap();
+        if call_id == "write" {
+            assert_eq!(
+                std::fs::read_to_string(annexe.join("build/reviews/README.md")).unwrap(),
+                "native approval marker"
+            );
+        } else if call_id == "list" {
+            assert!(
+                result.contains(if read { "source.txt" } else { "README.md" }),
+                "native list must see the tool's write: {result}"
+            );
+        } else {
+            assert!(
+                result.contains(if read { "source.txt" } else { "README.md" })
+                    && result.contains("native approval marker"),
+                "native search must read the written content: {result}"
+            );
+        }
+    }
+    // A fresh gateway has no session grant cache: permanent access must load from storage.
+    let (router, addr) = if scope == "permanent" {
+        let provider = MockProvider::new(vec![next(), native_done()]);
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(provider),
+            config,
+            swage_gateway::tool::ToolDispatcher::allow_all(native_file_tools()),
+            None,
+        );
+        let router = build_router(state);
+        let (addr, _server) = start_live_server(router.clone()).await;
+        (router, addr)
+    } else {
+        (router, addr)
+    };
+    let (_, other) = http(&router, "POST", "/api/conversations").await;
+    let other_id = other["id"].as_str().unwrap();
+    attach_native_workspace(&storage, other_id, &project).await;
+    let (mut other_sink, mut other_stream) = connect_ws(addr, other_id).await;
+    ws_send(
+        &mut other_sink,
+        json!({"type": "send_message", "content": "next"}),
+    )
+    .await;
+    let mut prompts = 0;
+    let complete = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let event = ws_recv_lenient(&mut other_stream).await.unwrap();
+            if event["type"] == "approval_required" {
+                prompts += 1;
+                assert_ne!(scope, "permanent", "permanent location approval must reach a new session");
+                ws_send(&mut other_sink, json!({"type": "approval_decision", "approval_id": event["approval_id"], "decision": "rejected"})).await;
+            }
+            if event["type"] == "turn_complete" { break event; }
+            assert_ne!(event["type"], "error", "{event}");
+        }
+    }).await.expect("new session turn completes");
+    let call = native_result(&storage, &complete, "next").await;
+    if scope == "permanent" {
+        assert_eq!(prompts, 0);
+        assert_eq!(call.status.as_deref(), Some("success"), "{:?}", call.result);
+        if read {
+            assert!(call.result.as_deref().unwrap().contains("source.txt"));
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(annexe.join("VERIFICATION.md")).unwrap(),
+                "new session write"
+            );
+        }
+    } else {
+        assert_eq!(
+            prompts, 1,
+            "once and session grants must not reach another session"
+        );
+        assert_eq!(call.status.as_deref(), Some("rejected"));
+        assert!(!annexe.join("VERIFICATION.md").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_once_releases_only_the_pending_call() {
+    native_approval_scope("once", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_session_releases_matching_calls_in_one_session() {
+    native_approval_scope("session", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_permanent_releases_calls_in_new_sessions() {
+    native_approval_scope("permanent", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_timeout_records_expired_result_and_refuses_late_grant() {
+    let _guard = SwageHomeGuard::isolate();
+    let project = tempfile::TempDir::new().unwrap();
+    let provider = MockProvider::new(vec![
+        native_call(
+            "expired-write",
+            "file_write",
+            json!({"path": "README.md", "content": "must not be written"}),
+        ),
+        native_done(),
+    ]);
+    let config = config_with_approval("file_write", 1, "reject");
+    let (router, addr, storage) =
+        start_test_server_with_tools(provider, config, native_file_tools()).await;
+    let (_, conversation) = http(&router, "POST", "/api/conversations").await;
+    let id = conversation["id"].as_str().unwrap();
+    attach_native_workspace(&storage, id, project.path()).await;
+    let (mut sink, mut stream) = connect_ws(addr, id).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "write"}),
+    )
+    .await;
+    let approval = ws_wait_for_event(&mut stream, "approval_required", Duration::from_secs(20))
+        .await
+        .unwrap();
+    ws_wait_for_event(&mut stream, "approval_expired", Duration::from_secs(20))
+        .await
+        .unwrap();
+    let complete = ws_wait_for_event(&mut stream, "turn_complete", Duration::from_secs(20))
+        .await
+        .unwrap();
+    let call = native_result(&storage, &complete, "expired-write").await;
+    assert_eq!(
+        call.status.as_deref(),
+        Some("expired"),
+        "timeout must be classified separately from a reviewer refusal: {:?}",
+        call.result
+    );
+    assert_eq!(
+        call.result.as_deref(),
+        Some("Tool call rejected: approval timed out"),
+        "existing timeout wording is preserved"
+    );
+    assert!(!project.path().join("README.md").exists());
+    let approval_id = approval["approval_id"].as_str().unwrap();
+    let (status, body) = live_http_json(
+        addr,
+        reqwest::Method::POST,
+        &format!("/api/approvals/{approval_id}"),
+        Some(json!({"decision": "approved", "scope": "permanent"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body.to_string().contains("expired"),
+        "late decision must explain expiry: {body}"
+    );
+    assert_eq!(
+        storage
+            .get_approval(approval_id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        swage_storage::ApprovalState::Expired
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_once_releases_the_pending_read() {
+    native_approval_scope("once", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_session_releases_matching_reads_in_one_session() {
+    native_approval_scope("session", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_permanent_releases_reads_in_new_sessions() {
+    native_approval_scope("permanent", true).await;
 }

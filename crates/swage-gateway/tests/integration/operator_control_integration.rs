@@ -514,6 +514,13 @@ async fn operator_controls_manage_approvals_and_schedules_without_full_restart()
         })
         .await
         .unwrap();
+    // A decision settles only a gate that is still waiting for it.
+    let (waiter, decision) = tokio::sync::oneshot::channel();
+    state
+        .approval_channels
+        .lock()
+        .unwrap()
+        .insert(approval.id, waiter.into());
 
     let (pause_status, pause_body) = post_json(
         &router,
@@ -544,4 +551,8 @@ async fn operator_controls_manage_approvals_and_schedules_without_full_restart()
     .await;
     assert_eq!(reject_status, StatusCode::OK);
     assert_eq!(reject_body["decision"], "rejected");
+    assert_eq!(
+        decision.await.unwrap().decision,
+        swage_agent::approval::ApprovalDecisionValue::Rejected
+    );
 }
