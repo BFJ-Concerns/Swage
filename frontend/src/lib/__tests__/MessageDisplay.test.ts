@@ -244,7 +244,7 @@ describe("assistant Markdown time blanks", () => {
       },
     });
 
-    expect(document.querySelector(".streaming .assistant-content")?.textContent?.trim()).toBe(content);
+    expect(document.querySelector(".streaming .assistant-content p")?.textContent?.trim()).toBe(content);
   });
 
   it("control: preserves underscores separated by spaces", () => {
