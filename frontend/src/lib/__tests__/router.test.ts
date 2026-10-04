@@ -35,6 +35,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -49,6 +50,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -63,6 +65,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -77,6 +80,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -91,6 +95,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -105,6 +110,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -119,12 +125,23 @@ describe("parseRoute", () => {
       settingsTab: "generation",
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
 
   it("maps the agent definitions settings route", () => {
     expect(parseRoute("/settings/agents").settingsTab).toBe("agents");
+  });
+
+  it("maps the memory settings route and the page its notice link names", () => {
+    expect(parseRoute("/settings/memory")).toMatchObject({ settingsTab: "memory", settingsMemoryReference: null });
+    expect(parseRoute("/settings/memory?reference=general%2Fpeople%2Falice")).toMatchObject({
+      path: "/settings/memory",
+      settingsTab: "memory",
+      settingsMemoryReference: "general/people/alice",
+    });
+    expect(parseRoute("/settings/agents?reference=general%2Fprofile").settingsMemoryReference).toBeNull();
   });
 
   it("maps command and skill settings routes", () => {
@@ -142,6 +159,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: "research",
       settingsTopicTab: "workspaces",
+      settingsMemoryReference: null,
       notFound: false,
     });
     expect(parseRoute("/settings/topic/research/surfaces")).toEqual({
@@ -153,6 +171,7 @@ describe("parseRoute", () => {
       settingsTab: null,
       settingsTopicSlug: "research",
       settingsTopicTab: "surfaces",
+      settingsMemoryReference: null,
       notFound: false,
     });
   });
@@ -173,6 +192,13 @@ describe("createRouter initial state", () => {
     window.history.replaceState(null, "", "/conversations/init-test");
     const router = createRouter();
     expect(router.currentRoute.conversationId).toBe("init-test");
+  });
+
+  it("opens the memory page a notice link names when the app loads at it", () => {
+    window.history.replaceState(null, "", "/settings/memory?reference=general%2Fpeople%2Falice");
+    const router = createRouter();
+    expect(router.currentRoute.settingsTab).toBe("memory");
+    expect(router.currentRoute.settingsMemoryReference).toBe("general/people/alice");
   });
 
   it("starts at root when URL is '/'", () => {
@@ -433,6 +459,7 @@ describe("init with conversation store", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
 
@@ -479,6 +506,7 @@ describe("init with conversation store", () => {
       settingsTab: null,
       settingsTopicSlug: null,
       settingsTopicTab: null,
+      settingsMemoryReference: null,
       notFound: false,
     });
   });

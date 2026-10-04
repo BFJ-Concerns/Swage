@@ -19,6 +19,7 @@
   import InformationalSettingsPanel from "./settings/InformationalSettingsPanel.svelte";
   import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
+  import MemoryPanel from "./MemoryPanel.svelte";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
   import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
@@ -36,6 +37,7 @@
     | "channels"
     | "devices"
     | "voice"
+    | "memory"
     | "recovery"
     | "display"
     | "account";
@@ -44,6 +46,8 @@
     tab?: SettingsTabId;
     topicId?: string | null;
     topics?: Topic[];
+    // The memory page a notice link names, opened on the memory tab.
+    memoryReference?: string | null;
     onSettingsSaved?: () => void | Promise<void>;
   }
 
@@ -51,6 +55,7 @@
     tab = "providers",
     topicId = null,
     topics = [],
+    memoryReference = null,
     onSettingsSaved,
   }: Props = $props();
 
@@ -222,6 +227,10 @@
       title: "Voice",
       sub: "The models the default provider uses for speech transcription and synthesis.",
     },
+    memory: {
+      title: "Memory",
+      sub: "What the curator remembers from your conversations, in general and for each topic. To change a page, tell the curator.",
+    },
     recovery: {
       title: "Recovery",
       sub: "Operator-managed export bundles capturing topics, conversations, and configuration for restore.",
@@ -246,6 +255,7 @@
     "channels",
     "devices",
     "voice",
+    "memory",
     "recovery",
     "display",
     "account",
@@ -321,6 +331,8 @@
       <CommandsPanel {topicId} />
     {:else if tab === "skills"}
       <SkillsPanel {topicId} />
+    {:else if tab === "memory"}
+      <MemoryPanel {topics} reference={memoryReference} />
     {:else if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until
