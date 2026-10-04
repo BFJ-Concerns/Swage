@@ -291,7 +291,7 @@
     {#if settingsTopicSlug}
       <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryReference={route?.settingsMemoryReference ?? null} {onSettingsSaved} />
+      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
     {/if}
   </div>
 {:else if libraryMode}

@@ -20,6 +20,7 @@
   import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
   import MemoryPanel from "./MemoryPanel.svelte";
+  import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
   import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
@@ -47,7 +48,7 @@
     topicId?: string | null;
     topics?: Topic[];
     // The memory page a notice link names, opened on the memory tab.
-    memoryReference?: string | null;
+    memoryPage?: MemoryPageAddress | null;
     onSettingsSaved?: () => void | Promise<void>;
   }
 
@@ -55,7 +56,7 @@
     tab = "providers",
     topicId = null,
     topics = [],
-    memoryReference = null,
+    memoryPage = null,
     onSettingsSaved,
   }: Props = $props();
 
@@ -332,7 +333,7 @@
     {:else if tab === "skills"}
       <SkillsPanel {topicId} />
     {:else if tab === "memory"}
-      <MemoryPanel {topics} reference={memoryReference} />
+      <MemoryPanel {topics} page={memoryPage} />
     {:else if tab === "plugins"}
       <!--
         Debt marker: this visible settings page is intentionally a shell until

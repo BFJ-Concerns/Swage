@@ -41,8 +41,9 @@ export interface Route {
   settingsTopicSlug: string | null;
   settingsTopicTab: TopicSettingsTab | null;
   // Set with the memory settings tab when the URL's `?reference=` names the
-  // memory page to open — the target of the curator's change notice.
-  settingsMemoryReference: string | null;
+  // memory page to open — the target of the curator's change notice — with
+  // `?scope=` (`general` or a topic id) naming the scope that holds it.
+  settingsMemoryPage: MemoryPageAddress | null;
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
@@ -59,7 +60,7 @@ function rootRoute(pathname = "/", notFound = false): Route {
     settingsTab: null,
     settingsTopicSlug: null,
     settingsTopicTab: null,
-    settingsMemoryReference: null,
+    settingsMemoryPage: null,
     notFound,
   };
 }
@@ -88,6 +89,18 @@ export interface RouterOptions {
 // ---------------------------------------------------------------------------
 // URL parsing
 // ---------------------------------------------------------------------------
+
+/** A memory page as a notice link addresses it; a null scope opens the first scope listing it. */
+export interface MemoryPageAddress {
+  // `general`, a topic id, or null when the link names no scope.
+  scope: string | null;
+  reference: string;
+}
+
+function memoryPageAddress(query: URLSearchParams): MemoryPageAddress | null {
+  const reference = query.get("reference");
+  return reference ? { scope: query.get("scope"), reference } : null;
+}
 
 /**
  * Derive a Route from a URL path, optionally carrying a query string.
@@ -141,7 +154,7 @@ export function parseRoute(location: string): Route {
     return {
       ...rootRoute(pathname),
       settingsTab,
-      settingsMemoryReference: settingsTab === "memory" ? query.get("reference") : null,
+      settingsMemoryPage: settingsTab === "memory" ? memoryPageAddress(query) : null,
     };
   }
   return rootRoute();
