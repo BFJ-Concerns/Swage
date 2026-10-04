@@ -134,11 +134,15 @@ const gathered = await pipeline(
         `Gather one source for the research sweep on "${subject}".\n` +
         `Source: ${source.url}\n` +
         `Expected contribution: ${source.why}\n\n` +
-        `Fetch it (degrade to the browser only if a plain fetch fails). ` +
-        `Record it into the knowledge base with knowledge_record, passing ` +
-        `the source URL as the origin, the raw body, and your extracted ` +
-        `text. If the source is unreachable or empty, do not invent a ` +
-        `substitute - report the failure. Return JSON only.`,
+        `Fetch it with url_fetch (degrade to the browser only if a plain ` +
+        `fetch fails). Record it into the knowledge base with ` +
+        `knowledge_record, passing the fetch result's capture reference as ` +
+        `fetch_call and nothing else: the platform keeps the bytes it ` +
+        `fetched and derives the citable text, so never retype the body or ` +
+        `the text yourself. A source you could only read through the ` +
+        `browser is recorded with content and its url, and is searchable ` +
+        `but not citable. If the source is unreachable or empty, do not ` +
+        `invent a substitute - report the failure. Return JSON only.`,
       {
         tools: researcherTools,
         label: `Gather ${source.url}`,

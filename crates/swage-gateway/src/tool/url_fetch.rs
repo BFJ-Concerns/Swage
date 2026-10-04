@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use swage_core::ToolError;
+use swage_core::{ToolError, tool_result_reference};
 use swage_tool::context::ToolContext;
 use tokio::io::AsyncWriteExt;
 
@@ -30,6 +30,7 @@ pub struct UrlFetchTool {
 
 const BLOCKED_HOSTNAMES: &[&str] = &["localhost", "metadata.google.internal"];
 const RAW_HTML_ARTIFACT_FILENAME: &str = "raw-body.html";
+const RAW_TEXT_ARTIFACT_FILENAME: &str = "raw-body.txt";
 
 impl Default for UrlFetchTool {
     fn default() -> Self {
@@ -53,7 +54,7 @@ impl Tool for UrlFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering."
+        "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering. The bytes as fetched are kept on disk and the result names them; to capture the source into the knowledge base, pass the result's capture reference to knowledge_record as fetch_call rather than retyping its content — the platform records the bytes it fetched and derives the citable text from them."
     }
 
     fn parameters(&self) -> Value {
@@ -159,19 +160,25 @@ impl Tool for UrlFetchTool {
         } else {
             offset_bytes.saturating_add(self.max_output_bytes)
         };
-        let raw_body_artifact_path =
-            is_html.then(|| tool_output_artifact_path(ctx, RAW_HTML_ARTIFACT_FILENAME));
-        let mut raw_body_artifact_writer = match raw_body_artifact_path.as_ref() {
-            Some(path) => Some(
-                create_tool_output_artifact(ctx, &path.absolute)
-                    .await
-                    .map_err(|error| ToolError::ExecutionFailed {
-                        name: self.name().to_owned(),
-                        message: format!("Failed to create raw HTML artifact: {error}"),
-                    })?,
-            ),
-            None => None,
-        };
+        // Every body is retained as fetched, whatever its size: the file is
+        // what a later knowledge_record captures, so the knowledge base holds
+        // the bytes the platform fetched and never the model's retelling.
+        let raw_body_artifact_path = tool_output_artifact_path(
+            ctx,
+            if is_html {
+                RAW_HTML_ARTIFACT_FILENAME
+            } else {
+                RAW_TEXT_ARTIFACT_FILENAME
+            },
+        );
+        let mut raw_body_artifact_writer = Some(
+            create_tool_output_artifact(ctx, &raw_body_artifact_path.absolute)
+                .await
+                .map_err(|error| ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!("Failed to create raw body artifact: {error}"),
+                })?,
+        );
         let mut body_bytes: Vec<u8> = Vec::new();
         let mut total_body_bytes = 0usize;
         loop {
@@ -207,14 +214,6 @@ impl Tool for UrlFetchTool {
                 })?;
         }
         drop(raw_body_artifact_writer);
-        let raw_body_artifact_relative_path = if total_body_bytes > body_bytes.len() {
-            raw_body_artifact_path.map(|path| path.relative)
-        } else {
-            if let Some(path) = raw_body_artifact_path {
-                let _ = tokio::fs::remove_file(path.absolute).await;
-            }
-            None
-        };
 
         // Dispatch on content type.
         let text = if is_html {
@@ -224,20 +223,27 @@ impl Tool for UrlFetchTool {
             // Plain text and JSON can be returned as-is.
             String::from_utf8_lossy(&body_bytes).into_owned()
         } else {
-            // Binary content types — reject with a clear message.
+            // Binary content types — reject with a clear message, and keep
+            // nothing: an unsupported body is not a capture candidate.
+            let _ = tokio::fs::remove_file(&raw_body_artifact_path.absolute).await;
             return Err(ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
                 message: format!("Unsupported content type: {content_type}"),
             });
         };
 
+        let retained = RetainedBody {
+            artifact_path: &raw_body_artifact_path.relative,
+            media_type: &content_type,
+            capture: capture_hint(ctx),
+        };
         if is_html {
             Ok(fetch_html_output_value(
                 &text,
                 self.max_output_bytes,
                 total_body_bytes,
                 body_bytes.len(),
-                raw_body_artifact_relative_path.as_deref(),
+                &retained,
             ))
         } else {
             fetch_text_output_value(
@@ -246,12 +252,42 @@ impl Tool for UrlFetchTool {
                 self.max_output_bytes,
                 offset_bytes,
                 total_body_bytes,
+                &retained,
             )
             .map_err(|message| ToolError::InvalidParameters {
                 name: self.name().to_owned(),
                 message,
             })
         }
+    }
+}
+
+/// What a fetch result says about the body it kept: where the bytes are,
+/// what they are, and the one call that captures them.
+struct RetainedBody<'a> {
+    artifact_path: &'a str,
+    media_type: &'a str,
+    capture: Option<Value>,
+}
+
+/// The knowledge_record call that captures this fetch, when the fetch runs
+/// inside a recorded turn (a stored call is what the reference resolves to).
+fn capture_hint(ctx: &dyn ToolContext) -> Option<Value> {
+    let turn_id = ctx.turn_id()?;
+    let call_id = ctx.call_id()?;
+    Some(json!({
+        "tool": "knowledge_record",
+        "arguments": {
+            "fetch_call": tool_result_reference(&turn_id.to_string(), call_id),
+        },
+    }))
+}
+
+fn describe_retained_body(value: &mut Value, retained: &RetainedBody<'_>) {
+    value["raw_body_artifact_path"] = json!(retained.artifact_path);
+    value["media_type"] = json!(retained.media_type);
+    if let Some(capture) = &retained.capture {
+        value["capture"] = capture.clone();
     }
 }
 
@@ -282,16 +318,14 @@ fn fetch_html_output_value(
     max_output_bytes: usize,
     total_body_bytes: usize,
     stored_body_bytes: usize,
-    raw_body_artifact_path: Option<&str>,
+    retained: &RetainedBody<'_>,
 ) -> Value {
     let mut value = truncated_output_value(text, max_output_bytes);
+    describe_retained_body(&mut value, retained);
     if total_body_bytes > stored_body_bytes {
         value["truncated"] = json!(true);
         value["total_bytes"] = json!(total_body_bytes);
-    }
-    if let Some(path) = raw_body_artifact_path {
-        value["raw_body_artifact_path"] = json!(path);
-        value["raw_body_follow_up"] = file_read_follow_up(path);
+        value["raw_body_follow_up"] = file_read_follow_up(retained.artifact_path);
     }
     value
 }
@@ -302,11 +336,13 @@ fn fetch_text_output_value(
     max_output_bytes: usize,
     offset_bytes: usize,
     total_body_bytes: usize,
+    retained: &RetainedBody<'_>,
 ) -> Result<Value, String> {
     let mut arguments = serde_json::Map::new();
     arguments.insert("url".to_string(), json!(url));
     let mut value =
         continuable_output_value(text, max_output_bytes, offset_bytes, "url_fetch", arguments)?;
+    describe_retained_body(&mut value, retained);
 
     let output_len = value
         .get("output")
@@ -481,7 +517,7 @@ fn is_private_or_metadata_ipv6(ip: Ipv6Addr) -> bool {
 /// We use a wide render width to avoid forced line breaks that would fragment
 /// URLs and code snippets. The output is reader-mode style — navigation,
 /// scripts, and style elements are stripped automatically.
-fn html_to_text(bytes: &[u8]) -> String {
+pub(crate) fn html_to_text(bytes: &[u8]) -> String {
     // html2text::from_read expects a `Read` impl and a terminal width in chars.
     // 120 is wide enough to avoid wrapping most prose and code blocks.
     html2text::from_read(bytes, 120).unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned())
@@ -628,11 +664,28 @@ mod tests {
     #[tokio::test]
     async fn truncates_large_response() {
         let capped_text = "a".repeat(100);
-        let value = fetch_html_output_value(&capped_text, 100, 200, 100, None);
+        let value = fetch_html_output_value(
+            &capped_text,
+            100,
+            200,
+            100,
+            &retained(".swage/tool-output/turn/call/raw-body.html", "text/html"),
+        );
 
         assert_eq!(value["output"].as_str().unwrap().len(), 100);
         assert_eq!(value["truncated"], json!(true));
         assert_eq!(value["total_bytes"], json!(200));
+    }
+
+    fn retained(path: &'static str, media_type: &'static str) -> RetainedBody<'static> {
+        RetainedBody {
+            artifact_path: path,
+            media_type,
+            capture: Some(json!({
+                "tool": "knowledge_record",
+                "arguments": { "fetch_call": "tool_call:turn:call:result" },
+            })),
+        }
     }
 
     #[test]
@@ -642,7 +695,7 @@ mod tests {
             100,
             200,
             100,
-            Some(".swage/tool-output/turn/call/raw-body.html"),
+            &retained(".swage/tool-output/turn/call/raw-body.html", "text/html"),
         );
 
         assert_eq!(
@@ -657,9 +710,60 @@ mod tests {
     }
 
     #[test]
+    fn every_fetch_names_its_retained_body_and_the_call_that_captures_it() {
+        let value = fetch_html_output_value(
+            "Rendered text",
+            100,
+            13,
+            13,
+            &retained(".swage/tool-output/turn/call/raw-body.html", "text/html"),
+        );
+        assert_eq!(
+            value["raw_body_artifact_path"],
+            json!(".swage/tool-output/turn/call/raw-body.html")
+        );
+        assert_eq!(value["media_type"], json!("text/html"));
+        assert_eq!(value["capture"]["tool"], json!("knowledge_record"));
+        assert_eq!(
+            value["capture"]["arguments"]["fetch_call"],
+            json!("tool_call:turn:call:result")
+        );
+        assert!(
+            value.get("raw_body_follow_up").is_none(),
+            "a body that fit needs no follow-up read; it is still retained"
+        );
+
+        let text = fetch_text_output_value(
+            "abc",
+            "https://example.com/data.txt",
+            100,
+            0,
+            3,
+            &retained(".swage/tool-output/turn/call/raw-body.txt", "text/plain"),
+        )
+        .expect("small text output");
+        assert_eq!(text["output"], json!("abc"));
+        assert_eq!(
+            text["raw_body_artifact_path"],
+            json!(".swage/tool-output/turn/call/raw-body.txt")
+        );
+        assert_eq!(
+            text["capture"]["arguments"]["fetch_call"],
+            json!("tool_call:turn:call:result")
+        );
+    }
+
+    #[test]
     fn text_fetch_output_returns_follow_up_offset() {
-        let value = fetch_text_output_value("abcdefghij", "https://example.com/data.txt", 4, 0, 10)
-            .expect("continuable text output");
+        let value = fetch_text_output_value(
+            "abcdefghij",
+            "https://example.com/data.txt",
+            4,
+            0,
+            10,
+            &retained(".swage/tool-output/turn/call/raw-body.txt", "text/plain"),
+        )
+        .expect("continuable text output");
 
         assert_eq!(value["output"], json!("abcd"));
         assert_eq!(value["truncated"], json!(true));
@@ -676,8 +780,15 @@ mod tests {
 
     #[test]
     fn offset_text_fetch_output_continues_from_prior_truncation() {
-        let value = fetch_text_output_value("abcdefghij", "https://example.com/data.txt", 4, 4, 10)
-            .expect("continuable text output");
+        let value = fetch_text_output_value(
+            "abcdefghij",
+            "https://example.com/data.txt",
+            4,
+            4,
+            10,
+            &retained(".swage/tool-output/turn/call/raw-body.txt", "text/plain"),
+        )
+        .expect("continuable text output");
 
         assert_eq!(value["output"], json!("efgh"));
         assert_eq!(value["truncated"], json!(true));
@@ -688,9 +799,28 @@ mod tests {
 
     #[test]
     fn small_text_fetch_output_keeps_simple_shape() {
-        let value = fetch_text_output_value("abc", "https://example.com/data.txt", 100, 0, 3)
-            .expect("small text output");
+        let value = fetch_text_output_value(
+            "abc",
+            "https://example.com/data.txt",
+            100,
+            0,
+            3,
+            &RetainedBody {
+                artifact_path: ".swage/tool-output/adhoc/call/raw-body.txt",
+                media_type: "text/plain",
+                capture: None,
+            },
+        )
+        .expect("small text output");
 
-        assert_eq!(value, json!({ "output": "abc" }));
+        assert_eq!(
+            value,
+            json!({
+                "output": "abc",
+                "raw_body_artifact_path": ".swage/tool-output/adhoc/call/raw-body.txt",
+                "media_type": "text/plain",
+            }),
+            "outside a recorded turn there is no call to reference, so no capture hint"
+        );
     }
 }

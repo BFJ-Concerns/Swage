@@ -915,10 +915,23 @@ pub struct ExtractionDerivation {
     pub observation_id: Uuid,
     pub version: u32,
     pub extracted_text: String,
-    /// What produced this text (e.g. "html-to-text v1") — provenance for
-    /// judging whether a better extraction is worth deriving.
+    /// What produced this text (e.g. "platform:html-to-text") — provenance
+    /// for judging whether a better extraction is worth deriving, and the
+    /// citability rule: text the model supplied is never citable.
     pub extractor: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// The extractor label of text a model supplied rather than the platform
+/// derived. Such a derivation is searchable but never citable: a citation
+/// must land in text the platform produced from the retained bytes.
+pub const AGENT_SUPPLIED_EXTRACTOR: &str = "agent-supplied";
+
+impl ExtractionDerivation {
+    /// Whether a quote may be located in this derivation.
+    pub fn is_citable(&self) -> bool {
+        self.extractor != AGENT_SUPPLIED_EXTRACTOR
+    }
 }
 
 /// One full-text search hit over a topic's knowledge base.
