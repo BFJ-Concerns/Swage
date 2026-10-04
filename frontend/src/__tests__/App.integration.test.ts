@@ -253,6 +253,7 @@ function makeSettings(
       expiry_interval_secs: 60,
     },
     sessions: { archive_after_days: 7 },
+    memory: { curator_idle_minutes: 10 },
     voice: {},
     restart_required: false,
     can_restart: false,

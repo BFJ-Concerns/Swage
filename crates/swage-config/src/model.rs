@@ -738,29 +738,9 @@ impl Default for SchedulingConfig {
     }
 }
 
-/// Session list housekeeping.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionsConfig {
-    /// Days without a user or assistant message after which a session is
-    /// archived out of the recent list. Only a session with a turn executing
-    /// is exempt; a new turn on an archived session returns it. Archiving is
-    /// visibility only — nothing is cancelled and nothing queued is blocked.
-    /// Default: 7 days.
-    #[serde(default = "default_archive_after_days")]
-    pub archive_after_days: u64,
-}
-
-fn default_archive_after_days() -> u64 {
-    7
-}
-
-impl Default for SessionsConfig {
-    fn default() -> Self {
-        Self {
-            archive_after_days: default_archive_after_days(),
-        }
-    }
-}
+// Declared once in swage-protocol: the wire type and the resolved config
+// type are one definition, with the partial, schema and semantics beside it.
+pub use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's
 /// endpoint; each id is the model that endpoint serves for that audio API.
@@ -873,6 +853,8 @@ pub struct ResolvedConfig {
     pub scheduling: SchedulingConfig,
     /// Session list housekeeping: the inactivity archive.
     pub sessions: SessionsConfig,
+    /// `[memory]` — when the curator passes over an attended conversation.
+    pub memory: MemoryConfig,
     /// Model routes for transcription and speech synthesis.
     pub voice: VoiceConfig,
     /// Named generation parameter presets available to model entries.

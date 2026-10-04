@@ -16,6 +16,7 @@ pub mod recovery;
 pub mod routes;
 pub mod schedule;
 pub mod settings;
+pub mod settings_section;
 pub mod skill;
 pub mod surface;
 pub mod topic;

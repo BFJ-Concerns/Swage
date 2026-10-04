@@ -130,7 +130,8 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         pricing: config.pricing.clone(),
         observability: config.observability.clone(),
         communication: try_wire_from_config(config.communication)?,
-        sessions: try_wire_from_config(config.sessions)?,
+        sessions: config.sessions,
+        memory: config.memory,
         voice: try_wire_from_config(config.voice)?,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
@@ -158,6 +159,7 @@ pub async fn save_settings(
         observability,
         communication,
         sessions,
+        memory,
         voice,
     } = request;
 
@@ -165,7 +167,6 @@ pub async fn save_settings(
         config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
-    let sessions: Option<swage_config::SessionsConfig> = config_from_wire(sessions)?;
     let voice: Option<swage_config::VoiceConfig> = config_from_wire(voice)?;
 
     let mut providers = HashMap::new();
@@ -222,16 +223,19 @@ pub async fn save_settings(
     };
     apply_runtime_settings_to_partial(
         &mut partial,
-        tool_runtime.clone(),
-        tool_permissions.clone(),
-        hitl.clone(),
-        sandbox.clone(),
-        context.clone(),
-        pricing.clone(),
-        observability.clone(),
-        communication.clone(),
-        sessions.clone(),
-        voice.clone(),
+        RuntimeSectionUpdates {
+            tool_runtime: tool_runtime.clone(),
+            tool_permissions: tool_permissions.clone(),
+            hitl: hitl.clone(),
+            sandbox: sandbox.clone(),
+            context: context.clone(),
+            pricing: pricing.clone(),
+            observability: observability.clone(),
+            communication: communication.clone(),
+            sessions: sessions.clone(),
+            memory: memory.clone(),
+            voice: voice.clone(),
+        },
     )?;
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
@@ -309,6 +313,7 @@ pub async fn save_settings(
     runtime_config.communication =
         communication.unwrap_or_else(|| runtime_config.communication.clone());
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
+    runtime_config.memory = memory.unwrap_or_else(|| runtime_config.memory.clone());
     runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
@@ -616,7 +621,8 @@ fn settings_response_from_saved_config(
         pricing: wire_from_config(active_config.pricing),
         observability: wire_from_config(active_config.observability),
         communication: wire_from_config(active_config.communication),
-        sessions: wire_from_config(active_config.sessions),
+        sessions: active_config.sessions,
+        memory: active_config.memory,
         voice: wire_from_config(active_config.voice),
         restart_required: true,
         can_restart: state.managed_gateway,
@@ -777,15 +783,11 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
             "communication TTL and expiry interval must be positive".to_string(),
         ));
     }
-    if let Some(sessions) = &request.sessions
-        && !(1..=swage_config::validation::MAX_ARCHIVE_AFTER_DAYS as u64)
-            .contains(&sessions.archive_after_days)
-    {
-        return Err(ApiError::validation(format!(
-            "sessions archive delay must be between 1 and {} days",
-            swage_config::validation::MAX_ARCHIVE_AFTER_DAYS
-        )));
-    }
+    // Declared sections carry their own semantic check: the same rule the
+    // config file loader applies, so the API never admits what a file would
+    // refuse.
+    refuse_declared_section_problems(request.sessions.as_ref())?;
+    refuse_declared_section_problems(request.memory.as_ref())?;
     if let Some(voice) = &request.voice
         && [&voice.transcription_model, &voice.speech_model]
             .into_iter()
@@ -800,8 +802,26 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     Ok(())
 }
 
-fn apply_runtime_settings_to_partial(
-    partial: &mut swage_config::PartialConfig,
+/// A declared section's values are refused by the rule its declaration
+/// carries, named by field, so the settings API and the config file agree.
+fn refuse_declared_section_problems<S>(section: Option<&S>) -> Result<(), ApiError>
+where
+    S: swage_protocol::client::settings_section::SettingsSection,
+{
+    if let Some(section) = section
+        && let Some(problem) = section.problems().into_iter().next()
+    {
+        return Err(ApiError::validation(problem.message));
+    }
+    Ok(())
+}
+
+/// The runtime sections a settings save may carry, each absent when the
+/// request leaves it unchanged. One struct, so adding a section is a field
+/// here and the assignments in `apply_runtime_settings_to_partial` and the
+/// hot-apply — never a positional signature every caller restates.
+#[derive(Debug, Clone, Default)]
+struct RuntimeSectionUpdates {
     tool_runtime: Option<ToolRuntimeSettings>,
     tool_permissions: Option<swage_config::ToolPermissionConfig>,
     hitl: Option<swage_config::HitlConfig>,
@@ -811,12 +831,33 @@ fn apply_runtime_settings_to_partial(
     observability: Option<swage_config::ObservabilityConfig>,
     communication: Option<swage_config::CommunicationConfig>,
     sessions: Option<swage_config::SessionsConfig>,
+    memory: Option<swage_config::MemoryConfig>,
     voice: Option<swage_config::VoiceConfig>,
+}
+
+fn apply_runtime_settings_to_partial(
+    partial: &mut swage_config::PartialConfig,
+    updates: RuntimeSectionUpdates,
 ) -> Result<(), ApiError> {
+    let RuntimeSectionUpdates {
+        tool_runtime,
+        tool_permissions,
+        hitl,
+        sandbox,
+        context,
+        pricing,
+        observability,
+        communication,
+        sessions,
+        memory,
+        voice,
+    } = updates;
+    // A declared section's partial is its own `From`: no field is restated.
     if let Some(sessions) = sessions {
-        partial.sessions = Some(swage_config::merge::PartialSessionsConfig {
-            archive_after_days: Some(sessions.archive_after_days),
-        });
+        partial.sessions = Some(sessions.into());
+    }
+    if let Some(memory) = memory {
+        partial.memory = Some(memory.into());
     }
     if let Some(voice) = voice {
         partial.voice = Some(swage_config::merge::PartialVoiceConfig {
@@ -1743,6 +1784,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            memory: None,
             voice: None,
         };
 
@@ -1845,8 +1887,61 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            memory: None,
             voice,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn save_settings_hot_applies_a_declared_section_and_refuses_by_its_own_rule() {
+        let swage_home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+
+        let mut request = voice_settings_request(None);
+        request.memory = Some(swage_config::MemoryConfig {
+            curator_idle_minutes: 45,
+        });
+        let response = save_settings(&state, request.clone())
+            .await
+            .expect("a declared section saves");
+        assert_eq!(response.memory.curator_idle_minutes, 45);
+        assert_eq!(
+            state.active_config().memory.curator_idle_minutes,
+            45,
+            "the running gateway reads the new value without a restart"
+        );
+        assert!(!state.restart_required());
+
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("the saved section reloads through the file loader");
+        assert_eq!(reloaded.memory.curator_idle_minutes, 45);
+
+        // The API refuses what the file would refuse, by the declaration's
+        // rule — and leaves the applied value standing.
+        request.memory = Some(swage_config::MemoryConfig {
+            curator_idle_minutes: 0,
+        });
+        let error = save_settings(&state, request)
+            .await
+            .expect_err("zero minutes is refused");
+        assert!(
+            error.to_string().contains("memory.curator_idle_minutes"),
+            "{error}"
+        );
+        assert_eq!(state.active_config().memory.curator_idle_minutes, 45);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1991,6 +2086,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            memory: None,
             voice: None,
         };
         save_settings(&state, request)
@@ -2133,6 +2229,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            memory: None,
             voice: None,
         };
 
@@ -2254,6 +2351,7 @@ mod tests {
             observability: Some(wire_from_config(observability)),
             communication: Some(wire_from_config(communication.clone())),
             sessions: None,
+            memory: None,
             voice: None,
         };
 
@@ -2300,6 +2398,7 @@ mod tests {
             observability: None,
             communication: None,
             sessions: None,
+            memory: None,
             voice: None,
         };
 
@@ -2384,34 +2483,39 @@ mod tests {
 
         apply_runtime_settings_to_partial(
             &mut partial,
-            None,
-            Some(permissions),
-            Some(swage_config::HitlConfig {
-                timeout: 600,
-                timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
-            }),
-            Some(swage_config::SandboxConfig {
-                enabled: false,
-                allow_degraded_execution: true,
-            }),
-            Some(swage_config::ContextConfig {
-                assembly: "compact".into(),
-                alternatives: Vec::new(),
-                timeout: 10,
-                budget: Some(8192),
-                compaction_threshold: None,
-                diagnosis_reader_model: None,
-                diagnosis_synthesis_model: None,
-            }),
-            None,
-            None,
-            None,
-            None,
-            None,
+            RuntimeSectionUpdates {
+                tool_permissions: Some(permissions),
+                hitl: Some(swage_config::HitlConfig {
+                    timeout: 600,
+                    timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
+                }),
+                sandbox: Some(swage_config::SandboxConfig {
+                    enabled: false,
+                    allow_degraded_execution: true,
+                }),
+                context: Some(swage_config::ContextConfig {
+                    assembly: "compact".into(),
+                    alternatives: Vec::new(),
+                    timeout: 10,
+                    budget: Some(8192),
+                    compaction_threshold: None,
+                    diagnosis_reader_model: None,
+                    diagnosis_synthesis_model: None,
+                }),
+                memory: Some(swage_config::MemoryConfig {
+                    curator_idle_minutes: 25,
+                }),
+                ..RuntimeSectionUpdates::default()
+            },
         )
         .expect("runtime settings convert");
 
         let body = toml::to_string(&partial).expect("partial config should serialise");
+        assert!(
+            body.contains("[memory]"),
+            "a declared section lands in the file: {body}"
+        );
+        assert!(body.contains("curator_idle_minutes = 25"));
         assert!(body.contains("[tools]"));
         assert!(body.contains("allow = [\"file_read\"]"));
         assert!(body.contains("deny = [\"shell\"]"));

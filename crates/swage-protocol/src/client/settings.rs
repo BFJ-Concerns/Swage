@@ -7,6 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::settings_section::SettingsProblem;
+use crate::settings_section;
+
 /// Reasoning effort as the user means it: one provider-neutral intent,
 /// ordered lowest to highest, resolved per model against that model's
 /// declared [`EffortCapability`] before anything reaches a provider.
@@ -466,16 +469,59 @@ pub struct CommunicationConfig {
     pub expiry_interval_secs: u64,
 }
 
-/// Session list housekeeping.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-#[ts(optional_fields = nullable)]
-pub struct SessionsConfig {
-    /// Days without a user or assistant message after which a session leaves
-    /// the recent list. Only a session with a turn executing is exempt, and
-    /// a new turn on an archived session brings it back.
-    #[ts(type = "number")]
-    pub archive_after_days: u64,
+/// The longest archive delay a session list may be set to, in days.
+pub const MAX_ARCHIVE_AFTER_DAYS: u64 = 3650;
+
+settings_section! {
+    /// Session list housekeeping.
+    section "sessions" as SessionsConfig / PartialSessionsConfig {
+        /// Days without a user or assistant message after which a session leaves
+        /// the recent list. Only a session with a turn executing is exempt, and
+        /// a new turn on an archived session brings it back. Archiving is
+        /// visibility only — nothing is cancelled and nothing queued is blocked.
+        #[ts(type = "number")]
+        archive_after_days: u64 = 7,
+    }
+    problems(section) {
+        let mut problems = Vec::new();
+        if !(1..=MAX_ARCHIVE_AFTER_DAYS).contains(&section.archive_after_days) {
+            problems.push(SettingsProblem {
+                field: "archive_after_days",
+                message: format!(
+                    "sessions.archive_after_days must be between 1 and {MAX_ARCHIVE_AFTER_DAYS}, got {}",
+                    section.archive_after_days
+                ),
+            });
+        }
+        problems
+    }
+}
+
+/// The longest idle wait before a memory curation pass, in minutes: a week.
+pub const MAX_CURATOR_IDLE_MINUTES: u64 = 10_080;
+
+settings_section! {
+    /// Memory curation: when the platform's curator reads an attended
+    /// conversation into the operator's memory.
+    section "memory" as MemoryConfig / PartialMemoryConfig {
+        /// Minutes a conversation the operator is in must have been idle before
+        /// the curator passes over what was said since its last pass.
+        #[ts(type = "number")]
+        curator_idle_minutes: u64 = 10,
+    }
+    problems(section) {
+        let mut problems = Vec::new();
+        if !(1..=MAX_CURATOR_IDLE_MINUTES).contains(&section.curator_idle_minutes) {
+            problems.push(SettingsProblem {
+                field: "curator_idle_minutes",
+                message: format!(
+                    "memory.curator_idle_minutes must be between 1 and {MAX_CURATOR_IDLE_MINUTES}, got {}",
+                    section.curator_idle_minutes
+                ),
+            });
+        }
+        problems
+    }
 }
 
 /// Model routes for voice, served by the default provider's endpoint. An
@@ -511,6 +557,7 @@ pub struct SettingsResponse {
     pub observability: ObservabilityConfig,
     pub communication: CommunicationConfig,
     pub sessions: SessionsConfig,
+    pub memory: MemoryConfig,
     pub voice: VoiceConfig,
     pub restart_required: bool,
     pub can_restart: bool,
@@ -553,6 +600,9 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub sessions: Option<SessionsConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub memory: Option<MemoryConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub voice: Option<VoiceConfig>,

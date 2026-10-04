@@ -7,12 +7,12 @@ use crate::model::{
     ModelEndpointConfig, ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig,
     ProviderCatalogConfig, ProviderEndpointConfig, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SchedulingConfig, SearchProviderConfig,
-    ServerConfig, SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
-    VoiceConfig,
+    ServerConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, VoiceConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
+pub use swage_protocol::client::settings::{PartialMemoryConfig, PartialSessionsConfig};
 
 // ---------------------------------------------------------------------------
 // Partial section types — mirror of model types, all fields Option<T>
@@ -233,12 +233,6 @@ pub struct PartialSchedulingConfig {
     pub run_history_max_per_schedule: Option<u32>,
 }
 
-/// Partial mirror of `SessionsConfig`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PartialSessionsConfig {
-    pub archive_after_days: Option<u64>,
-}
-
 /// Partial mirror of `VoiceConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialVoiceConfig {
@@ -265,6 +259,7 @@ pub struct PartialConfig {
     pub communication: Option<PartialCommunicationConfig>,
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
+    pub memory: Option<PartialMemoryConfig>,
     pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
@@ -425,9 +420,8 @@ impl From<ResolvedConfig> for PartialConfig {
                 run_history_max_age_days: Some(r.scheduling.run_history_max_age_days),
                 run_history_max_per_schedule: Some(r.scheduling.run_history_max_per_schedule),
             }),
-            sessions: Some(PartialSessionsConfig {
-                archive_after_days: Some(r.sessions.archive_after_days),
-            }),
+            sessions: Some(r.sessions.clone().into()),
+            memory: Some(r.memory.clone().into()),
             voice: Some(PartialVoiceConfig {
                 transcription_model: r.voice.transcription_model.clone(),
                 speech_model: r.voice.speech_model.clone(),
@@ -537,7 +531,6 @@ impl_merge_overlay!(PartialSchedulingConfig {
     run_history_max_age_days,
     run_history_max_per_schedule,
 });
-impl_merge_overlay!(PartialSessionsConfig { archive_after_days });
 impl_merge_overlay!(PartialVoiceConfig {
     transcription_model,
     speech_model,
@@ -701,7 +694,12 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             }
         }),
         scheduling: merge_overlay_section(base.scheduling, overlay.scheduling),
-        sessions: merge_overlay_section(base.sessions, overlay.sessions),
+        sessions: merge_section(
+            base.sessions,
+            overlay.sessions,
+            PartialSessionsConfig::overlay,
+        ),
+        memory: merge_section(base.memory, overlay.memory, PartialMemoryConfig::overlay),
         voice: merge_overlay_section(base.voice, overlay.voice),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
@@ -985,14 +983,8 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                     .unwrap_or(ds.run_history_max_per_schedule),
             }
         },
-        sessions: {
-            let s = partial.sessions.unwrap_or_default();
-            SessionsConfig {
-                archive_after_days: s
-                    .archive_after_days
-                    .unwrap_or_else(|| SessionsConfig::default().archive_after_days),
-            }
-        },
+        sessions: partial.sessions.unwrap_or_default().resolve(),
+        memory: partial.memory.unwrap_or_default().resolve(),
         voice: {
             let v = partial.voice.unwrap_or_default();
             VoiceConfig {
@@ -2028,6 +2020,36 @@ mod tests {
         };
         let resolved = resolve(merge_partial(base, overlay));
         assert_eq!(resolved.sessions.archive_after_days, 3);
+    }
+
+    #[test]
+    fn a_declared_section_defaults_overlays_and_round_trips() {
+        assert_eq!(
+            resolve(PartialConfig::default())
+                .memory
+                .curator_idle_minutes,
+            10
+        );
+
+        let base = PartialConfig {
+            memory: Some(PartialMemoryConfig {
+                curator_idle_minutes: Some(30),
+            }),
+            ..Default::default()
+        };
+        let overlay = PartialConfig {
+            memory: Some(PartialMemoryConfig {
+                curator_idle_minutes: Some(5),
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.memory.curator_idle_minutes, 5);
+
+        // Resolved → partial → resolved keeps the declared section whole.
+        let again = resolve(PartialConfig::from(resolved.clone()));
+        assert_eq!(again.memory, resolved.memory);
+        assert_eq!(again.sessions, resolved.sessions);
     }
 
     #[test]

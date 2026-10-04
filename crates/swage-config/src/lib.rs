@@ -28,7 +28,7 @@ pub use model::{
     BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, CommunicationConfig, ContextConfig,
     ContextTransferConfig, ContextTransferField, ContextTransferMode, ContextTransferTargetConfig,
     GenerationConfig, GenerationPresetConfig, HierarchyLevel, HitlConfig, LogLevel, LoggingConfig,
-    ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
+    MemoryConfig, ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
     ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
     ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
     RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,

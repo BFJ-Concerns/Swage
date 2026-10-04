@@ -123,6 +123,7 @@
       observability: settings.observability,
       communication: settings.communication,
       sessions: settings.sessions,
+      memory: settings.memory,
       voice: settings.voice,
     });
   }
@@ -146,6 +147,7 @@
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
     settings.sessions.archive_after_days = Math.min(3650, Math.max(1, nullableNumber(settings.sessions.archive_after_days) ?? 7));
+    settings.memory.curator_idle_minutes = Math.min(10080, Math.max(1, nullableNumber(settings.memory.curator_idle_minutes) ?? 10));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
     try {

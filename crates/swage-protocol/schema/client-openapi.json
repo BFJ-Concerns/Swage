@@ -2289,6 +2289,22 @@
         ],
         "type": "object"
       },
+      "MemoryConfig": {
+        "additionalProperties": false,
+        "description": "Memory curation: when the platform's curator reads an attended\nconversation into the operator's memory.",
+        "properties": {
+          "curator_idle_minutes": {
+            "description": "Minutes a conversation the operator is in must have been idle before\nthe curator passes over what was said since its last pass.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "curator_idle_minutes"
+        ],
+        "type": "object"
+      },
       "MessageAttachment": {
         "description": "Something submitted beside a message's text and carried to the model as\nits own content part. The tag names what the attachment is; a client\nsends only kinds the gateway's configured provider can consume, and the\ngateway refuses the turn otherwise rather than dropping the part.",
         "oneOf": [
@@ -3339,6 +3355,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/HitlConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "memory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryConfig"
               },
               {
                 "type": "null"
@@ -4869,7 +4896,7 @@
         "description": "Session list housekeeping.",
         "properties": {
           "archive_after_days": {
-            "description": "Days without a user or assistant message after which a session leaves\nthe recent list. Only a session with a turn executing is exempt, and\na new turn on an archived session brings it back.",
+            "description": "Days without a user or assistant message after which a session leaves\nthe recent list. Only a session with a turn executing is exempt, and\na new turn on an archived session brings it back. Archiving is\nvisibility only — nothing is cancelled and nothing queued is blocked.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -4905,6 +4932,9 @@
           },
           "hitl": {
             "$ref": "#/components/schemas/HitlConfig"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/MemoryConfig"
           },
           "models": {
             "additionalProperties": {
@@ -4958,6 +4988,7 @@
           "observability",
           "communication",
           "sessions",
+          "memory",
           "voice",
           "restart_required",
           "can_restart"

@@ -7,6 +7,7 @@ export type SessionsConfig = {
 /**
  * Days without a user or assistant message after which a session leaves
  * the recent list. Only a session with a turn executing is exempt, and
- * a new turn on an archived session brings it back.
+ * a new turn on an archived session brings it back. Archiving is
+ * visibility only — nothing is cancelled and nothing queued is blocked.
  */
 archive_after_days: number, };
