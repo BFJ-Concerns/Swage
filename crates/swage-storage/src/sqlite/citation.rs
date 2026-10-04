@@ -83,12 +83,12 @@ impl CitationStore for SqliteStorage {
             quoted_text,
         } = citation;
         self.with_conn(move |conn| {
-            let extracted_text = conn
+            let (extracted_text, extractor) = conn
                 .query_row(
-                    "SELECT extracted_text FROM extraction_derivations
+                    "SELECT extracted_text, extractor FROM extraction_derivations
                      WHERE observation_id = ?1 AND version = ?2",
                     params![observation_id.to_string(), derivation_version],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()?
                 .ok_or_else(|| {
@@ -99,6 +99,15 @@ impl CitationStore for SqliteStorage {
                         .into(),
                     )
                 })?;
+            // Text the model supplied is never the ground a citation stands
+            // on: only platform-derived text locates a quote.
+            if extractor == crate::model::AGENT_SUPPLIED_EXTRACTOR {
+                return Err(rusqlite::Error::ToSqlConversionFailure(
+                    "the pinned derivation is model-authored and is not citable; cite a \
+                     platform-derived version"
+                        .into(),
+                ));
+            }
             let start_offset = extracted_text.find(&quoted_text).ok_or_else(|| {
                 rusqlite::Error::ToSqlConversionFailure(
                     "the quoted text does not occur in the pinned derivation".into(),
@@ -235,6 +244,36 @@ mod tests {
             storage.get_citation(citation.id).await.unwrap(),
             Some(citation)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refuses_to_cite_text_the_model_supplied() {
+        let (storage, topic_id, observation_id, _platform_version) = evidence().await;
+        let before = citation_count(&storage).await;
+        let supplied = storage
+            .add_extraction(
+                observation_id,
+                "words the gatherer typed in".into(),
+                crate::model::AGENT_SUPPLIED_EXTRACTOR.into(),
+            )
+            .await
+            .unwrap();
+        assert!(!supplied.is_citable());
+
+        let error = storage
+            .add_citation(NewKnowledgeCitation {
+                topic_id,
+                observation_id,
+                derivation_version: supplied.version,
+                quoted_text: "words the gatherer typed in".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not citable"),
+            "a model-authored derivation is refused by name: {error}"
+        );
+        assert_eq!(citation_count(&storage).await, before, "nothing inserted");
     }
 
     #[tokio::test(flavor = "multi_thread")]

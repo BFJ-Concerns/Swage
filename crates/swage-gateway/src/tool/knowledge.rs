@@ -30,14 +30,17 @@ use swage_protocol::client::knowledge::{
     KnowledgeSearchResponse, KnowledgeSearchResult, OrientationCardResult, OrientationFindResponse,
 };
 use swage_storage::{
-    CurationAssertionKind, NewCurationAssertion, NewKnowledgeCitation, NewOrientationCard,
-    NewSourceObservation, ObservationOrigin,
+    AGENT_SUPPLIED_EXTRACTOR, CurationAssertionKind, NewCurationAssertion, NewKnowledgeCitation,
+    NewOrientationCard, NewSourceObservation, ObservationOrigin,
 };
 use swage_tool::context::ToolContext;
 
 use crate::knowledge;
 use crate::state::AppState;
 use crate::tool::Tool;
+use crate::tool::tool_result_read::stored_tool_call_in_current_thread;
+use crate::tool::url_fetch::html_to_text;
+use crate::tool::workspace::validate_path;
 
 const SEARCH_TOOL: &str = "knowledge_search";
 const RECORD_TOOL: &str = "knowledge_record";
@@ -221,20 +224,36 @@ impl Tool for KnowledgeRecordTool {
 
     fn description(&self) -> &str {
         "Capture an external source into this session's knowledge base (its topic's, or the general knowledge base when no topic is selected) as a \
-         permanent, citable observation. Supply the source (its URL, a local \
-         path, or both), the raw content, and the readable text extracted from \
-         it. The capture is immutable: recording the same content twice \
-         returns the original observation."
+         permanent observation. For a page you fetched with url_fetch, pass \
+         fetch_call — the capture reference in that fetch's result — and \
+         nothing else: the platform records the bytes it fetched, takes the \
+         origin from the fetch, and derives the readable text that search and \
+         citations run over. Only such a capture is citable. For material you \
+         hold yourself, pass content with its origin (url, local_path, or \
+         both) and optionally extracted_text; that text is searchable but \
+         never citable, because it is your words and not the source's. The \
+         capture is immutable: recording the same content twice returns the \
+         original observation."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
+                "fetch_call": {
+                    "type": "string",
+                    "description": "The capture reference a url_fetch result \
+                                    names (its capture.arguments.fetch_call). \
+                                    The platform captures that fetch's bytes \
+                                    and derives the text; pass nothing else \
+                                    with it except, if the same source also \
+                                    lives on disk, local_path."
+                },
                 "url": {
                     "type": "string",
-                    "description": "Where the content came from on the web. \
-                                    At least one of url or local_path is required."
+                    "description": "With content: where it came from on the \
+                                    web. At least one of url or local_path is \
+                                    required with content."
                 },
                 "local_path": {
                     "type": "string",
@@ -243,23 +262,21 @@ impl Tool for KnowledgeRecordTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "The raw captured content, exactly as \
-                                    retrieved. Stored permanently."
+                    "description": "Material you hold yourself, exactly as \
+                                    retrieved. Stored permanently. Not for a \
+                                    page you fetched — pass fetch_call instead."
                 },
                 "extracted_text": {
                     "type": "string",
-                    "description": "The readable text extracted from the \
-                                    content — what search and citations run \
-                                    over. Omit when the content yields no \
-                                    text yet; the capture is still kept."
+                    "description": "With content: the readable text you \
+                                    extracted. Searchable, never citable."
                 },
                 "media_type": {
                     "type": "string",
-                    "description": "The content's media type, e.g. text/html. \
-                                    Default text/plain."
+                    "description": "With content: its media type, e.g. \
+                                    text/html. Default text/plain."
                 }
-            },
-            "required": ["content"]
+            }
         })
     }
 
@@ -270,30 +287,93 @@ impl Tool for KnowledgeRecordTool {
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         // Parameter problems are the model's to fix, so they are reported
         // before any host-wiring failure.
-        let content = required_str(RECORD_TOOL, &params, "content")?;
-        let url = params
-            .get("url")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty());
-        let local_path = params
-            .get("local_path")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty());
-        if url.is_none() && local_path.is_none() {
-            return Err(invalid(
-                RECORD_TOOL,
-                "an observation needs its origin: supply 'url', 'local_path', or both",
-            ));
-        }
-        let media_type = params
-            .get("media_type")
-            .and_then(Value::as_str)
-            .unwrap_or("text/plain");
+        let present = |key: &str| {
+            params
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        };
+        let local_path = present("local_path");
+        let source = match (
+            present("fetch_call"),
+            params.get("content").and_then(Value::as_str),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(invalid(
+                    RECORD_TOOL,
+                    "pass fetch_call to capture a fetched page, or content for material you hold — not both",
+                ));
+            }
+            (Some(reference), None) => {
+                if ["url", "extracted_text", "media_type"]
+                    .iter()
+                    .any(|key| params.get(key).is_some())
+                {
+                    return Err(invalid(
+                        RECORD_TOOL,
+                        "with fetch_call the fetch supplies the body, the origin URL, the media type and the text: pass fetch_call alone (local_path too only if the same source also lives on disk)",
+                    ));
+                }
+                CaptureSource::Fetched { reference }
+            }
+            (None, Some(content)) => {
+                if content.trim().is_empty() {
+                    return Err(invalid(RECORD_TOOL, "content must not be empty"));
+                }
+                let url = present("url");
+                if url.is_none() && local_path.is_none() {
+                    return Err(invalid(
+                        RECORD_TOOL,
+                        "an observation needs its origin: supply 'url', 'local_path', or both",
+                    ));
+                }
+                CaptureSource::Supplied {
+                    content,
+                    url,
+                    extracted_text: present("extracted_text"),
+                    media_type: present("media_type").unwrap_or("text/plain"),
+                }
+            }
+            (None, None) => {
+                return Err(invalid(
+                    RECORD_TOOL,
+                    "supply fetch_call (the capture reference a url_fetch result names) or content",
+                ));
+            }
+        };
 
         let state = gateway_state(RECORD_TOOL, ctx)?;
         let (topic_id, scope, capture_scope) = session_topic(RECORD_TOOL, state, ctx).await?;
 
-        let body = knowledge::write_body(&state.config_root, &scope, content.as_bytes())
+        // The bytes, their origin and media type, and the text they yield —
+        // from the platform's own fetch, or from the model's hands, labelled
+        // as such so the citation rule can tell them apart.
+        let (bytes, url, media_type, derived) = match source {
+            CaptureSource::Fetched { reference } => {
+                let fetched = retained_fetch(ctx, reference).await?;
+                let (text, extractor) = platform_extraction(&fetched.media_type, &fetched.bytes);
+                (
+                    fetched.bytes,
+                    Some(fetched.url),
+                    fetched.media_type,
+                    (!text.trim().is_empty()).then_some((text, extractor.to_owned())),
+                )
+            }
+            CaptureSource::Supplied {
+                content,
+                url,
+                extracted_text,
+                media_type,
+            } => (
+                content.as_bytes().to_vec(),
+                url.map(str::to_owned),
+                media_type.to_owned(),
+                extracted_text.map(|text| (text.to_owned(), AGENT_SUPPLIED_EXTRACTOR.to_owned())),
+            ),
+        };
+
+        let body = knowledge::write_body(&state.config_root, &scope, &bytes)
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
         let captured_body_sha256 = body.sha256;
@@ -309,24 +389,20 @@ impl Tool for KnowledgeRecordTool {
             .record_observation(NewSourceObservation {
                 topic_id,
                 origin: ObservationOrigin {
-                    url: url.map(str::to_owned),
+                    url,
                     local_path: local_path.map(str::to_owned),
                 },
                 retrieved_at: Utc::now(),
                 body_sha256: captured_body_sha256.clone(),
                 body_bytes: body.byte_count,
-                media_type: media_type.to_owned(),
+                media_type,
                 capture_scope,
             })
             .await
             .map_err(|error| failed(RECORD_TOOL, error))?;
 
-        let extraction = match params
-            .get("extracted_text")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-        {
-            Some(text) => {
+        let extraction = match derived {
+            Some((text, extractor)) => {
                 // Under a capture scope this may be the first attempt's row.
                 // An extraction it already carries stands. If that attempt
                 // stopped before extracting, only text derived from the same
@@ -346,11 +422,7 @@ impl Tool for KnowledgeRecordTool {
                     None if observation.body_sha256 == captured_body_sha256 => Some(
                         state
                             .storage
-                            .add_extraction(
-                                observation.id,
-                                text.to_owned(),
-                                "agent-supplied".to_owned(),
-                            )
+                            .add_extraction(observation.id, text, extractor)
                             .await
                             .map_err(|error| failed(RECORD_TOOL, error))?,
                     ),
@@ -368,7 +440,105 @@ impl Tool for KnowledgeRecordTool {
             "version": extraction.as_ref().map(|e| e.version),
             "recorded": true,
             "searchable": extraction.is_some(),
+            "citable": extraction.as_ref().is_some_and(|e| e.is_citable()),
         }))
+    }
+}
+
+/// Where a capture's bytes come from.
+enum CaptureSource<'p> {
+    /// A url_fetch the platform ran earlier in this conversation; its
+    /// retained body is the capture.
+    Fetched { reference: &'p str },
+    /// Material the model holds and hands over itself.
+    Supplied {
+        content: &'p str,
+        url: Option<&'p str>,
+        extracted_text: Option<&'p str>,
+        media_type: &'p str,
+    },
+}
+
+/// A fetch's retained body, with the facts the fetch recorded about it.
+struct RetainedFetch {
+    url: String,
+    media_type: String,
+    bytes: Vec<u8>,
+}
+
+/// Read the body a url_fetch retained, through the stored call the
+/// reference names: the call must be a url_fetch in this conversation, its
+/// result must name the retained file, and the file is read only inside the
+/// working directory it was written under.
+async fn retained_fetch(
+    ctx: &dyn ToolContext,
+    reference: &str,
+) -> Result<RetainedFetch, ToolError> {
+    let call = stored_tool_call_in_current_thread(ctx, RECORD_TOOL, reference).await?;
+    if call.tool != "url_fetch" {
+        return Err(invalid(
+            RECORD_TOOL,
+            format!(
+                "fetch_call names a {} call; it must name a url_fetch result",
+                call.tool
+            ),
+        ));
+    }
+    let result: Value = call
+        .result
+        .as_deref()
+        .and_then(|result| serde_json::from_str(result).ok())
+        .ok_or_else(|| failed(RECORD_TOOL, "the referenced fetch has no completed result"))?;
+    let relative = result
+        .get("raw_body_artifact_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            failed(
+                RECORD_TOOL,
+                "the referenced fetch retained no body: it failed before its body arrived, or predates body retention",
+            )
+        })?;
+    let media_type = result
+        .get("media_type")
+        .and_then(Value::as_str)
+        .unwrap_or(
+            if std::path::Path::new(relative)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("html"))
+            {
+                "text/html"
+            } else {
+                "text/plain"
+            },
+        )
+        .to_owned();
+    let arguments: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+    let url = arguments
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| failed(RECORD_TOOL, "the referenced fetch recorded no URL"))?
+        .to_owned();
+    let path = validate_path(ctx.working_directory(), relative)
+        .map_err(|error| failed(RECORD_TOOL, error))?;
+    let bytes = tokio::fs::read(&path).await.map_err(|error| {
+        failed(
+            RECORD_TOOL,
+            format!("the fetch's retained body could not be read: {error}"),
+        )
+    })?;
+    Ok(RetainedFetch {
+        url,
+        media_type,
+        bytes,
+    })
+}
+
+/// The platform's own extraction of a retained body, and its label.
+fn platform_extraction(media_type: &str, bytes: &[u8]) -> (String, &'static str) {
+    if media_type.contains("text/html") {
+        (html_to_text(bytes), "platform:html-to-text")
+    } else {
+        (String::from_utf8_lossy(bytes).into_owned(), "platform:text")
     }
 }
 
@@ -922,6 +1092,227 @@ mod tests {
                 .is_none(),
             "retry text from different bytes must not become citable"
         );
+    }
+
+    /// The C24 shape: the knowledge base holds the bytes the platform fetched
+    /// and text the platform derived from them; what the model types in is
+    /// searchable at most, and a quote lands only in platform-derived text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn record_from_a_fetch_captures_the_retained_bytes_and_derives_the_citable_text() {
+        use swage_storage::model::{NewThread, NewToolCall, NewTurn, TurnState};
+        use swage_storage::{ThreadStore, ToolCallStore, TurnStore};
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let new_turn = |state| NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state,
+            user_input: None,
+            parent_turn_id: None,
+        };
+        let fetch_turn = storage
+            .create_turn(new_turn(TurnState::Completed))
+            .await
+            .unwrap();
+        let current_turn = storage
+            .create_turn(new_turn(TurnState::Pending))
+            .await
+            .unwrap();
+
+        // The fetch the platform ran: its retained body on disk under the
+        // working directory, its stored call naming the file and the URL.
+        let html =
+            b"<html><body><h1>Borrowing</h1><p>The borrow checker was rewritten.</p></body></html>";
+        let relative = format!(".swage/tool-output/{}/fetch-1/raw-body.html", fetch_turn.id);
+        let absolute = workspace.path().join(&relative);
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(&absolute, html).unwrap();
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: fetch_turn.id,
+                agent_id: "gateway".into(),
+                call_id: "fetch-1".into(),
+                tool: "url_fetch".into(),
+                arguments: json!({"url": "https://example.test/borrowing"}).to_string(),
+                model_arguments: swage_core::compact_tool_arguments_for_model(
+                    &json!({"url": "https://example.test/borrowing"}),
+                ),
+                result: Some(
+                    json!({
+                        "output": "Borrowing The borrow checker was rewritten.",
+                        "raw_body_artifact_path": relative,
+                        "media_type": "text/html; charset=utf-8",
+                    })
+                    .to_string(),
+                ),
+                model_result: None,
+                status: Some("success".into()),
+                duration_ms: Some(10),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            provider as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let mut base = swage_tool::context::MockToolContext::new("gateway", session.id.to_string());
+        base.turn_id = Some(current_turn.id);
+        base.working_directory = workspace.path().to_path_buf();
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+        let reference = swage_core::tool_result_reference(&fetch_turn.id.to_string(), "fetch-1");
+
+        let tool = KnowledgeRecordTool;
+        let muddled = tool
+            .execute(
+                json!({"fetch_call": reference, "content": "my retelling"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(muddled.to_string().contains("not both"));
+
+        let captured = tool
+            .execute(json!({"fetch_call": reference}), &ctx)
+            .await
+            .expect("a fetch-bound capture");
+        assert_eq!(captured["recorded"], true);
+        assert_eq!(captured["searchable"], true);
+        assert_eq!(captured["citable"], true);
+        let observation_id: Uuid = captured["observation_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let observation = storage
+            .list_observations_by_topic(topic.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|observation| observation.id == observation_id)
+            .expect("the observation is on the topic");
+        assert_eq!(
+            observation.origin.url.as_deref(),
+            Some("https://example.test/borrowing"),
+            "the origin is the fetch's, not the model's"
+        );
+        assert_eq!(observation.media_type, "text/html; charset=utf-8");
+        let retained = knowledge::read_body(
+            &state.config_root,
+            &ScopeLocation::General,
+            &observation.body_sha256,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            retained, html,
+            "the knowledge base holds the bytes the platform fetched"
+        );
+        let extraction = storage
+            .latest_extraction(observation_id)
+            .await
+            .unwrap()
+            .expect("the platform derived the text");
+        assert_eq!(extraction.extractor, "platform:html-to-text");
+        assert!(
+            extraction
+                .extracted_text
+                .contains("The borrow checker was rewritten.")
+        );
+        assert!(!extraction.extracted_text.contains("<p>"));
+        assert!(extraction.is_citable());
+
+        // What the model types in is searchable at most: recorded as its
+        // own words, and a quote cannot land in it.
+        let retold = tool
+            .execute(
+                json!({
+                    "content": "my retelling of the page",
+                    "url": "https://example.test/borrowing-retold",
+                    "extracted_text": "The work to remove the old borrow checker went on for years.",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retold["searchable"], true);
+        assert_eq!(retold["citable"], false);
+        let retold_id: Uuid = retold["observation_id"].as_str().unwrap().parse().unwrap();
+        let refused = storage
+            .add_citation(NewKnowledgeCitation {
+                topic_id: topic.id,
+                observation_id: retold_id,
+                derivation_version: retold["version"].as_u64().unwrap() as u32,
+                quoted_text: "went on for years".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("not citable"));
+
+        // A reference from another conversation is not a capture source.
+        let other_session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let other_thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: other_session.id,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let other_turn = storage
+            .create_turn(NewTurn {
+                thread_id: other_thread.id,
+                agent_id: "gateway".into(),
+                state: TurnState::Completed,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let foreign = swage_core::tool_result_reference(&other_turn.id.to_string(), "fetch-1");
+        let unavailable = tool
+            .execute(json!({"fetch_call": foreign}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(unavailable.to_string().contains("not available"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

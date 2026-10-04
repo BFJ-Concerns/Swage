@@ -53,47 +53,7 @@ impl Tool for ToolResultReadTool {
                 name: self.name().to_owned(),
                 message: "reference must be a non-empty string".to_owned(),
             })?;
-        let parsed =
-            parse_tool_result_reference(reference).ok_or_else(|| ToolError::InvalidParameters {
-                name: self.name().to_owned(),
-                message: "reference must be a compact tool-result reference".to_owned(),
-            })?;
-        let current_turn_id = ctx.turn_id().ok_or_else(|| ToolError::ExecutionFailed {
-            name: self.name().to_owned(),
-            message: "tool_result_read requires a turn ID".to_owned(),
-        })?;
-        let gateway_ctx = super::require_gateway_context(
-            ctx,
-            self.name(),
-            "tool_result_read requires gateway execution context",
-        )?;
-
-        let current_turn = gateway_ctx
-            .storage()
-            .get_turn(current_turn_id)
-            .await
-            .map_err(storage_error(self.name()))?
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!("Turn {current_turn_id} was not found"),
-            })?;
-        let referenced_turn = gateway_ctx
-            .storage()
-            .get_turn(parsed.turn_id)
-            .await
-            .map_err(storage_error(self.name()))?
-            .ok_or_else(|| unavailable_reference(self.name()))?;
-
-        if referenced_turn.thread_id != current_turn.thread_id {
-            return Err(unavailable_reference(self.name()));
-        }
-
-        let call = gateway_ctx
-            .storage()
-            .get_tool_call_by_turn_and_call_id(parsed.turn_id, &parsed.call_id)
-            .await
-            .map_err(storage_error(self.name()))?
-            .ok_or_else(|| unavailable_reference(self.name()))?;
+        let call = stored_tool_call_in_current_thread(ctx, self.name(), reference).await?;
         let result = call
             .result
             .as_deref()
@@ -113,6 +73,58 @@ impl Tool for ToolResultReadTool {
         object.insert("bytes".to_string(), json!(result.len()));
         Ok(value)
     }
+}
+
+/// Resolve a stored tool-call reference (`tool_call:<turn>:<call>:result`)
+/// to the call it names, provided the call's turn belongs to the current
+/// turn's thread. A reference from another conversation, a malformed one and
+/// a missing call all read as unavailable — nothing leaks which it was.
+pub(crate) async fn stored_tool_call_in_current_thread(
+    ctx: &dyn ToolContext,
+    tool_name: &str,
+    reference: &str,
+) -> Result<swage_storage::ToolCallRecord, ToolError> {
+    let parsed =
+        parse_tool_result_reference(reference).ok_or_else(|| ToolError::InvalidParameters {
+            name: tool_name.to_owned(),
+            message: "reference must be a compact tool-result reference".to_owned(),
+        })?;
+    let current_turn_id = ctx.turn_id().ok_or_else(|| ToolError::ExecutionFailed {
+        name: tool_name.to_owned(),
+        message: format!("{tool_name} requires a turn ID"),
+    })?;
+    let gateway_ctx = super::require_gateway_context(
+        ctx,
+        tool_name,
+        "reading a stored tool result requires gateway execution context",
+    )?;
+
+    let current_turn = gateway_ctx
+        .storage()
+        .get_turn(current_turn_id)
+        .await
+        .map_err(storage_error(tool_name))?
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!("Turn {current_turn_id} was not found"),
+        })?;
+    let referenced_turn = gateway_ctx
+        .storage()
+        .get_turn(parsed.turn_id)
+        .await
+        .map_err(storage_error(tool_name))?
+        .ok_or_else(|| unavailable_reference(tool_name))?;
+
+    if referenced_turn.thread_id != current_turn.thread_id {
+        return Err(unavailable_reference(tool_name));
+    }
+
+    gateway_ctx
+        .storage()
+        .get_tool_call_by_turn_and_call_id(parsed.turn_id, &parsed.call_id)
+        .await
+        .map_err(storage_error(tool_name))?
+        .ok_or_else(|| unavailable_reference(tool_name))
 }
 
 fn unavailable_reference(name: &str) -> ToolError {
