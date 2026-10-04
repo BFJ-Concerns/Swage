@@ -1205,8 +1205,11 @@ async fn native_file_fixture(
     (context, strategy)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn native_file_write_respects_attachment_access_on_local_and_sandboxed_turns() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
     use swage_gateway::tool::file_write::FileWriteTool;
     use swage_tool::dispatch::ToolExecutionStrategy;
     for sandboxed in [false, true] {
@@ -1248,8 +1251,11 @@ async fn native_file_write_respects_attachment_access_on_local_and_sandboxed_tur
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn native_file_edit_respects_attachment_access_on_local_and_sandboxed_turns() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
     use swage_gateway::tool::file_edit::FileEditTool;
     use swage_tool::dispatch::ToolExecutionStrategy;
     for sandboxed in [false, true] {
@@ -1321,8 +1327,11 @@ async fn native_file_mutations_without_attachment_authority_refuse() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn native_file_mutations_refuse_read_only_targets_before_remote_dispatch() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
     use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
     use swage_tool::dispatch::ToolExecutionStrategy;
     let root = tempfile::tempdir().unwrap();

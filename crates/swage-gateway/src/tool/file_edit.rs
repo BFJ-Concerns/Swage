@@ -657,7 +657,7 @@ mod tests {
         })
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn replaces_unique_text() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("note.txt"), "alpha beta gamma").unwrap();
@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(val["files"][0]["replacements"], json!(1));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn replace_all_replaces_every_match() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("note.txt"), "one fish, one dish").unwrap();
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(val["files"][0]["replacements"], json!(2));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn replace_rejects_ambiguous_text_without_replace_all() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("note.txt"), "one fish, one dish").unwrap();
@@ -739,7 +739,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn replace_section_requires_current_old_text() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -772,7 +772,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn replace_section_preserves_heading_for_body_only_replacement() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -803,7 +803,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn append_to_section_requires_current_old_text() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("note.md"), "# Note\n\n## Plan\n\nOld plan.").unwrap();
@@ -830,7 +830,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn invalid_second_file_does_not_write_first_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.txt"), "old a").unwrap();
@@ -874,7 +874,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn absolute_path_in_allowed_root_can_be_edited() {
         let workspace = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), "outside new");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn absolute_path_outside_allowed_roots_requests_write_approval() {
         let workspace = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).unwrap(), "outside old");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_binary_files() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("data.bin"), b"\x00\x01\x02").unwrap();
@@ -959,7 +959,7 @@ mod tests {
         assert!(err.to_string().contains("binary"), "got: {err}");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn returns_error_for_missing_changes() {
         let dir = TempDir::new().unwrap();
         let err = tool().execute(json!({}), &ctx(&dir)).await.unwrap_err();
