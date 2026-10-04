@@ -371,8 +371,9 @@ delivered up to a sequence number, preventing them from triggering future gates.
 the question and the verdicts it accepts — at least two distinct strings; a
 hold with fewer is refused at raise and never reaches a decider. The hold is
 registered on the run: the run page lists it, and an agent granted the
-`workflow_hold` tool lists the open holds it can see and answers one with a
-verdict from its set, the answering session recorded. An answer outside the
+`workflow_hold` tool lists the open holds in its topic (`action: "list"`) and
+answers one (`action: "answer"` with the `hold_id` and a `verdict` from the
+set), the answering session recorded; the script names no decider. An answer outside the
 set is refused with feedback and the hold keeps waiting. The run resumes with
 `{ verdict }`; cancelling the run releases its holds. The raise, the answer
 and each refused answer are journalled, and a replayed `hold` returns its

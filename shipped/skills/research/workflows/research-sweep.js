@@ -140,9 +140,11 @@ const gathered = await pipeline(
         `fetch_call and nothing else: the platform keeps the bytes it ` +
         `fetched and derives the citable text, so never retype the body or ` +
         `the text yourself. A source you could only read through the ` +
-        `browser is recorded with content and its url, and is searchable ` +
-        `but not citable. If the source is unreachable or empty, do not ` +
-        `invent a substitute - report the failure. Return JSON only.`,
+        `browser is recorded with knowledge_record's content (the page's ` +
+        `text as the browser showed it) and its url, nothing else; it is ` +
+        `searchable but not citable. If the source is unreachable or ` +
+        `empty, do not invent a substitute - report the failure with ` +
+        `recorded false and observation_id null. Return JSON only.`,
       {
         tools: researcherTools,
         label: `Gather ${source.url}`,

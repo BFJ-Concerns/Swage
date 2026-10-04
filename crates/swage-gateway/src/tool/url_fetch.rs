@@ -54,7 +54,7 @@ impl Tool for UrlFetchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering. The bytes as fetched are kept on disk and the result names them; to capture the source into the knowledge base, pass the result's capture reference to knowledge_record as fetch_call rather than retyping its content — the platform records the bytes it fetched and derives the citable text from them."
+        "Fetch a URL and return its content as readable text. HTML is converted to plain text. Static content only — no JavaScript rendering. The bytes as fetched are kept on disk and the result names them; to capture the source into the knowledge base, pass the result's capture reference (carried whenever the fetch ran inside a conversation turn) to knowledge_record as fetch_call rather than retyping its content — the platform records the bytes it fetched and derives the citable text from them."
     }
 
     fn parameters(&self) -> Value {
