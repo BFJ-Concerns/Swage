@@ -214,3 +214,79 @@ async fn fallback_sandbox_real_binary_rejects_oversized_ipc_payloads() {
 
     sandbox.shutdown().await.unwrap();
 }
+
+/// Start a shell command that appends to a marker file every 200 ms, abandon
+/// the call as a cancelled turn does (by dropping its future), then require
+/// the marker to stop growing and the sandbox to serve the next call.
+async fn assert_abandoned_shell_command_stops(sandbox: &dyn Sandbox, workspace: &std::path::Path) {
+    let marker = workspace.join("marker");
+    let abandoned = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sandbox.execute_tool(
+            "shell",
+            json!({ "command": "while true; do date +%s%N >> marker; sleep 0.2; done" }),
+        ),
+    )
+    .await;
+    assert!(
+        abandoned.is_err(),
+        "the looping command must still be running when abandoned"
+    );
+    assert!(
+        marker.exists(),
+        "the command must have started before it was abandoned"
+    );
+
+    // Allow the cancel to reach the agent and the process group to die.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let settled_len = std::fs::metadata(&marker).unwrap().len();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        std::fs::metadata(&marker).unwrap().len(),
+        settled_len,
+        "the abandoned command must stop appending to its marker"
+    );
+
+    let next = sandbox
+        .execute_tool("shell", json!({ "command": "printf after-cancel" }))
+        .await
+        .expect("the sandbox must serve the call after a cancelled one");
+    assert!(
+        next.output["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("after-cancel")),
+        "the next call must receive its own result, got: {}",
+        next.output
+    );
+}
+
+#[tokio::test]
+async fn bubblewrap_sandbox_real_binary_stops_abandoned_shell_command() {
+    if find_bwrap().is_err() {
+        eprintln!("skipping real bubblewrap integration test: bwrap is not installed");
+        return;
+    }
+
+    let mut env_guard = ProcessEnvGuard::new();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut sandbox = BubblewrapSandbox::new(test_config(&temp_dir), test_llm_handler());
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    sandbox.spawn_agent().await.unwrap();
+
+    assert_abandoned_shell_command_stops(&sandbox, temp_dir.path()).await;
+
+    sandbox.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fallback_sandbox_real_binary_stops_abandoned_shell_command() {
+    let mut env_guard = ProcessEnvGuard::new();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut sandbox = FallbackSandbox::new(test_config(&temp_dir), test_llm_handler());
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    sandbox.spawn_agent().await.unwrap();
+
+    assert_abandoned_shell_command_stops(&sandbox, temp_dir.path()).await;
+
+    sandbox.shutdown().await.unwrap();
+}

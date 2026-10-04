@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde_json::Value;
-use swage_core::SandboxError;
+use swage_core::{SandboxError, ToolError};
 use swage_tool::context::{ToolContext, UserInfo};
 use swage_tool::tool::Tool;
 use tokio::net::UnixStream;
@@ -129,15 +129,20 @@ pub(crate) async fn run_loop(
                 match tool_map.get(&tool_name) {
                     Some(tool) => {
                         let start = Instant::now();
-                        let result = tool.execute(parameters, &ctx).await;
+                        let outcome = execute_until_cancelled(
+                            &mut conn,
+                            &request_id,
+                            tool.execute(parameters, &ctx),
+                        )
+                        .await?;
                         let duration_ms = start.elapsed().as_millis() as u64;
 
-                        match result {
-                            Ok(output) => {
+                        match outcome {
+                            ToolOutcome::Finished(Ok(output)) => {
                                 conn.send_tool_result(request_id, output, duration_ms, None)
                                     .await?;
                             }
-                            Err(e) => {
+                            ToolOutcome::Finished(Err(e)) => {
                                 // Tool ran but errored — send a result with the error
                                 // field set so the host can surface the failure.
                                 conn.send_tool_result(
@@ -147,6 +152,19 @@ pub(crate) async fn run_loop(
                                     Some(e.to_string()),
                                 )
                                 .await?;
+                            }
+                            ToolOutcome::Cancelled => {
+                                conn.send_tool_result(
+                                    request_id,
+                                    Value::Null,
+                                    duration_ms,
+                                    Some("tool call cancelled".into()),
+                                )
+                                .await?;
+                            }
+                            ToolOutcome::ShutdownRequested => {
+                                conn.send_shutdown_ack().await?;
+                                break;
                             }
                         }
                     }
@@ -166,6 +184,9 @@ pub(crate) async fn run_loop(
                 break;
             }
 
+            // The call it names already finished; its result is on its way.
+            IpcMessage::ToolCallCancel { .. } => {}
+
             // Any other variant (Ready, ShutdownAck, LlmRequest, etc.) is
             // unexpected in the inbound direction — report it and continue.
             unexpected => {
@@ -180,6 +201,47 @@ pub(crate) async fn run_loop(
     }
 
     Ok(())
+}
+
+/// How a tool execution ended.
+enum ToolOutcome {
+    Finished(Result<Value, ToolError>),
+    /// The host cancelled the call; the execution was dropped.
+    Cancelled,
+    /// The host asked the agent to exit; the execution was dropped.
+    ShutdownRequested,
+}
+
+/// Drive `execution` while still reading the host's messages, so a cancel for
+/// `request_id` can stop it. Dropping the execution stops whatever it started —
+/// the shell tool kills its command's process group on drop.
+async fn execute_until_cancelled(
+    conn: &mut AgentConnection,
+    request_id: &str,
+    execution: impl Future<Output = Result<Value, ToolError>>,
+) -> Result<ToolOutcome, SandboxError> {
+    tokio::pin!(execution);
+    loop {
+        tokio::select! {
+            result = &mut execution => return Ok(ToolOutcome::Finished(result)),
+            message = conn.receive_message() => match message? {
+                IpcMessage::ToolCallCancel { request_id: cancelled } if cancelled == request_id => {
+                    return Ok(ToolOutcome::Cancelled);
+                }
+                // A cancel for an earlier call that has already been answered.
+                IpcMessage::ToolCallCancel { .. } => {}
+                IpcMessage::Shutdown => return Ok(ToolOutcome::ShutdownRequested),
+                unexpected => {
+                    conn.send_error(
+                        None,
+                        ErrorCategory::Protocol,
+                        format!("unexpected message during tool execution: {unexpected:?}"),
+                    )
+                    .await?;
+                }
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +287,10 @@ mod tests {
     use swage_tool::context::ToolContext;
     use swage_tool::tool::Tool;
     use tokio::net::UnixStream;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use super::run_loop;
     use crate::ipc::agent::AgentConnection;
@@ -286,6 +352,41 @@ mod tests {
         }
     }
 
+    /// Tool that never finishes on its own and records when its execution is
+    /// dropped — the moment a real tool's processes would be stopped.
+    struct HangingTool {
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct SetOnDrop(Arc<AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl Tool for HangingTool {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn description(&self) -> &str {
+            "Never returns."
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: Value,
+            _ctx: &dyn ToolContext,
+        ) -> Result<Value, ToolError> {
+            let _running = SetOnDrop(Arc::clone(&self.dropped));
+            std::future::pending().await
+        }
+    }
+
     // -- Tests ----------------------------------------------------------------
 
     #[tokio::test]
@@ -303,6 +404,56 @@ mod tests {
         let ack = host.receive().await.unwrap();
         assert!(matches!(ack, IpcMessage::ShutdownAck));
 
+        loop_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn loop_cancel_drops_running_tool_and_answers_cancelled() {
+        let (conn, mut host) = make_connection_pair();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let tool = HangingTool {
+            dropped: Arc::clone(&dropped),
+        };
+        let loop_handle = tokio::spawn(async move { run_loop(conn, vec![Box::new(tool)]).await });
+        let _ = host.receive().await.unwrap();
+
+        host.send(&IpcMessage::ToolCallRequest {
+            request_id: "req-hang".into(),
+            tool_name: "hang".into(),
+            parameters: json!({}),
+        })
+        .await
+        .unwrap();
+        host.send(&IpcMessage::ToolCallCancel {
+            request_id: "req-hang".into(),
+        })
+        .await
+        .unwrap();
+
+        let reply = host
+            .receive_timeout(Duration::from_secs(5))
+            .await
+            .expect("a cancelled call must be answered promptly");
+        match reply {
+            IpcMessage::ToolCallResult {
+                request_id, error, ..
+            } => {
+                assert_eq!(request_id, "req-hang");
+                assert_eq!(error.as_deref(), Some("tool call cancelled"));
+            }
+            other => panic!("expected ToolCallResult, got {other:?}"),
+        }
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the running execution must be dropped so its processes stop"
+        );
+
+        // The loop keeps serving after a cancel.
+        host.send(&IpcMessage::Shutdown).await.unwrap();
+        assert!(matches!(
+            host.receive().await.unwrap(),
+            IpcMessage::ShutdownAck
+        ));
         loop_handle.await.unwrap().unwrap();
     }
 
