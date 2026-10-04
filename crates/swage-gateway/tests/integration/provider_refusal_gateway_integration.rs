@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{Router, extract::State, http::header, routing::post};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use swage_gateway::{server::build_router, state::AppState, tool::ToolDispatcher};
 use swage_provider::{
@@ -13,7 +14,7 @@ use swage_provider::{
 };
 use swage_storage::{SqliteStorage, Storage, TopicStore};
 
-use crate::support::{ProcessEnvGuard, start_live_server};
+use crate::support::{ProcessEnvGuard, start_live_server, ws_recv_lenient};
 
 // Supply provider wire events, never a turn state or a conversation message.
 fn response(reason: &str, text: &str) -> String {
@@ -114,6 +115,12 @@ async fn account_for_response(
         .await
         .unwrap();
     let conversation_id = conversation["id"].as_str().unwrap();
+    let (socket, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/api/conversations/{conversation_id}/ws"
+    ))
+    .await
+    .unwrap();
+    let (_socket_sink, mut socket_stream) = socket.split();
     let submitted: Value = client.post(format!("{base}/api/turns")).json(&json!({"conversation_id":conversation_id,"message":"Read a harmless file.","output_schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     let turn_id = submitted["turn_id"].as_str().unwrap();
     let turn = wait_for_turn(&client, &base, turn_id).await;
@@ -209,7 +216,24 @@ async fn account_for_response(
             announced = true;
         }
     }
-    assert!(announced, "the recorded account must also reach open views");
+    assert!(announced, "the recorded account must be broadcast");
+    let received = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = ws_recv_lenient(&mut socket_stream).await {
+            if event["type"] == "message_appended" {
+                return Some(event);
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+    let received = received.expect("the conversation socket must receive the recorded account");
+    assert_eq!(received["session_id"], conversation_id);
+    assert_eq!(
+        received["message"], *notice,
+        "the socket carries the complete recorded view without a refetch"
+    );
     assert_eq!(
         rounds.lock().unwrap().len(),
         1,

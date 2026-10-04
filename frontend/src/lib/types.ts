@@ -224,7 +224,7 @@ export const KNOWN_SERVER_EVENT_TYPES = [
   "workflow_entry_completed", "workflow_run_completed", "error", "cancelled",
   "shutdown", "skill_activated", "skill_already_active", "skill_deactivated",
   "approval_required", "approval_confirmed", "approval_expired",
-  "approval_decision_error",
+  "approval_decision_error", "message_appended",
 ] as const satisfies readonly KnownServerEventType[];
 
 export type UnknownServerEvent = Extract<WireServerEvent, { type: "unknown" }>;
