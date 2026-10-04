@@ -33,9 +33,9 @@
     changed();
   }}/> Enable web search</label>
   {#if settings.tool_runtime.search}
-    <label>Provider type<input type="text" class="text" aria-label="Search provider type" bind:value={settings.tool_runtime.search.provider_type} oninput={changed} autocomplete="off" placeholder="searxng"/></label>
-    <small>Supported provider: searxng.</small>
-    <label>Base URL<input type="url" class="text" aria-label="Search base URL" bind:value={settings.tool_runtime.search.base_url} oninput={changed} autocomplete="off" placeholder="https://search.example.org"/></label>
+    <label>Provider type (required)<input type="text" class="text" aria-label="Search provider type" bind:value={settings.tool_runtime.search.provider_type} oninput={changed} autocomplete="off" placeholder="searxng" required/></label>
+    <small>Supported provider: searxng. Changes are saved once both required fields are filled.</small>
+    <label>Base URL (required)<input type="url" class="text" aria-label="Search base URL" bind:value={settings.tool_runtime.search.base_url} oninput={changed} autocomplete="off" placeholder="https://search.example.org" required/></label>
   {/if}
 </div></div>
 <div class="field"><div class="key">Sandbox<small>Global sandbox policy written to config.toml. Saved changes require a gateway restart.</small></div><div class="val"><button type="button" class="opt" class:active={settings.sandbox.enabled} onclick={() => {settings.sandbox.enabled=true;changed();}}>Enabled</button><button type="button" class="opt" class:active={!settings.sandbox.enabled} onclick={() => {settings.sandbox.enabled=false;changed();}}>Disabled</button></div></div>

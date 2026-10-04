@@ -132,6 +132,8 @@
     if (!settings) return false;
     error = null;
     status = "";
+    const search = settings.tool_runtime.search;
+    if (search && (!search.provider_type.trim() || !search.base_url.trim())) return false;
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
       error = "Fix the invalid automation JSON before saving.";
       return false;
