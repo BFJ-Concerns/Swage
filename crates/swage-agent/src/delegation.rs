@@ -580,6 +580,9 @@ impl DelegationExecutor {
                     "input_tokens": outbound.input_tokens,
                     "output_tokens": outbound.output_tokens,
                 });
+                if let Some(reason) = &outbound.incomplete_reason {
+                    result_payload["incomplete_reason"] = reason.clone().into();
+                }
                 if let Some(ref structured) = outbound.structured_output {
                     result_payload["structured_output"] = structured.clone();
                 }

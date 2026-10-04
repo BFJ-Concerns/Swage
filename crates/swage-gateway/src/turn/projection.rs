@@ -424,6 +424,8 @@ pub(super) async fn project_agent_events(
             }
             AgentEvent::TurnCompleted {
                 turn_id,
+                incomplete_reason,
+                incomplete_account,
                 input_tokens,
                 output_tokens,
                 structured_output,
@@ -491,7 +493,22 @@ pub(super) async fn project_agent_events(
                     }
                 }
 
+                if let Some(account) = incomplete_account {
+                    match crate::service::message_view(
+                        account,
+                        Some(swage_protocol::client::conversation::TurnState::Incomplete),
+                        Vec::new(),
+                    ) {
+                        Ok(view) => {
+                            crate::service::announce_appended_message(state, session_id, view)
+                        }
+                        Err(error) => {
+                            record_integrity_lost.get_or_insert(error.to_string());
+                        }
+                    }
+                }
                 let _ = ws_tx.send(ServerEvent::TurnComplete {
+                    incomplete_reason,
                     turn_id,
                     input_tokens: ws_input,
                     output_tokens: ws_output,
@@ -533,10 +550,12 @@ pub(super) async fn project_agent_events(
                 });
             }
             AgentEvent::DelegationCompleted {
+                incomplete_reason,
                 target_agent_id,
                 success,
             } => {
                 let _ = ws_tx.send(ServerEvent::DelegationCompleted {
+                    incomplete_reason,
                     parent_turn_id: turn_id.unwrap_or(prepared_turn_id),
                     child_turn_id: None,
                     target_agent_id,

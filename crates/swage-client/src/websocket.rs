@@ -288,6 +288,7 @@ mod tests {
             output_tokens,
             cost_microcents,
             structured_output,
+            ..
         } = event
         else {
             panic!("expected TurnComplete variant");
@@ -454,6 +455,7 @@ mod tests {
             child_turn_id: child,
             target_agent_id,
             success,
+            ..
         } = event
         else {
             panic!("expected DelegationCompleted");
@@ -476,6 +478,7 @@ mod tests {
             child_turn_id: child,
             target_agent_id,
             success,
+            ..
         } = event
         else {
             panic!("expected DelegationCompleted");
