@@ -188,6 +188,22 @@ describe("turn context inspector trigger", () => {
     }
   });
 
+  it("retries every person input in a drained refused turn in recorded order", async () => {
+    const messages: MessageView[] = [
+      { role: "user", origin: "user", content: "Unrelated request", timestamp: "2026-10-04T19:00:00Z", turn_id: "older-turn" },
+      { role: "user", origin: "user", content: "Inspect the files.", timestamp: "2026-10-04T20:00:00Z", turn_id: "refused-turn" },
+      { role: "user", origin: "user", content: "Include their sizes.", timestamp: "2026-10-04T20:00:01Z", turn_id: "refused-turn" },
+      { role: "user", origin: "platform", content: "The model refused this request.", timestamp: "2026-10-04T20:00:02Z", turn_id: "refused-turn", turn_state: "refused" },
+    ];
+    const streaming = makeStreamingStore();
+    streaming.startTurn = vi.fn();
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore(messages), streamingStore: streaming } });
+    const retry = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === "Retry request");
+    expect(retry).toBeDefined();
+    retry!.click();
+    expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith("Inspect the files.\n\nInclude their sizes.");
+  });
+
   it("switches the shared inspector when two completed turns are opened in sequence", async () => {
     vi.mocked(fetchTurnContext).mockImplementation(async (turnId) => ({
       assembly_name: "balanced",

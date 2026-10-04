@@ -12,7 +12,7 @@ use swage_provider::{
     provider::ProviderConfig,
     retry::{RetryConfig, RetryProvider},
 };
-use swage_storage::{SqliteStorage, Storage, TopicStore};
+use swage_storage::{SqliteStorage, Storage, ToolCallStore, TopicStore};
 
 use crate::support::{ProcessEnvGuard, start_live_server, ws_recv_lenient};
 
@@ -54,19 +54,33 @@ async fn serve_response(
     )
 }
 
+fn tool_response() -> String {
+    [
+        ("message_start", json!({"type":"message_start","message":{"usage":{"input_tokens":17,"output_tokens":0}}})),
+        ("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"saved-task","name":"session_values","input":{}}})),
+        ("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json": "{\"action\":\"set\",\"name\":\"task\",\"value\":\"inspect storage\"}"}})),
+        ("content_block_stop", json!({"type":"content_block_stop","index":0})),
+        ("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":12}})),
+        ("message_stop", json!({"type":"message_stop"})),
+    ].into_iter().map(|(name, data)| format!("event: {name}\ndata: {data}\n\n")).collect()
+}
+
 async fn account_for_response(
     reason: &str,
     text: &str,
     expected_state: &str,
     expected_notice: &str,
     attempts: usize,
+    tools_first: bool,
 ) {
     let root = tempfile::tempdir().unwrap();
     let mut environment = ProcessEnvGuard::new();
     environment.set_swage_home(root.path());
     let rounds = Arc::new(Mutex::new(
-        (0..attempts)
-            .map(|_| response(reason, text))
+        tools_first
+            .then(tool_response)
+            .into_iter()
+            .chain((0..attempts).map(|_| response(reason, text)))
             .chain([response(
                 "end_turn",
                 "{\"answer\":\"Benign follow-up completed.\"}",
@@ -97,7 +111,9 @@ async fn account_for_response(
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
-        ToolDispatcher::allow_all(vec![]),
+        ToolDispatcher::allow_all(vec![Arc::new(
+            swage_gateway::tool::session_variable::SessionVariableTool,
+        ) as Arc<dyn swage_gateway::tool::Tool>]),
         None,
     );
     let mut announcements = state.broadcast.subscribe();
@@ -167,6 +183,37 @@ async fn account_for_response(
     })
     .await
     .unwrap();
+    if tools_first {
+        let records = storage
+            .list_tool_calls_by_turn(turn_id.parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1, "the earlier tool round must be recorded");
+        assert_eq!(
+            records[0].status.as_deref(),
+            Some("success"),
+            "the earlier tool effect must succeed"
+        );
+        let projected = detail["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .flat_map(|message| message["tool_calls"].as_array().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            projected.len(),
+            1,
+            "reloaded conversation must retain earlier tool effects: {detail}"
+        );
+        assert_eq!(projected[0]["call_id"], "saved-task");
+        assert_eq!(projected[0]["status"], "success");
+        assert_eq!(projected[0]["arguments"]["value"], "inspect storage");
+        assert!(
+            !projected[0]["result"].is_null(),
+            "the result remains visible"
+        );
+    }
     let notice = detail["messages"]
         .as_array()
         .unwrap()
@@ -256,6 +303,15 @@ async fn account_for_response(
             .is_empty(),
         "the sidebar must remain non-blank immediately after the abnormal turn: {summary}"
     );
+    assert_eq!(
+        summary["message_preview"],
+        if text.is_empty() {
+            "Read a harmless file."
+        } else {
+            text
+        },
+        "a terminal platform account must preserve the person's preview"
+    );
     let snapshot: Value = client
         .get(format!("{base}/api/turns/{turn_id}/context"))
         .send()
@@ -321,6 +377,7 @@ async fn explicit_refusal_has_a_durable_and_announced_account() {
         "refused",
         "The model refused this request",
         1,
+        false,
     )
     .await;
 }
@@ -333,11 +390,38 @@ async fn explicit_refusal_preserves_the_models_text_and_account() {
         "refused",
         "The model refused this request",
         1,
+        false,
     )
     .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn exhausted_empty_response_has_an_anomaly_account_after_retry() {
-    account_for_response("end_turn", "", "failed", "empty provider response", 2).await;
+    account_for_response(
+        "end_turn",
+        "",
+        "failed",
+        "empty provider response",
+        2,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_round_then_refusal_retains_calls_after_reload() {
+    account_for_response(
+        "refusal",
+        "",
+        "refused",
+        "The model refused this request",
+        1,
+        true,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_round_then_empty_response_retains_calls_after_reload() {
+    account_for_response("end_turn", "", "failed", "empty provider response", 2, true).await;
 }

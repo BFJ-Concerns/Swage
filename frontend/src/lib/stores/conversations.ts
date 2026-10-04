@@ -151,6 +151,7 @@ export function createConversationStore(): ConversationStore {
       content: string;
       timestamp: string;
       turn_state: MessageView["turn_state"];
+      origin?: MessageView["origin"];
     },
   ): void {
     const conversations = get(conversationsStore);
@@ -160,7 +161,7 @@ export function createConversationStore(): ConversationStore {
     const nextSummary: ConversationSummary = {
       ...updatedSummary,
       last_activity: message.timestamp,
-      ...(message.content ? { message_preview: message.content } : {}),
+      ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
       has_interrupted_turn:
         updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
     };

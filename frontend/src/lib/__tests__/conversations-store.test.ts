@@ -502,6 +502,23 @@ describe("durable local updates", () => {
     expect(store.conversations[0].id).toBe("conv-2");
   });
 
+  it("installs a platform refusal account without replacing the session preview", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      { ...makeSummary("conv-1"), message_preview: "Read README.md" },
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    store.appendRecordedMessage({
+      id: "refusal-notice", thread_id: "thread-1", turn_id: "refused-turn",
+      role: "user", origin: "platform", content: "The model refused this request.",
+      timestamp: "2026-01-01T00:01:00Z", turn_state: "refused", tool_calls: [],
+    }, "conv-1");
+    expect(store.activeConversation!.messages.at(-1)?.content).toBe("The model refused this request.");
+    expect(store.conversations[0].message_preview, "platform accounts must preserve the person's preview").toBe("Read README.md");
+  });
+
   it("preserves the existing preview for a tool-only assistant message", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
