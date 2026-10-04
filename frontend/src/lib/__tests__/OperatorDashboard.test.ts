@@ -10,6 +10,7 @@ import { makeSchedule } from "./fixtures/schedules";
 type MountedComponent = ReturnType<typeof mount>;
 
 vi.mock("../api/operator", () => ({
+  fetchAuditEvents: vi.fn(async () => ({ events: [], next_before: null })),
   fetchOperatorOverview: vi.fn(),
   fetchOperatorHistory: vi.fn(),
   fetchScheduleRuns: vi.fn(),

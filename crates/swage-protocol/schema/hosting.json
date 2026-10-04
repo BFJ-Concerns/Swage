@@ -24,6 +24,9 @@
     "approvals": {
       "$ref": "#/$defs/ApprovalListResponse"
     },
+    "audit_events": {
+      "$ref": "#/$defs/AuditEventListResponse"
+    },
     "devices": {
       "$ref": "#/$defs/DeviceListResponse"
     },
@@ -49,6 +52,7 @@
     "approval_decision",
     "operator_overview",
     "operator_history",
+    "audit_events",
     "agent_definition_scope",
     "agent_definition_list",
     "effective_agent_definition_list",
@@ -296,6 +300,70 @@
         "topic_id",
         "recorded_at",
         "assembly_name"
+      ]
+    },
+    "AuditEventListResponse": {
+      "description": "A page of the audit record, newest first, under the filters the request\nnamed. `next_before` is the cursor for the page after this one — absent\nwhen this page ends the record.",
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuditEventView"
+          }
+        },
+        "next_before": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "events"
+      ]
+    },
+    "AuditEventView": {
+      "description": "One event of the local audit record, as recorded.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "entity_id": {
+          "type": "string"
+        },
+        "entity_kind": {
+          "type": "string"
+        },
+        "event_kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "metadata": true,
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "entity_kind",
+        "entity_id",
+        "event_kind",
+        "summary",
+        "metadata",
+        "created_at"
       ]
     },
     "ChannelStatusListResponse": {

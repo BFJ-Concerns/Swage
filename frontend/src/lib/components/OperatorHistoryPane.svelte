@@ -1,18 +1,68 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { fetchOperatorHistory } from "../api/operator";
+  import { fetchAuditEvents, fetchOperatorHistory } from "../api/operator";
   import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
+  import type { AuditEventView } from "../protocol/AuditEventView";
   import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   let history = $state<OperatorHistoryResponse | null>(null);
   let errorMessage = $state<string | null>(null);
   let inspectorTarget: HTMLDivElement | undefined = $state();
 
+  // The audit record itself: every event kind the record holds, read by
+  // the filters the operator sets and paged older through the cursor.
+  const AUDIT_PAGE = 50;
+  let auditSessionId = $state("");
+  let auditEntityKind = $state("");
+  let auditEntityId = $state("");
+  let auditEventKind = $state("");
+  let auditEvents = $state<AuditEventView[]>([]);
+  let auditNextBefore = $state<string | null>(null);
+  let auditError = $state<string | null>(null);
+  let auditLoaded = $state(false);
+
   function formatState(state: unknown): string {
     return JSON.stringify(state, null, 2);
   }
 
+  function auditFilter(before?: string) {
+    return {
+      sessionId: auditSessionId.trim() || undefined,
+      entityKind: auditEntityKind.trim() || undefined,
+      entityId: auditEntityId.trim() || undefined,
+      eventKind: auditEventKind.trim() || undefined,
+      before,
+      limit: AUDIT_PAGE,
+    };
+  }
+
+  async function loadAudit(): Promise<void> {
+    auditError = null;
+    try {
+      const page = await fetchAuditEvents(auditFilter());
+      auditEvents = page.events;
+      auditNextBefore = page.next_before ?? null;
+    } catch (error) {
+      auditError = error instanceof Error ? error.message : "Failed to load the audit record";
+    } finally {
+      auditLoaded = true;
+    }
+  }
+
+  async function loadOlderAudit(): Promise<void> {
+    if (!auditNextBefore) return;
+    auditError = null;
+    try {
+      const page = await fetchAuditEvents(auditFilter(auditNextBefore));
+      auditEvents = [...auditEvents, ...page.events];
+      auditNextBefore = page.next_before ?? null;
+    } catch (error) {
+      auditError = error instanceof Error ? error.message : "Failed to load the audit record";
+    }
+  }
+
   onMount(async () => {
+    void loadAudit();
     try {
       history = await fetchOperatorHistory();
     } catch (error) {
@@ -27,6 +77,50 @@
     <h2>Configuration and experiment activity</h2>
     <p>Read-only records from the local audit trail and saved turn context.</p>
   </header>
+
+  <section aria-labelledby="audit-record-heading" class="audit-record">
+    <h3 id="audit-record-heading">Audit record</h3>
+    <form
+      class="audit-filters"
+      aria-label="Audit record filters"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void loadAudit();
+      }}
+    >
+      <label><span>Session</span><input bind:value={auditSessionId} placeholder="session id" /></label>
+      <label><span>Entity kind</span><input bind:value={auditEntityKind} placeholder="turn, surface, settings…" /></label>
+      <label><span>Entity id</span><input bind:value={auditEntityId} placeholder="entity id" /></label>
+      <label><span>Event kind</span><input bind:value={auditEventKind} placeholder="configuration_change…" /></label>
+      <button type="submit">Apply filters</button>
+    </form>
+    {#if auditError}
+      <p class="history-alert" role="alert">{auditError}</p>
+    {:else if !auditLoaded}
+      <p class="history-loading">Loading the audit record…</p>
+    {:else if auditEvents.length === 0}
+      <p class="empty-copy">No events match.</p>
+    {:else}
+      <div class="entries">
+        {#each auditEvents as event (event.id)}
+          <article class="history-entry audit-entry">
+            <div class="entry-heading">
+              <strong>{event.event_kind} · {event.entity_kind} · {event.entity_id}</strong>
+              <time datetime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time>
+            </div>
+            <p>{event.summary} · session <span class="mono">{event.session_id ?? "none"}</span></p>
+            <details>
+              <summary>Recorded detail</summary>
+              <pre>{formatState(event.metadata)}</pre>
+            </details>
+          </article>
+        {/each}
+      </div>
+      {#if auditNextBefore}
+        <button type="button" class="load-older" onclick={() => void loadOlderAudit()}>Load older events</button>
+      {/if}
+    {/if}
+  </section>
 
   {#if errorMessage}
     <p class="history-alert" role="alert">{errorMessage}</p>
@@ -124,6 +218,11 @@
   .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper-deep); padding: 10px; font: 11px/1.45 var(--font-mono); margin: 6px 0 0; }
   .history-alert { color: var(--accent); padding-top: 12px; }
+  .audit-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 10px; }
+  .audit-filters label { display: flex; flex-direction: column; gap: 4px; font: 600 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
+  .audit-filters input { font: 12px var(--font-mono); padding: 4px 6px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); }
+  details summary { font: 600 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; margin-top: 6px; }
+  .load-older { margin-top: 10px; }
   .history-loading, .empty-copy { padding: 12px 0; text-transform: uppercase; letter-spacing: 0.08em; }
   @media (max-width: 760px) { .state-grid { grid-template-columns: 1fr; } }
 </style>

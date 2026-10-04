@@ -5217,6 +5217,47 @@ impl swage_storage::store::AuditStore for MockStorage {
             .cloned()
             .collect())
     }
+
+    async fn list_audit_events_filtered(
+        &self,
+        filter: swage_storage::AuditEventFilter,
+    ) -> Result<Vec<swage_storage::AuditEvent>, StorageError> {
+        let mut events: Vec<_> = self
+            .db
+            .lock()
+            .await
+            .audit_events
+            .iter()
+            .filter(|event| {
+                filter
+                    .session_id
+                    .is_none_or(|id| event.session_id == Some(id))
+            })
+            .filter(|event| {
+                filter
+                    .entity_kind
+                    .as_deref()
+                    .is_none_or(|kind| event.entity_kind == kind)
+            })
+            .filter(|event| {
+                filter
+                    .entity_id
+                    .as_deref()
+                    .is_none_or(|id| event.entity_id == id)
+            })
+            .filter(|event| {
+                filter
+                    .event_kind
+                    .as_deref()
+                    .is_none_or(|kind| event.event_kind == kind)
+            })
+            .filter(|event| filter.before.is_none_or(|before| event.created_at < before))
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        events.truncate(filter.limit);
+        Ok(events)
+    }
 }
 
 #[async_trait]

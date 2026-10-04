@@ -5,10 +5,10 @@ use swage_core::StorageError;
 
 use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMessage, AppendMessage, ApprovalRequest,
-    ApprovalState, Attachment, AttachmentStatus, AuditEvent, BackgroundJob, ChannelInboundMessage,
-    ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord, DeviceRegistration,
-    ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit, LibraryEntry,
-    LibraryEntryModule, LibrarySeeding, Material, Message, ModuleSourceReplacement,
+    ApprovalState, Attachment, AttachmentStatus, AuditEvent, AuditEventFilter, BackgroundJob,
+    ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
+    DeviceRegistration, ExtractionDerivation, InboundAudit, KnowledgeCitation, KnowledgeSearchHit,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message, ModuleSourceReplacement,
     NewAgentDefinition, NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent,
     NewBackgroundJob, NewChannelInboundMessage, NewChannelLink, NewCurationAssertion,
     NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry,
@@ -226,6 +226,12 @@ pub trait AuditStore: Send + Sync {
     async fn list_audit_events_by_session(
         &self,
         session_id: Uuid,
+    ) -> Result<Vec<AuditEvent>, StorageError>;
+    /// One page of the record under a filter, newest first — the read the
+    /// audit surface makes, so reconstruction never needs the database.
+    async fn list_audit_events_filtered(
+        &self,
+        filter: AuditEventFilter,
     ) -> Result<Vec<AuditEvent>, StorageError>;
 }
 
@@ -1891,6 +1897,12 @@ mod tests {
         async fn list_audit_events_by_session(
             &self,
             _: Uuid,
+        ) -> Result<Vec<AuditEvent>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_audit_events_filtered(
+            &self,
+            _: AuditEventFilter,
         ) -> Result<Vec<AuditEvent>, StorageError> {
             unimplemented!()
         }
