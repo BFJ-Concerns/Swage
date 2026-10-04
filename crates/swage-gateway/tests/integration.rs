@@ -84,3 +84,6 @@ mod web_interface_integration;
 mod workflow_integration;
 #[path = "integration/worktree_recovery_gateway_integration.rs"]
 mod worktree_recovery_gateway_integration;
+
+#[path = "integration/provider_refusal_gateway_integration.rs"]
+mod provider_refusal_gateway_integration;

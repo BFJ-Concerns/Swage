@@ -549,6 +549,17 @@ describe("turn_complete", () => {
 // ---------------------------------------------------------------------------
 
 describe("error events", () => {
+  it("keeps a streamed refusal as refused rather than failed", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "I cannot fulfil that request." });
+    store.handleServerEvent({ type: "error", code: "provider_refused", message: "The model refused this request." });
+    const reply = conv.getMessages().find(message => message.role === "assistant");
+    expect(reply?.turn_state).toBe("refused");
+    expect(reply?.content).toBe("I cannot fulfil that request.");
+    expect(store.isStreaming).toBe(false);
+  });
   it("sets isStreaming to false", () => {
     const store = createStreamingStore();
     store.startTurn("question");
