@@ -6561,6 +6561,7 @@
         "pending",
         "processing",
         "completed",
+        "refused",
         "failed",
         "interrupted",
         "awaiting_approval",

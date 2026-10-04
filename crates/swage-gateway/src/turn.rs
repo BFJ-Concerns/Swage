@@ -753,7 +753,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // (turn/projection.rs) until the agent's sender closes.
     let ProjectedTurn {
         turn_id,
-        record_integrity_lost,
+        mut record_integrity_lost,
     } = project_agent_events(
         state,
         TurnProjection {
@@ -773,8 +773,21 @@ pub(super) async fn process_turn_with_composition_and_focus(
     .await;
 
     // Wait for the agent task to finish and surface any panic or error.
+    let mut terminal_account = None;
     match agent_handle.await {
         Ok(Ok(_outbound)) => {}
+        Ok(Err(AgentError::ProviderRefused)) => {
+            terminal_account = Some(
+                "The model refused this request. You can amend your request in the message box or retry it.".to_owned(),
+            );
+        }
+        Ok(Err(AgentError::ProviderFailed(swage_core::ProviderError::ProviderAnomaly(
+            message,
+        )))) => {
+            terminal_account = Some(format!(
+                "The provider could not complete this response: {message}. You can amend your request in the message box or retry it."
+            ));
+        }
         Ok(Err(AgentError::Cancelled)) => {
             // Cancellation is cooperative — the agent already set
             // TurnState::Interrupted and ThreadState::Idle in storage.
@@ -799,6 +812,35 @@ pub(super) async fn process_turn_with_composition_and_focus(
                 code: "internal_error".to_string(),
                 message: "agent task panicked".to_string(),
             });
+        }
+    }
+
+    if let Some(content) = terminal_account {
+        if let Err(error) = crate::service::append_platform_message(
+            state,
+            crate::service::PlatformMessage {
+                session_id,
+                thread_id,
+                turn_id: Some(turn_id.unwrap_or(prepared_turn_id)),
+                agent_id: session.agent_id.clone(),
+                origin: swage_storage::MessageOrigin::Platform,
+                content,
+            },
+        )
+        .await
+        {
+            let account_turn_id = turn_id.unwrap_or(prepared_turn_id);
+            tracing::error!(%error, %account_turn_id, "failed to record the turn's terminal account");
+            let _ = record_durability::record_reconstruction_gap(
+                state.storage.as_ref(),
+                Some(session_id),
+                account_turn_id,
+                "terminal_account",
+                &error,
+            )
+            .await;
+            record_integrity_lost
+                .get_or_insert(format!("terminal account could not be persisted: {error}"));
         }
     }
 
