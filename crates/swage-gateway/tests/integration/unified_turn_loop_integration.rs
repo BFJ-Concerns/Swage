@@ -1073,7 +1073,12 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
         .unwrap();
     let detached: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
     let open_child_id = detached["child_session_id"].as_str().unwrap();
-    let (_child_sink, mut child_stream) = connect_ws(addr, open_child_id).await;
+    let (mut child_sink, mut child_stream) = connect_ws(addr, open_child_id).await;
+    // The upgrade can return before the server installs its broadcast
+    // listener. A refused frame's response proves the receive loop is ready
+    // without starting a child turn or supplying its completion state.
+    ws_send(&mut child_sink, json!({"type": "connection_ready_probe"})).await;
+    let _ = ws_collect_until(&mut child_stream, "error", Duration::from_secs(10)).await;
     child_release.add_permits(1);
     let mut child_events = Vec::new();
     // The child view is connected before its provider can finish. The
