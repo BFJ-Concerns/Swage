@@ -103,7 +103,7 @@ pub fn resolve_context_path(
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
     let working_directory = canonical_existing_root(ctx.working_directory())?;
-    let allowed_roots = context_roots(ctx, false)?;
+    let allowed_roots = context_roots(ctx)?;
 
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
@@ -126,7 +126,7 @@ pub fn resolve_new_context_path(
     requested: &str,
 ) -> Result<ResolvedToolPath, String> {
     let working_directory = canonical_existing_root(ctx.working_directory())?;
-    let allowed_roots = context_roots(ctx, true)?;
+    let allowed_roots = context_roots(ctx)?;
 
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
@@ -524,10 +524,10 @@ fn normalise_path(path: &Path) -> PathBuf {
     stack.iter().collect()
 }
 
-fn context_roots(ctx: &dyn ToolContext, allow_missing: bool) -> Result<Vec<PathBuf>, String> {
+fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
     for path in ctx.allowed_paths() {
-        let root = if allow_missing && !path.exists() {
+        let root = if !path.exists() {
             resolve_existing_prefix(&normalise_path(path), &path.to_string_lossy())?
         } else {
             canonical_existing_root(path)?
@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_root_checker_preserves_workspace_root_wording_at_both_call_sites() {
+    fn context_roots_require_directories_but_allow_missing_grants() {
         let dir = tmp_workspace();
         let tool_root = dir.path().join("not-a-directory");
         std::fs::write(&tool_root, b"").unwrap();
@@ -927,13 +927,11 @@ mod tests {
             call_id: None,
             turn_id: None,
         };
+        let resolved = resolve_context_path(&attachment_context, attachment_root.to_str().unwrap());
         assert!(
-            resolve_context_path(&attachment_context, attachment_root.to_str().unwrap())
-                .unwrap_err()
-                .starts_with(&format!(
-                    "Workspace root is unavailable: {}:",
-                    attachment_root.display()
-                ))
+            resolved.is_ok(),
+            "a missing grant must remain usable: {resolved:?}"
         );
+        assert_eq!(resolved.unwrap().path, attachment_root);
     }
 }
