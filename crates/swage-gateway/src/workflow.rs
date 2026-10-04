@@ -3120,7 +3120,10 @@ async fn run_ephemeral_agent_call_with_admission(
             }) {
                 // Catalogue resolution fails before input is persisted; a
                 // provider failure occurs after the prompt is in the thread.
-                Some((error.to_string(), matches!(error, GatewayError::Provider(_))))
+                Some((
+                    error.to_string(),
+                    matches!(error, GatewayError::Provider(_)),
+                ))
             } else {
                 return Err(error.to_string().into());
             }
