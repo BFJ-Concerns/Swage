@@ -210,6 +210,42 @@ describe("SettingsPage", () => {
     vi.clearAllMocks();
   });
 
+  it("edits and disables web search through Settings", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const enable = document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]');
+    expect(enable, "Settings must offer web search configuration").not.toBeNull();
+    enable!.click();
+    await flushUi();
+    const type = document.querySelector<HTMLInputElement>('[aria-label="Search provider type"]')!;
+    const url = document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!;
+    expect(type.value).toBe("searxng");
+    vi.mocked(settingsApi.saveSettings).mockRejectedValueOnce(new Error("unsupported search provider 'brave'; expected one of: searxng"));
+    type.value = "brave";
+    type.dispatchEvent(new Event("input", { bubbles: true }));
+    url.value = "http://127.0.0.1:35123";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "brave", base_url: "http://127.0.0.1:35123",
+    });
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("expected one of: searxng");
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    type.value = "searxng";
+    type.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "searxng", base_url: "http://127.0.0.1:35123",
+    });
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toBeNull();
+  });
+
   it("discovers models for a newly-added provider without saving first", async () => {
     component = mount(SettingsPage, {
       target: document.body,

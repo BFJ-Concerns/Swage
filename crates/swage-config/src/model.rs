@@ -203,6 +203,7 @@ impl Default for LoggingConfig {
 
 /// Web search configuration for the supported SearxNG backend.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchProviderConfig {
     /// Which search backend to use ("searxng").
     pub provider_type: String,
