@@ -46,12 +46,52 @@ pub(crate) async fn summarise_trusted_workspace_permissions(
         .permissions
 }
 
+/// A stored attachment and its declared path access, before the trust gate.
+pub(crate) struct WorkspaceAttachmentAccess {
+    pub(crate) attachment: swage_storage::WorkspaceAttachment,
+    pub(crate) grant: TrustedWorkspacePath,
+}
+
+/// Read attachment access once for both runtime grants and target restrictions.
+/// Untrusted attachments still declare restrictions; trust controls whether
+/// their paths become runtime grants, not whether read-only access is binding.
+pub(crate) async fn load_workspace_attachment_access(
+    storage: &Arc<dyn swage_storage::store::Storage>,
+    topic_id: Uuid,
+) -> Result<Vec<WorkspaceAttachmentAccess>, swage_core::StorageError> {
+    Ok(storage
+        .list_workspace_attachments_by_topic(topic_id)
+        .await?
+        .into_iter()
+        .filter(|attachment| !attachment.is_missing)
+        .map(|attachment| {
+            let grant = TrustedWorkspacePath {
+                path: PathBuf::from(if attachment.canonical_path.is_empty() {
+                    &attachment.path
+                } else {
+                    &attachment.canonical_path
+                }),
+                is_trusted: attachment.is_trusted,
+                can_read: attachment
+                    .permissions
+                    .iter()
+                    .any(|permission| permission == "read"),
+                can_write: attachment
+                    .permissions
+                    .iter()
+                    .any(|permission| permission == "write"),
+            };
+            WorkspaceAttachmentAccess { attachment, grant }
+        })
+        .collect())
+}
+
 pub(crate) async fn load_trusted_workspace_policy(
     storage: &Arc<dyn swage_storage::store::Storage>,
     topic_id: Uuid,
     active_workspace_attachment_id: Option<Uuid>,
 ) -> TrustedWorkspacePolicy {
-    let attachments = match storage.list_workspace_attachments_by_topic(topic_id).await {
+    let attachments = match load_workspace_attachment_access(storage, topic_id).await {
         Ok(list) => list,
         Err(error) => {
             tracing::warn!(
@@ -67,44 +107,16 @@ pub(crate) async fn load_trusted_workspace_policy(
     let default_workspace_attachment_id = active_workspace_attachment_id.or_else(|| {
         attachments
             .iter()
-            .find(|attachment| attachment.is_default && !attachment.is_missing)
-            .map(|attachment| attachment.id)
+            .find(|access| access.attachment.is_default)
+            .map(|access| access.attachment.id)
     });
 
-    for attachment in attachments.into_iter().filter(|a| !a.is_missing) {
-        let mut can_read = false;
-        let mut can_write = false;
-        for permission in &attachment.permissions {
-            match permission.as_str() {
-                "read" => {
-                    if attachment.is_trusted {
-                        policy.permissions.has_read = true;
-                    }
-                    can_read = true;
-                }
-                "write" => {
-                    if attachment.is_trusted {
-                        policy.permissions.has_write = true;
-                    }
-                    can_write = true;
-                }
-                _ => {}
-            }
-        }
-        let path = PathBuf::from(if attachment.canonical_path.is_empty() {
-            attachment.path
-        } else {
-            attachment.canonical_path
-        });
-        let grant = TrustedWorkspacePath {
-            path,
-            is_trusted: attachment.is_trusted,
-            can_read,
-            can_write,
-        };
+    for WorkspaceAttachmentAccess { attachment, grant } in attachments {
+        policy.permissions.has_read |= grant.is_trusted && grant.can_read;
+        policy.permissions.has_write |= grant.is_trusted && grant.can_write;
         // Selecting a working folder does not grant access to an untrusted
         // attachment. Every execution root follows the same trust gate.
-        if !grant.is_trusted || !(can_read || can_write) {
+        if !grant.is_trusted || !(grant.can_read || grant.can_write) {
             continue;
         }
         if Some(attachment.id) == default_workspace_attachment_id {

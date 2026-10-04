@@ -809,3 +809,139 @@ async fn a_registered_device_reconnects_to_a_restarted_gateway_and_serves_it() {
 
     device_shutdown.cancel();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_device_executes_own_paths_and_refuses_gateway_read_only_targets() {
+    use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
+    use swage_gateway::tool_executor::GatewayExecutionStrategy;
+    use swage_storage::{NewSession, SessionOrigin};
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let home = tempfile::tempdir().unwrap();
+    let mut guard = with_secret_env();
+    guard.set_swage_home(home.path());
+    let workspace = tempfile::tempdir().unwrap();
+    let protected = workspace.path().join("protected");
+    std::fs::create_dir(&protected).unwrap();
+    std::fs::write(protected.join("existing.txt"), "protected-original").unwrap();
+    let (addr, state) = start_test_server(
+        ChannelProvider::new(vec![]),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+    )
+    .await;
+    let credential = create_secret_ref(&state, "Native file device", "native-test-token").await;
+    DeviceConnection::register(
+        &format!("http://{addr}"),
+        &RegisterDeviceRequest {
+            device_id: "native-file-device".into(),
+            label: None,
+            kind: "attached_device".into(),
+            shared_token_secret_ref: credential,
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+            workspace_roots: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    // This is the same native tool registry and no-strategy dispatcher that
+    // `swage device` uses, reached over an actual DeviceConnection.
+    let (shutdown, device_task) = dial_device(
+        addr,
+        "native-file-device",
+        "native-test-token",
+        swage_gateway::startup::workspace_tools(&swage_config::ResolvedConfig::default()),
+        workspace.path(),
+    );
+    wait_for_device_state(addr, "native-file-device", "connected").await;
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/api/topics/{}/workspaces", topic.id))
+        .json(&json!({"path": protected, "permissions": ["read"], "is_trusted": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let session = state
+        .storage
+        .create_session(NewSession {
+            topic_id: topic.id,
+            agent_id: "default".into(),
+            origin: SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let mut context = MockToolContext::new("default", session.id.to_string());
+    context.working_directory = workspace.path().to_path_buf();
+    let device = state
+        .devices
+        .lock()
+        .await
+        .devices
+        .get("native-file-device")
+        .unwrap()
+        .clone();
+    let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let strategy = GatewayExecutionStrategy::new(
+        None,
+        tx,
+        Some(device),
+        state.secret_manager.clone(),
+        state.storage.clone(),
+        Some(state.clone()),
+    );
+    let write = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "own.txt", "content": "device-written"}),
+            &context,
+        )
+        .await;
+    let edit = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": "own.txt", "edits": [{"type": "replace", "old_text": "device-written", "new_text": "device-edited"}]}
+    ]}), &context).await;
+    let denied_write = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "protected/probe.txt", "content": "bad"}),
+            &context,
+        )
+        .await;
+    let denied_edit = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": "protected/existing.txt", "edits": [{"type": "replace", "old_text": "protected-original", "new_text": "bad"}]}
+    ]}), &context).await;
+    // Clean up the real counterpart even when an assertion below fails.
+    shutdown.cancel();
+    device_task.await.unwrap().unwrap();
+    assert_eq!(
+        write.expect("device-owned file_write must succeed")["output"],
+        "Wrote 14 bytes to own.txt"
+    );
+    assert_eq!(
+        edit.expect("device-owned file_edit must succeed")["output"],
+        "Applied 1 edit(s) to 1 file(s)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("own.txt")).unwrap(),
+        "device-edited"
+    );
+    assert!(
+        denied_write
+            .unwrap_err()
+            .to_string()
+            .contains("read-only access")
+    );
+    assert!(
+        denied_edit
+            .unwrap_err()
+            .to_string()
+            .contains("read-only access")
+    );
+    assert!(!protected.join("probe.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(protected.join("existing.txt")).unwrap(),
+        "protected-original"
+    );
+}

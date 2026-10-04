@@ -155,13 +155,23 @@ pub fn resolve_new_context_path(
 
 /// Refuses native file mutations covered by an attachment without write access.
 ///
-/// Only the gateway context can establish an attachment's write permission.
-/// A sandbox child or another context without that authority fails closed.
+/// The gateway checks its attachments before local execution or remote dispatch.
+/// The device receiver uses the serialised context after that gateway check and
+/// enforces its own workspace roots. Other contexts without authority fail closed.
 pub async fn require_workspace_write_access(
     ctx: &dyn ToolContext,
     path: &Path,
     tool_name: &str,
 ) -> Result<(), ToolError> {
+    // DeviceConnection dispatches native tools with this wire context. Its own
+    // paths are governed by the device's root checks; gateway-attached targets
+    // are checked before the operation crosses the connection.
+    if ctx
+        .as_any()
+        .is::<swage_tool::context::SerializableToolContext>()
+    {
+        return Ok(());
+    }
     let Some(gateway) = ctx
         .as_any()
         .downcast_ref::<crate::tool_executor::GatewayToolContext>()
@@ -183,30 +193,20 @@ pub async fn require_workspace_write_access(
         .await
         .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?
         .ok_or_else(|| failure("Cannot check workspace write access: session is missing".into()))?;
-    let attachments = gateway
-        .storage()
-        .list_workspace_attachments_by_topic(session.topic_id)
-        .await
-        .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?;
-    for attachment in attachments
-        .into_iter()
-        .filter(|attachment| !attachment.is_missing)
-    {
-        let root = Path::new(if attachment.canonical_path.is_empty() {
-            &attachment.path
-        } else {
-            &attachment.canonical_path
-        });
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        if path.starts_with(&root)
-            && !attachment
-                .permissions
-                .iter()
-                .any(|permission| permission == "write")
-        {
+    let attachments =
+        crate::turn::load_workspace_attachment_access(gateway.storage(), session.topic_id)
+            .await
+            .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?;
+    for access in attachments {
+        let root = access
+            .grant
+            .path
+            .canonicalize()
+            .unwrap_or(access.grant.path);
+        if path.starts_with(&root) && !access.grant.can_write {
             return Err(failure(format!(
                 "Permission denied: workspace '{}' has read-only access: {}",
-                attachment.label,
+                access.attachment.label,
                 path.display()
             )));
         }
