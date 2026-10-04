@@ -3118,7 +3118,9 @@ async fn run_ephemeral_agent_call_with_admission(
             if fallback_failure(&error).is_some_and(|failure| {
                 fallback_is_eligible(failure, emitted_output, dispatched_tool)
             }) {
-                Some(error.to_string())
+                // Catalogue resolution fails before input is persisted; a
+                // provider failure occurs after the prompt is in the thread.
+                Some((error.to_string(), matches!(error, GatewayError::Provider(_))))
             } else {
                 return Err(error.to_string().into());
             }
@@ -3148,8 +3150,9 @@ async fn run_ephemeral_agent_call_with_admission(
             if let Some(message) = primary.provider_failure
                 && fallback_is_eligible(FallbackFailure::Provider, emitted_output, dispatched_tool)
             {
-                Some(format!(
-                    "AgentCallError: provider failed before output: {message}"
+                Some((
+                    format!("AgentCallError: provider failed before output: {message}"),
+                    true,
                 ))
             } else if let Some(turn) =
                 turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
@@ -3166,7 +3169,7 @@ async fn run_ephemeral_agent_call_with_admission(
     };
     let final_events = match primary_error {
         None => primary.events,
-        Some(error) => {
+        Some((error, reuse_persisted_input)) => {
             let Some(fallback_model) = request
                 .session
                 .is_none()
@@ -3203,7 +3206,7 @@ async fn run_ephemeral_agent_call_with_admission(
                 composition,
                 journal_entry_id,
                 Some(fallback_model.clone()),
-                true,
+                reuse_persisted_input,
             )
             .await?;
             fallback.outcome.map_err(|fallback_error| {
@@ -25860,6 +25863,15 @@ protocol = "openai"
             "the unknown model must fail before a provider request"
         );
         assert_eq!(requests[0].model.as_deref(), Some("fallback-wire"));
+        assert_eq!(
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| message.text_content() == "answer")
+                .count(),
+            1,
+            "an unknown primary must pass the original prompt to its fallback exactly once"
+        );
 
         let (state, storage, provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
