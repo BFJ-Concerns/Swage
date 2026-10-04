@@ -6434,6 +6434,51 @@ async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
 }
 
 #[tokio::test]
+async fn default_turn_persists_configuration_disabled_boundary() {
+    let _home = SwageHomeGuard::isolate();
+    let (state, session_id) = make_state_with_session(vec![StreamChunk::Done {
+        finish_reason: None,
+    }])
+    .await;
+    // If the default enables sandboxing, exercise the existing sandbox path
+    // without depending on bubblewrap being available on the test machine.
+    let state = state.with_test_sandbox();
+
+    Box::pin(process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello",
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    ))
+    .await
+    .expect("a default turn should complete");
+
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        turn.execution_isolation,
+        Some(swage_storage::TurnIsolation::Degraded {
+            reason: "sandbox_disabled_by_configuration".into(),
+        }),
+        "the turn must persist the boundary selected from default configuration"
+    );
+    assert_eq!(turn.state, TurnState::Completed);
+}
+
+#[tokio::test]
 async fn full_turn_stores_messages_and_completes() {
     let chunks = vec![
         StreamChunk::Delta {
