@@ -38,6 +38,7 @@ fn server_event_token_serialises() {
 fn server_event_turn_complete_serialises() {
     let id = Uuid::new_v4();
     let event = ServerEvent::TurnComplete {
+        incomplete_reason: None,
         turn_id: id,
         input_tokens: None,
         output_tokens: None,
@@ -58,6 +59,7 @@ fn server_event_turn_complete_serialises() {
 fn server_event_turn_complete_with_usage_serialises() {
     let id = Uuid::new_v4();
     let event = ServerEvent::TurnComplete {
+        incomplete_reason: None,
         turn_id: id,
         input_tokens: Some(100),
         output_tokens: Some(50),
@@ -669,6 +671,7 @@ fn schema_validation_error_serialises() {
 fn turn_complete_with_structured_output_serialises() {
     let id = Uuid::new_v4();
     let event = ServerEvent::TurnComplete {
+        incomplete_reason: None,
         turn_id: id,
         input_tokens: None,
         output_tokens: None,
@@ -738,6 +741,7 @@ fn a_recorded_message_reaches_only_its_own_conversation() {
 fn turn_complete_without_structured_output_omits_field() {
     let id = Uuid::new_v4();
     let event = ServerEvent::TurnComplete {
+        incomplete_reason: None,
         turn_id: id,
         input_tokens: None,
         output_tokens: None,

@@ -57,6 +57,7 @@ pub(crate) fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
         TurnState::Pending => WireTurnState::Pending,
         TurnState::Processing => WireTurnState::Processing,
         TurnState::Completed => WireTurnState::Completed,
+        TurnState::Incomplete => WireTurnState::Incomplete,
         TurnState::Failed => WireTurnState::Failed,
         TurnState::Interrupted => WireTurnState::Interrupted,
         TurnState::AwaitingApproval => WireTurnState::AwaitingApproval,

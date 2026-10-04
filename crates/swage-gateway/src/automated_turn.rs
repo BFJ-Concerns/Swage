@@ -102,6 +102,7 @@ mod tests {
     use super::*;
     use crate::turn::tests::{
         make_state_with_approval_gated_echo, make_state_with_config, make_state_with_session,
+        sandboxed_turn_config,
     };
 
     #[test]
@@ -176,7 +177,7 @@ mod tests {
         };
 
         // On a host: the test harness stands in for the sandbox.
-        let (state, session_id) = make_state_with_session(reply()).await;
+        let (state, session_id) = make_state_with_config(reply(), sandboxed_turn_config()).await;
         let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Hello")
             .await
             .unwrap();

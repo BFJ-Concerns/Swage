@@ -98,7 +98,7 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "failed" | "interrupted"
+        "completed" | "incomplete" | "failed" | "interrupted"
       >;
       thread_id?: string;
       turn_id?: string;
@@ -240,7 +240,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "failed" | "interrupted"
+      "completed" | "incomplete" | "failed" | "interrupted"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -399,8 +399,8 @@ export function createStreamingStore(
           break;
 
         case "turn_complete":
-          // The gateway has committed the full turn. Push the completed
-          // assistant message and return to idle state.
+          // The gateway has committed the turn. Preserve the reply with
+          // its terminal state and return to idle.
           {
             const streamedContent = get(stream.streamedContentStore);
             const activeToolCalls = get(stream.activeToolCallsStore);
@@ -408,7 +408,7 @@ export function createStreamingStore(
               pushAssistantMessage(
                 ownerId,
                 streamedContent,
-                "completed",
+                event.incomplete_reason ? "incomplete" : "completed",
                 event.turn_id,
                 activeToolCalls,
               );

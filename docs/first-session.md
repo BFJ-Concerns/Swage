@@ -137,6 +137,6 @@ global ones.
 With a conversation open, start a turn. If a trusted workspace is
 attached, the agent will have access to the workspace's files and will
 follow whatever guidance its `AGENTS.md` provides.
-The [README's sandbox section](../README.md#the-first-turn-may-ask-about-sandboxing)
-covers what happens on the first tool call if bubblewrap is not yet
-installed.
+The [README's sandbox section](../README.md#sandbox-configuration)
+explains how to enable isolation for a topic and what happens if sandbox
+setup fails.

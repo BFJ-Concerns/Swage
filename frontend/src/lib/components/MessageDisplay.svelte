@@ -281,7 +281,7 @@
           <div
             class="message-content assistant-content markdown-body"
             class:interrupted={message.turn_state === "interrupted" ||
-              message.turn_state === "failed"}
+              message.turn_state === "failed" || message.turn_state === "incomplete"}
           >
             {#if shouldRenderMarkdown}
               <!-- marked output is trusted (server-generated content only). -->
@@ -294,6 +294,8 @@
             {#if message.turn_state === "interrupted"}
               <!-- Subtle notice below the partial response. -->
               <p class="interrupted-notice">↩ Response interrupted</p>
+            {:else if message.turn_state === "incomplete"}
+              <p class="interrupted-notice">⚠ Response incomplete</p>
             {:else if message.turn_state === "failed"}
               <p class="interrupted-notice">⚠ Response failed</p>
             {/if}
