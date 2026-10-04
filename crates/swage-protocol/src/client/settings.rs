@@ -338,7 +338,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             allow_degraded_execution: false,
         }
     }

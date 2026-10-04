@@ -352,8 +352,8 @@ not found.
 
 ### Sandbox isolation
 
-Local tool calls that are eligible for sandboxed execution run inside a
-two-layer sandbox (`swage-sandbox`):
+When sandboxing is enabled, eligible local tool calls run inside a two-layer
+sandbox (`swage-sandbox`):
 
 1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
    user, IPC, UTS). `--unshare-all` with `--die-with-parent`. Read-only
@@ -385,20 +385,18 @@ completion requests.
 
 | Option | Type | Default |
 |---|---|---|
-| `sandbox.enabled` | bool | `true` |
+| `sandbox.enabled` | bool | `false` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
 
-Setting `sandbox.enabled = false` does not by itself disable sandboxing —
-it tells the dispatcher to skip sandbox setup, which counts as degraded
-execution. The dispatcher requires the explicit opt-in
-`sandbox.allow_degraded_execution = true` before it will proceed without a
-sandbox. Without that opt-in, dispatcher construction fails with
-`SandboxError::Unavailable`. To run unsandboxed, set both:
+Omitting `[sandbox]` or setting `sandbox.enabled = false` runs turns
+unsandboxed without requiring `allow_degraded_execution`. The persisted turn
+boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+
+To enable sandboxing for a topic, add this to its `config.toml`:
 
 ```toml
 [sandbox]
-enabled = false
-allow_degraded_execution = true
+enabled = true
 ```
 
 When `enabled` is true and sandbox setup fails at runtime, the recovery
