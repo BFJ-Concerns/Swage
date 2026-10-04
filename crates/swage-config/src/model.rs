@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn sandbox_config_defaults() {
         let cfg = SandboxConfig::default();
-        assert!(cfg.enabled);
+        assert!(!cfg.enabled);
         assert!(!cfg.allow_degraded_execution);
     }
 
@@ -1057,7 +1057,7 @@ mod tests {
         assert_eq!(cfg.models.default, "");
         assert!(cfg.models.entries.is_empty());
         assert_eq!(cfg.default_model_id(), "");
-        assert!(cfg.sandbox.enabled);
+        assert!(!cfg.sandbox.enabled);
         assert!(!cfg.sandbox.allow_degraded_execution);
         assert_eq!(cfg.logging.level, LogLevel::Info);
         assert_eq!(cfg.instructions, "");

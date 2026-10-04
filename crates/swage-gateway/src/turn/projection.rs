@@ -377,14 +377,16 @@ pub(super) async fn project_agent_events(
                 turn_id,
                 attempt,
                 max_retries,
-                provider,
+                provider: _,
                 wait_ms,
             } => {
+                // The client displays this field as the requested model. A retry
+                // decorator's identity can still name the provider's default.
                 let retry_event = ServerEvent::ProviderRetryStarted {
                     turn_id,
                     attempt,
                     max_retries,
-                    provider,
+                    provider: model_name.to_owned(),
                     wait_ms,
                 };
                 if subscription.lock().await.should_deliver(&retry_event) {
@@ -395,14 +397,14 @@ pub(super) async fn project_agent_events(
                 turn_id,
                 attempt,
                 max_retries,
-                provider,
+                provider: _,
                 success,
             } => {
                 let retry_event = ServerEvent::ProviderRetrySettled {
                     turn_id,
                     attempt,
                     max_retries,
-                    provider,
+                    provider: model_name.to_owned(),
                     success,
                 };
                 if subscription.lock().await.should_deliver(&retry_event) {
