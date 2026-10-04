@@ -342,6 +342,26 @@ mod tests {
     }
 
     #[test]
+    fn search_config_rejects_unused_fields_at_load() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            r#"[tools.search]
+provider_type = "searxng"
+base_url = "http://localhost:8080"
+api_key = "x"
+"#,
+        )
+        .unwrap();
+        let error = load_resolved_config_from(tmp.path(), &ScopeLocation::General, "default")
+            .expect_err("unused search fields must be refused at load");
+        assert!(
+            error.to_string().contains("api_key"),
+            "field must be named: {error}"
+        );
+    }
+
+    #[test]
     fn validation_errors_returned_as_config_error() {
         let tmp = TempDir::new().unwrap();
         build_fixture(
