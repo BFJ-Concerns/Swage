@@ -178,6 +178,28 @@ describe("startTurn", () => {
     expect(store.isStreaming).toBe(true);
   });
 
+  it("routes a recorded message the gateway announces to the conversation store", () => {
+    const conv = { ...createMockConversationStore(), appendRecordedMessage: vi.fn() };
+    const store = createStreamingStore({ conversationStore: conv });
+    const message = {
+      id: "msg-brief",
+      thread_id: "thread-1",
+      role: "user",
+      origin: "schedule" as const,
+      content: "Summarise the inbox.",
+      timestamp: "2026-01-01T00:05:00Z",
+      turn_state: "pending" as const,
+      tool_calls: [],
+    };
+
+    store.handleServerEvent({ type: "message_appended", session_id: "conv-9", message }, "conv-9");
+
+    // Installed by the gateway's own identity for it, on the conversation
+    // the event names — never re-derived from the stream.
+    expect(conv.appendRecordedMessage).toHaveBeenCalledWith(message, "conv-9");
+    expect(store.isStreaming).toBe(false);
+  });
+
   it("pushes the user message to the conversation store", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });

@@ -411,6 +411,68 @@ describe("durable local updates", () => {
     expect(store.conversations[0].message_preview).toBe("Reply");
   });
 
+  it("installs a message the gateway recorded on the open conversation, as recorded", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+
+    store.appendRecordedMessage(
+      {
+        id: "msg-brief",
+        thread_id: "thread-1",
+        turn_id: "turn-7",
+        role: "user",
+        origin: "schedule",
+        content: "Summarise the inbox.",
+        timestamp: "2026-01-01T00:05:00Z",
+        turn_state: "pending",
+        tool_calls: [],
+      },
+      "conv-1",
+    );
+
+    const [installed] = store.activeConversation!.messages;
+    expect(installed.id).toBe("msg-brief");
+    expect(installed.origin).toBe("schedule");
+    expect(installed.turn_id).toBe("turn-7");
+    expect(installed.thread_id).toBe("thread-1");
+    expect(store.conversations[0].message_preview).toBe("Summarise the inbox.");
+  });
+
+  it("a recorded message for another conversation updates only that conversation's summary", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
+      makeSummary("conv-2", "2026-01-01T00:00:00Z"),
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+
+    store.appendRecordedMessage(
+      {
+        id: "msg-notice",
+        thread_id: "thread-2",
+        role: "user",
+        origin: "delegation",
+        content: "Delegated agent worker completed: done.",
+        timestamp: "2026-01-01T00:09:00Z",
+        turn_state: null,
+        tool_calls: [],
+      },
+      "conv-2",
+    );
+
+    expect(store.activeConversation!.messages).toHaveLength(0);
+    const other = store.conversations.find((c) => c.id === "conv-2")!;
+    expect(other.message_preview).toBe("Delegated agent worker completed: done.");
+    expect(store.conversations[0].id).toBe("conv-2");
+  });
+
   it("preserves the existing preview for a tool-only assistant message", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([

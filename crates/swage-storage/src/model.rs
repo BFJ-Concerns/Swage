@@ -3,6 +3,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use swage_core::{Role, StorageError};
+pub use swage_protocol::client::conversation::MessageOrigin;
 use uuid::Uuid;
 
 /// One durable string value scoped to a session.
@@ -1395,6 +1396,9 @@ pub struct Message {
     /// Older rows and synthetic thread bootstrap messages may not have a turn.
     pub turn_id: Option<Uuid>,
     pub role: Role,
+    /// Who authored the message: a person, the model, or the platform path
+    /// (delegation, schedule, workflow, a notice) that composed it.
+    pub origin: MessageOrigin,
     pub content: String,
     /// Content parts submitted beside the text, one generic JSON value per
     /// part exactly as the client wire carried it. Storage keeps them
@@ -2160,6 +2164,7 @@ pub struct NewMessage {
     /// The turn that produced this message, when known.
     pub turn_id: Option<Uuid>,
     pub role: Role,
+    pub origin: MessageOrigin,
     pub content: String,
     /// Content parts beside the text; empty for a text-only message.
     pub attachments: Vec<serde_json::Value>,
@@ -2178,6 +2183,7 @@ pub struct AppendMessage {
     /// The turn that produced this message, when known.
     pub turn_id: Option<Uuid>,
     pub role: Role,
+    pub origin: MessageOrigin,
     pub content: String,
     /// Content parts beside the text; empty for a text-only message.
     pub attachments: Vec<serde_json::Value>,
@@ -2974,6 +2980,7 @@ mod tests {
             attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
+            origin: MessageOrigin::User,
             content: "hello".to_string(),
             position: 0,
             agent_id: "agent-1".to_string(),
@@ -3006,6 +3013,7 @@ mod tests {
             attachments: Vec::new(),
             turn_id: None,
             role: Role::Assistant,
+            origin: MessageOrigin::User,
             content: "sure".to_string(),
             position: 1,
             agent_id: "agent-1".to_string(),
@@ -3029,6 +3037,7 @@ mod tests {
             attachments: Vec::new(),
             turn_id: None,
             role: Role::User,
+            origin: crate::model::MessageOrigin::User,
             content: "test".to_string(),
             position: 0,
             agent_id: "agent-x".to_string(),
@@ -3044,6 +3053,7 @@ mod tests {
             attachments: Vec::new(),
             turn_id: Some(Uuid::new_v4()),
             role: Role::User,
+            origin: crate::model::MessageOrigin::User,
             content: "hi".to_string(),
             position: 0,
             agent_id: "agent-y".to_string(),

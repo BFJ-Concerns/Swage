@@ -485,7 +485,8 @@ async fn drain_channel_origin(
     };
 
     let response =
-        crate::automated_turn::run_placeholder_turn(state, session_id, &input, turn.id).await?;
+        crate::automated_turn::run_placeholder_turn(state, session_id, input.as_str(), turn.id)
+            .await?;
     deliver_channel_response(
         state,
         session_id,

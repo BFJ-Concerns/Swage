@@ -101,6 +101,8 @@ import type { ConversationSummary as WireConversationSummary } from "./protocol/
 import type { ConversationDetail as WireConversationDetail } from "./protocol/ConversationDetail";
 import type { ConversationResponse as WireConversationResponse } from "./protocol/ConversationResponse";
 import type { MessageView as WireMessageView } from "./protocol/MessageView";
+import type { MessageOrigin } from "./protocol/MessageOrigin";
+export type { MessageOrigin };
 import type { ToolCallView as WireToolCallView } from "./protocol/ToolCallView";
 import type { ConversationThreadDetail as WireConversationThreadDetail } from "./protocol/ConversationThreadDetail";
 export type { ConversationBranchResponse as ConversationBranch } from "./protocol/ConversationBranchResponse";
@@ -143,7 +145,7 @@ export type ToolCallView = Omit<
 
 export type MessageView = Omit<
   WireMessageView,
-  "id" | "role" | "tool_calls" | "thread_id" | "turn_id"
+  "id" | "role" | "tool_calls" | "thread_id" | "turn_id" | "origin"
 > & {
   // Absent on a message appended locally before the gateway has recorded
   // it; only a recorded message can be branched from.
@@ -151,6 +153,10 @@ export type MessageView = Omit<
   thread_id?: string;
   turn_id?: string | null;
   role: "user" | "assistant";
+  // Who wrote it. Absent on a row appended locally before the gateway
+  // recorded it — the person's own typed message, the model's streamed
+  // reply — where the role says which of the two it is.
+  origin?: MessageOrigin;
   model?: string | null;
   tool_calls?: ToolCallView[];
 };

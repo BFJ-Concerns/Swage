@@ -9,18 +9,29 @@
 //! entry point admits through `resolve_turn_model_and_attachments`, so the
 //! admission decision cannot drift from execution.
 
+use swage_storage::MessageOrigin;
+
 use super::{
     AppState, ContentPart, GatewayError, MessageAttachment, Uuid, effective_session_config,
     ensure_selected_model_available, resolve_model_catalogue_entry, resolve_requested_turn_model,
 };
 
-/// What a caller submits for one turn: the message text plus the content
-/// parts sent beside it. Every turn entry point takes this; a `String`
-/// converts, so a text-only caller passes its text unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What a caller submits for one turn: the message text, the content parts
+/// sent beside it, and who composed it. Every turn entry point takes this; a
+/// `String` converts as a person's own message, so a text-only caller passes
+/// its text unchanged, and a platform path names its origin with
+/// [`TurnInput::with_origin`] so the recorded row says a person did not type it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnInput {
     pub text: String,
     pub attachments: Vec<MessageAttachment>,
+    pub origin: MessageOrigin,
+}
+
+impl Default for TurnInput {
+    fn default() -> Self {
+        Self::text("")
+    }
 }
 
 impl TurnInput {
@@ -28,6 +39,7 @@ impl TurnInput {
         Self {
             text: text.into(),
             attachments: Vec::new(),
+            origin: MessageOrigin::User,
         }
     }
 
@@ -35,7 +47,16 @@ impl TurnInput {
         Self {
             text: text.into(),
             attachments,
+            origin: MessageOrigin::User,
         }
+    }
+
+    /// Name the platform path that composed this input — a schedule's brief,
+    /// a workflow's prompt — so the stored message and every open view carry
+    /// the fact. A person's own message keeps the default.
+    pub fn with_origin(mut self, origin: MessageOrigin) -> Self {
+        self.origin = origin;
+        self
     }
 }
 

@@ -11,6 +11,7 @@ import type {
   ConversationDetail,
   MessageView,
 } from "../types";
+import type { MessageView as WireMessageView } from "../protocol/MessageView";
 import * as api from "../api/conversations";
 
 export interface ConversationStore {
@@ -53,6 +54,12 @@ export interface ConversationStore {
     turn_id?: string;
     tool_calls?: MessageView["tool_calls"];
   }, conversationId?: string | null): void;
+  /**
+   * Install a message the gateway recorded and announced — a row nobody at
+   * this client typed, such as a schedule's brief or a delegation's notice —
+   * on the conversation it names, exactly as the gateway holds it.
+   */
+  appendRecordedMessage(message: WireMessageView, conversationId: string): void;
   /** Install a fetched snapshot only when its owner is still selected. */
   replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
@@ -169,7 +176,9 @@ export function createConversationStore(): ConversationStore {
 
   function appendMessage(
     message: {
+      id?: string;
       role: MessageView["role"];
+      origin?: MessageView["origin"];
       content: string;
       timestamp: string;
       turn_state: MessageView["turn_state"];
@@ -196,6 +205,8 @@ export function createConversationStore(): ConversationStore {
       content: message.content,
       timestamp: message.timestamp,
       turn_state: message.turn_state,
+      ...(message.id === undefined ? {} : { id: message.id }),
+      ...(message.origin === undefined ? {} : { origin: message.origin }),
       ...(threadId === undefined ? {} : { thread_id: threadId }),
       ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
@@ -349,6 +360,29 @@ export function createConversationStore(): ConversationStore {
         ...(message.thread_id === undefined ? {} : { thread_id: message.thread_id }),
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
+      }, conversationId);
+    },
+
+    appendRecordedMessage(message, conversationId) {
+      // The gateway's own view of the row, installed as recorded: its
+      // identity (so it can be branched from), its origin (so it is labelled
+      // by its author), and the thread it belongs to.
+      appendMessage({
+        id: message.id,
+        role: message.role === "assistant" ? "assistant" : "user",
+        origin: message.origin,
+        content: message.content,
+        timestamp: message.timestamp,
+        turn_state: message.turn_state,
+        thread_id: message.thread_id,
+        ...(message.turn_id === undefined || message.turn_id === null
+          ? {}
+          : { turn_id: message.turn_id }),
+        // The wire tool-call view narrows to the display view the same way
+        // the conversation API's fetch does.
+        ...(message.tool_calls.length === 0
+          ? {}
+          : { tool_calls: message.tool_calls as unknown as MessageView["tool_calls"] }),
       }, conversationId);
     },
 

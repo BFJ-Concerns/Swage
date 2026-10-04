@@ -261,14 +261,18 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     crate::presence::record_client_disconnected(&state, session_id).await;
 }
 
-pub(super) fn broadcast_event_matches_session(_session_id: Uuid, event: &ServerEvent) -> bool {
-    matches!(
-        event,
+pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
+    match event {
+        // A recorded message is for the conversation it joined and no other.
+        ServerEvent::MessageAppended {
+            session_id: target, ..
+        } => *target == session_id,
         ServerEvent::Shutdown { .. }
-            | ServerEvent::SurfaceUpdated { .. }
-            | ServerEvent::WorkflowRunStarted { .. }
-            | ServerEvent::WorkflowEntryStarted { .. }
-            | ServerEvent::WorkflowEntryCompleted { .. }
-            | ServerEvent::WorkflowRunCompleted { .. }
-    )
+        | ServerEvent::SurfaceUpdated { .. }
+        | ServerEvent::WorkflowRunStarted { .. }
+        | ServerEvent::WorkflowEntryStarted { .. }
+        | ServerEvent::WorkflowEntryCompleted { .. }
+        | ServerEvent::WorkflowRunCompleted { .. } => true,
+        _ => false,
+    }
 }

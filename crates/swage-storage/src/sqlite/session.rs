@@ -533,6 +533,7 @@ mod tests {
                 thread_id: thread.id,
                 turn_id: None,
                 role,
+                origin: crate::model::MessageOrigin::User,
                 content: content.to_string(),
                 attachments: Vec::new(),
                 position,

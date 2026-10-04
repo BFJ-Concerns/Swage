@@ -28,7 +28,31 @@ const BRANCH_PREVIEW_CHARS: usize = 80;
 /// It needs no agent-definition row, so selector validation always admits it.
 const DEFAULT_AGENT_ID: &str = "gateway";
 
-fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
+/// The wire view of a stored message: every field the record holds, the
+/// attachments parsed against the contract (a value outside it is refused as
+/// corruption), the turn state and tool calls the caller resolved. Every
+/// projection and every live announcement maps through here, so the view a
+/// client receives live is byte-for-byte the view it would load.
+pub(crate) fn message_view(
+    message: swage_storage::model::Message,
+    turn_state: Option<WireTurnState>,
+    tool_calls: Vec<ToolCallView>,
+) -> Result<MessageView, GatewayError> {
+    Ok(MessageView {
+        id: message.id,
+        thread_id: message.thread_id,
+        turn_id: message.turn_id,
+        role: message.role.to_string(),
+        origin: message.origin,
+        content: message.content,
+        attachments: crate::turn::message_attachments(&message.attachments)?,
+        timestamp: message.created_at,
+        turn_state,
+        tool_calls,
+    })
+}
+
+pub(crate) fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
     match state {
         TurnState::Pending => WireTurnState::Pending,
         TurnState::Processing => WireTurnState::Processing,
@@ -304,17 +328,7 @@ impl ConversationService {
                     Vec::new()
                 };
 
-                Ok(MessageView {
-                    id: message.id,
-                    thread_id: message.thread_id,
-                    turn_id,
-                    role: message.role.to_string(),
-                    content: message.content,
-                    attachments: crate::turn::message_attachments(&message.attachments)?,
-                    timestamp: message.created_at,
-                    turn_state,
-                    tool_calls,
-                })
+                message_view(message, turn_state, tool_calls)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -692,27 +706,19 @@ impl ConversationService {
                 .into_iter()
                 .map(|message| -> Result<MessageView, GatewayError> {
                     let is_assistant = message.role == Role::Assistant;
-                    Ok(MessageView {
-                        id: message.id,
-                        thread_id: message.thread_id,
-                        turn_id: message.turn_id,
-                        role: message.role.to_string(),
-                        content: message.content,
-                        attachments: crate::turn::message_attachments(&message.attachments)?,
-                        timestamp: message.created_at,
-                        turn_state: message
+                    let turn_state = message
+                        .turn_id
+                        .and_then(|turn_id| turn_state_by_turn.get(&turn_id))
+                        .map(turn_state_to_wire);
+                    let tool_calls = if is_assistant {
+                        message
                             .turn_id
-                            .and_then(|turn_id| turn_state_by_turn.get(&turn_id))
-                            .map(turn_state_to_wire),
-                        tool_calls: if is_assistant {
-                            message
-                                .turn_id
-                                .and_then(|turn_id| tool_calls_by_turn.get(&turn_id).cloned())
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        },
-                    })
+                            .and_then(|turn_id| tool_calls_by_turn.get(&turn_id).cloned())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    message_view(message, turn_state, tool_calls)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             branch,
@@ -849,6 +855,7 @@ mod branch_tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role,
+                origin: swage_storage::MessageOrigin::User,
                 content: content.into(),
                 position,
                 agent_id: "gateway".into(),
@@ -856,6 +863,52 @@ mod branch_tests {
             .await
             .expect("message")
             .id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_view_carries_each_message_s_recorded_origin() {
+        // Both projections — the conversation and a thread's detail — map
+        // through one view, so the origin a client labels by is the recorded
+        // one on either route.
+        let (service, storage, session_id) = service_with_conversation().await;
+        let root = service.get_conversation(session_id).await.expect("detail");
+        say(&storage, root.root_thread_id, Role::User, "typed", 0).await;
+        storage
+            .create_message(NewMessage {
+                thread_id: root.root_thread_id,
+                attachments: Vec::new(),
+                turn_id: None,
+                role: Role::User,
+                origin: swage_storage::MessageOrigin::Schedule,
+                content: "a brief".into(),
+                position: 1,
+                agent_id: "gateway".into(),
+            })
+            .await
+            .expect("brief");
+
+        let detail = service.get_conversation(session_id).await.expect("detail");
+        let origins: Vec<_> = detail
+            .messages
+            .iter()
+            .map(|message| (message.role.as_str(), message.origin))
+            .collect();
+        assert_eq!(
+            origins,
+            vec![
+                ("user", swage_storage::MessageOrigin::User),
+                ("user", swage_storage::MessageOrigin::Schedule),
+            ]
+        );
+
+        let thread = service
+            .get_thread_detail(root.root_thread_id)
+            .await
+            .expect("thread detail");
+        assert_eq!(
+            thread.messages[1].origin,
+            swage_storage::MessageOrigin::Schedule
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1,5 +1,6 @@
 mod agent_definition;
 mod conversation;
+mod platform_message;
 mod session_variable;
 mod task_definition;
 mod topic;
@@ -8,6 +9,7 @@ mod workspace_attachment;
 
 pub use agent_definition::*;
 pub use conversation::*;
+pub(crate) use platform_message::*;
 pub use session_variable::*;
 pub use task_definition::*;
 pub use topic::*;
@@ -831,6 +833,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: "Hello!".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -913,6 +916,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: "Hi".to_string(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -925,6 +929,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: "Hello!".to_string(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1022,6 +1027,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: "list files".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1035,6 +1041,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: "I'll run ls for you.".into(),
                 position: 1,
                 agent_id: "gateway".to_string(),
@@ -1118,6 +1125,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: "Ran python".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),
@@ -1218,6 +1226,7 @@ default_effort = "high"
                 attachments: Vec::new(),
                 turn_id: Some(turn.id),
                 role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: "Hello".into(),
                 position: 0,
                 agent_id: "gateway".to_string(),

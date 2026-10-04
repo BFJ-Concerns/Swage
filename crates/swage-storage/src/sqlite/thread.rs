@@ -424,7 +424,7 @@ impl ThreadStore for SqliteStorage {
             )?;
 
             let mut stmt = conn.prepare(
-                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments
+                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin
                  FROM messages
                  WHERE thread_id = ?1 AND position <= ?2
                  ORDER BY position ASC",
@@ -442,6 +442,7 @@ impl ThreadStore for SqliteStorage {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
                     ))
                 },
             )?;
@@ -547,14 +548,15 @@ impl ThreadStore for SqliteStorage {
                     tool_name,
                     created_at,
                     attachments,
+                    origin,
                 ) = row;
                 let child_turn_id = turn_id
                     .as_ref()
                     .and_then(|turn_id| turn_id_map.get(turn_id))
                     .cloned();
                 conn.execute(
-                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         Uuid::new_v4().to_string(),
                         child_thread_id.to_string(),
@@ -567,6 +569,7 @@ impl ThreadStore for SqliteStorage {
                         tool_name,
                         created_at,
                         attachments,
+                        origin,
                     ],
                 )?;
             }
@@ -1018,6 +1021,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: Role::User,
+                origin: crate::model::MessageOrigin::User,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1030,6 +1034,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: Role::Assistant,
+                origin: crate::model::MessageOrigin::Assistant,
                 content: "world".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1076,6 +1081,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
+                origin: crate::model::MessageOrigin::User,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1088,6 +1094,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
+                origin: crate::model::MessageOrigin::Assistant,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1182,6 +1189,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
+                origin: crate::model::MessageOrigin::User,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1194,6 +1202,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
+                origin: crate::model::MessageOrigin::Assistant,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1267,6 +1276,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: Role::User,
+                origin: crate::model::MessageOrigin::User,
                 content: "a".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1279,6 +1289,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: Role::User,
+                origin: crate::model::MessageOrigin::User,
                 content: "b".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1349,8 +1360,8 @@ mod tests {
         storage
             .with_conn(|conn| {
                 conn.execute(
-                    "INSERT INTO messages (id, thread_id, role, content, position, agent_id, created_at)
-                     VALUES (?1, ?2, 'user', 'hello', 0, 'agent-1', ?3)",
+                    "INSERT INTO messages (id, thread_id, role, origin, content, position, agent_id, created_at)
+                     VALUES (?1, ?2, 'user', 'user', 'hello', 0, 'agent-1', ?3)",
                     rusqlite::params![Uuid::new_v4().to_string(), thread.id.to_string(), &now],
                 )
             })

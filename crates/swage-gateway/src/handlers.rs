@@ -2659,6 +2659,11 @@ mod tests {
                     } else {
                         Role::Assistant
                     },
+                    origin: if index % 2 == 0 {
+                        swage_storage::MessageOrigin::User
+                    } else {
+                        swage_storage::MessageOrigin::Assistant
+                    },
                     content: format!("history message {index}"),
                     agent_id: "gateway".to_string(),
                 })
@@ -4595,6 +4600,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "gateway".into(),
@@ -4607,6 +4613,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
                 content: "draft".into(),
                 position: 1,
                 agent_id: "gateway".into(),
@@ -4647,6 +4654,7 @@ mod tests {
                 attachments: Vec::new(),
                 turn_id: None,
                 role: swage_core::Role::User,
+                origin: swage_storage::MessageOrigin::User,
                 content: "parent continues".into(),
                 position: 2,
                 agent_id: "gateway".into(),

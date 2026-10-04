@@ -80,6 +80,7 @@ async fn create_full_hierarchy(
             turn_id: Some(turn.id),
             agent_id: agent_id.to_string(),
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "Hello from integration test".to_string(),
             position: 0,
         })
@@ -553,6 +554,7 @@ async fn messages_ordered_within_thread() {
             turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "second".into(),
             position: 1,
         })
@@ -566,6 +568,7 @@ async fn messages_ordered_within_thread() {
             turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: Role::User,
+            origin: swage_storage::MessageOrigin::User,
             content: "first".into(),
             position: 0,
         })
@@ -579,6 +582,7 @@ async fn messages_ordered_within_thread() {
             turn_id: None,
             agent_id: AGENT_A.to_string(),
             role: Role::Assistant,
+            origin: swage_storage::MessageOrigin::Assistant,
             content: "third".into(),
             position: 2,
         })

@@ -2603,7 +2603,7 @@ async fn execute_workflow_agent_turn(
         state,
         session_id,
         Some(thread_id),
-        prompt,
+        crate::turn::TurnInput::text(prompt).with_origin(swage_storage::MessageOrigin::Workflow),
         event_tx,
         // Workflow fallback decisions must see tool dispatches as output
         // activity. Force delivery to this private channel so the normal

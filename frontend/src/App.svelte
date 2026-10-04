@@ -244,6 +244,8 @@
       conversationStore.appendOptimisticUserMessage(msg),
     appendAssistantMessage: (msg, conversationId) =>
       conversationStore.appendAssistantMessage(msg, conversationId),
+    appendRecordedMessage: (msg, conversationId) =>
+      conversationStore.appendRecordedMessage(msg, conversationId),
     refreshActiveConversation: () =>
       conversationStore.refreshActiveConversation(),
     selectThread: (threadId) => conversationStore.selectThread!(threadId),

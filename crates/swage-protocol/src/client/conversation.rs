@@ -159,6 +159,72 @@ pub struct ToolCallView {
     pub summary: Option<String>,
 }
 
+/// Who put a message into the conversation. `role` is what the model is
+/// shown; the origin is the authorship fact a person reads — only a `User`
+/// message was typed by them, whatever role carries it to the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOrigin {
+    /// A person typed it, at any client (the web UI, a channel, the API).
+    User,
+    /// The model's reply.
+    Assistant,
+    /// A tool's result, recorded as its own row.
+    Tool,
+    /// The delegation machinery: a brief handed to a child, or a child's
+    /// completion notice delivered to its parent.
+    Delegation,
+    /// A schedule's run: a fresh run's opening or a continuation's brief.
+    Schedule,
+    /// A workflow script's prompt to a worker.
+    Workflow,
+    /// A notice the platform itself attached to the conversation.
+    Platform,
+}
+
+impl MessageOrigin {
+    /// The stored and wire spelling: the serde name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::Delegation => "delegation",
+            Self::Schedule => "schedule",
+            Self::Workflow => "workflow",
+            Self::Platform => "platform",
+        }
+    }
+
+    /// Every spelling, for storage's column constraint.
+    pub const ALL: [MessageOrigin; 7] = [
+        Self::User,
+        Self::Assistant,
+        Self::Tool,
+        Self::Delegation,
+        Self::Schedule,
+        Self::Workflow,
+        Self::Platform,
+    ];
+}
+
+impl std::fmt::Display for MessageOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MessageOrigin {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|origin| origin.as_str() == s)
+            .ok_or_else(|| format!("unknown message origin '{s}'"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct MessageView {
@@ -168,6 +234,8 @@ pub struct MessageView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<Uuid>,
     pub role: String,
+    /// Who authored it — what the author label is keyed on.
+    pub origin: MessageOrigin,
     pub content: String,
     /// Content parts recorded beside the text when the message was
     /// submitted; absent for text-only messages.

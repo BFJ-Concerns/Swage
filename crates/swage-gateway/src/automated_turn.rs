@@ -58,9 +58,10 @@ pub async fn create_placeholder_turn(
 pub async fn run_placeholder_turn(
     state: &AppState,
     session_id: Uuid,
-    message: &str,
+    input: impl Into<crate::turn::TurnInput>,
     turn_id: Uuid,
 ) -> Result<String, GatewayError> {
+    let input: crate::turn::TurnInput = input.into();
     let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
     let subscription = Arc::new(Mutex::new(SubscriptionState::new(false)));
@@ -70,7 +71,7 @@ pub async fn run_placeholder_turn(
         state,
         session_id,
         Some(thread.id),
-        message.to_string(),
+        input,
         ws_tx,
         subscription,
         None,
@@ -158,6 +159,112 @@ mod tests {
         assert!(
             provider_request["request"]["body"]["messages"].is_array(),
             "automated turn snapshot should include provider-visible messages"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scheduled_brief_is_recorded_by_its_origin_and_announced_to_open_views() {
+        // The brief rides the user role to the model, so the record must say
+        // a person did not type it — and an open view of the continued
+        // conversation learns of it live, never only on reload.
+        let (state, session_id) = make_state_with_session(vec![
+            StreamChunk::Delta {
+                content: "Inbox summarised".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ])
+        .await;
+        let mut announcements = state.broadcast.subscribe();
+
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Summarise the inbox")
+            .await
+            .expect("create scheduled placeholder");
+        run_placeholder_turn(
+            &state,
+            session_id,
+            crate::turn::TurnInput::text("Summarise the inbox")
+                .with_origin(swage_storage::MessageOrigin::Schedule),
+            turn_id,
+        )
+        .await
+        .expect("scheduled turn should complete");
+
+        let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
+            .await
+            .expect("thread");
+        let messages = state
+            .storage
+            .list_messages_by_thread(thread.id)
+            .await
+            .expect("messages");
+        let origins: Vec<_> = messages
+            .iter()
+            .map(|message| (message.role, message.origin))
+            .collect();
+        assert_eq!(
+            origins,
+            vec![
+                (
+                    swage_core::Role::User,
+                    swage_storage::MessageOrigin::Schedule
+                ),
+                (
+                    swage_core::Role::Assistant,
+                    swage_storage::MessageOrigin::Assistant
+                ),
+            ]
+        );
+
+        let announced = announcements
+            .try_recv()
+            .expect("the brief is announced on the broadcast");
+        match announced {
+            swage_protocol::client::websocket::ServerEvent::MessageAppended {
+                session_id: announced_session,
+                message,
+            } => {
+                assert_eq!(announced_session, session_id);
+                assert_eq!(
+                    message.id, messages[0].id,
+                    "the announced view is the recorded row"
+                );
+                assert_eq!(message.origin, swage_storage::MessageOrigin::Schedule);
+                assert_eq!(message.content, "Summarise the inbox");
+            }
+            other => panic!("expected the brief's announcement, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_typed_message_is_not_announced_to_its_own_author() {
+        // The person's view already holds what they typed; announcing it
+        // would show it twice. Only a row they did not write is announced.
+        let (state, session_id) = make_state_with_session(vec![
+            StreamChunk::Delta {
+                content: "Hello back".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ])
+        .await;
+        let mut announcements = state.broadcast.subscribe();
+
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Hello")
+            .await
+            .expect("create placeholder");
+        run_placeholder_turn(&state, session_id, "Hello", turn_id)
+            .await
+            .expect("turn should complete");
+
+        assert!(
+            !matches!(
+                announcements.try_recv(),
+                Ok(swage_protocol::client::websocket::ServerEvent::MessageAppended { .. })
+            ),
+            "a person's own message is never announced back to them"
         );
     }
 
