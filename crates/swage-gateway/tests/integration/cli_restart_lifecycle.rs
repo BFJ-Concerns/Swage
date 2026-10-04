@@ -59,7 +59,7 @@ impl GatewayProbe {
             // name, so it never falls back outside the scratch filesystem.
             runtime: tempfile::Builder::new()
                 .prefix("qa-gateway-not-running-state-")
-                .rand_bytes(3)
+                .rand_bytes(1)
                 .tempdir_in("/tmp/scratch")
                 .expect("failed to create the probe runtime dir"),
             home: tempfile::TempDir::new().expect("failed to create the probe home"),
