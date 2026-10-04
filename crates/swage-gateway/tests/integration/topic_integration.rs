@@ -1137,6 +1137,7 @@ async fn native_file_fixture(
     writable: bool,
     sandboxed_turn: bool,
     remote: bool,
+    trusted: bool,
 ) -> (
     swage_tool::context::MockToolContext,
     swage_gateway::tool_executor::GatewayExecutionStrategy,
@@ -1162,7 +1163,7 @@ async fn native_file_fixture(
         "POST",
         &format!("/api/topics/{topic_id}/workspaces"),
         Some(json!({ "path": root, "permissions": permissions,
-            "is_trusted": true, "set_as_default": true })),
+            "is_trusted": trusted, "set_as_default": true })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -1217,7 +1218,7 @@ async fn native_file_write_respects_attachment_access_on_local_and_sandboxed_tur
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("existing.txt"), "original").unwrap();
             let (ctx, strategy) =
-                native_file_fixture(root.path(), writable, sandboxed, false).await;
+                native_file_fixture(root.path(), writable, sandboxed, false, true).await;
             for path in ["nested/denied-probe.txt", "existing.txt"] {
                 let result = strategy
                     .execute(
@@ -1265,7 +1266,7 @@ async fn native_file_edit_respects_attachment_access_on_local_and_sandboxed_turn
                 std::fs::write(root.path().join(path), "original").unwrap();
             }
             let (ctx, strategy) =
-                native_file_fixture(root.path(), writable, sandboxed, false).await;
+                native_file_fixture(root.path(), writable, sandboxed, false, true).await;
             let result = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
                 {"path": "first.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "changed"}]},
                 {"path": "second.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "changed"}]}
@@ -1294,7 +1295,6 @@ async fn native_file_mutations_without_attachment_authority_refuse() {
     std::fs::write(root.path().join("existing.txt"), "original").unwrap();
     let mut ctx = swage_tool::context::MockToolContext::new("unknown", "unknown");
     ctx.working_directory = root.path().to_path_buf();
-    let ctx = swage_tool::context::serialise_tool_context(&ctx);
     let error = FileWriteTool
         .execute(json!({"path": "probe.txt", "content": "bad"}), &ctx)
         .await
@@ -1336,7 +1336,7 @@ async fn native_file_mutations_refuse_read_only_targets_before_remote_dispatch()
     use swage_tool::dispatch::ToolExecutionStrategy;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("existing.txt"), "original").unwrap();
-    let (ctx, strategy) = native_file_fixture(root.path(), false, false, true).await;
+    let (ctx, strategy) = native_file_fixture(root.path(), false, false, true, true).await;
     let error = strategy
         .execute(
             &FileWriteTool,
@@ -1373,5 +1373,37 @@ async fn native_file_mutations_refuse_read_only_targets_before_remote_dispatch()
             .to_string()
             .contains("device execution needs the live gateway state"),
         "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_mutations_keep_read_only_access_for_untrusted_attachments() {
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
+    use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+    // Even a caller with this permitted working root cannot turn a declared
+    // read-only attachment into a writable one by clearing its trust flag.
+    let (ctx, strategy) = native_file_fixture(root.path(), false, false, false, false).await;
+    let write = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "probe.txt", "content": "bad"}),
+            &ctx,
+        )
+        .await;
+    assert!(write.unwrap_err().to_string().contains("read-only access"));
+    let edit = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": "existing.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "bad"}]}
+    ]}), &ctx).await;
+    assert!(edit.unwrap_err().to_string().contains("read-only access"));
+    assert!(!root.path().join("probe.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+        "original"
     );
 }
