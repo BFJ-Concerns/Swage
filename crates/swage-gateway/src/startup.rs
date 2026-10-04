@@ -253,6 +253,12 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    // Memory curation: the platform's curator reads each attended
+    // conversation into the operator's memory once it has fallen quiet.
+    let curation_handle = crate::memory_curation::spawn_curation_loop_until_cancelled(
+        state.clone(),
+        background_shutdown.clone(),
+    );
     let queue_handle = crate::background_loop::spawn_periodic_loop(
         std::time::Duration::from_millis(250),
         background_shutdown.clone(),
@@ -348,6 +354,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
             ("workflow wake", workflow_wake_handle),
             ("attachment ingestion", attachment_handle),
             ("session archive", archive_handle),
+            ("memory curation", curation_handle),
             ("channel queue", queue_handle),
         ] {
             if let Err(error) = handle.await {

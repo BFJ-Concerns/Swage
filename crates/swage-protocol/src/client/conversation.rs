@@ -261,9 +261,21 @@ pub struct ConversationListResponse {
 #[ts(optional_fields = nullable)]
 pub enum SessionOrigin {
     Direct,
-    ScheduleRun { schedule_id: Uuid },
-    WorkflowWorker { run_id: Uuid },
-    Delegation { parent_session_id: Uuid },
+    ScheduleRun {
+        schedule_id: Uuid,
+    },
+    WorkflowWorker {
+        run_id: Uuid,
+    },
+    Delegation {
+        parent_session_id: Uuid,
+    },
+    /// The platform's memory curator opened it, to curate the named
+    /// conversation or (naming none) to apply an instruction from Settings.
+    MemoryCuration {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attended_session_id: Option<Uuid>,
+    },
 }
 
 /// One session as the recent-sessions list shows it.

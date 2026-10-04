@@ -10,6 +10,7 @@ pub mod docs;
 pub mod error;
 pub mod knowledge;
 pub mod material;
+pub mod memory;
 pub mod openapi;
 pub mod provider_signin;
 pub mod recovery;
@@ -48,6 +49,10 @@ pub struct ClientSurface {
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
     create_topic_request: topic::CreateTopicRequest,
     create_surface_request: surface::CreateSurfaceRequest,
+    memory_page_list: memory::MemoryPageListResponse,
+    memory_page: memory::MemoryPageResponse,
+    memory_instruction_request: memory::MemoryInstructionRequest,
+    memory_instruction_response: memory::MemoryInstructionResponse,
     write_surface_module_request: surface::WriteSurfaceModuleRequest,
     create_surface_annotation_request: surface::CreateSurfaceAnnotationRequest,
     update_surface_annotation_request: surface::UpdateSurfaceAnnotationRequest,

@@ -17,6 +17,7 @@ export function makeAgentDefinition(
     output_schema: null,
     output_max_retries: null,
     is_builtin: sourceScope === "built_in",
+    selectable: true,
     source_scope: sourceScope,
     ...overrides,
   };

@@ -24,10 +24,39 @@ pub struct AgentDefinitionChange {
     pub summary: String,
 }
 
-/// A definition that can actually be selected for a new session in a topic.
+/// A definition in a topic's effective registry.
 pub struct EffectiveAgentDefinition {
     pub definition: NewAgentDefinition,
     pub is_builtin: bool,
+    /// Whether the picker offers it for a new session. Every definition is,
+    /// except a platform agent that runs only where the platform runs it —
+    /// the memory curator, the one holder of memory writes.
+    pub selectable: bool,
+}
+
+/// The platform's memory curator: present and enabled on a fresh install,
+/// never offered by the picker, holding `memory_read` and `memory_write`
+/// and nothing else. The one shipped agent definition besides the default.
+fn memory_curator_definition() -> NewAgentDefinition {
+    NewAgentDefinition {
+        id: crate::memory::MEMORY_CURATOR_AGENT_ID.into(),
+        topic_id: None,
+        display_name: "Memory curator".into(),
+        description: "Records what the operator states into their memory, after a \
+                      conversation falls quiet or on an instruction from Settings."
+            .into(),
+        instructions: crate::memory_curation::CURATOR_INSTRUCTIONS.into(),
+        model_id: None,
+        tool_permissions: Some(serde_json::json!({
+            "allow": ["memory_read", "memory_write"],
+            "deny": [],
+            "bundles": {},
+            "require_approval": [],
+        })),
+        skills: Vec::new(),
+        output_schema: None,
+        output_max_retries: None,
+    }
 }
 
 fn gateway_definition() -> NewAgentDefinition {
@@ -60,6 +89,14 @@ pub async fn resolve_effective_agent_definition(
         return Ok(Some(EffectiveAgentDefinition {
             definition: gateway_definition(),
             is_builtin: true,
+            selectable: true,
+        }));
+    }
+    if agent_id == crate::memory::MEMORY_CURATOR_AGENT_ID {
+        return Ok(Some(EffectiveAgentDefinition {
+            definition: memory_curator_definition(),
+            is_builtin: true,
+            selectable: false,
         }));
     }
     Ok(storage
@@ -100,6 +137,17 @@ pub async fn effective_agent_definitions(
         EffectiveAgentDefinition {
             definition: gateway_definition(),
             is_builtin: true,
+            selectable: true,
+        },
+    );
+    // The curator is listed — the operator can read what runs over their
+    // words — but never offered for a session.
+    effective.insert(
+        crate::memory::MEMORY_CURATOR_AGENT_ID.into(),
+        EffectiveAgentDefinition {
+            definition: memory_curator_definition(),
+            is_builtin: true,
+            selectable: false,
         },
     );
     Ok(effective.into_values().collect())
@@ -120,6 +168,7 @@ fn stored_definition(definition: swage_storage::AgentDefinition) -> EffectiveAge
             output_max_retries: definition.output_max_retries,
         },
         is_builtin: false,
+        selectable: true,
     }
 }
 
@@ -238,6 +287,11 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
     if definition.id == "gateway" {
         return Err(GatewayError::ValidationError(
             "the gateway agent id is reserved".into(),
+        ));
+    }
+    if definition.id == crate::memory::MEMORY_CURATOR_AGENT_ID {
+        return Err(GatewayError::ValidationError(
+            "the memory-curator agent id is reserved for the platform's curator".into(),
         ));
     }
     if definition.display_name.trim().is_empty() {
@@ -437,11 +491,51 @@ mod validation_tests {
             .map(|entry| entry.definition.id.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(ids, vec!["gateway", "global-only", "shared"]);
-        assert!(effective[0].is_builtin);
+        assert_eq!(
+            ids,
+            vec!["gateway", "global-only", "memory-curator", "shared"]
+        );
+        assert!(effective[0].is_builtin && effective[0].selectable);
         assert_eq!(effective[0].definition.display_name, "Swage default");
-        assert!(!effective[1].is_builtin);
-        assert_eq!(effective[2].definition.instructions, "local");
+        assert!(!effective[1].is_builtin && effective[1].selectable);
+        assert!(
+            effective[2].is_builtin && !effective[2].selectable,
+            "the curator is listed but never offered"
+        );
+        assert_eq!(effective[3].definition.instructions, "local");
+    }
+
+    /// The curator is the one shipped definition beside the default: present
+    /// on a fresh install, holding the memory tools alone, never offered by
+    /// the picker, and its id reserved against authoring.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_memory_curator_ships_unselectable_and_holds_only_the_memory_tools() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let topic = storage.general_scope().await.unwrap();
+        let curator = resolve_effective_agent_definition(
+            &storage,
+            crate::memory::MEMORY_CURATOR_AGENT_ID,
+            topic.id,
+        )
+        .await
+        .unwrap()
+        .expect("the curator resolves on a fresh store");
+        assert!(curator.is_builtin);
+        assert!(!curator.selectable);
+        let permissions: swage_config::ToolPermissionConfig =
+            serde_json::from_value(curator.definition.tool_permissions.expect("overlay")).unwrap();
+        assert_eq!(permissions.allow, vec!["memory_read", "memory_write"]);
+        assert!(
+            curator
+                .definition
+                .instructions
+                .contains("Record only what the operator stated"),
+            "the curator runs under its instructions"
+        );
+        assert!(matches!(
+            validate_definition(&definition(crate::memory::MEMORY_CURATOR_AGENT_ID)),
+            Err(GatewayError::ValidationError(message)) if message.contains("reserved")
+        ));
     }
 
     /// Nothing ships as a global definition: a fresh store resolves only the
@@ -455,9 +549,14 @@ mod validation_tests {
         let effective = effective_agent_definitions(&storage, topic.id)
             .await
             .unwrap();
-        assert_eq!(effective.len(), 1);
+        assert_eq!(effective.len(), 2, "the default and the platform's curator");
         assert_eq!(effective[0].definition.id, "gateway");
         assert!(effective[0].is_builtin);
+        assert_eq!(
+            effective[1].definition.id,
+            crate::memory::MEMORY_CURATOR_AGENT_ID
+        );
+        assert!(effective[1].is_builtin && !effective[1].selectable);
 
         for role in ["researcher", "organiser", "synthesist"] {
             assert!(

@@ -271,6 +271,10 @@ pub enum SessionOrigin {
     WorkflowWorker { run_id: Uuid },
     /// A turn in another session delegated to it.
     Delegation { parent_session_id: Uuid },
+    /// The platform's memory curator opened it: to curate the named attended
+    /// conversation, or to apply the operator's instruction from Settings
+    /// when it names none.
+    MemoryCuration { attended_session_id: Option<Uuid> },
 }
 
 impl SessionOrigin {
@@ -281,6 +285,7 @@ impl SessionOrigin {
             Self::ScheduleRun { .. } => "schedule_run",
             Self::WorkflowWorker { .. } => "workflow_worker",
             Self::Delegation { .. } => "delegation",
+            Self::MemoryCuration { .. } => "memory_curation",
         }
     }
 
@@ -292,6 +297,9 @@ impl SessionOrigin {
             Self::ScheduleRun { schedule_id } => Some(*schedule_id),
             Self::WorkflowWorker { run_id } => Some(*run_id),
             Self::Delegation { parent_session_id } => Some(*parent_session_id),
+            Self::MemoryCuration {
+                attended_session_id,
+            } => *attended_session_id,
         }
     }
 
@@ -303,6 +311,9 @@ impl SessionOrigin {
             ("schedule_run", Some(schedule_id)) => Ok(Self::ScheduleRun { schedule_id }),
             ("workflow_worker", Some(run_id)) => Ok(Self::WorkflowWorker { run_id }),
             ("delegation", Some(parent_session_id)) => Ok(Self::Delegation { parent_session_id }),
+            ("memory_curation", attended_session_id) => Ok(Self::MemoryCuration {
+                attended_session_id,
+            }),
             (kind, None) => Err(format!("session origin '{kind}' has no source id")),
             (kind, Some(_)) => Err(format!("unknown session origin '{kind}'")),
         }

@@ -21,6 +21,10 @@ use super::{
         CreateConversationBranchRequest, CreateConversationRequest, RecentSessionsResponse,
     },
     docs::{DocumentListResponse, DocumentResponse},
+    memory::{
+        MemoryInstructionRequest, MemoryInstructionResponse, MemoryPageListResponse,
+        MemoryPageResponse,
+    },
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
     },
@@ -486,6 +490,66 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<TurnContextResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_memory_pages",
+            method: Method::Get,
+            path: "/api/memory/pages",
+            path_parameters: vec![],
+            query_parameters: vec![QueryParameter {
+                name: "topic_id",
+                kind: ParameterType::Uuid,
+                required: false,
+            }],
+            summary: "List every memory page of one scope — general memory, or a topic's.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<MemoryPageListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "get_memory_page",
+            method: Method::Get,
+            path: "/api/memory/page",
+            path_parameters: vec![],
+            query_parameters: vec![
+                QueryParameter {
+                    name: "reference",
+                    kind: ParameterType::String,
+                    required: true,
+                },
+                QueryParameter {
+                    name: "topic_id",
+                    kind: ParameterType::Uuid,
+                    required: false,
+                },
+            ],
+            summary: "Read one memory page, whole, by the reference the index spells.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<MemoryPageResponse>(),
+            },
+        },
+        Route {
+            operation_id: "apply_memory_instruction",
+            method: Method::Post,
+            path: "/api/memory/instructions",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Change memory by instructing the platform's curator; the reply shows every page it changed.",
+            request_optional: false,
+
+            request: schema::<MemoryInstructionRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<MemoryInstructionResponse>(),
             },
         },
         Route {

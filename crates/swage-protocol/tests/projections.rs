@@ -37,6 +37,12 @@ fn typescript_bindings_are_regenerated() {
     client::topic::CreateTopicRequest::export_all(&cfg).expect("export create topic");
     client::topic::UpdateTopicRequest::export_all(&cfg).expect("export update topic");
     client::topic::TopicListResponse::export_all(&cfg).expect("export topics");
+    client::memory::MemoryPageListResponse::export_all(&cfg).expect("export memory pages");
+    client::memory::MemoryPageResponse::export_all(&cfg).expect("export memory page");
+    client::memory::MemoryInstructionRequest::export_all(&cfg)
+        .expect("export memory instruction request");
+    client::memory::MemoryInstructionResponse::export_all(&cfg)
+        .expect("export memory instruction response");
     client::surface::CreateSurfaceRequest::export_all(&cfg).expect("export create surface");
     client::surface::WriteSurfaceModuleRequest::export_all(&cfg)
         .expect("export write surface module");

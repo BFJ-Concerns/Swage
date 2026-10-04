@@ -582,6 +582,30 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_curator_session_records_the_conversation_it_curated_or_none() {
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let attended = Uuid::new_v4();
+        for origin in [
+            SessionOrigin::MemoryCuration {
+                attended_session_id: Some(attended),
+            },
+            SessionOrigin::MemoryCuration {
+                attended_session_id: None,
+            },
+        ] {
+            let session = storage
+                .create_session(NewSession {
+                    origin: origin.clone(),
+                    ..new_session(topic_id)
+                })
+                .await
+                .unwrap();
+            let fetched = storage.get_session(session.id).await.unwrap().unwrap();
+            assert_eq!(fetched.origin, origin);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_recent_list_orders_by_the_latest_user_or_assistant_message() {
         let (storage, topic_id) = make_storage_with_topic().await;
         let quiet = storage.create_session(new_session(topic_id)).await.unwrap();

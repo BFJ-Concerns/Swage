@@ -5,4 +5,4 @@
  * other kinds are automation, and the recent-sessions list groups them
  * beneath their source instead of listing them at the top level.
  */
-export type SessionOrigin = { "kind": "direct" } | { "kind": "schedule_run", schedule_id: string, } | { "kind": "workflow_worker", run_id: string, } | { "kind": "delegation", parent_session_id: string, };
+export type SessionOrigin = { "kind": "direct" } | { "kind": "schedule_run", schedule_id: string, } | { "kind": "workflow_worker", run_id: string, } | { "kind": "delegation", parent_session_id: string, } | { "kind": "memory_curation", attended_session_id?: string | null, };

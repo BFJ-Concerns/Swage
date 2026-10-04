@@ -255,19 +255,23 @@ impl ConversationService {
                 "agent_id must not be empty".to_string(),
             ));
         }
-        if crate::service::resolve_effective_agent_definition(
+        match crate::service::resolve_effective_agent_definition(
             self.storage.as_ref(),
             &agent_id,
             topic_id,
         )
         .await?
-        .is_none()
         {
-            return Err(GatewayError::ValidationError(format!(
+            None => Err(GatewayError::ValidationError(format!(
                 "no agent definition named '{agent_id}' is visible to this topic"
-            )));
+            ))),
+            Some(definition) if !definition.selectable => {
+                Err(GatewayError::ValidationError(format!(
+                    "'{agent_id}' is the platform's own agent and cannot be chosen for a session"
+                )))
+            }
+            Some(_) => Ok(agent_id),
         }
-        Ok(agent_id)
     }
 
     /// List the conversations of the general scope, newest session update first.

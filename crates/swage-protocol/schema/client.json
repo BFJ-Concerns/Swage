@@ -91,6 +91,18 @@
     "material_list": {
       "$ref": "#/$defs/MaterialListResponse"
     },
+    "memory_instruction_request": {
+      "$ref": "#/$defs/MemoryInstructionRequest"
+    },
+    "memory_instruction_response": {
+      "$ref": "#/$defs/MemoryInstructionResponse"
+    },
+    "memory_page": {
+      "$ref": "#/$defs/MemoryPageResponse"
+    },
+    "memory_page_list": {
+      "$ref": "#/$defs/MemoryPageListResponse"
+    },
     "message_attachment": {
       "$ref": "#/$defs/MessageAttachment"
     },
@@ -278,6 +290,10 @@
     "create_channel_link_code_request",
     "create_topic_request",
     "create_surface_request",
+    "memory_page_list",
+    "memory_page",
+    "memory_instruction_request",
+    "memory_instruction_response",
     "write_surface_module_request",
     "create_surface_annotation_request",
     "update_surface_annotation_request",
@@ -2646,6 +2662,148 @@
       "additionalProperties": false,
       "required": [
         "curator_idle_minutes"
+      ]
+    },
+    "MemoryInstructionRequest": {
+      "description": "An instruction to the curator about the operator's memory — the only way\na page changes from Settings.",
+      "type": "object",
+      "properties": {
+        "instruction": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/MemoryScopeSelector"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "instruction"
+      ]
+    },
+    "MemoryInstructionResponse": {
+      "description": "What the curator did with an instruction: its reply, and every page it\nchanged, whole, so the view shows the result as instructed.",
+      "type": "object",
+      "properties": {
+        "curator_session_id": {
+          "description": "The curator session the instruction ran in — its record of the pass.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "pages_changed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryPageResponse"
+          }
+        },
+        "reply": {
+          "type": "string"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "reply",
+        "pages_changed",
+        "curator_session_id",
+        "turn_id"
+      ]
+    },
+    "MemoryPageListResponse": {
+      "description": "Every page of one scope.",
+      "type": "object",
+      "properties": {
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemoryPageSummary"
+          }
+        },
+        "scope": {
+          "$ref": "#/$defs/MemoryScopeSelector"
+        }
+      },
+      "required": [
+        "scope",
+        "pages"
+      ]
+    },
+    "MemoryPageResponse": {
+      "description": "One page, whole.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "reference",
+        "body"
+      ]
+    },
+    "MemoryPageSummary": {
+      "description": "One memory page as the index lists it: its reference and the curator's\none-sentence summary.",
+      "type": "object",
+      "properties": {
+        "reference": {
+          "description": "The reference the index spells: `general/<entry>` or `topic/<entry>`.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Absent when the page carries no summary line yet.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "reference"
+      ]
+    },
+    "MemoryScopeSelector": {
+      "description": "Which memory store a request addresses: the operator's general memory,\nor one topic's.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "general"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "topic"
+            },
+            "topic_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "topic_id"
+          ]
+        }
       ]
     },
     "MessageAttachment": {
@@ -5185,6 +5343,26 @@
           "required": [
             "kind",
             "parent_session_id"
+          ]
+        },
+        {
+          "description": "The platform's memory curator opened it, to curate the named\nconversation or (naming none) to apply an instruction from Settings.",
+          "type": "object",
+          "properties": {
+            "attended_session_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
+            "kind": {
+              "type": "string",
+              "const": "memory_curation"
+            }
+          },
+          "required": [
+            "kind"
           ]
         }
       ]
