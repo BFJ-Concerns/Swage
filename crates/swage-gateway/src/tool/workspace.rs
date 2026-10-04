@@ -156,16 +156,17 @@ pub fn resolve_new_context_path(
 /// Refuses native file mutations covered by an attachment without write access.
 ///
 /// The gateway checks its attachments before local execution or remote dispatch.
-/// The device receiver uses the serialised context after that gateway check and
-/// enforces its own workspace roots. Other contexts without authority fail closed.
+/// Device and nested-tool receivers use a serialised context after their
+/// gateway preflight. Devices also enforce their own workspace roots. Other
+/// contexts without authority fail closed.
 pub async fn require_workspace_write_access(
     ctx: &dyn ToolContext,
     path: &Path,
     tool_name: &str,
 ) -> Result<(), ToolError> {
-    // DeviceConnection dispatches native tools with this wire context. Its own
-    // paths are governed by the device's root checks; gateway-attached targets
-    // are checked before the operation crosses the connection.
+    // Both DeviceConnection and NestedToolRuntime preflight gateway attachments
+    // before dispatching native tools with this wire context. The type alone
+    // carries no attachment authority; those callers own the preceding check.
     if ctx
         .as_any()
         .is::<swage_tool::context::SerializableToolContext>()

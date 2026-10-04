@@ -117,10 +117,28 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
         };
         let agent_id = ctx.agent_id().to_owned();
 
-        let dispatched = self
-            .dispatcher
-            .dispatch(tool_name, arguments, &ctx, &agent_id)
-            .await;
+        // Nested native file tools run on the gateway through a no-strategy
+        // dispatcher. Their wire context has no attachment authority, so check
+        // the gateway's stored permissions before entering that dispatcher.
+        let gateway_ctx = crate::tool_executor::GatewayToolContext::new(
+            &ctx,
+            self.ws_tx.clone(),
+            self.storage.clone(),
+        );
+        let dispatched = match crate::tool::workspace::require_native_file_write_access(
+            tool_name,
+            &arguments,
+            &gateway_ctx,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.dispatcher
+                    .dispatch(tool_name, arguments, &ctx, &agent_id)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // The settlement is the second half of a constitutive record
@@ -264,6 +282,111 @@ mod tests {
 
     struct ObservingTool {
         observed: Arc<Mutex<Option<ObservedContext>>>,
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_native_file_mutations_respect_attachment_access() {
+        use swage_storage::{NewWorkspaceAttachment, WorkspaceAttachmentStore};
+
+        for writable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+            let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+            let turn_id = create_turn(storage.as_ref()).await;
+            let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+            let thread = ThreadStore::get(storage.as_ref(), turn.thread_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let session = storage
+                .get_session(thread.session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            storage
+                .create_workspace_attachment(NewWorkspaceAttachment {
+                    topic_id: session.topic_id,
+                    label: "nested workspace".into(),
+                    path: root.path().to_string_lossy().into_owned(),
+                    permissions: if writable {
+                        vec!["read".into(), "write".into()]
+                    } else {
+                        vec!["read".into()]
+                    },
+                    is_trusted: true,
+                })
+                .await
+                .unwrap();
+            let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
+                crate::startup::workspace_tools(&swage_config::ResolvedConfig::default()),
+            ));
+            let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut context = parent_context(turn_id);
+            context.session_id = session.id.to_string();
+            context.working_directory = root.path().to_path_buf();
+            context.allowed_paths = vec![root.path().to_path_buf()];
+            let runtime = NestedToolRuntime::new(
+                dispatcher,
+                ws_tx,
+                storage,
+                turn_id,
+                "python_parent".into(),
+                serialise_tool_context(&context),
+            );
+            let write = runtime
+                .dispatch_tool(
+                    "file_write",
+                    json!({"path": "probe.txt", "content": "written"}),
+                )
+                .await;
+            let edit = runtime
+                .dispatch_tool(
+                    "file_edit",
+                    json!({"changes": [{"path": "existing.txt", "edits": [
+                        {"type": "replace", "old_text": "original", "new_text": "edited"}
+                    ]}]}),
+                )
+                .await;
+            if writable {
+                assert!(
+                    write.is_ok(),
+                    "writable nested file_write failed: {write:?}"
+                );
+                assert!(edit.is_ok(), "writable nested file_edit failed: {edit:?}");
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("probe.txt")).unwrap(),
+                    "written"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+                    "edited"
+                );
+            } else {
+                for (tool, result) in [("file_write", write), ("file_edit", edit)] {
+                    let error = result
+                        .expect_err("nested native mutation must refuse read-only attachment");
+                    assert!(
+                        error.message.contains("read-only access"),
+                        "{tool}: {error:?}"
+                    );
+                }
+                assert!(!root.path().join("probe.txt").exists());
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+                    "original"
+                );
+            }
+            let mut statuses = Vec::new();
+            while let Ok(event) = ws_rx.try_recv() {
+                if let ServerEvent::ToolEnd { status, .. } = event {
+                    statuses.push(status);
+                }
+            }
+            assert_eq!(
+                statuses,
+                vec![if writable { "success" } else { "error" }; 2]
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
