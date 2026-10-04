@@ -382,6 +382,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn record_turn_isolation(
+            &self,
+            _id: Uuid,
+            _isolation: &swage_storage::TurnIsolation,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
         async fn update_structured_output(
             &self,
             _id: Uuid,

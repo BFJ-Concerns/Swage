@@ -1150,6 +1150,50 @@ pub struct InboundAudit {
     pub modified_by_hooks: Vec<String>,
 }
 
+/// The execution boundary a turn ran inside, recorded on the turn when its
+/// dispatcher settles. Three kinds: sandboxed on the host, degraded for a
+/// stated reason, or the boundary the install declares for every turn (a
+/// container image, for one), which is neither of the other two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnIsolation {
+    Isolated,
+    Degraded { reason: String },
+    Declared { boundary: String },
+}
+
+impl TurnIsolation {
+    /// The stored kind column.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Isolated => "isolated",
+            Self::Degraded { .. } => "degraded",
+            Self::Declared { .. } => "declared",
+        }
+    }
+
+    /// The stored detail column: the reason or the boundary, when there is one.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Isolated => None,
+            Self::Degraded { reason } => Some(reason),
+            Self::Declared { boundary } => Some(boundary),
+        }
+    }
+
+    /// Rebuild from the two stored columns.
+    pub fn from_columns(kind: &str, detail: Option<String>) -> Result<Self, String> {
+        match (kind, detail) {
+            ("isolated", _) => Ok(Self::Isolated),
+            ("degraded", Some(reason)) => Ok(Self::Degraded { reason }),
+            ("declared", Some(boundary)) => Ok(Self::Declared { boundary }),
+            ("degraded" | "declared", None) => {
+                Err(format!("turn isolation '{kind}' stored without its detail"))
+            }
+            (other, _) => Err(format!("unknown turn isolation kind '{other}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     pub id: Uuid,
@@ -1192,6 +1236,9 @@ pub struct Turn {
     /// Completion tokens spent by this turn's delegated children
     /// (transitively); see `delegated_input_tokens`.
     pub delegated_output_tokens: Option<i64>,
+    /// The execution boundary the turn ran inside, recorded when its
+    /// dispatcher settled; `None` for a turn that never reached that point.
+    pub execution_isolation: Option<TurnIsolation>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -3152,6 +3199,7 @@ mod tests {
             completed_at: None,
             delegated_input_tokens: None,
             delegated_output_tokens: None,
+            execution_isolation: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3207,6 +3255,7 @@ mod tests {
             completed_at: Some(now),
             delegated_input_tokens: None,
             delegated_output_tokens: None,
+            execution_isolation: None,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
@@ -3236,6 +3285,7 @@ mod tests {
             completed_at: None,
             delegated_input_tokens: None,
             delegated_output_tokens: None,
+            execution_isolation: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -3268,6 +3318,7 @@ mod tests {
             completed_at: None,
             delegated_input_tokens: None,
             delegated_output_tokens: None,
+            execution_isolation: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3298,6 +3349,7 @@ mod tests {
             completed_at: None,
             delegated_input_tokens: None,
             delegated_output_tokens: None,
+            execution_isolation: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");

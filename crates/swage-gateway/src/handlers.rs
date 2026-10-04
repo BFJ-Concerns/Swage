@@ -1353,7 +1353,8 @@ pub async fn shutdown(
 // ---------------------------------------------------------------------------
 
 pub use swage_protocol::client::turn::{
-    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnPollResponse,
+    MessageResponse, SendMessageRequest, SubmitTurnRequest, SubmitTurnResponse, TurnIsolationView,
+    TurnPollResponse,
 };
 
 /// `POST /api/turns` — submit a turn for async processing.
@@ -1552,7 +1553,19 @@ pub async fn get_turn(
         delegated_input_tokens: turn.delegated_input_tokens,
         delegated_output_tokens: turn.delegated_output_tokens,
         parent_turn_id: turn.parent_turn_id,
+        execution_isolation: turn.execution_isolation.map(isolation_view),
     }))
+}
+
+/// The wire form of a turn's recorded execution boundary.
+fn isolation_view(isolation: swage_storage::TurnIsolation) -> TurnIsolationView {
+    match isolation {
+        swage_storage::TurnIsolation::Isolated => TurnIsolationView::Isolated,
+        swage_storage::TurnIsolation::Degraded { reason } => TurnIsolationView::Degraded { reason },
+        swage_storage::TurnIsolation::Declared { boundary } => {
+            TurnIsolationView::Declared { boundary }
+        }
+    }
 }
 
 /// `POST /api/messages` — send a typed message to an agent.
@@ -2184,6 +2197,7 @@ pub async fn list_turns(
             delegated_input_tokens: t.delegated_input_tokens,
             delegated_output_tokens: t.delegated_output_tokens,
             parent_turn_id: t.parent_turn_id,
+            execution_isolation: t.execution_isolation.map(isolation_view),
         })
         .collect();
 
@@ -3505,6 +3519,81 @@ mod tests {
         let db = storage.db.lock().await;
         assert!(db.sessions.is_empty());
         assert!(db.threads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_polled_turn_names_the_boundary_it_ran_inside() {
+        use swage_storage::TurnIsolation;
+        use swage_storage::model::{NewTurn, TurnState};
+        use swage_storage::store::{SessionStore, ThreadStore, TurnStore};
+
+        let (router, storage) = make_router();
+        let create_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/conversations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let conversation_id = body_json(create_resp).await["id"]
+            .as_str()
+            .expect("conversation id")
+            .parse::<Uuid>()
+            .expect("conversation uuid");
+        let session = storage
+            .get_session(conversation_id)
+            .await
+            .expect("get session")
+            .expect("session exists");
+        let thread = storage
+            .list_by_session(session.id)
+            .await
+            .expect("list threads")
+            .into_iter()
+            .next()
+            .expect("root thread exists");
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: session.agent_id.clone(),
+                state: TurnState::Completed,
+                user_input: Some("hello".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("create turn");
+        storage
+            .record_turn_isolation(
+                turn.id,
+                &TurnIsolation::Declared {
+                    boundary: "container".into(),
+                },
+            )
+            .await
+            .expect("record isolation");
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/turns/{}", turn.id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["execution_isolation"],
+            serde_json::json!({ "kind": "declared", "boundary": "container" }),
+            "the turn's record names the boundary, neither sandboxed nor degraded"
+        );
     }
 
     #[tokio::test]

@@ -6397,6 +6397,55 @@
         "report"
       ]
     },
+    "TurnIsolationView": {
+      "description": "The execution boundary a turn ran inside: sandboxed on the host, degraded\nfor a stated reason, or the boundary the install declares for every turn\n(a container image, for one) — which is neither of the other two.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "isolated"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "degraded"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "boundary": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "declared"
+            }
+          },
+          "required": [
+            "kind",
+            "boundary"
+          ]
+        }
+      ]
+    },
     "TurnPollResponse": {
       "type": "object",
       "properties": {
@@ -6420,6 +6469,17 @@
             "null"
           ],
           "format": "int64"
+        },
+        "execution_isolation": {
+          "description": "The execution boundary the turn ran inside, once its dispatcher\nsettled. Null until then.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnIsolationView"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "input_tokens": {
           "type": [

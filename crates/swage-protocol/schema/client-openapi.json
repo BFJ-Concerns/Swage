@@ -6026,6 +6026,55 @@
         ],
         "type": "object"
       },
+      "TurnIsolationView": {
+        "description": "The execution boundary a turn ran inside: sandboxed on the host, degraded\nfor a stated reason, or the boundary the install declares for every turn\n(a container image, for one) — which is neither of the other two.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "isolated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "degraded",
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "boundary": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "declared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "boundary"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "TurnPollResponse": {
         "properties": {
           "assistant_response": {
@@ -6048,6 +6097,17 @@
               "integer",
               "null"
             ]
+          },
+          "execution_isolation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnIsolationView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The execution boundary the turn ran inside, once its dispatcher\nsettled. Null until then."
           },
           "input_tokens": {
             "format": "int64",

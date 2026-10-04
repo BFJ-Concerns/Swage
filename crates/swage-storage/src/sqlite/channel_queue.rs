@@ -269,6 +269,7 @@ impl ChannelQueueStore for SqliteStorage {
                 completed_at: None,
                 delegated_input_tokens: None,
                 delegated_output_tokens: None,
+                execution_isolation: None,
             })
         })
         .await

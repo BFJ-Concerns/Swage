@@ -34,6 +34,19 @@ use crate::{
     telegram::TelegramClient, tool::ToolDispatcher, websocket::ServerEvent,
 };
 
+/// The environment variable an install sets to declare the boundary every
+/// turn runs inside — `SWAGE_EXECUTION_BOUNDARY=container` in the container
+/// image. It is read from the process environment only: the declaration
+/// belongs to the install, never to configuration an operator edits.
+pub const EXECUTION_BOUNDARY_ENV: &str = "SWAGE_EXECUTION_BOUNDARY";
+
+fn declared_execution_boundary_from_env() -> Option<String> {
+    std::env::var(EXECUTION_BOUNDARY_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
 /// All fields are wrapped in `Arc` so that cloning the state is cheap.
@@ -134,6 +147,12 @@ pub struct AppState {
     pub restart_required: Arc<AtomicBool>,
     /// Whether this process can restart itself via the desktop/runtime wrapper.
     pub managed_gateway: bool,
+    /// The execution boundary the install declares for every turn — a
+    /// container image sets it — read from the process environment
+    /// (`EXECUTION_BOUNDARY_ENV`), never from operator-editable
+    /// configuration. When set, no per-turn sandbox is built and every turn's
+    /// record names this boundary.
+    pub declared_execution_boundary: Option<String>,
     /// Hot-swapped runtime config used by new turns and settings reads.
     pub runtime_config: Arc<RwLock<ResolvedConfig>>,
     /// Hot-swapped provider catalogue used by new turns.
@@ -352,6 +371,7 @@ impl AppState {
             managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            declared_execution_boundary: declared_execution_boundary_from_env(),
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),

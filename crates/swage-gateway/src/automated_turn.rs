@@ -163,6 +163,63 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_records_the_boundary_its_dispatcher_settled_at() {
+        let reply = || {
+            vec![
+                StreamChunk::Delta {
+                    content: "Done.".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ]
+        };
+
+        // On a host: the test harness stands in for the sandbox.
+        let (state, session_id) = make_state_with_session(reply()).await;
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Hello")
+            .await
+            .unwrap();
+        run_placeholder_turn(&state, session_id, "Hello", turn_id)
+            .await
+            .unwrap();
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(
+            turn.execution_isolation,
+            Some(swage_storage::TurnIsolation::Isolated),
+            "every settled turn carries where it ran"
+        );
+
+        // In an install that declares its boundary: the turn says so, and
+        // nothing about it reads as degraded.
+        let (mut state, session_id) = make_state_with_session(reply()).await;
+        state.declared_execution_boundary = Some("container".into());
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Hello")
+            .await
+            .unwrap();
+        run_placeholder_turn(&state, session_id, "Hello", turn_id)
+            .await
+            .unwrap();
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(
+            turn.execution_isolation,
+            Some(swage_storage::TurnIsolation::Declared {
+                boundary: "container".into()
+            })
+        );
+        assert!(
+            state
+                .storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.event_kind != "execution_isolation_degraded"),
+            "a declared boundary is not a degradation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_scheduled_brief_is_recorded_by_its_origin_and_announced_to_open_views() {
         // The brief rides the user role to the model, so the record must say
         // a person did not type it — and an open view of the continued
