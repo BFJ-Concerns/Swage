@@ -1185,6 +1185,9 @@ async fn approvals_for_other_session_not_re_emitted_on_connect() {
 
 fn native_file_tools() -> Vec<Arc<dyn swage_tool::tool::Tool>> {
     vec![
+        Arc::new(swage_gateway::tool::file_read::FileReadTool {
+            max_output_bytes: 65536,
+        }),
         Arc::new(swage_gateway::tool::file_write::FileWriteTool),
         Arc::new(swage_gateway::tool::file_list::FileListTool),
         Arc::new(swage_gateway::tool::file_search::FileSearchTool {
@@ -1596,4 +1599,100 @@ async fn native_file_approval_session_releases_matching_reads_in_one_session() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_file_approval_permanent_releases_reads_in_new_sessions() {
     native_approval_scope("permanent", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_missing_read_keeps_workspace_and_granted_path_readable() {
+    let _guard = SwageHomeGuard::isolate();
+    let files = tempfile::TempDir::new().unwrap();
+    let project = files.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("inside.txt"), "existing workspace content").unwrap();
+    let provider = MockProvider::new(vec![
+        native_call(
+            "missing-first",
+            "file_read",
+            json!({"path": "../missing/notes.md"}),
+        ),
+        native_done(),
+        native_call("inside", "file_read", json!({"path": "inside.txt"})),
+        native_done(),
+        native_call(
+            "missing-again",
+            "file_read",
+            json!({"path": "../missing/notes.md"}),
+        ),
+        native_done(),
+    ]);
+    let mut config = ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sandbox.allow_degraded_execution = true;
+    let (router, addr, storage) =
+        start_test_server_with_tools(provider, config, native_file_tools()).await;
+    let (_, conversation) = http(&router, "POST", "/api/conversations").await;
+    let id = conversation["id"].as_str().unwrap();
+    attach_native_workspace(&storage, id, &project).await;
+    let (mut sink, mut stream) = connect_ws(addr, id).await;
+    for (index, call_id) in ["missing-first", "inside", "missing-again"]
+        .into_iter()
+        .enumerate()
+    {
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": call_id}),
+        )
+        .await;
+        let mut prompts = 0;
+        let complete = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let event = ws_recv_lenient(&mut stream).await.unwrap();
+                if event["type"] == "approval_required" {
+                    prompts += 1;
+                    assert_eq!(
+                        index, 0,
+                        "a missing read grant must not cause another approval: {event}"
+                    );
+                    assert_eq!(
+                        event["context"]["path"],
+                        files.path().join("missing").to_string_lossy().as_ref()
+                    );
+                    let (status, body) = live_http_json(
+                        addr,
+                        reqwest::Method::POST,
+                        &format!("/api/approvals/{}", event["approval_id"].as_str().unwrap()),
+                        Some(json!({"decision": "approved", "scope": "session"})),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                }
+                if event["type"] == "turn_complete" {
+                    break event;
+                }
+                assert_ne!(event["type"], "error", "{event}");
+            }
+        })
+        .await
+        .expect("read turn completes");
+        assert_eq!(prompts, usize::from(index == 0));
+        let call = native_result(&storage, &complete, call_id).await;
+        let result = call.result.as_deref().unwrap();
+        assert!(
+            !result.contains("requires read approval"),
+            "granted read must reach the filesystem: {result}"
+        );
+        if call_id == "inside" {
+            assert_eq!(call.status.as_deref(), Some("success"), "{result}");
+            assert!(result.contains("existing workspace content"), "{result}");
+        } else {
+            assert_eq!(call.status.as_deref(), Some("error"), "{result}");
+            assert!(
+                result.contains("File not found: ../missing/notes.md"),
+                "{result}"
+            );
+        }
+        assert!(
+            !files.path().join("missing").exists(),
+            "a read grant must not create its missing location"
+        );
+    }
 }
