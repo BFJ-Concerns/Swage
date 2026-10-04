@@ -16,6 +16,9 @@ use swage_storage::TurnState;
 pub struct OutboundMessage {
     /// The assistant's response text.
     pub response: String,
+    /// The output-limit stop reason when the response is partial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
     /// ID of the completed turn.
     pub turn_id: Uuid,
     /// Total input tokens consumed.
@@ -37,6 +40,7 @@ mod outbound_message_tests {
 
     fn sample() -> OutboundMessage {
         OutboundMessage {
+            incomplete_reason: None,
             response: "The answer is 42.".into(),
             turn_id: Uuid::new_v4(),
             input_tokens: 128,
@@ -91,6 +95,7 @@ mod outbound_message_tests {
     fn zero_token_counts_serialise() {
         // Counts of zero must be preserved — not omitted as absent.
         let msg = OutboundMessage {
+            incomplete_reason: None,
             response: "simple".into(),
             turn_id: Uuid::new_v4(),
             input_tokens: 0,
