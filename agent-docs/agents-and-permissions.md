@@ -388,9 +388,14 @@ completion requests.
 | `sandbox.enabled` | bool | `false` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
 
-Omitting `[sandbox]` or setting `sandbox.enabled = false` runs turns
-unsandboxed without requiring `allow_degraded_execution`. The persisted turn
-boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+With no sandbox setting in the configuration cascade, per-turn sandboxing
+defaults off. A topic inherits sandbox settings from the global configuration;
+an agent can override them. When `sandbox.enabled` resolves to `false`, local
+gateway turns run unsandboxed without requiring `allow_degraded_execution`.
+The persisted turn boundary is `Degraded` with reason
+`sandbox_disabled_by_configuration`. A declared install boundary, such as a
+container image, takes precedence over sandbox settings and remains the
+recorded boundary.
 
 To enable sandboxing for a topic, add this to its `config.toml`:
 
