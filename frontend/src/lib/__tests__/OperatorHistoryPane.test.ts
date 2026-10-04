@@ -100,6 +100,47 @@ describe("OperatorHistoryPane", () => {
     expect(document.querySelectorAll(".audit-entry")).toHaveLength(1);
   });
 
+  it("names each changed setting with its prior and new value and keeps the whole objects collapsed", async () => {
+    const base = {
+      default_provider: "proxy-anthropic",
+      context: { assembly: "default", timeout: 5 },
+      providers: { "proxy-anthropic": { api_key: "[REDACTED]", base_url: "http://a" } },
+      models: { sonnet: { model_id: "claude-sonnet-5-5" } },
+    };
+    vi.mocked(fetchOperatorHistory).mockResolvedValue({
+      configuration_changes: [{
+        id: "change-1",
+        resource_kind: "settings",
+        resource_id: "global",
+        action: "save_settings",
+        source: "operator_http",
+        session_id: null,
+        prior_state: { ...base, default_model: "sonnet" },
+        new_state: { ...base, default_model: "sol", context: { assembly: "compact", timeout: 5 } },
+        recorded_at: "2026-10-04T10:00:00Z",
+      }],
+      variant_selections: [],
+      assembly_reports: [],
+    });
+
+    component = mount(OperatorHistoryPane, { target: document.body });
+
+    await vi.waitFor(() => expect(document.querySelector(".configuration-entry")).not.toBeNull());
+    const rows = Array.from(document.querySelectorAll(".changed-fields tbody tr")).map((row) =>
+      Array.from(row.querySelectorAll("th, td")).map((cell) => cell.textContent?.trim()),
+    );
+    expect(rows).toEqual([
+      ["Context › Assembly", "default", "compact"],
+      ["Default model", "sonnet", "sol"],
+    ]);
+    const whole = document.querySelector(".configuration-entry details") as HTMLDetailsElement;
+    expect(whole).not.toBeNull();
+    expect(whole.open).toBe(false);
+    expect(whole.querySelector("pre")?.textContent).toContain('"default_model": "sonnet"');
+    expect(document.querySelector(".configuration-entry > .state-grid")).toBeNull();
+    expect(document.body.textContent).toContain("[REDACTED]");
+  });
+
   it("shows a loading state while the history request is pending", () => {
     vi.mocked(fetchOperatorHistory).mockReturnValue(new Promise(() => {}));
 
