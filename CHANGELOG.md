@@ -60,6 +60,7 @@ All notable changes to Swage are documented in this file.
 - Provider rejections that cannot succeed on retry, such as an unknown model or failed authentication, end the turn immediately without a retry countdown.
 
 - Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
+- A turn for a selected model goes only to that model's configured provider, with its saved URL and protocol: when that provider is unreachable or fails, the turn fails with its error instead of being answered by another configured model.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.
 - Retry badges name the model requested for the current turn.
 - Stopping a turn ends a shell command running inside the sandbox, in both bubblewrap and fallback modes, and its call settles as cancelled.
