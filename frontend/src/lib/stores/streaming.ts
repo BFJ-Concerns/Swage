@@ -399,8 +399,8 @@ export function createStreamingStore(
           break;
 
         case "turn_complete":
-          // The gateway has committed the full turn. Push the completed
-          // assistant message and return to idle state.
+          // The gateway has committed the turn. Preserve the reply with
+          // its terminal state and return to idle.
           {
             const streamedContent = get(stream.streamedContentStore);
             const activeToolCalls = get(stream.activeToolCallsStore);

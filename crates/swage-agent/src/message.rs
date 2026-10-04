@@ -11,7 +11,7 @@ use crate::context::TurnExecutionContext;
 use swage_core::ChatMessage;
 use swage_storage::TurnState;
 
-/// A successful response from the agent to the caller.
+/// A settled response from the agent to the caller, including partial work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// The assistant's response text.
@@ -19,7 +19,7 @@ pub struct OutboundMessage {
     /// The output-limit stop reason when the response is partial.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete_reason: Option<String>,
-    /// ID of the completed turn.
+    /// ID of the settled turn.
     pub turn_id: Uuid,
     /// Total input tokens consumed.
     pub input_tokens: u32,
