@@ -355,6 +355,7 @@ mod tests {
     /// Tool that never finishes on its own and records when its execution is
     /// dropped — the moment a real tool's processes would be stopped.
     struct HangingTool {
+        started: Arc<tokio::sync::Notify>,
         dropped: Arc<AtomicBool>,
     }
 
@@ -383,6 +384,7 @@ mod tests {
             _ctx: &dyn ToolContext,
         ) -> Result<Value, ToolError> {
             let _running = SetOnDrop(Arc::clone(&self.dropped));
+            self.started.notify_one();
             std::future::pending().await
         }
     }
@@ -411,7 +413,9 @@ mod tests {
     async fn loop_cancel_drops_running_tool_and_answers_cancelled() {
         let (conn, mut host) = make_connection_pair();
         let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
         let tool = HangingTool {
+            started: Arc::clone(&started),
             dropped: Arc::clone(&dropped),
         };
         let loop_handle = tokio::spawn(async move { run_loop(conn, vec![Box::new(tool)]).await });
@@ -424,6 +428,7 @@ mod tests {
         })
         .await
         .unwrap();
+        started.notified().await;
         host.send(&IpcMessage::ToolCallCancel {
             request_id: "req-hang".into(),
         })
