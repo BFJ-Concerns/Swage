@@ -170,11 +170,11 @@ impl LeakDetector {
         // Merge overlapping ranges, retaining the first match's label.
         let mut merged: Vec<(usize, usize, &str)> = Vec::new();
         for redaction in redactions {
-            if let Some(last) = merged.last_mut() {
-                if redaction.0 < last.1 {
-                    last.1 = last.1.max(redaction.1);
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && redaction.0 < last.1
+            {
+                last.1 = last.1.max(redaction.1);
+                continue;
             }
             merged.push(redaction);
         }
