@@ -2123,6 +2123,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_rebuilds_tool_runtime_without_restart() {
         let swage_home = SwageHomeGuard::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let search_url = format!("http://{}", listener.local_addr().unwrap());
+        let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/search",
+            axum::routing::get(move |axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>| {
+                let requests = requests.clone();
+                async move {
+                    requests.send(query).unwrap();
+                    axum::Json(json!({"results": [{"title": "Observed search", "url": "https://example.org/result", "content": "Endpoint response"}]}))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let plugin_dir = swage_home.path().join("plugins").join("echo-plugin");
         std::fs::create_dir_all(&plugin_dir).expect("plugin directory");
@@ -2224,7 +2238,7 @@ mod tests {
                 plugin_directory: Some(plugin_root.clone()),
                 search: Some(swage_protocol::client::settings::SearchProviderConfig {
                     provider_type: "searxng".to_string(),
-                    base_url: "http://127.0.0.1:8080".to_string(),
+                    base_url: search_url.clone(),
                 }),
             }),
             tool_permissions: None,
@@ -2239,7 +2253,7 @@ mod tests {
             voice: None,
         };
 
-        let response = save_settings(&state, request)
+        let response = save_settings(&state, request.clone())
             .await
             .expect("settings should save and hot-rebuild tools");
 
@@ -2260,19 +2274,69 @@ mod tests {
             "hot-rebuilt dispatcher should include tools from the saved plugin directory"
         );
         assert!(!state.restart_required());
+        let dispatcher = state.active_tool_dispatcher();
+        let search = dispatcher
+            .registry()
+            .get("web_search")
+            .expect("registered search tool");
+        let result = search
+            .execute(
+                json!({"query": "changed endpoint"}),
+                &swage_tool::context::MockToolContext::new("default", "test"),
+            )
+            .await
+            .expect("search reaches the saved endpoint");
+        let query = tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
+            .await
+            .expect("request observed at the new endpoint")
+            .unwrap();
+        assert_eq!(query.get("q").map(String::as_str), Some("changed endpoint"));
+        assert_eq!(query.get("format").map(String::as_str), Some("json"));
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("Endpoint response")
+        );
+        server.abort();
         let events = state.storage.list_audit_events().await.unwrap();
         let change = events
             .iter()
             .find(|event| event.event_kind == "configuration_change")
             .expect("settings configuration change");
-        for state in ["prior_state", "new_state"] {
-            assert_eq!(
-                change.metadata[state]["tool_runtime"]["search"],
-                json!({
-                    "provider_type": "searxng", "base_url": "http://127.0.0.1:8080"
-                })
-            );
-        }
+        assert_eq!(
+            change.metadata["prior_state"]["tool_runtime"]["search"]["base_url"],
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            change.metadata["new_state"]["tool_runtime"]["search"]["base_url"],
+            search_url
+        );
+
+        let mut disabled = request;
+        disabled.tool_runtime.as_mut().unwrap().search = None;
+        let response = save_settings(&state, disabled)
+            .await
+            .expect("disable search");
+        assert!(response.tool_runtime.search.is_none());
+        assert!(!response.restart_required);
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .expect("disabled search reloads");
+        assert!(reloaded.tools.search.is_none());
+        let dispatcher = state.active_tool_dispatcher();
+        let search = dispatcher.registry().get("web_search").unwrap();
+        let error = search
+            .execute(
+                json!({"query": "disabled"}),
+                &swage_tool::context::MockToolContext::new("default", "test"),
+            )
+            .await
+            .expect_err("disabled search must not reach a provider");
+        assert!(error.to_string().contains("not configured"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
