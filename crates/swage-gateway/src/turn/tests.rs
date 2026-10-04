@@ -13840,13 +13840,14 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
 }
 
 #[tokio::test]
-async fn registered_context_assembly_alternative_can_be_selected_and_is_audited() {
+async fn session_variant_registered_context_assembly_alternative_can_be_selected_and_is_audited() {
     let storage = Arc::new(MockStorage::new());
-    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let (state, _) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    let session_id = Uuid::from_u128(1);
     let mut config = swage_config::ResolvedConfig::default();
     config.context.alternatives = vec!["candidate".to_owned()];
 
-    let choices = select_context_assembly(&state, &config, session_id, Uuid::from_u128(1), None)
+    let choices = select_context_assembly(&state, &config, session_id, Uuid::nil(), None)
         .await
         .expect("registered alternative should be selectable");
 
@@ -14016,6 +14017,21 @@ async fn session_variant_context_assembly_survives_control_and_candidate_changes
         .await
         .unwrap();
     assert_eq!(first.assembly_name, "candidate");
+    config
+        .experimentation
+        .locations
+        .get_mut(crate::experimentation::LOCATION_CONTEXT_ASSEMBLY)
+        .unwrap()
+        .enabled = false;
+    let location_disabled =
+        select_context_assembly(&state, &config, session_id, Uuid::new_v4(), None)
+            .await
+            .unwrap();
+    assert_eq!(
+        location_disabled.assembly_name, "candidate",
+        "location disable must preserve the session's choice"
+    );
+
     config.experimentation.enabled = false;
     config.context.alternatives.clear();
     config
