@@ -62,6 +62,10 @@ type CooldownMap = Arc<Mutex<Vec<Option<Instant>>>>;
 /// 2. Providers still in cooldown, ordered from earliest start (most likely
 ///    recovered) to latest.
 ///
+/// A request naming a configured model bypasses both passes: only the first
+/// provider configured for that model is tried, so a failure surfaces instead
+/// of being answered by a different model.
+///
 /// ### Cooldown lifecycle
 ///
 /// A provider enters cooldown when it returns a transient error. Once
@@ -136,9 +140,9 @@ impl FailoverProvider {
         // Earliest start = longest in cooldown = most likely recovered.
         still_cooled.sort_by_key(|(since, _)| *since);
 
-        let mut order = prioritise_requested_model(&self.providers, available, requested_model);
+        let mut order = available;
         order.extend(still_cooled.into_iter().map(|(_, i)| i));
-        order
+        route_to_requested_model(&self.providers, order, requested_model)
     }
 
     /// Put provider `idx` into cooldown.
@@ -335,10 +339,9 @@ impl LlmProvider for FailoverProvider {
                 }
 
                 still_cooled.sort_by_key(|(since, _)| *since);
-                let mut o =
-                    prioritise_requested_model(&providers, available, request.model.as_deref());
+                let mut o = available;
                 o.extend(still_cooled.into_iter().map(|(_, i)| i));
-                o
+                route_to_requested_model(&providers, o, request.model.as_deref())
             };
 
             if order.is_empty() {
@@ -462,7 +465,13 @@ impl LlmProvider for FailoverProvider {
     }
 }
 
-fn prioritise_requested_model(
+/// Narrow the try order to the requested model's own provider.
+///
+/// A request that names a model is served only by the first provider
+/// configured for that model: falling through to a provider configured for a
+/// different model would answer with a model the caller did not select. Only
+/// a request that names no configured model keeps the full failover order.
+fn route_to_requested_model(
     providers: &[Arc<dyn LlmProvider>],
     order: Vec<usize>,
     requested_model: Option<&str>,
@@ -471,11 +480,13 @@ fn prioritise_requested_model(
         return order;
     };
 
-    let (mut matching, rest): (Vec<_>, Vec<_>) = order
-        .into_iter()
-        .partition(|idx| providers[*idx].model_id() == requested_model);
-    matching.extend(rest);
-    matching
+    match providers
+        .iter()
+        .position(|provider| provider.model_id() == requested_model)
+    {
+        Some(idx) => vec![idx],
+        None => order,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +782,33 @@ mod tests {
         assert_eq!(result.content, "selected");
         assert_eq!(*p1_calls.lock().unwrap(), 0);
         assert_eq!(*p2_calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_does_not_fall_through_from_requested_model() {
+        let p1 = SequencedProvider::new(
+            "selected-model",
+            vec![Err(ProviderError::Network {
+                provider: "p1".into(),
+                message: "down".into(),
+            })],
+        );
+        let p2 = SequencedProvider::new("other-model", vec![Ok(ok_completion("other"))]);
+        let p1_calls = Arc::clone(&p1.call_count);
+        let p2_calls = Arc::clone(&p2.call_count);
+
+        let failover = FailoverProvider::with_defaults(vec![p1, p2]);
+        let mut request = completion_req();
+        request.model = Some("selected-model".to_string());
+        let result = failover.complete(request).await;
+
+        assert!(matches!(result, Err(ProviderError::Network { .. })));
+        assert_eq!(*p1_calls.lock().unwrap(), 1);
+        assert_eq!(
+            *p2_calls.lock().unwrap(),
+            0,
+            "another model must not answer"
+        );
     }
 
     #[tokio::test]

@@ -1149,6 +1149,7 @@ mod tests {
 
     use super::*;
     use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+    use futures::StreamExt;
     use serde_json::{Value, json};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1938,6 +1939,203 @@ mod tests {
             default_effort: None,
             capabilities: swage_config::ModelCapabilitiesConfig::default(),
         }
+    }
+
+    fn endpoint(protocol: Protocol, base_url: String) -> ProviderEndpointConfig {
+        ProviderEndpointConfig {
+            worker_staleness_threshold_ms: None,
+            protocol,
+            api_key_secret_ref: None,
+            api_key_env: None,
+            base_url: Some(base_url),
+            command: None,
+            state_dir: None,
+        }
+    }
+
+    async fn unreachable_base_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind probe");
+        let addr = listener.local_addr().expect("probe address");
+        drop(listener);
+        format!("http://{addr}/v1")
+    }
+
+    fn selected_model_request(model: &str) -> swage_core::CompletionRequest {
+        swage_core::CompletionRequest {
+            effort: None,
+            messages: vec![swage_core::ChatMessage::new(swage_core::Role::User, "hi")],
+            model: Some(model.to_string()),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: vec![],
+        }
+    }
+
+    fn no_retry() -> swage_provider::retry::RetryConfig {
+        swage_provider::retry::RetryConfig {
+            max_retries: 0,
+            initial_backoff: std::time::Duration::ZERO,
+            max_backoff: std::time::Duration::ZERO,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn selected_model_turn_fails_at_its_unreachable_provider_without_other_providers() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let anthropic_calls = Arc::new(AtomicUsize::new(0));
+        let fixture_calls = Arc::new(AtomicUsize::new(0));
+        let anthropic_base_url = spawn_openai_compatible_server(
+            Arc::clone(&anthropic_calls),
+            StatusCode::OK,
+            "anthropic-route reply",
+        )
+        .await;
+        let fixture_base_url = spawn_openai_compatible_server(
+            Arc::clone(&fixture_calls),
+            StatusCode::OK,
+            "fixture reply",
+        )
+        .await;
+        let unreachable = unreachable_base_url().await;
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "proxy-openai".to_string(),
+                entries: [
+                    (
+                        "proxy-openai".to_string(),
+                        endpoint(Protocol::OpenAi, unreachable.clone()),
+                    ),
+                    (
+                        "proxy-anthropic".to_string(),
+                        endpoint(Protocol::OpenAi, anthropic_base_url),
+                    ),
+                    (
+                        "fixture".to_string(),
+                        endpoint(Protocol::OpenAi, fixture_base_url),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "luna".to_string(),
+                entries: [
+                    ("luna".to_string(), model("proxy-openai", "gpt-6-luna")),
+                    (
+                        "sonnet".to_string(),
+                        model("proxy-anthropic", "claude-sonnet-5-5"),
+                    ),
+                    (
+                        "fake-echo".to_string(),
+                        model("fixture", "fake-fixture-model"),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+
+        let provider = create_provider_with_retry(&config, &secret_manager, no_retry()).await;
+
+        let completion = provider
+            .complete(selected_model_request("gpt-6-luna"))
+            .await;
+        let error = completion.expect_err("an unreachable selected provider must fail the turn");
+        let port = unreachable
+            .rsplit(':')
+            .next()
+            .expect("port")
+            .trim_end_matches("/v1");
+        assert!(
+            error.to_string().contains(port),
+            "error should name the unreachable endpoint: {error}"
+        );
+
+        let chunks: Vec<_> = provider
+            .stream(selected_model_request("gpt-6-luna"))
+            .collect()
+            .await;
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !matches!(chunk, swage_core::StreamChunk::Delta { .. })),
+            "no reply may arrive from another provider: {chunks:?}"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| matches!(chunk, swage_core::StreamChunk::Error { .. })),
+            "the streamed turn must end in an error: {chunks:?}"
+        );
+
+        assert_eq!(anthropic_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture_calls.load(Ordering::SeqCst), 0);
+
+        let fixture_reply = provider
+            .complete(selected_model_request("fake-fixture-model"))
+            .await
+            .expect("a model bound to the fixture reaches the fixture");
+        assert_eq!(fixture_reply.content, "fixture reply");
+        assert_eq!(fixture_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(anthropic_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn openai_responses_provider_turn_records_responses_protocol_after_a_failure() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let chat_base_url = spawn_openai_compatible_server(
+            Arc::clone(&chat_calls),
+            StatusCode::OK,
+            "chat completions reply",
+        )
+        .await;
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "proxy-responses".to_string(),
+                entries: [
+                    (
+                        "proxy-responses".to_string(),
+                        endpoint(Protocol::OpenAiResponses, unreachable_base_url().await),
+                    ),
+                    (
+                        "proxy-openai".to_string(),
+                        endpoint(Protocol::OpenAi, chat_base_url),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "sol".to_string(),
+                entries: [
+                    ("sol".to_string(), model("proxy-responses", "gpt-6.1-sol")),
+                    ("luna".to_string(), model("proxy-openai", "gpt-6-luna")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            ..Default::default()
+        };
+
+        let provider = create_provider_with_retry(&config, &secret_manager, no_retry()).await;
+        let request = selected_model_request("gpt-6.1-sol");
+        let _failed = provider.complete(request.clone()).await;
+
+        let snapshot = provider.provider_request_snapshot(&request, true);
+        assert_eq!(snapshot["protocol"], "responses", "snapshot: {snapshot}");
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
     }
 
     async fn spawn_openai_compatible_server(
