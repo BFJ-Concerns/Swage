@@ -105,24 +105,19 @@ pub fn resolve_context_path(
     let working_directory = canonical_existing_root(ctx.working_directory())?;
     let allowed_roots = context_roots(ctx)?;
 
-    if Path::new(requested).is_absolute() {
-        let mut last_error = None;
-        for root in allowed_roots {
-            match validate_path(&root, requested) {
-                Ok(path) => return Ok(ResolvedToolPath { root, path }),
-                Err(error) => last_error = Some(error),
-            }
+    let candidate = if Path::new(requested).is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        working_directory.join(requested)
+    };
+    let mut last_error = None;
+    for root in allowed_roots {
+        match validate_path(&root, &candidate.to_string_lossy()) {
+            Ok(path) => return Ok(ResolvedToolPath { root, path }),
+            Err(error) => last_error = Some(error),
         }
-        return Err(
-            last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}"))
-        );
     }
-
-    let path = validate_path(&working_directory, requested)?;
-    Ok(ResolvedToolPath {
-        root: working_directory,
-        path,
-    })
+    Err(last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}")))
 }
 
 /// Resolves a not-yet-created tool path against the runtime workspace roots.
@@ -133,24 +128,19 @@ pub fn resolve_new_context_path(
     let working_directory = canonical_existing_root(ctx.working_directory())?;
     let allowed_roots = context_roots(ctx)?;
 
-    if Path::new(requested).is_absolute() {
-        let mut last_error = None;
-        for root in allowed_roots {
-            match validate_new_path(&root, requested) {
-                Ok(path) => return Ok(ResolvedToolPath { root, path }),
-                Err(error) => last_error = Some(error),
-            }
+    let candidate = if Path::new(requested).is_absolute() {
+        PathBuf::from(requested)
+    } else {
+        working_directory.join(requested)
+    };
+    let mut last_error = None;
+    for root in allowed_roots {
+        match validate_new_path(&root, &candidate.to_string_lossy()) {
+            Ok(path) => return Ok(ResolvedToolPath { root, path }),
+            Err(error) => last_error = Some(error),
         }
-        return Err(
-            last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}"))
-        );
     }
-
-    let path = validate_new_path(&working_directory, requested)?;
-    Ok(ResolvedToolPath {
-        root: working_directory,
-        path,
-    })
+    Err(last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}")))
 }
 
 /// Refuses native file mutations covered by an attachment without write access.
@@ -583,14 +573,13 @@ fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<S
         ctx.working_directory().join(requested)
     };
     let normalised = normalise_path(&raw);
-    if normalised.is_dir() {
-        normalised.canonicalize().ok()
-    } else {
-        normalised
-            .parent()
-            .and_then(|parent| parent.canonicalize().ok())
-    }
-    .map(|path| path.to_string_lossy().into_owned())
+    // A write may create several parent directories. The approval must name
+    // an existing directory that can actually be added to the tool context.
+    normalised
+        .ancestors()
+        .find(|path| path.is_dir())
+        .and_then(|path| path.canonicalize().ok())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// Follows every symlink before appending missing path components, including

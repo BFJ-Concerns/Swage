@@ -1097,6 +1097,9 @@ impl Agent {
                                     ApprovalGateOutcome::Rejected { feedback } => {
                                         (feedback, true, "rejected".to_string()).into()
                                     }
+                                    ApprovalGateOutcome::Expired { feedback } => {
+                                        (feedback, true, "expired".to_string()).into()
+                                    }
                                     ApprovalGateOutcome::Interrupted => {
                                         return Err(AgentError::Cancelled);
                                     }
@@ -2105,6 +2108,9 @@ impl Agent {
             ApprovalGateOutcome::Rejected { feedback } => {
                 Ok((feedback, true, "rejected".to_string()).into())
             }
+            ApprovalGateOutcome::Expired { feedback } => {
+                Ok((feedback, true, "expired".to_string()).into())
+            }
             ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
         }
     }
@@ -2320,6 +2326,9 @@ impl Agent {
                     }
                     ApprovalGateOutcome::Rejected { feedback } => {
                         Ok((feedback, true, "rejected".to_string()).into())
+                    }
+                    ApprovalGateOutcome::Expired { feedback } => {
+                        Ok((feedback, true, "expired".to_string()).into())
                     }
                     ApprovalGateOutcome::Interrupted => {
                         // State transitions already done by handle_approval_gate.
@@ -2729,7 +2738,7 @@ impl Agent {
                             Some("approval timed out"),
                         )
                         .await?;
-                        Ok(ApprovalGateOutcome::Rejected {
+                        Ok(ApprovalGateOutcome::Expired {
                             feedback: "Tool call rejected: approval timed out".into(),
                         })
                     }

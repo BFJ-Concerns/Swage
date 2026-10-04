@@ -34,10 +34,9 @@
 
   // A call is in-progress when it is live and has no result yet.
   const isInProgress = $derived(isLive && toolCall.status === null);
-  // Rejected approvals are terminal failed calls: the model receives the
-  // rejection feedback, but the tool itself did not succeed.
+  // Rejected and expired approvals are terminal failed calls; the tool did not run.
   const isFailed = $derived(
-    toolCall.status === "error" || toolCall.status === "rejected",
+    toolCall.status === "error" || toolCall.status === "rejected" || toolCall.status === "expired",
   );
 
   // True once the result is long enough to warrant collapsing.
@@ -134,6 +133,10 @@
       <span class="duration">{formatDuration(toolCall.duration_ms)}</span>
     {/if}
   </div>
+
+  {#if toolCall.status === "expired"}
+    <p role="status">Approval expired. Retry the operation.</p>
+  {/if}
 
   <!-- ---- Result block: only shown once the call has completed ---- -->
   {#if toolCall.result !== null}

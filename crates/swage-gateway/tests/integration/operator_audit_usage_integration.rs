@@ -342,6 +342,13 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
         })
         .await
         .unwrap();
+    // A decision settles only a gate that is still waiting for it.
+    let (waiter, decision) = tokio::sync::oneshot::channel();
+    state
+        .approval_channels
+        .lock()
+        .unwrap()
+        .insert(approval.id, waiter.into());
     let (approval_status, _) = post_json(
         &router,
         &format!("/api/approvals/{}", approval.id),
@@ -349,6 +356,10 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
     )
     .await;
     assert_eq!(approval_status, StatusCode::OK);
+    assert_eq!(
+        decision.await.unwrap().decision,
+        swage_agent::approval::ApprovalDecisionValue::Approved
+    );
 
     let schedule = storage
         .create_schedule(NewSchedule {

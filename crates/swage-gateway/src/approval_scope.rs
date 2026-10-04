@@ -3,6 +3,93 @@ use swage_storage::model::{ApprovalRequest, NewWorkspaceAttachment, Topic};
 
 use crate::{error::ApiError, state::AppState};
 
+/// A decision can release only a live, unexpired waiting call.
+pub(crate) async fn ensure_approval_actionable(
+    state: &AppState,
+    approval: &ApprovalRequest,
+) -> Result<(), ApiError> {
+    use swage_storage::{ApprovalState, TurnState};
+
+    if approval.state != ApprovalState::Pending {
+        return Err(ApiError::conflict(format!(
+            "approval request is {}; retry the operation",
+            approval.state
+        )));
+    }
+    let turn = state
+        .storage
+        .get_turn(approval.turn_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    let has_waiter = state
+        .approval_channels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&approval.id)
+        .is_some_and(|sender| !sender.is_closed());
+    if approval.timeout_at > chrono::Utc::now()
+        && has_waiter
+        && turn
+            .as_ref()
+            .is_some_and(|turn| turn.state == TurnState::AwaitingApproval)
+    {
+        return Ok(());
+    }
+    let expired = state
+        .storage
+        .update_approval_state(
+            approval.id,
+            ApprovalState::Expired,
+            Some("approval timed out"),
+        )
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !expired {
+        let current = state
+            .storage
+            .get_approval(approval.id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| ApiError::not_found("approval", approval.id))?;
+        return Err(ApiError::conflict(format!(
+            "approval request is {}; retry the operation",
+            current.state
+        )));
+    }
+    // Dropping the sender wakes a live gate through its existing timeout path.
+    state
+        .approval_channels
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&approval.id);
+    if !has_waiter
+        && let Some(turn) = turn
+        && turn.state == TurnState::AwaitingApproval
+    {
+        state
+            .storage
+            .update_turn_state(turn.id, TurnState::Interrupted)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        if state
+            .storage
+            .get(turn.thread_id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .is_some_and(|thread| thread.state != swage_storage::ThreadState::Idle)
+        {
+            state
+                .storage
+                .update_state(turn.thread_id, swage_storage::ThreadState::Idle)
+                .await
+                .map_err(|error| ApiError::internal(error.to_string()))?;
+        }
+    }
+    Err(ApiError::conflict(
+        "approval request expired; retry the operation".to_string(),
+    ))
+}
+
 pub(crate) async fn apply_approval_scope(
     state: &AppState,
     approval: &ApprovalRequest,
