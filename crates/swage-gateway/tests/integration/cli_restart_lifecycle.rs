@@ -110,7 +110,9 @@ impl GatewayProbe {
             }
             assert!(
                 Instant::now() < deadline,
-                "gateway did not become healthy after the start command timed out"
+                "gateway did not become healthy after the start command timed out; metadata: {:?}; daemon log: {}",
+                fs::read_to_string(self.metadata_path()),
+                fs::read_to_string(self.root.path().join("gateway.log")).unwrap_or_default()
             );
             thread::sleep(Duration::from_millis(25));
         }
