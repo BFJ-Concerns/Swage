@@ -17,7 +17,7 @@
  *   - Live tool calls with a result have isLive=false (no pulse)
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 vi.mock("../api/turns", () => ({
   fetchTurnContext: vi.fn(),
 }));
@@ -365,6 +365,41 @@ describe("turns that ended without a reply, as loaded", () => {
 
     const request = document.body.querySelector('[aria-label="Your message"]');
     expect(request?.querySelectorAll(".tool-call")).toHaveLength(1);
+    expect(request?.textContent).toContain("Interrupted before a reply");
+  });
+
+  it("shows a running call stopped live with an unknown outcome, before any reload", async () => {
+    const api = await import("../api/conversations");
+    vi.spyOn(api, "createConversation").mockResolvedValue({
+      id: "conv-live",
+      agent_id: "gateway",
+      topic_id: "proj-1",
+      created_at: "2026-03-20T10:00:00Z",
+      last_activity: "2026-03-20T10:00:00Z",
+    });
+    const { createConversationStore } = await import("../stores/conversations");
+    const store = createConversationStore();
+    await store.createConversation("proj-1");
+    const streamingStore = createStreamingStore({ conversationStore: store });
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore },
+    });
+    streamingStore.startTurn("Run sleep 30");
+    streamingStore.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-sleep",
+      tool: "shell",
+      arguments: { command: "sleep 30" },
+    });
+    streamingStore.handleServerEvent({ type: "cancelled" });
+    flushSync();
+
+    const request = document.body.querySelector('[aria-label="Your message"]');
+    expect(request?.querySelector(".tool-call")?.textContent).toContain(
+      "its outcome is unknown",
+    );
     expect(request?.textContent).toContain("Interrupted before a reply");
   });
 
