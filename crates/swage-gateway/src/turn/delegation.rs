@@ -654,7 +654,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                     &self.state,
                     crate::experimentation::LOCATION_TASK_PROMPT,
                     &decision,
-                    None,
+                    existing_named_child
+                        .as_ref()
+                        .map(|child| child.continuation.session_id),
                     Some(sender_turn_id),
                 )
                 .await

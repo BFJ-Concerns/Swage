@@ -34,7 +34,7 @@ use swage_storage::{
         ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
-        AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore,
+        AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore, AuditStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
         MessageStore, ScheduleStore, SessionStore, SkillActivationStore, TaskDefinitionStore,
         ThreadStore, ToolCallStore, TopicStore, TurnStore, WorkspaceAttachmentStore,
@@ -2165,6 +2165,7 @@ pub(crate) struct MockStorage {
     fail_secret_reads: AtomicBool,
     fail_skill_activations: AtomicBool,
     fail_audit_writes: AtomicBool,
+    fail_audit_reads: AtomicBool,
     fail_snapshot_writes: AtomicBool,
     fail_tool_call_settlement: AtomicBool,
     fail_tool_call_creates: AtomicBool,
@@ -2663,6 +2664,7 @@ impl MockStorage {
             fail_secret_reads: AtomicBool::new(false),
             fail_skill_activations: AtomicBool::new(false),
             fail_audit_writes: AtomicBool::new(false),
+            fail_audit_reads: AtomicBool::new(false),
             fail_snapshot_writes: AtomicBool::new(false),
             fail_tool_call_settlement: AtomicBool::new(false),
             fail_tool_call_creates: AtomicBool::new(false),
@@ -5263,6 +5265,11 @@ impl swage_storage::store::AuditStore for MockStorage {
         &self,
         filter: swage_storage::AuditEventFilter,
     ) -> Result<Vec<swage_storage::AuditEvent>, StorageError> {
+        if self.fail_audit_reads.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected audit read failure".into(),
+            ));
+        }
         let mut events: Vec<_> = self
             .db
             .lock()
@@ -11557,6 +11564,17 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             .await
             .expect("store agent definition");
     }
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "scouting".into(),
+            instructions: "Report your findings.".into(),
+            model_id: None,
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
     let (provider, captured_requests) = CapturingMultiRoundProvider::new(vec![
         vec![
             StreamChunk::Delta {
@@ -11599,7 +11617,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .handle_delegation(
             "agent-b",
             "scout the eastern approach",
-            None,
+            Some("scouting"),
             Some(
                 serde_json::to_value(vec![ChatMessage::new(
                     Role::User,
@@ -11713,6 +11731,18 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .await
         .expect("second delegation completes");
 
+    let attributed = storage
+        .list_audit_events_by_session(child_session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        attributed
+            .iter()
+            .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
+            .count(),
+        1,
+        "the delegation to a known child must attribute its task draw to that child"
+    );
     let sessions_after_second = storage
         .list_sessions_by_agent_id("agent-b")
         .await
@@ -13889,49 +13919,63 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
 }
 
 #[tokio::test]
-async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
-    let storage = Arc::new(MockStorage::new());
-    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
-
-    let mut disabled = swage_config::ResolvedConfig::default();
-    disabled.experimentation.enabled = false;
-    let choices = select_context_assembly(&state, &disabled, session_id, Uuid::nil(), None)
+async fn session_variant_working_norms_honours_disabled_forced_and_seeded_choices() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.experimentation.enabled = false;
+    let first = select_context_assembly(&state, &config, session_id, Uuid::nil(), None)
         .await
-        .expect("disabled experimentation should serve defaults");
+        .unwrap();
     assert_eq!(
-        choices.working_norms_scaffold,
+        first.working_norms_scaffold,
         swage_context::working_norms::WorkingNormsScaffold::Native
     );
-
-    let mut forced = swage_config::ResolvedConfig::default();
-    forced.experimentation.enabled = true;
-    forced.experimentation.locations.insert(
+    config.experimentation.enabled = true;
+    config.experimentation.locations.insert(
         crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
         swage_config::model::ExperimentLocationConfig {
             enabled: true,
             forced_variant: Some(WORKING_NORMS_FAMILY_FALLBACK.to_owned()),
         },
     );
-    let choices = select_context_assembly(&state, &forced, session_id, Uuid::nil(), None)
+    let reused = select_context_assembly(&state, &config, session_id, Uuid::from_u128(1), None)
         .await
-        .expect("registered fallback should be forceable");
+        .unwrap();
     assert_eq!(
-        choices.working_norms_scaffold,
+        reused.working_norms_scaffold, first.working_norms_scaffold,
+        "a force must not redraw an existing session"
+    );
+    let fresh = select_context_assembly(&state, &config, Uuid::new_v4(), Uuid::nil(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh.working_norms_scaffold,
         swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
     );
-
-    forced
+    config
         .experimentation
         .locations
         .get_mut(crate::experimentation::LOCATION_WORKING_NORMS)
         .unwrap()
         .forced_variant = None;
-    let native = select_context_assembly(&state, &forced, session_id, Uuid::nil(), None)
-        .await
-        .expect("seed zero should draw the default");
-    let fallback = select_context_assembly(&state, &forced, session_id, Uuid::from_u128(1), None)
-        .await
-        .expect("seed one should draw the registered alternative");
+    let native = select_context_assembly(
+        &state,
+        &config,
+        Uuid::from_u128(0),
+        Uuid::from_u128(1),
+        None,
+    )
+    .await
+    .unwrap();
+    let fallback = select_context_assembly(
+        &state,
+        &config,
+        Uuid::from_u128(1),
+        Uuid::from_u128(0),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         native.working_norms_scaffold,
         swage_context::working_norms::WorkingNormsScaffold::Native
@@ -13940,23 +13984,195 @@ async fn working_norms_selection_honours_disabled_forced_and_seeded_choices() {
         fallback.working_norms_scaffold,
         swage_context::working_norms::WorkingNormsScaffold::FamilyFallback
     );
-
-    let audit = state.storage.list_audit_events().await.unwrap();
-    assert!(
-        audit.iter().any(|event| {
-            event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
-                && event.metadata["reason"] == serde_json::json!("disabled")
-        }),
-        "missing disabled working-norms audit record: {audit:?}"
+    let audit = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .filter(|e| e.entity_id == crate::experimentation::LOCATION_WORKING_NORMS)
+            .count(),
+        1,
+        "reuse must not record a second selection"
     );
-    assert!(audit.iter().any(|event| {
-        event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
-            && event.metadata["reason"] == serde_json::json!("forced")
-    }));
-    assert!(audit.iter().any(|event| {
-        event.entity_id == crate::experimentation::LOCATION_WORKING_NORMS
-            && event.metadata["variant"] == serde_json::json!("authored-v1")
-    }));
+}
+
+#[tokio::test]
+async fn session_variant_context_assembly_survives_control_and_candidate_changes() {
+    let (state, session_id) = make_state_with_session(vec![]).await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.context.alternatives = vec!["candidate".into()];
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("candidate".into()),
+        },
+    );
+    let first_turn = Uuid::new_v4();
+    let first = select_context_assembly(&state, &config, session_id, first_turn, None)
+        .await
+        .unwrap();
+    assert_eq!(first.assembly_name, "candidate");
+    config.experimentation.enabled = false;
+    config.context.alternatives.clear();
+    config
+        .experimentation
+        .locations
+        .get_mut(crate::experimentation::LOCATION_CONTEXT_ASSEMBLY)
+        .unwrap()
+        .forced_variant = Some("unregistered".into());
+    let reused = select_context_assembly(&state, &config, session_id, Uuid::new_v4(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        reused.assembly_name, "candidate",
+        "disabled experimentation must preserve the session's choice"
+    );
+    let fresh = select_context_assembly(&state, &config, Uuid::new_v4(), Uuid::new_v4(), None)
+        .await
+        .unwrap();
+    assert_eq!(fresh.assembly_name, "default");
+    let events = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .unwrap();
+    let draws: Vec<_> = events
+        .iter()
+        .filter(|e| e.entity_id == crate::experimentation::LOCATION_CONTEXT_ASSEMBLY)
+        .collect();
+    assert_eq!(draws.len(), 1);
+    assert_eq!(draws[0].metadata["turn_id"], serde_json::json!(first_turn));
+    assert_eq!(draws[0].metadata["reason"], "forced");
+}
+
+#[tokio::test]
+async fn session_variant_lookup_failure_serves_default_without_recording_a_draw() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_storage(vec![], Arc::clone(&storage)).await;
+    storage.fail_audit_reads.store(true, Ordering::SeqCst);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_WORKING_NORMS.to_owned(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some(WORKING_NORMS_FAMILY_FALLBACK.to_owned()),
+        },
+    );
+    let choices = select_context_assembly(&state, &config, session_id, Uuid::new_v4(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        choices.working_norms_scaffold,
+        swage_context::working_norms::WorkingNormsScaffold::Native,
+        "lookup failure must not serve a new forced draw"
+    );
+    assert!(
+        state
+            .storage
+            .list_audit_events_by_session(session_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a failed lookup must not write a replacement selection"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_variant_task_prompt_records_once_for_two_real_turns() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "session-task".into(),
+            instructions: "Answer briefly.".into(),
+            model_id: None,
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let mut request = new_session(topic.id);
+    request.metadata = Some(serde_json::json!({"task_definition": "session-task"}));
+    let session = storage.create_session(request).await.unwrap();
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![
+            vec![
+                StreamChunk::Delta {
+                    content: "First reply".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "Second reply".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    for text in ["first", "second"] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session.id,
+            None,
+            TurnInput::text(text),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let threads = ThreadStore::list_by_session(storage.as_ref(), session.id)
+        .await
+        .unwrap();
+    let turns = storage.list_turns_by_thread(threads[0].id).await.unwrap();
+    assert_eq!(turns.len(), 2);
+    let events = storage
+        .list_audit_events_by_session(session.id)
+        .await
+        .unwrap();
+    let draws: Vec<_> = events
+        .iter()
+        .filter(|e| e.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
+        .collect();
+    assert_eq!(
+        draws.len(),
+        1,
+        "a task session must not redraw its prompt on continuation"
+    );
+    assert!(
+        turns
+            .iter()
+            .any(|turn| serde_json::json!(turn.id) == draws[0].metadata["turn_id"]),
+        "the draw must identify its first real turn"
+    );
 }
 
 #[tokio::test]

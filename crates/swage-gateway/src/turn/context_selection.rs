@@ -31,8 +31,8 @@ pub(super) async fn select_context_assembly(
             .map_err(GatewayError::ConfigError)?;
     }
     // The assembly name is an experiment location: when variants are
-    // registered for it, the selection loop chooses which serves this turn
-    // (honouring the kill switch and forced pins), and every decision —
+    // registered for it, its first use draws which serves this session
+    // (honouring the kill switch and forced pins), and that decision —
     // including "experimentation is off" — lands in the audit trail. The
     // report and every model-facing surface stay function-named; the audit
     // record is the only place the variant id appears.
@@ -46,71 +46,33 @@ pub(super) async fn select_context_assembly(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let decision = crate::experimentation::select_variant(
+    let decision = crate::experimentation::select_session_variant(
+        state,
         &config.experimentation,
         crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
         &assembly_variants,
         &configured_assembly,
-        turn_id,
-    )
-    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    let decision = match crate::experimentation::record_selection(
-        state,
-        crate::experimentation::LOCATION_CONTEXT_ASSEMBLY,
-        &decision,
-        Some(session_id),
+        session_id,
         Some(turn_id),
     )
     .await
-    {
-        Ok(()) => decision,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                variant = %decision.variant,
-                "variant selection could not be recorded; serving the configured default"
-            );
-            crate::experimentation::VariantDecision {
-                variant: configured_assembly.clone(),
-                reason: crate::experimentation::SelectionReason::RecordUnavailable,
-            }
-        }
-    };
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
 
     // The working-norms text is its own experiment location, drawn beside
     // the assembly choice. The exact-model native scaffold is the default;
     // the established family text remains a registered alternative.
     let norms_variants = [WORKING_NORMS_FAMILY_FALLBACK];
-    let norms_decision = crate::experimentation::select_variant(
+    let norms_decision = crate::experimentation::select_session_variant(
+        state,
         &config.experimentation,
         crate::experimentation::LOCATION_WORKING_NORMS,
         &norms_variants,
         WORKING_NORMS_AUTHORED_V1,
-        turn_id,
-    )
-    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    let norms_decision = match crate::experimentation::record_selection(
-        state,
-        crate::experimentation::LOCATION_WORKING_NORMS,
-        &norms_decision,
-        Some(session_id),
+        session_id,
         Some(turn_id),
     )
     .await
-    {
-        Ok(()) => norms_decision,
-        Err(error) => {
-            tracing::error!(
-                %error,
-                variant = %norms_decision.variant,
-                "working-norms selection could not be recorded; serving the native scaffold"
-            );
-            crate::experimentation::VariantDecision {
-                variant: WORKING_NORMS_AUTHORED_V1.to_owned(),
-                reason: crate::experimentation::SelectionReason::RecordUnavailable,
-            }
-        }
-    };
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
     let working_norms_scaffold = match norms_decision.variant.as_str() {
         WORKING_NORMS_FAMILY_FALLBACK => {
             swage_context::working_norms::WorkingNormsScaffold::FamilyFallback

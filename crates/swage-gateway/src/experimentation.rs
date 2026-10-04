@@ -38,7 +38,7 @@ pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
 
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionReason {
     /// Experimentation is off (globally or for this location); the default
@@ -77,8 +77,8 @@ pub struct VariantSelectionError {
 ///
 /// `registered` lists the alternatives (the default may be among them);
 /// `default` is what serves when experimentation cannot or need not choose.
-/// The draw is seeded by `draw_seed` — callers pass the turn id — so a
-/// recorded decision is reproducible from the audit trail alone.
+/// The draw is seeded by `draw_seed`; session-scoped callers use the session
+/// id, so a recorded decision is reproducible from the audit trail alone.
 pub fn select_variant(
     config: &ExperimentationConfig,
     location_id: &str,
@@ -129,6 +129,73 @@ pub fn select_variant(
         variant: pool[index].to_owned(),
         reason: SelectionReason::Drawn,
     })
+}
+
+/// Serve a session's recorded choice, or draw and record its first use.
+/// Configuration changes bind only when a session first uses the location.
+/// A failed lookup or write serves the default without an unrecorded draw.
+pub async fn select_session_variant(
+    state: &AppState,
+    config: &ExperimentationConfig,
+    location_id: &str,
+    registered: &[&str],
+    default: &str,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+) -> Result<VariantDecision, VariantSelectionError> {
+    let fallback = || VariantDecision {
+        variant: default.to_owned(),
+        reason: SelectionReason::RecordUnavailable,
+    };
+    let events = match state
+        .storage
+        .list_audit_events_filtered(swage_storage::AuditEventFilter {
+            session_id: Some(session_id),
+            entity_kind: Some("experiment_location".to_owned()),
+            entity_id: Some(location_id.to_owned()),
+            event_kind: Some("variant_selected".to_owned()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::error!(%error, location_id, "session variant lookup unavailable; serving the default");
+            return Ok(fallback());
+        }
+    };
+    if let Some(event) = events.first() {
+        match (
+            event
+                .metadata
+                .get("variant")
+                .and_then(serde_json::Value::as_str),
+            serde_json::from_value::<SelectionReason>(event.metadata["reason"].clone()),
+        ) {
+            (Some(variant), Ok(reason)) => {
+                return Ok(VariantDecision {
+                    variant: variant.to_owned(),
+                    reason,
+                });
+            }
+            _ => {
+                tracing::error!(
+                    location_id,
+                    "session variant record unreadable; serving the default"
+                );
+                return Ok(fallback());
+            }
+        }
+    }
+    let decision = select_variant(config, location_id, registered, default, session_id)?;
+    if let Err(error) =
+        record_selection(state, location_id, &decision, Some(session_id), turn_id).await
+    {
+        tracing::error!(%error, location_id, "session variant record unavailable; serving the default");
+        return Ok(fallback());
+    }
+    Ok(decision)
 }
 
 /// Record a selection to the audit trail. Every decision is recorded — the
