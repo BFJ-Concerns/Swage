@@ -166,6 +166,25 @@
   // Live tool calls for the current in-progress turn.
   const activeToolCalls = $derived(stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []);
 
+  // A turn that ended without a reply carries its account — state, tool
+  // calls, failure explanation — on its request, since no assistant message
+  // exists to hold it.
+  function endedWithoutReply(message: (typeof messages)[number]): boolean {
+    if (message.role === "assistant" || !message.turn_id) return false;
+    if (message.turn_state !== "failed" && message.turn_state !== "interrupted") return false;
+    return !messages.some((other) => other.role === "assistant" && other.turn_id === message.turn_id);
+  }
+
+  // Retry resends the request through the ordinary send path.
+  function retry(content: string): void {
+    streamingStore?.startTurn(content);
+  }
+
+  // The request a live failure answered: the latest message the person sent.
+  const lastPersonsMessage = $derived(
+    [...messages].reverse().find((message) => isPersonsMessage(message)) ?? null,
+  );
+
   function shouldShowModel(role: "user" | "assistant"): boolean {
     return (
       displayPreferences.message_model_display === "all" ||
@@ -286,6 +305,27 @@
             {/if}
           </div>
         {/if}
+        {#if endedWithoutReply(message)}
+          {#if message.tool_calls && message.tool_calls.length > 0}
+            <div class="tool-calls-history">
+              {#each buildToolCallTree(message.tool_calls) as toolCall (toolCall.call_id)}
+                <ToolCallDisplay {toolCall} isLive={false} />
+              {/each}
+            </div>
+          {/if}
+          <p class="interrupted-notice">
+            {message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
+          </p>
+        {/if}
+        {#if message.failure_message}
+          <div class="turn-error" role="alert">
+            <span class="error-icon" aria-hidden="true">⚠</span>
+            <span class="error-message">{message.failure_message}</span>
+          </div>
+        {/if}
+        {#if message.turn_state === "failed" && endedWithoutReply(message) && !isStreaming}
+          <button class="branch-link" onclick={() => retry(message.content)}>Retry</button>
+        {/if}
         {#if shouldShowModel(message.role) && message.model}
           <div class="message-model">{message.model}</div>
         {/if}
@@ -376,6 +416,9 @@
         <span class="error-icon" aria-hidden="true">⚠</span>
         <span class="error-message">{turnError.message}</span>
       </div>
+      {#if lastPersonsMessage && !isStreaming}
+        <button class="branch-link" onclick={() => retry(lastPersonsMessage.content)}>Retry</button>
+      {/if}
     {/if}
   {/if}
 </div>
