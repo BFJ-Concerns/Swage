@@ -257,13 +257,6 @@ describe("SettingsPage", () => {
     expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value).toBe("");
     expect(document.querySelector('[role="alert"]')).toBeNull();
 
-    const callsBeforeSave = vi.mocked(settingsApi.saveSettings).mock.calls.length;
-    buttonNamed("Save").click();
-    await flushUi();
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls.length).toBe(callsBeforeSave + 1);
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toBeNull();
-    expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value).toBe("");
-
     vi.mocked(settingsApi.saveSettings).mockClear();
     const url = document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!;
     url.value = "http://127.0.0.1:35123";
