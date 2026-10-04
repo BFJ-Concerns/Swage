@@ -226,17 +226,25 @@ async fn start_test_server_with_config(
     dispatcher: swage_gateway::tool::ToolDispatcher,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let root = tempfile::tempdir().expect("isolated gateway configuration root");
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
         None,
+        root.path().to_path_buf(),
     );
     let router = build_router(state);
 
-    let (addr, _server) = start_live_server(router.clone()).await;
+    let (addr, server) = start_live_server(router.clone()).await;
+    // Keep the root until the server ends or this test's runtime drops the
+    // task; TempDir then removes it without leaking state between tests.
+    tokio::spawn(async move {
+        let _ = server.await;
+        drop(root);
+    });
 
     (router, addr, storage)
 }
