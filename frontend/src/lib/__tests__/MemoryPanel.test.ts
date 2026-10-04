@@ -7,7 +7,11 @@ import type { Topic } from "../types";
 type MountedComponent = ReturnType<typeof mount>;
 
 const TOPIC_ID = "7d0c6f3e-1111-4a2b-9c3d-000000000001";
-const topics = [{ id: TOPIC_ID, name: "Garden", slug: "garden" }] as unknown as Topic[];
+const SECOND_TOPIC_ID = "7d0c6f3e-1111-4a2b-9c3d-000000000002";
+const topics = [
+  { id: TOPIC_ID, name: "Garden", slug: "garden" },
+  { id: SECOND_TOPIC_ID, name: "Kitchen", slug: "kitchen" },
+] as unknown as Topic[];
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -18,6 +22,7 @@ function json(body: unknown, status = 200): Response {
 function gateway(options: {
   general: Array<{ reference: string; summary: string | null }>;
   topic: Array<{ reference: string; summary: string | null }>;
+  secondTopic?: Array<{ reference: string; summary: string | null }>;
   bodies: Record<string, string>;
   instruct?: (body: unknown) => Response;
 }) {
@@ -25,6 +30,9 @@ function gateway(options: {
     const url = new URL(String(input), "http://swage.test");
     const topicId = url.searchParams.get("topic_id");
     if (url.pathname === "/api/memory/pages") {
+      if (topicId === SECOND_TOPIC_ID) {
+        return json({ scope: { kind: "topic", topic_id: topicId }, pages: options.secondTopic ?? [] });
+      }
       return topicId
         ? json({ scope: { kind: "topic", topic_id: topicId }, pages: options.topic })
         : json({ scope: { kind: "general" }, pages: options.general });
@@ -64,6 +72,7 @@ describe("MemoryPanel", () => {
         { reference: "general/people/alice", summary: "Alice, the operator's sister." },
       ],
       topic: [{ reference: "topic/conventions", summary: "How beds are labelled." }],
+      secondTopic: [{ reference: "topic/stock", summary: "What the pantry holds." }],
       bodies: { [`${TOPIC_ID}:topic/conventions`]: "Beds are labelled north to south." },
     });
     component = mount(MemoryPanel, { target: document.body, props: { topics, reference: null } });
@@ -75,6 +84,10 @@ describe("MemoryPanel", () => {
     expect(general?.textContent).toContain("general/people/alice");
     expect(garden?.textContent).toContain("topic/conventions");
     expect(garden?.textContent).toContain("How beds are labelled.");
+    const kitchen = document.querySelector('[aria-label="Kitchen memory pages"]');
+    expect(kitchen?.textContent).toContain("topic/stock");
+    expect(kitchen?.textContent).not.toContain("topic/conventions");
+    expect(garden?.textContent).not.toContain("topic/stock");
 
     flushSync(() => buttonNamed("topic/conventions")?.click());
     await vi.waitFor(() =>
@@ -121,7 +134,10 @@ describe("MemoryPanel", () => {
         topicPages.push({ reference: "topic/harvest", summary: null });
         return json({
           reply: "Removed the note about Fridays.",
-          pages_changed: [{ reference: "topic/conventions", summary: null, body: "Beds are labelled south to north." }],
+          pages_changed: [
+            { reference: "topic/conventions", summary: null, body: "Beds are labelled south to north." },
+            { reference: "topic/harvest", summary: null, body: "Beans are picked in August." },
+          ],
           curator_session_id: "7d0c6f3e-1111-4a2b-9c3d-0000000000aa",
           turn_id: "7d0c6f3e-1111-4a2b-9c3d-0000000000bb",
         });
@@ -150,6 +166,8 @@ describe("MemoryPanel", () => {
     const changed = document.querySelector('[aria-label="Pages the curator changed"]');
     expect(changed?.textContent).toContain("topic/conventions");
     expect(changed?.textContent).toContain("Beds are labelled south to north.");
+    expect(changed?.textContent).toContain("Beans are picked in August.");
+    expect(changed?.querySelectorAll("article")).toHaveLength(2);
     // A page the instruction created joins the listing without a reload.
     await vi.waitFor(() =>
       expect(document.querySelector('[aria-label="Garden memory pages"]')?.textContent).toContain("topic/harvest"),
