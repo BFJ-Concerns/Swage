@@ -45,9 +45,10 @@ directory), so run `stop` with the same environment you started with.
 
 ## Sandbox configuration
 
-Per-turn sandboxing is off by default. Local tools run without bubblewrap
-isolation, and each such turn records a degraded execution boundary with the
-reason `sandbox_disabled_by_configuration`.
+Per-turn sandboxing is off by default. Local gateway turns run without
+bubblewrap isolation and record a degraded execution boundary with the reason
+`sandbox_disabled_by_configuration`. Installs with a declared boundary, such
+as a container image, retain that boundary in their turn records.
 
 To enable sandboxing for a topic, add this to its `config.toml` and install
 [bubblewrap](https://github.com/containers/bubblewrap):
