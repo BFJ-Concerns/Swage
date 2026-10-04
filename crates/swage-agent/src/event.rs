@@ -113,7 +113,7 @@ pub enum AgentEvent {
     TurnCompleted {
         turn_id: Uuid,
         incomplete_reason: Option<String>,
-        incomplete_account: Option<swage_storage::Message>,
+        incomplete_account: Option<Box<swage_storage::Message>>,
         input_tokens: u32,
         output_tokens: u32,
         tool_calls_count: u32,
@@ -347,6 +347,7 @@ mod tests {
             output_tokens,
             tool_calls_count,
             structured_output,
+            ..
         } = event
         {
             assert_eq!(id, turn_id);

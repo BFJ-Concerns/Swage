@@ -495,7 +495,7 @@ pub(super) async fn project_agent_events(
 
                 if let Some(account) = incomplete_account {
                     match crate::service::message_view(
-                        account,
+                        *account,
                         Some(swage_protocol::client::conversation::TurnState::Incomplete),
                         Vec::new(),
                     ) {
