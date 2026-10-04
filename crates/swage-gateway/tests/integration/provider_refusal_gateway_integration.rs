@@ -220,7 +220,7 @@ async fn account_for_response(
     let (_, summaries) =
         crate::support::live_http_json(address, reqwest::Method::GET, "/api/conversations", None)
             .await;
-    let summary = summaries
+    let summary = summaries["conversations"]
         .as_array()
         .unwrap()
         .iter()

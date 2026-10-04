@@ -230,7 +230,7 @@
     </div>
   {:else}
     <!-- ---- Committed messages from conversation history ---- -->
-    {#each messages as message (message.timestamp)}
+    {#each messages as message, messageIndex (message.timestamp)}
       <div
         class="message"
         class:user={isPersonsMessage(message)}
@@ -285,6 +285,14 @@
               <p class="interrupted-notice">⚠ Response failed</p>
             {/if}
           </div>
+        {/if}
+        {#if message.origin === "platform" && message.turn_state === "refused" && streamingStore}
+          <!-- Recorded requests carry the turn id; an optimistic request is
+               still the person's preceding message until the history is read. -->
+          {@const request = messages.find(candidate => isPersonsMessage(candidate) && candidate.turn_id === message.turn_id) ?? messages.slice(0, messageIndex).reverse().find(candidate => isPersonsMessage(candidate) && !candidate.turn_id)}
+          {#if request}
+            <button class="branch-link" disabled={isStreaming} onclick={() => streamingStore?.startTurn(request.content)}>Retry request</button>
+          {/if}
         {/if}
         {#if shouldShowModel(message.role) && message.model}
           <div class="message-model">{message.model}</div>

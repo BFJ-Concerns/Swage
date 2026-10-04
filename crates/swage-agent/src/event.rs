@@ -209,6 +209,9 @@ pub enum AgentEvent {
         success: bool,
     },
 
+    /// The provider explicitly refused the request.
+    ProviderRefused { turn_id: Uuid },
+
     /// A non-recoverable error occurred during turn processing.
     Error {
         message: String,

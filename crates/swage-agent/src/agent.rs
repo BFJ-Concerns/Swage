@@ -504,7 +504,7 @@ impl Agent {
     /// - Supports cooperative cancellation via `request.cancellation_token`
     ///
     /// Turn state transitions: Pending → Processing → Completed (or Interrupted on
-    /// cancellation, Failed on error).
+    /// cancellation, Refused on provider refusal, Failed on error).
     pub async fn process_turn_streaming(
         &self,
         request: TurnRequest,
@@ -1268,6 +1268,33 @@ impl Agent {
                 }
                 chunk = stream.next() => {
                     match chunk {
+                        Some(StreamChunk::Done { finish_reason: Some(swage_core::FinishReason::Refusal) }) => {
+                            let safe_content = self.scan_output(&format!("{accumulated_prefix}{text}"));
+                            if !safe_content.is_empty() {
+                                self.storage.append_message(swage_storage::model::AppendMessage {
+                                    thread_id: execution.thread_id,
+                                    turn_id: Some(execution.turn_id),
+                                    role: Role::Assistant,
+                                    origin: swage_storage::MessageOrigin::Assistant,
+                                    content: safe_content.clone(),
+                                    attachments: Vec::new(),
+                                    agent_id: self.config.agent_id.clone(),
+                                }).await?;
+                                self.storage.update_response(execution.turn_id, &safe_content).await?;
+                            }
+                            if *usage_reported {
+                                self.storage.update_tokens(execution.turn_id, (*total_input_tokens).into(), (*total_output_tokens).into()).await?;
+                            }
+                            self.storage.update_turn_state(execution.turn_id, TurnState::Refused).await?;
+                            self.storage.update_state(execution.thread_id, ThreadState::Idle).await?;
+                            let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                                turn_id: execution.turn_id,
+                                round,
+                                outcome: ProviderRoundOutcome::Responded { tool_calls: 0 },
+                            });
+                            let _ = event_tx.send(AgentEvent::ProviderRefused { turn_id: execution.turn_id });
+                            return Err(AgentError::ProviderRefused);
+                        }
                         None | Some(StreamChunk::Done { .. }) => break,
                         Some(StreamChunk::Delta { content }) => {
                             text.push_str(&content);

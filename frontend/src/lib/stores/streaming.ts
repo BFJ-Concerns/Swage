@@ -98,7 +98,7 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "failed" | "interrupted"
+        "completed" | "refused" | "failed" | "interrupted"
       >;
       thread_id?: string;
       turn_id?: string;
@@ -240,7 +240,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "failed" | "interrupted"
+      "completed" | "refused" | "failed" | "interrupted"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -263,7 +263,7 @@ export function createStreamingStore(
   function settlePartialResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "refused" | "failed" | "interrupted">,
   ): void {
     const streamedContent = get(stream.streamedContentStore);
     if (streamedContent) {
@@ -426,7 +426,7 @@ export function createStreamingStore(
         case "error":
           // Turn failed mid-stream. Preserve whatever the user saw so the
           // conversation history reflects the partial response.
-          settlePartialResponse(ownerId, stream, "failed");
+          settlePartialResponse(ownerId, stream, event.code === "provider_refused" ? "refused" : "failed");
           stream.turnErrorStore.set({ code: event.code, message: event.message });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);

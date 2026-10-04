@@ -305,6 +305,8 @@ pub enum FinishReason {
     Length,
     /// Model chose to invoke a tool.
     ToolUse,
+    /// The provider explicitly refused the request.
+    Refusal,
     /// Content was filtered by safety systems.
     ContentFilter,
     /// Reason not recognised or not provided.

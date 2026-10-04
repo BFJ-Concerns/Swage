@@ -499,6 +499,14 @@ pub(super) async fn project_agent_events(
                     structured_output: structured_output.clone(),
                 });
             }
+            AgentEvent::ProviderRefused { .. } => {
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "provider_refused".to_owned(),
+                    message:
+                        "The model refused this request. You can amend your request or retry it."
+                            .to_owned(),
+                });
+            }
             AgentEvent::Error {
                 message,
                 provider_failure,
