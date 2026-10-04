@@ -382,64 +382,65 @@ async fn restart_preserves_running_environment_and_still_starts_when_nothing_is_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_restart_preserves_running_environment() {
     journey(async {
-    let probe = GatewayProbe::new();
-    probe.start().await;
-    let first_pid = probe.pid();
+        let probe = GatewayProbe::new();
+        probe.start().await;
+        let first_pid = probe.pid();
 
-    let invoking_runtime = tempfile::TempDir::new().expect("failed to create invoking runtime");
-    let invoking_home = tempfile::TempDir::new().expect("failed to create invoking home");
-    let invoking_metadata = invoking_runtime.path().join("swage/metadata.json");
-    fs::create_dir_all(invoking_metadata.parent().unwrap())
-        .expect("failed to create invoking metadata directory");
-    fs::hard_link(probe.metadata_path(), &invoking_metadata)
-        .expect("failed to expose runtime metadata to the restart command");
+        let invoking_runtime = tempfile::TempDir::new().expect("failed to create invoking runtime");
+        let invoking_home = tempfile::TempDir::new().expect("failed to create invoking home");
+        let invoking_metadata = invoking_runtime.path().join("swage/metadata.json");
+        fs::create_dir_all(invoking_metadata.parent().unwrap())
+            .expect("failed to create invoking metadata directory");
+        fs::hard_link(probe.metadata_path(), &invoking_metadata)
+            .expect("failed to expose runtime metadata to the restart command");
 
-    let port = probe.port.to_string();
-    let mut restart = tokio::process::Command::from(probe.command())
-        .kill_on_drop(true)
-        .env_remove("SWAGE_HOME")
-        .env("HOME", invoking_home.path())
-        .env("XDG_RUNTIME_DIR", invoking_runtime.path())
-        .args([
-            "gateway",
-            "restart",
-            "--force",
-            "--foreground",
-            "--port",
-            &port,
-        ])
-        .spawn()
-        .expect("failed to invoke foreground gateway restart");
+        let port = probe.port.to_string();
+        let mut restart = tokio::process::Command::from(probe.command())
+            .kill_on_drop(true)
+            .env_remove("SWAGE_HOME")
+            .env("HOME", invoking_home.path())
+            .env("XDG_RUNTIME_DIR", invoking_runtime.path())
+            .args([
+                "gateway",
+                "restart",
+                "--force",
+                "--foreground",
+                "--port",
+                &port,
+            ])
+            .spawn()
+            .expect("failed to invoke foreground gateway restart");
 
-    let second_pid = tokio::select! {
-        pid = probe.wait_for_ready_process(Some(first_pid)) => pid,
-        status = restart.wait() => panic!("foreground restart exited before readiness: {status:?}"),
-    };
-    let environment = process_environment(second_pid);
-    for (name, value) in [
-        ("SWAGE_HOME", probe.root.path()),
-        ("HOME", probe.home.path()),
-        ("XDG_RUNTIME_DIR", probe.runtime.path()),
-    ] {
-        let expected = format!("{name}={}", value.display());
-        assert!(
-            environment
-                .split(|byte| *byte == 0)
-                .any(|entry| entry == expected.as_bytes()),
-            "foreground replacement gateway did not receive recovered {name}"
-        );
-    }
-    assert!(!invoking_metadata.exists());
+        let second_pid = tokio::select! {
+            pid = probe.wait_for_ready_process(Some(first_pid)) => pid,
+            status = restart.wait() => panic!("foreground restart exited before readiness: {status:?}"),
+        };
+        let environment = process_environment(second_pid);
+        for (name, value) in [
+            ("SWAGE_HOME", probe.root.path()),
+            ("HOME", probe.home.path()),
+            ("XDG_RUNTIME_DIR", probe.runtime.path()),
+        ] {
+            let expected = format!("{name}={}", value.display());
+            assert!(
+                environment
+                    .split(|byte| *byte == 0)
+                    .any(|entry| entry == expected.as_bytes()),
+                "foreground replacement gateway did not receive recovered {name}"
+            );
+        }
+        assert!(!invoking_metadata.exists());
 
-    let stop_output = probe.run(&["gateway", "stop", "--force"]);
-    probe.assert_success(stop_output);
-    let status = restart
-        .wait()
-        .await
-        .expect("failed to wait for foreground gateway restart");
-    assert!(status.success(), "foreground restart failed: {status}");
-    assert!(!probe.metadata_path().exists());
-    }).await;
+        let stop_output = probe.run(&["gateway", "stop", "--force"]);
+        probe.assert_success(stop_output);
+        let status = restart
+            .wait()
+            .await
+            .expect("failed to wait for foreground gateway restart");
+        assert!(status.success(), "foreground restart failed: {status}");
+        assert!(!probe.metadata_path().exists());
+    })
+    .await;
 }
 
 fn watch_metadata(directory: &Path) -> AsyncFd<fs::File> {
