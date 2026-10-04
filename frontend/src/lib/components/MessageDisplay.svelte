@@ -4,7 +4,7 @@
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
-  import { marked } from "marked";
+  import { marked, Tokenizer } from "marked";
   import { markedHighlight } from "marked-highlight";
   import hljs from "highlight.js/lib/core";
   import bash from "highlight.js/lib/languages/bash";
@@ -67,6 +67,19 @@
   hljs.registerLanguage("yml", yaml);
 
   marked.use(
+    {
+      tokenizer: {
+        emStrong(src, maskedSrc, prevChar) {
+          const token = Tokenizer.prototype.emStrong.call(this, src, maskedSrc, prevChar);
+          // Underscore-delimited punctuation is a fill-in blank in assistant
+          // templates; keep its delimiters instead of emphasising the punctuation.
+          if (token?.raw.startsWith("_") && /^[\p{P}\p{S}]+$/u.test(token.text)) {
+            return undefined;
+          }
+          return token;
+        },
+      },
+    },
     markedHighlight({
       langPrefix: "hljs language-",
       highlight(code, lang) {
