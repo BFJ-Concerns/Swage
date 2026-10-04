@@ -297,25 +297,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
         Some(task_id) => {
             let definition =
                 crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
-            let decision = crate::experimentation::select_variant(
-                &config.experimentation,
-                crate::experimentation::LOCATION_TASK_PROMPT,
-                &[],
-                "definition",
-                session_id,
-            )
-            .map_err(|e| GatewayError::ConfigError(e.to_string()))?;
-            if let Err(error) = crate::experimentation::record_selection(
-                state,
-                crate::experimentation::LOCATION_TASK_PROMPT,
-                &decision,
-                Some(session_id),
-                None,
-            )
-            .await
-            {
-                tracing::warn!(%error, task_id, "task prompt variant record unavailable; serving the definition default");
-            }
             let defines_output_retries = definition.output_max_retries.is_some();
             (
                 apply_task_definition(config, &definition)?,
@@ -370,6 +351,35 @@ pub(super) async fn process_turn_with_composition_and_focus(
                 .id
         }
     };
+
+    if session
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        if let Err(error) = crate::experimentation::select_session_variant(
+            state,
+            &config.experimentation,
+            crate::experimentation::LOCATION_TASK_PROMPT,
+            &[],
+            "definition",
+            session_id,
+            Some(prepared_turn_id),
+        )
+        .await
+        {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(error.to_string()));
+        }
+    }
 
     // Step 5: Set up the cancellation token before any turn processing begins.
     let cancel_token = cancellation_override.unwrap_or_default();

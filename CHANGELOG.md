@@ -70,6 +70,8 @@ All notable changes to Swage are documented in this file.
 - `gateway status` after a clean stop reports not running without an error and exits successfully; `gateway start` recovers after a hard kill even while the terminated process awaits reaping.
 - A turn that failed, was interrupted or was cancelled keeps its explanation and its tool calls in the conversation after a reload, attached to the request it answered; a failed turn offers Retry.
 - Native file tools refuse to write into a workspace attached without permission to change files.
+- Experimentation variants serve a whole conversation; configuration changes apply when a new session first draws.
+
 - Tool output written into an attached workspace no longer appears as untracked files in that workspace’s Git repository.
 - Session previews in conversation, topic and operator lists show the latest user or assistant message; tool and system messages do not replace the preview.
 - A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart is settled as interrupted and one stopped with its turn is settled as cancelled, and the resumed conversation replays those calls with their results.

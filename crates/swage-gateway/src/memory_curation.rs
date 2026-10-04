@@ -332,25 +332,17 @@ async fn run_curator_turn(
         &brief,
     )
     .await?;
-    let decision = crate::experimentation::select_variant(
+    crate::experimentation::select_session_variant(
+        state,
         &state.active_config().experimentation,
         crate::experimentation::LOCATION_MEMORY_CURATOR_PROMPT,
         &[],
         "default",
         curator_session_id,
-    )
-    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
-    if let Err(error) = crate::experimentation::record_selection(
-        state,
-        crate::experimentation::LOCATION_MEMORY_CURATOR_PROMPT,
-        &decision,
-        Some(curator_session_id),
         Some(turn_id),
     )
     .await
-    {
-        tracing::warn!(%error, "curator prompt variant record unavailable; serving the default");
-    }
+    .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
     let reply = crate::automated_turn::run_placeholder_turn(
         state,
         curator_session_id,
@@ -955,6 +947,62 @@ mod tests {
         assert!(
             apply_instruction(&state, topic.id, "   ").await.is_err(),
             "an empty instruction is refused before any session opens"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_variant_curator_prompt_records_once_across_passes() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, storage) = state_with(
+            vec![
+                vec![
+                    StreamChunk::Delta {
+                        content: "First pass".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+                vec![
+                    StreamChunk::Delta {
+                        content: "Second pass".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ],
+            ],
+            root.path(),
+        )
+        .await;
+        let topic = storage.general_scope().await.unwrap();
+        let session_id = create_curator_session(&state, topic.id, None)
+            .await
+            .unwrap();
+        let first = run_curator_turn(&state, session_id, "First brief".into())
+            .await
+            .unwrap();
+        let second = run_curator_turn(&state, session_id, "Second brief".into())
+            .await
+            .unwrap();
+        assert_ne!(first.turn_id, second.turn_id);
+        assert_eq!(second.reply, "Second pass");
+        let events = storage
+            .list_audit_events_by_session(session_id)
+            .await
+            .unwrap();
+        let draws: Vec<_> = events
+            .iter()
+            .filter(|e| e.entity_id == crate::experimentation::LOCATION_MEMORY_CURATOR_PROMPT)
+            .collect();
+        assert_eq!(
+            draws.len(),
+            1,
+            "a curator session must not redraw its prompt per pass"
+        );
+        assert_eq!(
+            draws[0].metadata["turn_id"],
+            serde_json::json!(first.turn_id)
         );
     }
 
