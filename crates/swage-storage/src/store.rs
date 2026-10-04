@@ -21,8 +21,8 @@ use crate::model::{
     Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
     SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
     SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
-    TopicSlug, Turn, TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
-    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
@@ -585,6 +585,13 @@ pub trait TurnStore: Send + Sync {
     /// `cost` is in microcents (see `PricingConfig::compute_cost`). Only called
     /// when pricing was configured for the model; absent turns remain NULL.
     async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError>;
+    /// Record the execution boundary the turn's dispatcher settled at — the
+    /// turn's own statement of where it ran, read back with the turn.
+    async fn record_turn_isolation(
+        &self,
+        id: Uuid,
+        isolation: &TurnIsolation,
+    ) -> Result<(), StorageError>;
     /// Persist the validated structured output for a completed turn.
     ///
     /// Called when output schema validation succeeds. The `output` value is
@@ -2520,6 +2527,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn record_turn_isolation(
+            &self,
+            _id: Uuid,
+            _isolation: &TurnIsolation,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn update_inbound_audit(

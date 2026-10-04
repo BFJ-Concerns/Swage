@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{InboundAudit, NewTurn, Turn, TurnState};
+use crate::model::{InboundAudit, NewTurn, Turn, TurnIsolation, TurnState};
 use crate::sqlite::SqliteStorage;
 use crate::store::TurnStore;
 
@@ -46,7 +46,8 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 /// Column order: id, thread_id, agent_id, user_input, inbound_audit,
 /// assistant_response, input_tokens, output_tokens, state, created_at,
 /// completed_at, cost_microcents, structured_output, parent_turn_id,
-/// delegated_input_tokens, delegated_output_tokens
+/// delegated_input_tokens, delegated_output_tokens, isolation_kind,
+/// isolation_detail
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
@@ -103,6 +104,19 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
         parent_turn_id,
         delegated_input_tokens: row.get(14)?,
         delegated_output_tokens: row.get(15)?,
+        execution_isolation: {
+            let kind: Option<String> = row.get(16)?;
+            let detail: Option<String> = row.get(17)?;
+            kind.map(|kind| TurnIsolation::from_columns(&kind, detail))
+                .transpose()
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        16,
+                        rusqlite::types::Type::Text,
+                        Box::new(ParseError(e)),
+                    )
+                })?
+        },
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -154,6 +168,7 @@ impl TurnStore for SqliteStorage {
                 completed_at: None,
                 delegated_input_tokens: None,
                 delegated_output_tokens: None,
+                execution_isolation: None,
             })
         })
         .await
@@ -165,7 +180,8 @@ impl TurnStore for SqliteStorage {
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
-                        delegated_input_tokens, delegated_output_tokens
+                        delegated_input_tokens, delegated_output_tokens,
+                        isolation_kind, isolation_detail
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -181,7 +197,8 @@ impl TurnStore for SqliteStorage {
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
-                        delegated_input_tokens, delegated_output_tokens
+                        delegated_input_tokens, delegated_output_tokens,
+                        isolation_kind, isolation_detail
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -259,7 +276,8 @@ impl TurnStore for SqliteStorage {
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
-                        delegated_input_tokens, delegated_output_tokens
+                        delegated_input_tokens, delegated_output_tokens,
+                        isolation_kind, isolation_detail
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -334,6 +352,23 @@ impl TurnStore for SqliteStorage {
             conn.execute(
                 "UPDATE turns SET cost_microcents = ?1 WHERE id = ?2",
                 params![cost, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn record_turn_isolation(
+        &self,
+        id: Uuid,
+        isolation: &TurnIsolation,
+    ) -> Result<(), StorageError> {
+        let kind = isolation.kind().to_string();
+        let detail = isolation.detail().map(str::to_string);
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns SET isolation_kind = ?1, isolation_detail = ?2 WHERE id = ?3",
+                params![kind, detail, id.to_string()],
             )?;
             Ok(())
         })
@@ -723,6 +758,33 @@ mod tests {
 
         let fetched = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert!(fetched.structured_output.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_turn_reads_back_the_boundary_its_dispatcher_settled_at() {
+        let (storage, thread_id) = make_thread().await;
+        let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+        assert_eq!(
+            turn.execution_isolation, None,
+            "a turn that has not settled its dispatcher names no boundary yet"
+        );
+
+        for isolation in [
+            TurnIsolation::Isolated,
+            TurnIsolation::Degraded {
+                reason: "bubblewrap_unavailable".into(),
+            },
+            TurnIsolation::Declared {
+                boundary: "container".into(),
+            },
+        ] {
+            storage
+                .record_turn_isolation(turn.id, &isolation)
+                .await
+                .unwrap();
+            let read = storage.get_turn(turn.id).await.unwrap().unwrap();
+            assert_eq!(read.execution_isolation, Some(isolation));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

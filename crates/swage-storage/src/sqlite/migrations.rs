@@ -105,12 +105,21 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             SESSION_SURFACES_AND_LIBRARY,
         ),
         ("064_turn_queue", CREATE_TURN_QUEUE),
+        ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
     ]
 }
 
 /// Messages accepted while a session's turn was running, held in arrival
 /// order until the next turn takes them as its input. A row carries the
 /// origin it arrived with, so the message it becomes is labelled truthfully.
+/// The execution boundary a turn ran inside, recorded when its dispatcher
+/// settled: the kind (isolated, degraded, declared) and its detail (the
+/// degradation reason or the declared boundary).
+const ADD_TURN_EXECUTION_ISOLATION: &str = "
+    ALTER TABLE turns ADD COLUMN isolation_kind TEXT;
+    ALTER TABLE turns ADD COLUMN isolation_detail TEXT;
+";
+
 const CREATE_TURN_QUEUE: &str = "
     CREATE TABLE turn_queue (
         id          TEXT    NOT NULL PRIMARY KEY,

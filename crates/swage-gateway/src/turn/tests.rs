@@ -4498,6 +4498,7 @@ impl TurnStore for MockStorage {
             completed_at: None,
             delegated_input_tokens: None,
             delegated_output_tokens: None,
+            execution_isolation: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
@@ -4607,6 +4608,17 @@ impl TurnStore for MockStorage {
     async fn update_cost(&self, id: Uuid, cost: i64) -> Result<(), StorageError> {
         if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
             t.cost_microcents = Some(cost);
+        }
+        Ok(())
+    }
+
+    async fn record_turn_isolation(
+        &self,
+        id: Uuid,
+        isolation: &swage_storage::TurnIsolation,
+    ) -> Result<(), StorageError> {
+        if let Some(t) = self.db.lock().await.turns.get_mut(&id) {
+            t.execution_isolation = Some(isolation.clone());
         }
         Ok(())
     }
@@ -8455,12 +8467,15 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    assert_eq!(second.messages.len(), 5);
+    // Orientation, working norms and the memory index stand before the
+    // conversation; then the user's turn, the tool call, and its result.
+    assert_eq!(second.messages.len(), 6);
     assert_eq!(second.messages[0].role(), Role::System);
     assert_eq!(second.messages[1].role(), Role::System);
-    assert_eq!(second.messages[2].role(), Role::User);
-    assert_eq!(second.messages[3].role(), Role::Assistant);
-    assert_eq!(second.messages[4].role(), Role::User);
+    assert_eq!(second.messages[2].role(), Role::System);
+    assert_eq!(second.messages[3].role(), Role::User);
+    assert_eq!(second.messages[4].role(), Role::Assistant);
+    assert_eq!(second.messages[5].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System

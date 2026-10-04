@@ -17,7 +17,8 @@ use super::{
     SandboxDegradationApprovalRequest, ServerEvent, TurnAttendance, TurnState, Uuid,
     build_gateway_dispatcher, mpsc, record_degraded_execution,
     record_failed_turn_and_release_on_error, record_terminal_state_and_release,
-    release_active_turn, request_sandbox_degradation_approval, shutdown_sandbox_guard,
+    record_turn_isolation, release_active_turn, request_sandbox_degradation_approval,
+    shutdown_sandbox_guard,
 };
 
 /// What the coordinator resolved for building the turn's dispatcher.
@@ -244,6 +245,20 @@ pub(super) async fn settle_turn_dispatcher(
         shutdown_sandbox_guard(
             &dispatcher_build.sandbox_guard,
             "failed to shut down sandbox after degradation audit failure",
+        )
+        .await;
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
+            .await?;
+        return Err(error);
+    }
+    // The turn's own statement of where it runs, written before anything
+    // runs there: like the degradation audit, constitutive of the record.
+    if let Err(error) =
+        record_turn_isolation(state, &dispatcher_build.isolation, prepared_turn_id).await
+    {
+        shutdown_sandbox_guard(
+            &dispatcher_build.sandbox_guard,
+            "failed to shut down sandbox after isolation record failure",
         )
         .await;
         record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
