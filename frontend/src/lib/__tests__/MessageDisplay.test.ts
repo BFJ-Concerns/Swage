@@ -170,6 +170,51 @@ afterEach(() => {
 });
 
 describe("turn context inspector trigger", () => {
+  it.each([true, false])("retries the person's request from an empty-response account with recorded input %s", async (recorded) => {
+    const request: MessageView = { role: "user", origin: "user", content: "Summarise the document.", timestamp: "2026-10-05T12:00:00Z", ...(recorded ? { turn_id: "empty-turn" } : {}) };
+    const notice: MessageView = { role: "user", origin: "platform", content: "The provider could not complete this response: empty response.", timestamp: "2026-10-05T12:00:01Z", turn_id: "empty-turn", turn_state: "failed", failure_message: "empty response" };
+    const streaming = makeStreamingStore();
+    streaming.startTurn = vi.fn();
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request, notice]), streamingStore: streaming } });
+    const retry = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === "Retry");
+    retry!.click();
+    expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith(request.content);
+  });
+
+  it("shows the refusal account and retries the person's request from recorded messages", async () => {
+    const request: MessageView = { role: "user", origin: "user", content: "Read a harmless file.", timestamp: "2026-10-04T20:00:00Z", turn_id: "refused-turn" };
+    const notice: MessageView = { role: "user", origin: "platform", content: "The model refused this request. You can amend your request in the message box or retry it.", timestamp: "2026-10-04T20:00:01Z", turn_id: "refused-turn", turn_state: "refused" as MessageView["turn_state"] };
+    const optimisticRequest = { ...request, turn_id: undefined };
+    for (const messages of [[optimisticRequest, notice], [request, notice], JSON.parse(JSON.stringify([request, notice]))]) {
+      const streaming = makeStreamingStore();
+      streaming.startTurn = vi.fn();
+      component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore(messages), streamingStore: streaming } });
+      expect(document.body.textContent).toContain("The model refused this request");
+      const retry = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === "Retry request");
+      expect(retry, "a refused request has a usable retry action").toBeDefined();
+      retry!.click();
+      expect(streaming.startTurn).toHaveBeenCalledWith(request.content);
+      await unmount(component!);
+      component = undefined;
+    }
+  });
+
+  it("retries every person input in a drained refused turn in recorded order", async () => {
+    const messages: MessageView[] = [
+      { role: "user", origin: "user", content: "Unrelated request", timestamp: "2026-10-04T19:00:00Z", turn_id: "older-turn" },
+      { role: "user", origin: "user", content: "Inspect the files.", timestamp: "2026-10-04T20:00:00Z", turn_id: "refused-turn" },
+      { role: "user", origin: "user", content: "Include their sizes.", timestamp: "2026-10-04T20:00:01Z", turn_id: "refused-turn" },
+      { role: "user", origin: "platform", content: "The model refused this request.", timestamp: "2026-10-04T20:00:02Z", turn_id: "refused-turn", turn_state: "refused" },
+    ];
+    const streaming = makeStreamingStore();
+    streaming.startTurn = vi.fn();
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore(messages), streamingStore: streaming } });
+    const retry = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === "Retry request");
+    expect(retry).toBeDefined();
+    retry!.click();
+    expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith("Inspect the files.\n\nInclude their sizes.");
+  });
+
   it("switches the shared inspector when two completed turns are opened in sequence", async () => {
     vi.mocked(fetchTurnContext).mockImplementation(async (turnId) => ({
       assembly_name: "balanced",
