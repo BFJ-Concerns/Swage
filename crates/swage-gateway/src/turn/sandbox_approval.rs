@@ -77,11 +77,9 @@ pub(super) async fn request_sandbox_degradation_approval(
         .await?;
 
     let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
-    state
-        .approval_channels
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(approval.id, decision_tx);
+    let _registration = super::dispatcher::build_approval_registrar(
+        state.approval_channels.clone(),
+    )(approval.id, decision_tx);
 
     let _ = ws_tx.send(ServerEvent::ApprovalRequired {
         approval_id: approval.id,
@@ -110,12 +108,6 @@ pub(super) async fn request_sandbox_degradation_approval(
         _ = tokio::time::sleep(timeout) => ApprovalWait::Timeout,
         _ = cancel_token.cancelled() => ApprovalWait::Cancelled,
     };
-
-    state
-        .approval_channels
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .remove(&approval.id);
 
     let outcome = match wait_result {
         ApprovalWait::Decision(decision) if decision.is_approved() => {

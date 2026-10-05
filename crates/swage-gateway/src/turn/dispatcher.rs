@@ -10,19 +10,21 @@ use super::{
 pub(super) type GatewayToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
 pub(crate) fn build_approval_registrar(
     approval_channels: Arc<
-        std::sync::Mutex<
-            std::collections::HashMap<
-                Uuid,
-                tokio::sync::oneshot::Sender<swage_agent::ApprovalDecision>,
-            >,
-        >,
+        std::sync::Mutex<std::collections::HashMap<Uuid, crate::state::ApprovalWaiter>>,
     >,
 ) -> swage_agent::ApprovalChannelRegistrar {
     Arc::new(move |approval_id, sender| {
         approval_channels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(approval_id, sender);
+            .insert(approval_id, sender.into());
+        let channels = Arc::clone(&approval_channels);
+        swage_agent::approval::ApprovalChannelRegistration::new(move || {
+            channels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&approval_id);
+        })
     })
 }
 

@@ -175,6 +175,74 @@ mod approval_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approval_gate_does_not_resume_after_losing_the_storage_update() {
+        let registered = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&registered);
+        let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+            *slot.lock().unwrap() = Some((id, sender));
+            crate::approval::ApprovalChannelRegistration::default()
+        }))
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let gate = agent.handle_approval_gate(
+            &execution,
+            ApprovalKind::Tool,
+            Some("shell".into()),
+            None,
+            None,
+            "Allow shell?".into(),
+            None,
+            std::time::Duration::from_secs(60),
+            swage_core::ApprovalTimeoutPolicy::Reject,
+            &tx,
+            &cancel,
+            &mut scope,
+        );
+        let settle_first = async {
+            let _ = rx.recv().await.unwrap();
+            let (id, sender) = registered.lock().unwrap().take().unwrap();
+            agent
+                .storage
+                .update_approval_state(id, swage_storage::ApprovalState::Expired, None)
+                .await
+                .unwrap();
+            agent
+                .storage
+                .update_turn_state(execution.turn_id, TurnState::Interrupted)
+                .await
+                .unwrap();
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
+                    scope: crate::approval::ApprovalDecisionScope::Session,
+                    reason: None,
+                })
+                .unwrap();
+        };
+        let (outcome, ()) = tokio::join!(gate, settle_first);
+        assert_eq!(
+            (
+                matches!(
+                    outcome,
+                    Ok(crate::approval::ApprovalGateOutcome::Interrupted)
+                ),
+                agent
+                    .storage
+                    .get_turn(execution.turn_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                scope.approves_remaining_gates
+            ),
+            (true, TurnState::Interrupted, false),
+            "a settled approval must neither resume the turn nor grant remaining gates",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn immediate_rejection_after_approval_notification_keeps_its_sender() {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let event_rx = Arc::new(Mutex::new(event_rx));
@@ -202,6 +270,7 @@ mod approval_tests {
                     reason: Some("immediate rejection".into()),
                 })
                 .expect("registered sender accepts an immediate rejection");
+            crate::approval::ApprovalChannelRegistration::default()
         });
         let (agent, execution) = approval_fixture(registrar).await;
         let outcome = agent
@@ -257,6 +326,7 @@ mod approval_tests {
                     reason: Some("denied by the user".into()),
                 })
                 .expect("registered sender accepts rejection");
+            crate::approval::ApprovalChannelRegistration::default()
         });
         let (agent, execution) = approval_fixture(registrar).await;
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -313,6 +383,7 @@ mod approval_tests {
                     reason: Some("not allowed".into()),
                 })
                 .expect("registered sender accepts rejection");
+            crate::approval::ApprovalChannelRegistration::default()
         });
         let (agent, execution) = approval_fixture(registrar).await;
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -369,6 +440,7 @@ mod approval_tests {
                     reason: reason.map(Into::into),
                 })
                 .expect("registered sender accepts the decision");
+            crate::approval::ApprovalChannelRegistration::default()
         })
     }
 
@@ -2506,14 +2578,18 @@ impl Agent {
         turn_id: Uuid,
         state: swage_storage::model::ApprovalState,
         reason: Option<&str>,
-    ) -> Result<(), AgentError> {
-        self.storage
+    ) -> Result<bool, AgentError> {
+        if !self
+            .storage
             .update_approval_state(approval_id, state, reason)
-            .await?;
+            .await?
+        {
+            return Ok(false);
+        }
         self.storage
             .update_turn_state(turn_id, TurnState::Processing)
             .await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn interrupt_approval_gate(
@@ -2620,7 +2696,7 @@ impl Agent {
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
-        registrar(approval.id, tx);
+        let _registration = registrar(approval.id, tx);
 
         // 4. Emit ApprovalRequired only once a decision can be received.
         let _ = event_tx.send(AgentEvent::ApprovalRequired {
@@ -2671,6 +2747,17 @@ impl Agent {
                 .await
             }
             GateResult::Decision(d) if d.is_approved() => {
+                if !self
+                    .resume_after_approval_decision(
+                        approval.id,
+                        execution.turn_id,
+                        ApprovalState::Approved,
+                        d.reason.as_deref(),
+                    )
+                    .await?
+                {
+                    return Ok(ApprovalGateOutcome::Interrupted);
+                }
                 if matches!(
                     d.scope,
                     crate::approval::ApprovalDecisionScope::Session
@@ -2679,14 +2766,6 @@ impl Agent {
                 ) {
                     approval_scope.approve_remaining_gates();
                 }
-
-                self.resume_after_approval_decision(
-                    approval.id,
-                    execution.turn_id,
-                    ApprovalState::Approved,
-                    d.reason.as_deref(),
-                )
-                .await?;
                 let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
                     approval_id: approval.id,
                     decision: crate::approval::ApprovalDecisionValue::Approved,
@@ -2701,13 +2780,17 @@ impl Agent {
                     .clone()
                     .unwrap_or_else(|| "rejected by reviewer".into());
                 let feedback = crate::approval::user_denied_feedback();
-                self.resume_after_approval_decision(
-                    approval.id,
-                    execution.turn_id,
-                    ApprovalState::Rejected,
-                    d.reason.as_deref(),
-                )
-                .await?;
+                if !self
+                    .resume_after_approval_decision(
+                        approval.id,
+                        execution.turn_id,
+                        ApprovalState::Rejected,
+                        d.reason.as_deref(),
+                    )
+                    .await?
+                {
+                    return Ok(ApprovalGateOutcome::Interrupted);
+                }
                 let _ = event_tx.send(AgentEvent::ApprovalConfirmed {
                     approval_id: approval.id,
                     decision: crate::approval::ApprovalDecisionValue::Rejected,
@@ -2731,13 +2814,17 @@ impl Agent {
                 match timeout_policy {
                     swage_core::ApprovalTimeoutPolicy::Reject => {
                         // Treat timeout as rejection — turn continues.
-                        self.resume_after_approval_decision(
-                            approval.id,
-                            execution.turn_id,
-                            ApprovalState::Expired,
-                            Some("approval timed out"),
-                        )
-                        .await?;
+                        if !self
+                            .resume_after_approval_decision(
+                                approval.id,
+                                execution.turn_id,
+                                ApprovalState::Expired,
+                                Some("approval timed out"),
+                            )
+                            .await?
+                        {
+                            return Ok(ApprovalGateOutcome::Interrupted);
+                        }
                         Ok(ApprovalGateOutcome::Expired {
                             feedback: "Tool call rejected: approval timed out".into(),
                         })

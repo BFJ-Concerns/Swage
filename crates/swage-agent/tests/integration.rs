@@ -709,6 +709,7 @@ async fn approved_metadata_result() -> (swage_storage::model::ToolCallRecord, se
                     reason: None,
                 })
                 .expect("approval receiver");
+            swage_agent::approval::ApprovalChannelRegistration::default()
         }))
         .build()
         .expect("agent");

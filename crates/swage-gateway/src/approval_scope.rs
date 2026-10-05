@@ -3,11 +3,13 @@ use swage_storage::model::{ApprovalRequest, NewWorkspaceAttachment, Topic};
 
 use crate::{error::ApiError, state::AppState};
 
-/// A decision can release only a live, unexpired waiting call.
-pub(crate) async fn ensure_approval_actionable(
+/// Validate and claim a waiting call in one map operation. A claimed slot
+/// remains present until the agent settles its row, so a competing decision
+/// cannot mistake an in-flight decision for an abandoned gate.
+pub(crate) async fn claim_approval_waiter(
     state: &AppState,
     approval: &ApprovalRequest,
-) -> Result<(), ApiError> {
+) -> Result<tokio::sync::oneshot::Sender<swage_agent::ApprovalDecision>, ApiError> {
     use swage_storage::{ApprovalState, TurnState};
 
     if approval.state != ApprovalState::Pending {
@@ -21,20 +23,49 @@ pub(crate) async fn ensure_approval_actionable(
         .get_turn(approval.turn_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let has_waiter = state
-        .approval_channels
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&approval.id)
-        .is_some_and(|sender| !sender.is_closed());
-    if approval.timeout_at > chrono::Utc::now()
-        && has_waiter
-        && turn
-            .as_ref()
-            .is_some_and(|turn| turn.state == TurnState::AwaitingApproval)
-    {
-        return Ok(());
-    }
+    let has_waiter = {
+        let mut channels = state
+            .approval_channels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let slot = channels.get_mut(&approval.id);
+        if slot.as_ref().is_some_and(|slot| slot.sender.is_none()) {
+            return Err(ApiError::conflict(
+                "approval request is already decided".to_string(),
+            ));
+        }
+        let has_waiter = slot.as_ref().is_some_and(|slot| {
+            slot.sender
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed())
+        });
+        if approval.timeout_at > chrono::Utc::now()
+            && has_waiter
+            && turn
+                .as_ref()
+                .is_some_and(|turn| turn.state == TurnState::AwaitingApproval)
+        {
+            return Ok(slot
+                .and_then(|slot| slot.sender.take())
+                .expect("live waiter"));
+        }
+        // Dropping an unclaimed sender wakes its gate through the timeout path.
+        channels.remove(&approval.id);
+        has_waiter
+    };
+    expire_approval(state, approval, if has_waiter { None } else { turn }).await?;
+    Err(ApiError::conflict(
+        "approval request expired; retry the operation".to_string(),
+    ))
+}
+
+/// Failed delivery and genuinely abandoned gates may expire only a pending row.
+pub(crate) async fn expire_approval(
+    state: &AppState,
+    approval: &ApprovalRequest,
+    abandoned_turn: Option<swage_storage::Turn>,
+) -> Result<(), ApiError> {
+    use swage_storage::{ApprovalState, TurnState};
     let expired = state
         .storage
         .update_approval_state(
@@ -56,14 +87,7 @@ pub(crate) async fn ensure_approval_actionable(
             current.state
         )));
     }
-    // Dropping the sender wakes a live gate through its existing timeout path.
-    state
-        .approval_channels
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&approval.id);
-    if !has_waiter
-        && let Some(turn) = turn
+    if let Some(turn) = abandoned_turn
         && turn.state == TurnState::AwaitingApproval
     {
         state
@@ -85,9 +109,7 @@ pub(crate) async fn ensure_approval_actionable(
                 .map_err(|error| ApiError::internal(error.to_string()))?;
         }
     }
-    Err(ApiError::conflict(
-        "approval request expired; retry the operation".to_string(),
-    ))
+    Ok(())
 }
 
 pub(crate) async fn apply_approval_scope(
