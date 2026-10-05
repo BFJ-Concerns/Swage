@@ -8,6 +8,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import { fromStore, writable } from "svelte/store";
+import { compile } from "svelte/compiler";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import SurfacesPane from "../components/SurfacesPane.svelte";
 import type { SurfacesStore } from "../stores/surfaces";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
@@ -212,5 +216,44 @@ describe("SurfacesPane module controls", () => {
     await settled();
     expect(store.writeModule).toHaveBeenLastCalledWith(SURFACE_ID, "m-1", "# Mine, edited", 4);
     expect(document.querySelector("article.module textarea")).toBeNull();
+  });
+
+  it("renders document tables as padded, separated cells", () => {
+    const rota = "| Name | Shift | Cost | Status |\n| --- | --- | --- | --- |\n| Priya | Morning | 280 | Confirmed |";
+    const store = fakeStore(surface([module("m-1", rota, 0)]));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    const content = document.querySelector("article.module .module-content");
+    const table = content?.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(Array.from(table!.querySelectorAll("th")).map((cell) => cell.textContent)).toEqual([
+      "Name", "Shift", "Cost", "Status",
+    ]);
+
+    // Vitest does not load component styles, so apply the pane's own
+    // stylesheet under the scope class the mounted pane carries.
+    const scope = Array.from(content!.classList).find((name) => name.startsWith("svelte-"));
+    expect(scope).toBeDefined();
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../components/SurfacesPane.svelte"),
+      "utf8",
+    );
+    const { css } = compile(source, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope! });
+    const style = document.createElement("style");
+    style.textContent = css?.code ?? "";
+    document.head.append(style);
+    try {
+      for (const cell of table!.querySelectorAll("th, td")) {
+        const computed = getComputedStyle(cell);
+        expect(parseFloat(computed.paddingLeft)).toBeGreaterThan(0);
+        expect(parseFloat(computed.paddingRight)).toBeGreaterThan(0);
+      }
+    } finally {
+      style.remove();
+    }
   });
 });
