@@ -11,6 +11,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
+  import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
   import CommandsPanel from "./CommandsPanel.svelte";
@@ -225,7 +226,7 @@
     },
     automation: {
       title: "Automation",
-      sub: "Lifecycle hooks and runtime triggers loaded by the gateway at startup.",
+      sub: "Schedules become active when created, without a gateway restart. Manage scheduled work and runtime settings here.",
     },
     plugins: {
       title: "Plugins",
@@ -424,11 +425,11 @@
         <p class="sub">{heading.sub}</p>
       </div>
       <div class="head-actions">
-        {#if shouldAutosaveSettings}
+        {#if shouldAutosaveSettings && tab !== "automation"}
           <span class="autosave-state" class:saving={isPersisting}>
             {isPersisting ? "Autosaving" : "Autosave"}
           </span>
-        {:else}
+        {:else if !shouldAutosaveSettings}
           <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
             {isPersisting ? "Saving..." : "Save"}
           </button>
@@ -469,17 +470,23 @@
     {:else if tab === "generation"}
       <GenerationSettingsPanel bind:settings />
     {:else if tab === "automation"}
-      <AutomationSettingsPanel
-        bind:settings
-        {topicId}
-        {topics}
-        sessionId={null}
-        onValidation={(bundlesInvalid, approvalsInvalid, message) => {
-          hasInvalidBundlesJson = bundlesInvalid;
-          hasInvalidApprovalJson = approvalsInvalid;
-          error = message;
-        }}
-      />
+      <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
+      <section aria-label="Automation settings">
+        <div class="head">
+          <h3>Automation settings</h3>
+          <span class="autosave-state" class:saving={isPersisting}>
+            {isPersisting ? "Autosaving" : "Autosave"}
+          </span>
+        </div>
+        <AutomationSettingsPanel
+          bind:settings
+          onValidation={(bundlesInvalid, approvalsInvalid, message) => {
+            hasInvalidBundlesJson = bundlesInvalid;
+            hasInvalidApprovalJson = approvalsInvalid;
+            error = message;
+          }}
+        />
+      </section>
     {/if}
   {/if}
 </div>
