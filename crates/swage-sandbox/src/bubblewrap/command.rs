@@ -625,17 +625,29 @@ mod tests {
                 .map(|(i, w)| (i, Path::new(w[1]), Path::new(w[2])))
                 .collect();
 
-            // The read-only root `/ /` precedes the tmpfs, which then hides
-            // /tmp; every other ancestor of the socket, /tmp and the runtime
-            // directory must never appear as a bind source or destination.
-            let mut forbidden: Vec<&Path> = socket
-                .ancestors()
-                .skip(1)
-                .filter(|ancestor| *ancestor != Path::new("/"))
-                .collect();
+            // The one permitted exposure of `/` is the read-only root bind
+            // that precedes the tmpfs, which then hides /tmp beneath it.
+            // Every other bind — at any position — must not carry `/`, any
+            // other ancestor of the socket, /tmp or the runtime directory as
+            // its source or destination.
+            let root_bind = binds
+                .iter()
+                .position(|&(position, source, destination)| {
+                    args[position] == OsStr::new("--ro-bind")
+                        && source == Path::new("/")
+                        && destination == Path::new("/")
+                        && position < tmpfs
+                })
+                .expect("a read-only root bind precedes the /tmp tmpfs");
+            let mut forbidden: Vec<&Path> = socket.ancestors().skip(1).collect();
             forbidden.push(Path::new("/tmp"));
             forbidden.extend(runtime_dir);
-            for (_, source, destination) in &binds {
+            for (_, source, destination) in binds
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != root_bind)
+                .map(|(_, bind)| bind)
+            {
                 for path in &forbidden {
                     assert!(
                         source != path && destination != path,
