@@ -8,6 +8,7 @@
     pauseSchedule,
     rejectPendingAction,
     resumeSchedule,
+    triggerSchedule,
   } from "../api/operator";
   import type { OperatorOverview } from "../types";
   import StatusBadge from "./StatusBadge.svelte";
@@ -58,6 +59,10 @@
     return run.state === "completed_empty" ? "completed empty" : run.state;
   }
 
+  function passedOneShot(schedule: Schedule): boolean {
+    return schedule.spec.kind === "one_shot" && Date.parse(schedule.spec.at) <= Date.now();
+  }
+
   async function toggleScheduleRuns(scheduleId: string): Promise<void> {
     if (openScheduleId === scheduleId) {
       openScheduleId = null;
@@ -76,6 +81,13 @@
 
     try {
       overview = await fetchOperatorOverview();
+      const histories = await Promise.all(
+        overview.schedules.schedules.filter(passedOneShot).map(async (schedule) => {
+          const response = await fetchScheduleRuns(schedule.id);
+          return [schedule.id, response.runs.toReversed()] as const;
+        }),
+      );
+      scheduleRuns = { ...scheduleRuns, ...Object.fromEntries(histories) };
     } catch (error) {
       errorMessage =
         error instanceof Error ? error.message : "Failed to load operator overview";
@@ -280,12 +292,21 @@
             <p class="empty-copy">Nothing is scheduled.</p>
           {:else}
             {#each overview.schedules.schedules as schedule (schedule.id)}
+              {@const latestRun = passedOneShot(schedule) ? scheduleRuns[schedule.id]?.[0] : undefined}
               <section class="control-card">
                 <div class="primary-line">
                   <span>{schedule.message}</span>
                   <StatusBadge
-                    register={schedule.status === "active" ? "calm" : "not-yet"}
-                    label={schedule.status}
+                    register={latestRun
+                      ? latestRun.state === "failed"
+                        ? "wants-a-human"
+                        : latestRun.state === "running" || latestRun.state === "pending"
+                          ? "in-motion"
+                          : latestRun.state === "completed" || latestRun.state === "completed_empty"
+                            ? "calm"
+                            : "not-yet"
+                      : schedule.status === "active" ? "calm" : "not-yet"}
+                    label={latestRun ? describeRunState(latestRun) : schedule.status}
                   />
                 </div>
                 <p class="detail-copy">
@@ -301,7 +322,17 @@
                   </p>
                 {/if}
                 <div class="action-row">
-                  {#if schedule.status === "active"}
+                  {#if passedOneShot(schedule)}
+                    <button
+                      class="action-btn positive"
+                      onclick={() => runAction(`run-${schedule.id}`, async () => {
+                        await triggerSchedule(schedule.id);
+                      })}
+                      disabled={actionBusy(`run-${schedule.id}`)}
+                    >
+                      {actionBusy(`run-${schedule.id}`) ? "Running…" : "Run again"}
+                    </button>
+                  {:else if schedule.status === "active"}
                     <button
                       class="action-btn neutral"
                       onclick={() =>

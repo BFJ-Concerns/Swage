@@ -218,6 +218,14 @@
     return "";
   }
 
+  function passedOneShot(schedule: Schedule): boolean {
+    return schedule.spec.kind === "one_shot" && Date.parse(schedule.spec.at) <= Date.now();
+  }
+
+  function cardRun(schedule: Schedule): ScheduleRun | undefined {
+    return passedOneShot(schedule) ? runsById[schedule.id]?.at(-1) : undefined;
+  }
+
   // Newest run first.
   function runHistory(scheduleId: string): ScheduleRun[] {
     return [...(runsById[scheduleId] ?? [])].reverse();
@@ -332,6 +340,7 @@
 
   <div class="schedule-list" aria-label="Schedules">
     {#each schedules as schedule (schedule.id)}
+      {@const latestRun = cardRun(schedule)}
       <article class="schedule-row">
         <div class="schedule-main">
           <strong>{schedule.message}</strong>
@@ -350,7 +359,9 @@
           {/each}
         </div>
         <div class="schedule-facts">
-          <span class="status status-{schedule.status}">{schedule.status}</span>
+          <span class="status {latestRun ? `status-run-${latestRun.state}` : `status-${schedule.status}`}">
+            {latestRun ? describeRunState(latestRun) : schedule.status}
+          </span>
           <span class="creator creator-{schedule.creator.kind}"
             >by {describeCreator(schedule.creator)}</span
           >
@@ -364,7 +375,7 @@
             onclick={() => runNow(schedule)}
             disabled={actionId === schedule.id}
           >
-            {actionId === schedule.id ? "Running…" : "Run now"}
+            {actionId === schedule.id ? "Running…" : passedOneShot(schedule) ? "Run again" : "Run now"}
           </button>
           {#if schedule.status === "active"}
             <button
@@ -374,7 +385,7 @@
             >
               Pause
             </button>
-          {:else}
+          {:else if !passedOneShot(schedule)}
             <button
               type="button"
               onclick={() => setPaused(schedule, false)}
