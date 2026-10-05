@@ -411,6 +411,22 @@ expectation and the unit's verifier checks it (references/briefs.md).
 
 ## Landing
 
+**A unit is landed when the landing stage's returned envelope says so, and
+not before.** Authorising a landing — answering the triage hold with
+`land` — is reported as exactly that: authorised, or in progress, until
+the pipeline's result is read. The result is derived: `landed: true` with
+a merge commit (direct-merge) or a confirmed PR (PR mode), or the
+`already-integrated` outcome, means the unit landed; `landed: false` means
+nothing landed, and `blocked_on` says why; `verification-failed` means no
+verdict exists and nothing landed. Read the envelope before writing any
+account that uses the word (`workflow_run_account`; when the result is not
+yet reachable, say so and report the unit as awaiting its landing result).
+After a `landed: false` result, the next account opens by saying the unit
+did not land, every later wake's account says the same until a later
+result says otherwise, and the session header and title derived from
+those accounts carry the correction — a lead never reverts to a landed
+claim it has corrected.
+
 Landing stays inside the pipeline, per the annexe's `merge_policy` and
 `push_policy`. The one class that skips the pipeline is the **direct
 fix** — a tiny mechanical repair landing on the structural branch without
@@ -459,6 +475,27 @@ Near a ceiling, step down inside the same family or park; never silently
 drop a pipeline's verification legs to save quota. When a whole family is
 out, the cross-family property is unavailable: park what needs it and tell
 the user, the question riding a delivered message if they are away.
+
+## Standing Constraints
+
+The constraints the run was opened under — the schedule brief's or the
+user's: local only, no deletion, no remotes, no push, no PR, a named
+width — are standing decisions. Record them in the run journal's opening
+entry under a `Standing constraints` heading at run open, re-read them at
+every wake (a fresh segment has no memory of them otherwise), and check
+every outward or destructive act against them before planning it, let
+alone announcing it: a push, a PR, a merge to the lane, the removal of a
+unit's worktree or branch. An act the record forbids is not done, not
+planned, and not offered; where it blocks the run's ordinary course, say
+what the constraint stops and leave the decision with the user.
+
+Unit worktrees and branches are retained by default: a completed worker's
+worktree stays on disk through run close, so its tree remains inspectable
+and recoverable. Removing worktrees and branches is a cleanup the standing
+record must permit — never a default step of landing or of wrap-up — and
+when it is permitted it happens only after each head is confirmed on the
+lane or on main. Under a no-deletion constraint the plan preserves them
+and says so.
 
 ## State and Resilience
 

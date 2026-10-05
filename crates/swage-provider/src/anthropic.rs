@@ -385,9 +385,9 @@ impl AnthropicStreamWitness {
     fn terminal_chunks(self) -> [StreamChunk; 2] {
         let (witness, empty) = self.finish();
         let finish_reason = Some(map_stop_reason(witness.stop_reason.as_deref()));
-        let terminal = if empty {
+        let terminal = if empty && witness.stop_reason.as_deref() != Some("refusal") {
             StreamChunk::ProviderAnomaly {
-                message: "Anthropic stream completed without visible text or tool output"
+                message: "Anthropic stream completed with an empty provider response (no visible text or tool output)"
                     .to_owned(),
             }
         } else {
@@ -861,6 +861,7 @@ fn map_stop_reason(stop_reason: Option<&str>) -> FinishReason {
         Some("end_turn") => FinishReason::Stop,
         Some("tool_use") => FinishReason::ToolUse,
         Some("max_tokens") => FinishReason::Length,
+        Some("refusal") => FinishReason::Refusal,
         _ => FinishReason::Unknown,
     }
 }

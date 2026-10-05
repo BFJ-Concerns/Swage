@@ -150,7 +150,17 @@ Stages, with the holds where the pipeline waits on you:
    stage stops before the push and says so. The stage returns a **derived** result (`landed` true only on
    git/API confirmation, else what blocked it); you record the obligation
    record's evidence from that envelope — pipelines never write the
-   ledger. De-WIP is not a stage — it is your act, later, when the
+   ledger. The envelope's `outcome` is one of three: `landed` (a merge
+   commit or a confirmed PR), `already-integrated` (the lane already
+   contained the branch head, so there was nothing to merge or publish;
+   `landed` stays true and `landing.already_integrated` is set — a
+   no-op, not a failure), or `landing-blocked` (`landed` false, with
+   `landing.blocked_on` naming what blocked it). A run can also end
+   `verification-failed`: the verifier produced no schema-valid findings
+   report across two readers, so no verdict exists and nothing landed;
+   the envelope's `reason` names the labels whose turns to read before
+   re-dispatching. Your account of a unit uses the word *landed* only for
+   the first two. De-WIP is not a stage — it is your act, later, when the
    obligation is proven and no dependent can force a change (SKILL.md,
    Landing).
 

@@ -193,9 +193,11 @@ base_url = "http://localhost:8080"
 ```
 
 SearxNG is the only supported backend. `provider_type` and `base_url` are the
-search configuration fields; `base_url` names your SearxNG instance.
-Unsupported provider types are refused when configuration loads and when
-settings are saved.
+only search configuration fields; `base_url` names your SearxNG instance.
+Unsupported provider types and unrecognised keys are refused when
+configuration loads and when settings are saved. The web search provider can
+also be edited in the web UI under **Settings**; saved changes apply to new
+turns.
 
 ## Tool permission model
 

@@ -313,6 +313,39 @@ describe("ScheduleAutomationPanel", () => {
     });
   });
 
+  it("shows a gate's declaration flags on its schedule, so unobserved criteria are visible before the first fire", async () => {
+    const message =
+      "This gate declares no files to observe, so its criteria are decided against the schedule's own record alone.";
+    const flagged = makeSchedule({
+      id: "flagged",
+      message: "Work the inbox.",
+      gate: { model: "cheap", criteria: "run only when inbox/todo.txt is non-empty" },
+      gate_warnings: [{ kind: "unobserved_criteria", message }],
+    });
+    const seeing = makeSchedule({
+      id: "seeing",
+      message: "Watch the inbox.",
+      gate: {
+        model: "cheap",
+        criteria: "run only when inbox/todo.txt is non-empty",
+        observations: [{ kind: "file", path: "inbox/todo.txt" }],
+      },
+    });
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [flagged, seeing] });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const rows = [...document.querySelectorAll(".schedule-row")];
+    const flaggedRow = rows.find((row) => row.textContent?.includes("Work the inbox."));
+    const seeingRow = rows.find((row) => row.textContent?.includes("Watch the inbox."));
+    expect(flaggedRow?.querySelector(".gate-warning")?.textContent).toBe(message);
+    expect(seeingRow?.querySelector(".gate-warning")).toBeNull();
+    expect(seeingRow?.textContent).toContain("watching 1 file");
+  });
+
   it("blocks a ticked gate with a blank model before submitting", async () => {
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [] });
     component = mount(ScheduleAutomationPanel, {

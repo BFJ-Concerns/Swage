@@ -1,6 +1,6 @@
 //! Gateway settings, provider discovery, and restart HTTP contracts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
@@ -317,7 +317,7 @@ impl RequireApprovalEntry {
 pub struct ToolPermissionConfig {
     pub allow: Vec<String>,
     pub deny: Vec<String>,
-    pub bundles: HashMap<String, Vec<String>>,
+    pub bundles: BTreeMap<String, Vec<String>>,
     pub require_approval: Vec<RequireApprovalEntry>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

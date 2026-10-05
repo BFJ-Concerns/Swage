@@ -232,13 +232,13 @@ impl TurnStore for SqliteStorage {
                 let now_str = Utc::now().to_rfc3339();
                 conn.execute(
                     "UPDATE turns SET state = ?1, completed_at = ?2
-                     WHERE id = ?3 AND state NOT IN ('completed', 'incomplete', 'failed', 'interrupted')",
+                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
                 conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('completed', 'incomplete', 'failed', 'interrupted')",
+                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
                     params![&state_str, id.to_string()],
                 )?;
             }
@@ -847,6 +847,34 @@ mod tests {
             still_interrupted.state,
             TurnState::Interrupted,
             "terminal state should not be overwritten"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refused_and_incomplete_turns_reject_later_transitions() {
+        let (storage, thread_id) = make_thread().await;
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for state in [TurnState::Refused, TurnState::Incomplete] {
+            let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+            storage
+                .update_turn_state(turn.id, state.clone())
+                .await
+                .unwrap();
+            let settled = storage.get_turn(turn.id).await.unwrap().unwrap();
+            for later_state in [TurnState::Completed, TurnState::Processing] {
+                storage
+                    .update_turn_state(turn.id, later_state)
+                    .await
+                    .unwrap();
+                let retained = storage.get_turn(turn.id).await.unwrap().unwrap();
+                observed.push((retained.state, retained.completed_at));
+                expected.push((state.clone(), settled.completed_at));
+            }
+        }
+        assert_eq!(
+            observed, expected,
+            "both terminal accounts must survive later writes"
         );
     }
 

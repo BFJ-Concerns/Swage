@@ -183,7 +183,7 @@
   // calls, failure explanation — on its request, since no assistant message
   // exists to hold it.
   function endedWithoutReply(message: (typeof messages)[number]): boolean {
-    if (message.role === "assistant") return false;
+    if (!isPersonsMessage(message)) return false;
     if (message.turn_state !== "failed" && message.turn_state !== "interrupted") return false;
     if (!message.turn_id) {
       // A request settled live, before the gateway's record names its turn:
@@ -193,16 +193,27 @@
     return !messages.some((other) => other.role === "assistant" && other.turn_id === message.turn_id);
   }
 
+  // Queue inputs retain the recorded order and the gateway's separator.
+  // Before the request is recorded, the optimistic input has no turn id.
+  function turnRequestContent(message: (typeof messages)[number]): string | null {
+    const requests = message.turn_id
+      ? messages.filter((candidate) => isPersonsMessage(candidate) && candidate.turn_id === message.turn_id)
+      : [];
+    if (requests.length > 0) return requests.map((request) => request.content).join("\n\n");
+    return messages.slice(0, messages.indexOf(message)).reverse()
+      .find((candidate) => isPersonsMessage(candidate) && !candidate.turn_id)?.content ?? null;
+  }
+
   // What Retry resends for a failed turn, shown on the message holding the
   // turn's account: the request itself when no reply came, or — under a
   // partial reply — the request that partial reply answered.
   function retryContent(message: (typeof messages)[number]): string | null {
     if (message.turn_state !== "failed") return null;
     if (endedWithoutReply(message)) return message.content;
-    if (message.role !== "assistant" || !message.turn_id) return null;
+    if ((message.role !== "assistant" && message.origin !== "platform") || !message.turn_id) return null;
     const turnMessages = messages.filter((other) => other.turn_id === message.turn_id);
     if (turnMessages[turnMessages.length - 1] !== message) return null;
-    return turnMessages.find((other) => isPersonsMessage(other))?.content ?? null;
+    return turnRequestContent(message);
   }
 
   // Retry resends the request through the ordinary send path.
@@ -336,6 +347,12 @@
               <p class="interrupted-notice">⚠ Response failed</p>
             {/if}
           </div>
+        {/if}
+        {#if message.origin === "platform" && message.turn_state === "refused" && streamingStore}
+          {@const input = turnRequestContent(message)}
+          {#if input !== null}
+            <button class="branch-link" disabled={isStreaming} onclick={() => streamingStore?.startTurn(input)}>Retry request</button>
+          {/if}
         {/if}
         {#if endedWithoutReply(message)}
           {#if message.tool_calls && message.tool_calls.length > 0}
