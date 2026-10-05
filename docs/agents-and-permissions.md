@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, handles wall-triggered succession, and configures voice transcription and synthesis
+description: How Swage defines agents (including creating them through the API), reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, controls experimentation and variant selection, handles wall-triggered succession, and configures voice transcription and synthesis
 ---
 
 # Agents and permissions
@@ -23,7 +23,7 @@ agent id can behave differently per topic without requiring separate ids.
 ### How the overlay works
 
 When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a `ResolvedConfig`, then
+cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
 overlays the agent definition on top. The overlay:
 
 - **Instructions** are appended after operator instructions, preserving the
@@ -37,9 +37,41 @@ overlays the agent definition on top. The overlay:
 - **Skills**, **output schema**, and **output retry limit** are set directly
   from the definition.
 
-A malformed permission overlay (one that fails to parse as
-`ToolPermissionConfig`) is logged and ignored — the config's own grants stand
-rather than the session silently running with an unintended permission set.
+A malformed permission overlay is logged and ignored — the config's own
+grants stand rather than the session silently running with an unintended
+permission set.
+
+### Creating and editing definitions
+
+Definitions can be created and edited through two surfaces.
+
+**Through the API.** `POST /api/operator/agent-definitions` creates a
+definition; `PUT /api/operator/agent-definitions/{agent_id}` replaces one.
+A complete creation request:
+
+```json
+{
+  "id": "reader",
+  "display_name": "Read-only assistant",
+  "description": "An agent that can search and read but not write.",
+  "instructions": "You help the user find and read information. Do not modify files.",
+  "tool_permissions": {
+    "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
+    "deny": [],
+    "require_approval": []
+  }
+}
+```
+
+`description` is required. `topic_id` scopes the definition to one topic;
+omit it for a global definition. The `tool_permissions` object carries
+`allow`, `deny`, and `require_approval` arrays — it intersects with the
+config cascade's grants, so it can only narrow what the config allows, never
+widen it. Optional fields not shown above include `model_id`, `skills`,
+`output_schema`, and `output_max_retries`.
+
+**Conversationally.** An agent whose definition grants the configuration
+tools can create and edit definitions during a session, using those tools.
 
 ## Effort
 
@@ -492,6 +524,60 @@ naming what to address (see
 Both ids can be edited in the web UI under **Settings → Voice**, which also
 states the prerequisite (an OpenAI-protocol default provider plus the two
 model ids). A save applies without restarting the gateway.
+
+## Experimentation controls
+
+Swage can run alternative implementations behind a stable surface — a
+different context assembly, a different working-norms text — selecting one
+per turn and recording every decision in the audit trail. The
+`[experimentation]` section of `config.toml` governs this.
+
+### Disabling experimentation
+
+A global switch turns all variant selection off:
+
+```toml
+[experimentation]
+enabled = false
+```
+
+When disabled, every location uses its default variant and the decision is
+recorded as such. Experimentation is on by default.
+
+### Per-location controls
+
+Each experiment location — identified by a stable string such as
+`context.assembly` or `context.working_norms` — can be individually
+controlled:
+
+```toml
+[experimentation.locations."context.assembly"]
+enabled = true
+forced_variant = "working_norms"
+```
+
+- **`enabled`** — defaults to `true`. Set to `false` to disable variant
+  selection for this location only; the default variant serves.
+- **`forced_variant`** — pins the location to a specific named variant for
+  every turn. The variant must be registered at the location's choice point;
+  an unrecognised name is refused. Remove the key to return to random
+  selection.
+
+The shipped locations are `context.assembly`, `context.working_norms`,
+`task.prompt`, and `prompts.memory_curator`.
+
+### Operator history
+
+Every variant decision — whether drawn randomly, forced, or recorded as
+disabled — appears in the operator history pane. Each entry names the
+location, the variant that served, the reason (such as `drawn`, `forced`, or
+`disabled`), and the session and turn that produced it.
+
+### Cascading
+
+Experimentation settings cascade through the file hierarchy (Global → Topic
+→ Agent). Per-location entries merge by location id across layers, so a topic
+file can force a variant the global file leaves to random selection.
 
 ## Succession compaction
 
