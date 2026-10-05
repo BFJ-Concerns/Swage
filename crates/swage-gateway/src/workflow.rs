@@ -23707,6 +23707,71 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_agent_option_run_records_its_name_without_worker_dispatch() {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let topic = storage.general_scope().await.expect("topic");
+        let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
+        let provider = Arc::new(ScriptedRecordingProvider {
+            outputs: std::sync::Mutex::new(std::collections::VecDeque::from([
+                scripted_text_output("unexpected worker dispatch"),
+            ])),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let (script, _) = storage
+            .create_workflow_script(NewWorkflowScript {
+                topic_id: topic.id,
+                name: "unknown agent option".into(),
+                description: String::new(),
+                source: r#"await agent("inspect the unit", { bogusOption: true });"#.into(),
+                delivery_grant: None,
+                captured_sources_grant: false,
+                authoring_session_id: None,
+            })
+            .await
+            .expect("script");
+        let Json(started) = start_saved_run(
+            State(state.clone()),
+            Path(script.id),
+            Json(StartWorkflowRunRequest {
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("start");
+        wait_for_terminal(&state, started.id).await;
+
+        let run = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("run")
+            .expect("present");
+        assert_eq!(run.state, "failed");
+        let message = run.error_message.as_deref().expect("recorded failure");
+        assert!(
+            message.contains("UnknownAgentOptionError: unknown agent() option 'bogusOption'"),
+            "the run record must name the author error and option: {message}"
+        );
+        let journal = storage
+            .list_workflow_journal(started.id)
+            .await
+            .expect("journal");
+        assert!(
+            !journal.iter().any(|entry| entry.kind == "agent_call"),
+            "a rejected option must not create a worker call: {journal:#?}"
+        );
+        assert!(provider.requests.lock().expect("requests").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_caught_missing_workflow_keeps_positional_replay_dense() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
