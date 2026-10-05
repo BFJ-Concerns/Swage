@@ -225,6 +225,19 @@ mod tests {
         socket_root(TEST_PREFIX).expect("socket root should resolve")
     }
 
+    /// Asserts `socket` sits directly in this user's private `/tmp/swage-<uid>`
+    /// directory, mode 0700, spelled out here rather than read back from
+    /// the code under test.
+    fn assert_private_fallback_parent(socket: &Path) {
+        let uid = unsafe { libc::geteuid() };
+        let expected = PathBuf::from(format!("/tmp/swage-{uid}"));
+        assert_eq!(socket.parent(), Some(expected.as_path()));
+        let metadata = std::fs::symlink_metadata(&expected).expect("fallback directory exists");
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), uid);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    }
+
     fn wait_until_stale(path: &Path) {
         let deadline = Instant::now() + Duration::from_millis(250);
         while Instant::now() < deadline {
@@ -342,10 +355,7 @@ mod tests {
     async fn overlong_xdg_runtime_dir_uses_short_fallback_child() {
         let configured = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("XDG set"));
         let (manager, _listener) = SocketManager::create(TEST_PREFIX).expect("fallback socket");
-        assert_eq!(
-            manager.path().parent(),
-            Some(fallback_socket_root().as_path())
-        );
+        assert_private_fallback_parent(manager.path());
         assert!(!configured.join("swage").exists());
     }
 
@@ -375,10 +385,7 @@ mod tests {
     async fn unset_xdg_runtime_dir_uses_short_fallback_child() {
         assert!(std::env::var_os("XDG_RUNTIME_DIR").is_none());
         let (manager, _listener) = SocketManager::create(TEST_PREFIX).expect("fallback socket");
-        assert_eq!(
-            manager.path().parent(),
-            Some(fallback_socket_root().as_path())
-        );
+        assert_private_fallback_parent(manager.path());
     }
 
     #[test]
