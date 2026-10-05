@@ -315,6 +315,7 @@ subdirectory (`build/`, or a legacy `maestro/`) = scratch.
 | `AGENTS.md` (committed) | Orientation for cold-landing agents: what the repo is, contract versus scratch, the commit discipline. It is the cross-tool source of truth that AGENTS.md-reading tools read directly; a sibling `CLAUDE.md` imports it with `@AGENTS.md` for tools that read that file instead. |
 | `config.toml` | Runtime knobs — `merge_policy` and `push_policy` first, more as needed. Plain config, editable without a commission conversation; read by the orchestrator and any agent or script. Not the contract, not single-writer. |
 | `VERIFICATION.md` | The consumer-proof ladder: what "prove it at the real consumer" concretely means for this project — one rung per kind of thing it ships (a CLI's binary invoked, a service hit with a live request, a UI driven, a library linked from a separate caller), with what to do when a rung's consumer is unreachable. It does not compete with the README's contract claim: the What's commitment register already defines what the thing is, and each line's falsifier is the acceptance shape — the ladder only operationalises how each commitment is exercised at its named consumer's boundary, and where a rung would add a new claim about what the project must be, that claim belongs in the What first. Single-writer like the README, and settled through the same machinery: rungs pass the handshake, the file rides the working-tree draft, and the sign-off read covers its diff alongside the README's. Settle it during capture for any commission that will be built — the elicitation probe is "how would you check this actually works, per kind of thing?" — keeping rungs journey-shaped, not tool-prescriptive. Probe the proof shapes a two-rung template misses, and settle each while the ladder is first drafted: behaviour that by construction exits before the product's surface is reachable (what discharges a live rung when the thing under proof is a refusal to start), in-process engine journeys (whether they stand as proof in their own right or as supporting instruments below the ladder), and invariants proven at storage level against promises proven at the consumer (which level governs which change) — each of these otherwise resurfaces as a build-run gap, one parked obligation at a time. Settle the dark-capability question alongside the rungs: whether a capability may ever land before a consumer. The default is no — capability and its thinnest real consumer build and prove as one unit (the build skills enforce this) — so a pre-consumer proof rung exists only where this commission explicitly allows one. The build skills read it for every proof and never write it; a build session missing it files a gap and parks the affected proofs. A rung reading settled after capture — a drained gap, a user ruling from a build run — lands in the ladder file itself through the ordinary handshake, never only in the gaps entry that raised it: briefs are written from the ladder, so a reading left outside it is re-litigated by the next brief. |
+| `commission/` | This skill's own persisted records: the sign-off reports, the commitment audit's verdicts and exclusion diffs, and any other dispatched-work product worth keeping past the session — one dated subdirectory per round (`commission/<YYYY-MM-DD>-<round>/`). Never under `build/`: that directory is the build phases' state, and the structural phase reads its presence as resume state. |
 | Build subdirectory (`build/`) | The build phases' shared state — spine inventory, obligation ledger, teardown records, unit folders — not this skill's business, save `gaps.md`, the deferred-gap queue every update conversation drains (see Reading the Situation). Older annexes may carry the predecessor's `maestro/` subdirectory as well as or instead of `build/`; every `gaps.md` present is drained. |
 
 **Managed files hold the setting, never the procedure that executes it.** A
@@ -349,8 +350,28 @@ Once the name is settled, run the bundled scaffolder rather than hand-typing
 the ritual:
 
 ```bash
-scripts/create-annexe.sh --annexe-dir ../foo-Annexe --remote <host-alias>:<account>
+scripts/create-annexe.sh --annexe-dir ../foo-Annexe [--remote <host-alias>:<account>]
 ```
+
+`--remote` is optional. A project whose code repo has a forge remote passes
+the same account; a local project with no remote omits it, and the
+scaffolder then creates a local-only annexe — no probe, no clone, no push —
+which gains a remote later with an ordinary `git remote add` and push.
+Never hand-build a substitute annexe because the project has no remote.
+
+**Prove the location before capture begins.** The annexe is a sibling of
+the project, outside the attached workspace, and the sandbox may refuse
+writes there: creating `../foo-Annexe` can fail with a read-only
+filesystem while writes inside the project succeed. So the first thing
+this conversation does on a project with no annexe — before the first
+intent question — is run the scaffolder (or, when the name is still
+open, probe the parent directory with a shell `mkdir` of the intended
+path and remove it). If the write is refused, stop there and name the
+single setup action: the operator attaches the project's parent
+directory, or creates the empty sibling and attaches it, trusted and
+read-write; then re-run the scaffolder and continue. One question, asked
+once, before capture — intent capture never stops midway on a directory
+the procedure could have proven writable at the start.
 
 (The script lives in this skill's directory; run it from there through the
 shell tool.) It is idempotent — it creates only what is missing, so the same
@@ -363,15 +384,16 @@ green field it initialises the sibling repo, lays down the orientation
 tools that read that file) plus a `config.toml` stub and
 empty `IDEAS.md`, `ISSUES.md`, `TASKS.md`, `FRICTION.md`, `held/`, and
 `shed/`, writes the code repo's uncommitted
-`ANNEXE.local.md` pointer when a code repo exists, commits, and pushes — the
-forge has push-to-create enabled, so that first push makes the private repo.
+`ANNEXE.local.md` pointer when a code repo exists, commits, and — when a
+remote was given — pushes; the forge has push-to-create enabled, so that first
+push makes the private repo.
 Pass `--merge-policy` and `--push-policy` once they are settled, or write
 `merge_policy` / `push_policy` into `config.toml` when the conversation lands
 them.
 
 Pick `--remote` as the same forge account the code repo uses (its SSH host
 alias and account). Greenfield with no code repo: ask the operator which
-account the project belongs to.
+account the project belongs to, or whether the annexe stays local for now.
 
 **The repo exists from setup; the commission lands signed.** That first push
 bootstraps the remote repo with its orientation and working files but no
@@ -783,18 +805,33 @@ this conversation rides along, so flag anything sensitive to the user before
 dispatching (registered secrets are already redacted from the record by the
 platform).
 
-The platform keeps every turn of this conversation in its local record.
-Before dispatching the audit, export this session's transcript to files
-under `<scratch>` and pass those file paths as the workflow's transcript
-arguments. A conversation that has been resumed or compacted spans its
-whole session history — export everything the session holds, not just the
-recent turns.
+The platform keeps every turn of this conversation in its local record,
+and the `session_transcript` tool returns it: every user and assistant
+message of this session, verbatim and in order, across resumes and
+compactions, paged by offset like the other read tools. Before dispatching
+the audit, read the whole transcript through that tool and write it
+unchanged to files under `<scratch>` — one JSON line per message as the
+tool returned it, split into files only where the tool's paging splits it
+— and pass those file paths as the workflow's transcript arguments.
+
+Never reconstruct the transcript: a file assembled from remembered or
+selected user messages with the assistant's turns summarised is not the
+record, and an audit over it checks the conversation against your memory
+of the conversation. If the tool is unavailable or returns an error, the
+audit cannot run — say so, record the round's audit as not run, and let
+the sign-off read carry that fact as a decision card, rather than
+substitute a reconstruction.
 
 ## Workspace
 
 Dispatched-work output, staged options, and the directories carried
 workflows write to live under `<scratch>`. The contract and everything
-meant to persist live in the annexe repo.
+meant to persist live in the annexe repo: the contract at the root, and
+this skill's own records — a sign-off report, an audit's verdicts — under
+`commission/<date>-<round>/`, committed with the round. Nothing of this
+conversation's goes under `build/`, whose presence the structural phase
+reads as its own resume state; a commission that leaves records there
+forces the next phase to ask the operator to move them.
 
 `<scratch>` is the topic's scratch area — the session working directory
 the runtime provisions when no workspace is attached; name a directory

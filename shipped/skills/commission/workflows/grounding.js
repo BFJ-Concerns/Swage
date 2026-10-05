@@ -143,7 +143,7 @@ Grounding rules — these make the finding usable rather than noise:
   up to "built" — a wrong "built" is the expensive error here.
 - Keep what you OBSERVE in the code separate from what you INFER (\`observed_vs_inferred\`).
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const verifyPrompt = (candidate, finding) =>
   `You are independently verifying a claim that a codebase capability is FULLY implemented. A
@@ -173,7 +173,7 @@ names the wrong thing, or a true/false verdict would mislead whichever way it we
 in \`out_of_scope_concerns\`. That field is for what this task did not ask you about; use an
 empty string when you have nothing, and never pad it.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // One pipeline per candidate: find → (conditionally) cross-family verify. pipeline keeps a
