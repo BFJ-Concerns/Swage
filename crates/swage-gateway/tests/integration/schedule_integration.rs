@@ -2486,7 +2486,7 @@ async fn gate_update_tristate_round_trips_over_the_wire() {
     assert_eq!(set["gate"]["criteria"], "revised");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_change_is_refused_without_mutating_the_schedule_api() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
