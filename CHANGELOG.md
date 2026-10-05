@@ -59,8 +59,8 @@ All notable changes to Swage are documented in this file.
 - File search, read and edit recognise a binary file from its first 8 KiB and read no further, and file search reads text line by line. A search reaching multi-gigabyte model weights no longer holds each file whole in memory, which had grown the gateway past 20 GB.
 - Provider rejections that cannot succeed on retry, such as an unknown model or failed authentication, end the turn immediately without a retry countdown.
 
+- A turn for a selected model goes only to that model's configured provider, with its saved URL and protocol: when that provider is unreachable, fails, or answers with something other than model output (an HTML page, another protocol's stream), the turn fails with an error naming that provider and its endpoint instead of being answered by another configured model. This holds when two models share an upstream model id on different providers.
 - Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
-- A turn for a selected model goes only to that model's configured provider, with its saved URL and protocol: when that provider is unreachable or fails, the turn fails with an error naming that provider and its endpoint instead of being answered by another configured model. This holds when two models share an upstream model id on different providers.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.
 - Retry badges name the model requested for the current turn.
 - Stopping a turn ends a shell command running inside the sandbox, in both bubblewrap and fallback modes, and its call settles as cancelled.
