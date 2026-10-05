@@ -235,22 +235,24 @@ describe("SurfacesPane module controls", () => {
     ]);
 
     // Vitest does not load component styles, so apply the pane's own
-    // stylesheet under the scope class the mounted pane carries.
-    const scope = Array.from(content!.classList).find((name) => name.startsWith("svelte-"));
-    expect(scope).toBeDefined();
+    // stylesheet under the scope class the mounted pane carries (Svelte adds
+    // none to an element no rule targets, leaving the cells unstyled).
+    const scope = Array.from(content!.classList).find((name) => name.startsWith("svelte-")) ??
+      "svelte-unstyled";
     const source = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "../components/SurfacesPane.svelte"),
       "utf8",
     );
-    const { css } = compile(source, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope! });
+    const { css } = compile(source, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope });
     const style = document.createElement("style");
     style.textContent = css?.code ?? "";
     document.head.append(style);
     try {
       for (const cell of table!.querySelectorAll("th, td")) {
         const computed = getComputedStyle(cell);
-        expect(parseFloat(computed.paddingLeft)).toBeGreaterThan(0);
-        expect(parseFloat(computed.paddingRight)).toBeGreaterThan(0);
+        // Beyond the browser default's 1px, which lets cell texts touch.
+        expect(parseFloat(computed.paddingLeft)).toBeGreaterThanOrEqual(4);
+        expect(parseFloat(computed.paddingRight)).toBeGreaterThanOrEqual(4);
       }
     } finally {
       style.remove();
