@@ -248,6 +248,51 @@ mod approval_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_tool_approval_preserves_user_denial_in_model_feedback() {
+        let registrar: ApprovalChannelRegistrar = Arc::new(|_approval_id, sender| {
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Rejected,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: Some("denied by the user".into()),
+                })
+                .expect("registered sender accepts rejection");
+        });
+        let (agent, execution) = approval_fixture(registrar).await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = agent
+            .handle_approval_gate(
+                &execution,
+                ApprovalKind::Tool,
+                Some("shell".into()),
+                None,
+                None,
+                "Allow shell?".into(),
+                None,
+                std::time::Duration::from_secs(5),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .expect("approval gate");
+
+        let crate::approval::ApprovalGateOutcome::Rejected { feedback } = outcome else {
+            panic!("expected rejected approval, got {outcome:?}");
+        };
+        assert_eq!(feedback, "Tool call rejected: denied by the user");
+        assert!(!feedback.contains("approval card"));
+        let model_result = compact_tool_result_for_model_with_reference(
+            &feedback,
+            true,
+            tool_result_reference(&execution.turn_id.to_string(), "call-1"),
+        );
+        assert!(model_result.contains("Tool call rejected: denied by the user"));
+        assert!(!model_result.contains("approval card"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rejected_tool_approval_emits_settlement_log() {
         use tracing_subscriber::{Registry, layer::SubscriberExt};
 
