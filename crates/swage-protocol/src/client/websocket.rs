@@ -186,6 +186,10 @@ pub enum ServerEvent {
     /// keeps the JSON shape backward-compatible).
     TurnComplete {
         turn_id: Uuid,
+        /// Output-limit cause when the reply is incomplete.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        incomplete_reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         input_tokens: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,6 +258,10 @@ pub enum ServerEvent {
     /// A delegation has completed (successfully or with failure).
     /// Always delivered — matches DelegationStarted semantics.
     DelegationCompleted {
+        /// Output-limit cause when the child response is incomplete.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        incomplete_reason: Option<String>,
         parent_turn_id: Uuid,
         child_turn_id: Option<Uuid>,
         target_agent_id: String,

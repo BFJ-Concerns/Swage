@@ -612,6 +612,13 @@ pub trait TurnStore: Send + Sync {
         id: Uuid,
         isolation: &TurnIsolation,
     ) -> Result<(), StorageError>;
+    /// Record the explanation shown to the person when the turn ended
+    /// without a reply. The first explanation recorded for a turn stands.
+    async fn record_turn_failure_message(
+        &self,
+        id: Uuid,
+        message: &str,
+    ) -> Result<(), StorageError>;
     /// Persist the validated structured output for a completed turn.
     ///
     /// Called when output schema validation succeeds. The `output` value is
@@ -741,6 +748,13 @@ pub const INTERRUPTED_TOOL_STATUS: &str = "interrupted";
 /// Result a started tool call settles with when its result was not recorded.
 pub const INTERRUPTED_TOOL_RESULT: &str =
     "tool call did not report a result; its outcome is unknown";
+
+/// Status for a started call whose turn was stopped while it ran.
+pub const CANCELLED_TOOL_STATUS: &str = "cancelled";
+
+/// Result a started tool call settles with when its turn was stopped; the
+/// call's execution was dropped, which stops the work it started.
+pub const CANCELLED_TOOL_RESULT: &str = "tool call was cancelled when its turn was stopped";
 
 /// Status for a call that ran but whose result could not be recorded.
 pub const TOOL_RESULT_UNAVAILABLE_STATUS: &str = "result_unavailable";
@@ -2578,6 +2592,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_cost(&self, _id: Uuid, _cost: i64) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn record_turn_failure_message(
+            &self,
+            _id: Uuid,
+            _message: &str,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn record_turn_isolation(

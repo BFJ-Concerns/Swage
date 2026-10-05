@@ -4,6 +4,8 @@
 //! agents run as regular child processes. IPC proxying still provides
 //! credential isolation — credentials remain in the host process.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use swage_core::SandboxError;
@@ -11,6 +13,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::config::SandboxConfig;
+use crate::ipc::in_flight::InFlightToolCall;
 use crate::ipc::message::{ErrorCategory, IpcMessage, LlmRequest as IpcLlmRequest};
 use crate::ipc::transport::IpcTransport;
 use crate::llm_handler::HostLlmHandler;
@@ -52,8 +55,9 @@ pub struct FallbackSandbox {
     socket_manager: Mutex<Option<SocketManager>>,
     process: Mutex<Option<ChildProcessManager>>,
     // Mutex for interior mutability: execute_tool receives &self but must
-    // send/receive on the transport. Populated after spawn_agent.
-    transport: Mutex<Option<IpcTransport>>,
+    // send/receive on the transport. Populated after spawn_agent. Shared so
+    // an abandoned tool call can keep it while its cancel is sent.
+    transport: Arc<Mutex<Option<IpcTransport>>>,
 }
 
 impl FallbackSandbox {
@@ -66,7 +70,7 @@ impl FallbackSandbox {
             llm_handler,
             socket_manager: Mutex::new(None),
             process: Mutex::new(None),
-            transport: Mutex::new(None),
+            transport: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -85,7 +89,7 @@ impl FallbackSandbox {
             llm_handler,
             socket_manager: Mutex::new(None),
             process: Mutex::new(None),
-            transport: Mutex::new(Some(transport)),
+            transport: Arc::new(Mutex::new(Some(transport))),
         }
     }
 }
@@ -223,14 +227,17 @@ impl Sandbox for FallbackSandbox {
         tool_name: &str,
         params: Value,
     ) -> Result<ToolCallResult, SandboxError> {
-        let mut guard = self.transport.lock().await;
-        let transport = guard.as_mut().ok_or_else(|| SandboxError::Unavailable {
-            message: "no active agent connection — call spawn_agent first".into(),
-        })?;
-
-        // Send the tool call request.
-        let request_id = Uuid::new_v4().to_string();
-        transport
+        let guard = Arc::clone(&self.transport).lock_owned().await;
+        if guard.is_none() {
+            return Err(SandboxError::Unavailable {
+                message: "no active agent connection — call spawn_agent first".into(),
+            });
+        }
+        // Dropping `call` before its result arrives — the turn was cancelled —
+        // tells the agent to stop the tool.
+        let mut call = InFlightToolCall::new(guard, Uuid::new_v4().to_string());
+        let request_id = call.request_id().to_owned();
+        call.transport()
             .send(&IpcMessage::ToolCallRequest {
                 request_id: request_id.clone(),
                 tool_name: tool_name.into(),
@@ -241,7 +248,8 @@ impl Sandbox for FallbackSandbox {
         // Dispatch loop: route interleaved LLM proxy requests and return when
         // the tool call result arrives.
         loop {
-            let msg = transport
+            let msg = call
+                .transport()
                 .receive_timeout(self.config.tool_call_timeout)
                 .await?;
 
@@ -253,12 +261,18 @@ impl Sandbox for FallbackSandbox {
                     error,
                 } => {
                     if resp_id != request_id {
+                        // A late answer to a call abandoned earlier, which the
+                        // agent finished before it read the cancel.
+                        if call.transport().take_abandoned_tool_call(&resp_id) {
+                            continue;
+                        }
                         return Err(SandboxError::IpcError {
                             message: format!(
                                 "request ID mismatch: sent {request_id}, got {resp_id}"
                             ),
                         });
                     }
+                    call.settle();
                     return Ok(ToolCallResult {
                         output,
                         duration_ms,
@@ -286,7 +300,7 @@ impl Sandbox for FallbackSandbox {
 
                     match self.llm_handler.handle_request(llm_req).await {
                         Ok(llm_resp) => {
-                            transport
+                            call.transport()
                                 .send(&IpcMessage::LlmResponse {
                                     request_id: llm_resp.request_id,
                                     content: llm_resp.content,
@@ -300,7 +314,7 @@ impl Sandbox for FallbackSandbox {
                             // Proxy failure — tell the agent so it can
                             // surface the error in the tool result rather
                             // than hanging indefinitely.
-                            transport
+                            call.transport()
                                 .send(&IpcMessage::ErrorMessage {
                                     request_id: Some(llm_id),
                                     category: ErrorCategory::Provider,
@@ -693,6 +707,59 @@ mod tests {
             SandboxError::Unavailable { .. } => {}
             other => panic!("expected SandboxError::Unavailable, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dropped_execute_tool_cancels_the_call_and_skips_its_late_result() {
+        let (sandbox, mut agent) = sandbox_with_mock_agent();
+        let sandbox = std::sync::Arc::new(sandbox);
+
+        // The turn is cancelled while the call is in flight: its future drops.
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            sandbox.execute_tool("shell", json!({"command": "sleep 300"})),
+        );
+        let abandoned_id = tokio::join!(abandoned, async {
+            match agent.receive().await.unwrap() {
+                IpcMessage::ToolCallRequest { request_id, .. } => request_id,
+                other => panic!("expected ToolCallRequest, got {other:?}"),
+            }
+        })
+        .1;
+
+        match agent
+            .receive_timeout(std::time::Duration::from_secs(5))
+            .await
+            .expect("the agent must be told the call was cancelled")
+        {
+            IpcMessage::ToolCallCancel { request_id } => assert_eq!(request_id, abandoned_id),
+            other => panic!("expected ToolCallCancel, got {other:?}"),
+        }
+
+        // The agent answers the cancelled call after the host has moved on;
+        // the next call must still receive its own result.
+        let next = tokio::spawn({
+            let sandbox = std::sync::Arc::clone(&sandbox);
+            async move { sandbox.execute_tool("echo", json!({})).await }
+        });
+        let next_id = match agent.receive().await.unwrap() {
+            IpcMessage::ToolCallRequest { request_id, .. } => request_id,
+            other => panic!("expected ToolCallRequest, got {other:?}"),
+        };
+        for (request_id, output) in [(abandoned_id, json!("stale")), (next_id, json!("fresh"))] {
+            agent
+                .send(&IpcMessage::ToolCallResult {
+                    request_id,
+                    output,
+                    duration_ms: 1,
+                    error: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let result = next.await.unwrap().expect("next call must not desync");
+        assert_eq!(result.output, json!("fresh"));
     }
 
     #[tokio::test]

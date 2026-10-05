@@ -55,8 +55,11 @@ const organiserTools = [
 const synthesistBrief =
   "Synthesise findings for the stated purpose using only evidence in the " +
   "knowledge base. Validate the shortest sufficient exact quotation for " +
-  "every delivered claim with knowledge_cite, and report the durable " +
-  "citation id it returns.\n\n";
+  "every delivered claim with knowledge_cite, and deliver each claim with " +
+  "the durable citation id it returns, the exact quote it accepted, the " +
+  "observation id, and the source the search hit names, so a reader can " +
+  "follow the claim to its quotation and the quotation to its origin " +
+  "without a further lookup.\n\n";
 const synthesistTools = ["knowledge_search", "knowledge_cite"];
 
 // Every dispatch records on the run journal whether it continued a held
@@ -148,6 +151,10 @@ const gathered = await pipeline(
       {
         tools: researcherTools,
         label: `Gather ${source.url}`,
+        // Identified, so a slot that settled by schema exhaustion
+        // ({ output: null, failure }) reads differently from a worker that
+        // never replied (the slot collapses to null) in the accounting below.
+        identity: true,
         schema: {
           type: "object",
           required: ["url", "recorded", "observation_id", "note"],
@@ -164,17 +171,47 @@ const gathered = await pipeline(
   },
 );
 
+// Source accounting is derived from the knowledge base, never from a
+// gatherer's account of its own attempt: a source is gathered when an
+// observation for it exists under this run's capture scopes. The plan URL
+// is matched first — one observation can carry several captured origins
+// when two sources have the same body, so an id alone does not name a
+// source — and the gatherer's reported observation id second, only through
+// a captured origin no other planned source owns (a page recorded under a
+// redirected or normalised URL is still gathered; a gatherer naming another
+// source's id is not). A source is failed only when no observation exists,
+// and its reason is the gatherer's own note, its off-schema reply, or the
+// fact that the worker never replied.
 const captured = await capturedSources();
+const planUrls = new Set(plan.sources.map((source) => source.url));
 const capturedByUrl = new Map(captured.sources.map((source) => [source.url, source]));
-const landed = plan.sources
-  .map((source) => capturedByUrl.get(source.url))
-  .filter(Boolean);
-const failed = plan.sources
-  .map((source, index) => ({ source, outcome: gathered[index], landed: landed.find((entry) => entry.url === source.url) }))
-  .filter(({ landed }) => !landed)
-  .map(({ source, outcome }) => ({
+const unplannedById = new Map(
+  captured.sources
+    .filter((source) => !planUrls.has(source.url))
+    .map((source) => [source.observation_id, source]),
+);
+const accounted = plan.sources.map((source, index) => {
+  const slot = gathered[index];
+  const outcome = slot && slot.output ? slot.output : null;
+  const failure = slot && slot.failure ? slot.failure.message : null;
+  const byUrl = capturedByUrl.get(source.url);
+  const byId = outcome && outcome.observation_id ? unplannedById.get(outcome.observation_id) : undefined;
+  return { source, outcome, failure, landed: byUrl ?? byId ?? null };
+});
+const landed = accounted
+  .filter((entry) => entry.landed)
+  .map((entry) => ({ url: entry.landed.url, observation_id: entry.landed.observation_id }));
+const failed = accounted
+  .filter((entry) => !entry.landed)
+  .map(({ source, outcome, failure }) => ({
     url: source.url,
-    reason: outcome ? outcome.note : "gather worker failed",
+    reason: outcome === null
+      ? (failure
+          ? `the gather worker replied, but nothing it said validated against the gather schema: ${failure}`
+          : "the gather worker failed before replying")
+      : outcome.recorded
+        ? `the gatherer reported recording ${outcome.observation_id}, but the knowledge base holds no observation for this source: ${outcome.note}`
+        : outcome.note,
   }));
 log(`gathered ${landed.length}/${plan.sources.length}; ${failed.length} failed`);
 if (landed.length === 0) {
@@ -249,12 +286,19 @@ const findings = await agent(
     `fetching, no memory of this conversation. For every claim, call ` +
     `knowledge_cite with the observation id, extraction version, and ` +
     `shortest sufficient exact quote returned by search. Put the claim in ` +
-    `findings only after knowledge_cite accepts the quote, and return its ` +
-    `citation_id with the claim. If citation validation refuses the quote, ` +
-    `the claim does not go in findings - it goes in ` +
+    `findings only after knowledge_cite accepts the quote, and return with ` +
+    `the claim its citation_id, the quote exactly as accepted, the ` +
+    `observation_id it was cited from, and the hit's source (its origin ` +
+    `URL or path; null when the hit carries none - never invent one). ` +
+    `knowledge_cite takes the hit's observation_id, its version field, and ` +
+    `the exact quote. If citation validation refuses ` +
+    `the quote, the claim does not go in findings - it goes in ` +
     `"withheld", with the reason it could not be supported (nothing in the ` +
     `corpus, evidence conflicts, the evidence is too thin). Never drop an ` +
-    `unsupported claim silently. Return JSON only.`,
+    `unsupported claim silently. Your findings are about the subject: do ` +
+    `not describe what this sweep gathered or failed to gather - the ` +
+    `report's source accounting carries that, derived from the knowledge ` +
+    `base. Return JSON only.`,
   {
     tools: synthesistTools,
     label: "Synthesise findings",
@@ -267,11 +311,14 @@ const findings = await agent(
           type: "array",
           items: {
             type: "object",
-            required: ["claim", "citation_id"],
+            required: ["claim", "citation_id", "quote", "observation_id", "source"],
             additionalProperties: false,
             properties: {
               claim: { type: "string" },
               citation_id: { type: "string" },
+              quote: { type: "string" },
+              observation_id: { type: "string" },
+              source: { type: ["string", "null"] },
             },
           },
         },
@@ -293,7 +340,9 @@ const findings = await agent(
 );
 
 // The terminal report names what failed, was omitted, or was withheld -
-// the commission's requirement that a sweep never pretends completeness.
+// the commission's requirement that a sweep never pretends completeness -
+// and each finding carries its own trail (quote, observation, source), so
+// the reader follows a claim to its evidence without a backend lookup.
 // Schema exhaustion returns null, so refuse to present an unvalidated
 // synthesis as findings; other agent-call failures still throw.
 if (findings === null) {

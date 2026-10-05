@@ -2001,6 +2001,28 @@
         ],
         "type": "string"
       },
+      "GateWarning": {
+        "description": "A flag raised when a gate is declared: something about the declaration\nthe operator should know before the first fire. Derived from the gate as\nstored, never persisted, so every surface that shows the schedule shows\nthe same flags.",
+        "oneOf": [
+          {
+            "description": "Criteria were declared but nothing is observed, so a criterion about\na file or other workspace state can never be decided against that\nstate: the gate skips such a criterion and names what it did not\nobserve, rather than guessing at every fire.",
+            "properties": {
+              "kind": {
+                "const": "unobserved_criteria",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "GenerationPresetConfig": {
         "additionalProperties": false,
         "properties": {
@@ -2590,6 +2612,13 @@
           },
           "content": {
             "type": "string"
+          },
+          "failure_message": {
+            "description": "Why the message's turn ended without a reply, as the person was told\nlive; carried on the message that holds the turn's account.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "description": "The message's own identity — what a branch is taken from.",
@@ -3756,6 +3785,13 @@
               }
             ]
           },
+          "gate_warnings": {
+            "description": "Declaration-time flags on the gate, derived from it as stored; empty\nwhen there is no gate or nothing to flag.",
+            "items": {
+              "$ref": "#/components/schemas/GateWarning"
+            },
+            "type": "array"
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -4466,6 +4502,13 @@
                   "null"
                 ]
               },
+              "incomplete_reason": {
+                "description": "Output-limit cause when the reply is incomplete.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "input_tokens": {
                 "format": "uint32",
                 "minimum": 0,
@@ -4685,6 +4728,13 @@
             "properties": {
               "child_turn_id": {
                 "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "incomplete_reason": {
+                "description": "Output-limit cause when the child response is incomplete.",
                 "type": [
                   "string",
                   "null"
@@ -6189,6 +6239,7 @@
           "pending",
           "processing",
           "completed",
+          "incomplete",
           "failed",
           "interrupted",
           "awaiting_approval",
