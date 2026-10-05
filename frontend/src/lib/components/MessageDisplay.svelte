@@ -606,8 +606,8 @@
 
   /* An assistant reply spans the conversation column, as tool blocks do, so
      tables and code blocks have room; the readable line-length cap sits on
-     its prose elements instead (see the markdown body rules). Platform-written
-     messages keep the bubble cap. */
+     its prose elements instead (see the reply rules after the markdown body).
+     Platform-written messages keep the bubble cap. */
   .message:not(.platform) .assistant-content {
     max-width: none;
   }
@@ -752,17 +752,6 @@
     margin: 0 0 0.75em;
   }
 
-  .markdown-body :global(p),
-  .markdown-body :global(ul),
-  .markdown-body :global(ol),
-  .markdown-body :global(h1),
-  .markdown-body :global(h2),
-  .markdown-body :global(h3),
-  .markdown-body :global(h4),
-  .markdown-body :global(blockquote) {
-    max-width: 80ch;
-  }
-
   .markdown-body :global(p:last-child) {
     margin-bottom: 0;
   }
@@ -838,14 +827,9 @@
     text-underline-offset: 2px;
   }
 
-  /* A table wider than the column scrolls inside itself, as pre does,
-     rather than wrapping its cells mid-word or widening the bubble. */
   .markdown-body :global(table) {
-    display: block;
-    overflow-x: auto;
-    width: max-content;
-    max-width: 100%;
     border-collapse: collapse;
+    width: 100%;
     margin: 0.5em 0;
     font-size: 0.875em;
     border: 1px solid var(--ink);
@@ -856,8 +840,6 @@
     border: 1px solid var(--rule-soft);
     padding: 6px 10px;
     text-align: left;
-    word-break: normal;
-    overflow-wrap: normal;
   }
 
   .markdown-body :global(th) {
@@ -868,5 +850,33 @@
     font-size: 11px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  /* An assistant reply spans the column, so its prose carries the readable
+     line-length cap while tables and code blocks use the full width. A table
+     wider than the column scrolls inside itself, as pre does, rather than
+     wrapping its cells mid-word or widening the reply. Platform-written
+     messages keep the bubble cap and the markdown rules above unchanged. */
+  .message:not(.platform) .markdown-body :global(p),
+  .message:not(.platform) .markdown-body :global(ul),
+  .message:not(.platform) .markdown-body :global(ol),
+  .message:not(.platform) .markdown-body :global(h1),
+  .message:not(.platform) .markdown-body :global(h2),
+  .message:not(.platform) .markdown-body :global(h3),
+  .message:not(.platform) .markdown-body :global(h4),
+  .message:not(.platform) .markdown-body :global(blockquote) {
+    max-width: 80ch;
+  }
+
+  .message:not(.platform) .markdown-body :global(table) {
+    display: block;
+    overflow-x: auto;
+    width: max-content;
+    max-width: 100%;
+  }
+
+  .message:not(.platform) .markdown-body :global(th),
+  .message:not(.platform) .markdown-body :global(td) {
+    word-break: normal;
   }
 </style>
