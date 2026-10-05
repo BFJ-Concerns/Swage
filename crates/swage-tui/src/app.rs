@@ -738,6 +738,7 @@ mod tests {
         let outcome = handle_server_event(
             &mut state,
             ServerEvent::TurnComplete {
+                incomplete_reason: None,
                 turn_id,
                 input_tokens: Some(50),
                 output_tokens: Some(10),
@@ -940,6 +941,7 @@ mod tests {
         let outcome = handle_server_event(
             &mut state,
             ServerEvent::DelegationCompleted {
+                incomplete_reason: None,
                 parent_turn_id: Uuid::new_v4(),
                 child_turn_id: Some(Uuid::new_v4()),
                 target_agent_id: "reviewer".to_string(),

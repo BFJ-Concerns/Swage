@@ -19,6 +19,7 @@ export type SettingsTab =
   | "channels"
   | "devices"
   | "voice"
+  | "memory"
   | "recovery"
   | "display"
   | "account";
@@ -39,6 +40,10 @@ export interface Route {
   settingsTab: SettingsTab | null;
   settingsTopicSlug: string | null;
   settingsTopicTab: TopicSettingsTab | null;
+  // Set with the memory settings tab when the URL's `?reference=` names the
+  // memory page to open — the target of the curator's change notice — with
+  // `?scope=` (`general` or a topic id) naming the scope that holds it.
+  settingsMemoryPage: MemoryPageAddress | null;
   // Set when a conversation ID from the URL was not found in the gateway.
   // The route falls back to "/" and the UI shows a "not found" notice.
   notFound: boolean;
@@ -55,6 +60,7 @@ function rootRoute(pathname = "/", notFound = false): Route {
     settingsTab: null,
     settingsTopicSlug: null,
     settingsTopicTab: null,
+    settingsMemoryPage: null,
     notFound,
   };
 }
@@ -84,8 +90,20 @@ export interface RouterOptions {
 // URL parsing
 // ---------------------------------------------------------------------------
 
+/** A memory page as a notice link addresses it; a null scope opens the first scope listing it. */
+export interface MemoryPageAddress {
+  // `general`, a topic id, or null when the link names no scope.
+  scope: string | null;
+  reference: string;
+}
+
+function memoryPageAddress(query: URLSearchParams): MemoryPageAddress | null {
+  const reference = query.get("reference");
+  return reference ? { scope: query.get("scope"), reference } : null;
+}
+
 /**
- * Derive a Route from a URL pathname.
+ * Derive a Route from a URL path, optionally carrying a query string.
  *
  * Recognised patterns:
  *   /                                   → root, no active conversation
@@ -93,9 +111,13 @@ export interface RouterOptions {
  *   /conversations/:id/surfaces/:sid    → that conversation with one of its surfaces open
  *   /library                            → the shared surface library's catalogue
  *   /workflow-runs/:id                  → read back that run's record and terminal account
+ *   /settings/memory?reference=:ref     → the memory settings tab with that page open
  *   anything else                       → treated as root (unrecognised paths get SPA fallback)
  */
-export function parseRoute(pathname: string): Route {
+export function parseRoute(location: string): Route {
+  const queryStart = location.indexOf("?");
+  const pathname = queryStart === -1 ? location : location.slice(0, queryStart);
+  const query = new URLSearchParams(queryStart === -1 ? "" : location.slice(queryStart + 1));
   const match = pathname.match(/^\/conversations\/([^/]+)(?:\/surfaces\/([^/]+))?$/);
   if (match) {
     return {
@@ -125,12 +147,14 @@ export function parseRoute(pathname: string): Route {
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|channels|devices|voice|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|channels|devices|voice|memory|recovery|display|account))?$/,
   );
   if (settingsMatch) {
+    const settingsTab = (settingsMatch[1] as SettingsTab | undefined) ?? "providers";
     return {
       ...rootRoute(pathname),
-      settingsTab: (settingsMatch[1] as SettingsTab | undefined) ?? "providers",
+      settingsTab,
+      settingsMemoryPage: settingsTab === "memory" ? memoryPageAddress(query) : null,
     };
   }
   return rootRoute();
@@ -155,9 +179,14 @@ export function conversationPath(conversationId: string, surfaceId?: string | nu
 // Router factory
 // ---------------------------------------------------------------------------
 
+// The address bar's path and query — the part of the URL a route reads.
+function currentLocation(): string {
+  return window.location.pathname + window.location.search;
+}
+
 export function createRouter(options?: RouterOptions): Router {
   // Seed from the current URL so the initial state is always consistent.
-  let currentRoute: Route = parseRoute(window.location.pathname);
+  let currentRoute: Route = parseRoute(currentLocation());
   let navigationGeneration = 0;
 
   function updateRoute(route: Route): void {
@@ -167,7 +196,7 @@ export function createRouter(options?: RouterOptions): Router {
 
   // Called on every URL change (pushState + popstate).
   async function applyLocation(generation: number): Promise<void> {
-    const route = parseRoute(window.location.pathname);
+    const route = parseRoute(currentLocation());
     updateRoute(route);
 
     if (route.conversationId && options?.conversationStore) {
@@ -210,7 +239,7 @@ export function createRouter(options?: RouterOptions): Router {
 
     navigate(path: string): void {
       navigationGeneration += 1;
-      if (window.location.pathname !== path) {
+      if (currentLocation() !== path) {
         window.history.pushState(null, "", path);
       }
       // navigate() is always intentional — no async store call needed here.

@@ -48,7 +48,7 @@ export interface ConversationStore {
     timestamp: string;
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
     >;
     /** The thread the reply belongs to; absent means the thread in view. */
     thread_id?: string;
@@ -66,6 +66,17 @@ export interface ConversationStore {
   /** The held messages became the next turn's input: the queue is empty. */
   /** Drop the held messages a drain took, by id; later arrivals stay held. */
   clearQueuedMessages(conversationId: string, queuedIds: string[]): void;
+  /**
+   * Settle the person's pending request as a turn that ended without a
+   * reply, with its terminal state and the tool calls it issued.
+   */
+  settleUnansweredRequest?(
+    settlement: {
+      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+      tool_calls: MessageView["tool_calls"];
+    },
+    conversationId?: string | null,
+  ): void;
   /** Install a fetched snapshot only when its owner is still selected. */
   replaceActiveConversationIfCurrent?(conversation: ConversationDetail): void;
   refreshActiveConversation(): Promise<void>;
@@ -368,6 +379,24 @@ export function createConversationStore(): ConversationStore {
         ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
         ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
       }, conversationId);
+    },
+
+    settleUnansweredRequest(settlement, conversationId) {
+      const activeConversation = get(activeConversationStore);
+      if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
+      const index = activeConversation.messages.findLastIndex(
+        (message) => message.role === "user" && message.turn_state === "pending",
+      );
+      if (index < 0) return;
+      const messages = [...activeConversation.messages];
+      messages[index] = {
+        ...messages[index],
+        turn_state: settlement.turn_state,
+        ...(settlement.tool_calls && settlement.tool_calls.length > 0
+          ? { tool_calls: settlement.tool_calls }
+          : {}),
+      };
+      activeConversationStore.set({ ...activeConversation, messages });
     },
 
     appendQueuedMessage(queued, conversationId) {

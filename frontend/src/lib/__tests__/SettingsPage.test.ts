@@ -210,6 +210,113 @@ describe("SettingsPage", () => {
     vi.clearAllMocks();
   });
 
+  it("waits for the required search fields before autosaving", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings, "enabling search must not save an empty endpoint").not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+
+    const url = document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!;
+    expect(url.required).toBe(true);
+    url.value = "   ";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+
+    url.value = "http://127.0.0.1:35123";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "searxng", base_url: "http://127.0.0.1:35123",
+    });
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("saves other settings while retaining an incomplete search draft", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
+    buttonNamed("Disabled").click();
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings, "an incomplete search draft must not block other settings").toHaveBeenCalled();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sandbox?.enabled).toBe(false);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toBeNull();
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.checked).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value).toBe("");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    const url = document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!;
+    url.value = "http://127.0.0.1:35123";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "searxng", base_url: "http://127.0.0.1:35123",
+    });
+
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value = "";
+    document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Enabled").click();
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).toHaveBeenCalled();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sandbox?.enabled).toBe(true);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "searxng", base_url: "http://127.0.0.1:35123",
+    });
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value).toBe("");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("edits and disables web search through Settings", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const enable = document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]');
+    expect(enable, "Settings must offer web search configuration").not.toBeNull();
+    enable!.click();
+    await flushUi();
+    const type = document.querySelector<HTMLInputElement>('[aria-label="Search provider type"]')!;
+    const url = document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!;
+    expect(type.value).toBe("searxng");
+    vi.mocked(settingsApi.saveSettings).mockRejectedValueOnce(new Error("unsupported search provider 'brave'; expected one of: searxng"));
+    type.value = "brave";
+    type.dispatchEvent(new Event("input", { bubbles: true }));
+    url.value = "http://127.0.0.1:35123";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "brave", base_url: "http://127.0.0.1:35123",
+    });
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("expected one of: searxng");
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    type.value = "searxng";
+    type.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
+      provider_type: "searxng", base_url: "http://127.0.0.1:35123",
+    });
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toBeNull();
+  });
+
   it("discovers models for a newly-added provider without saving first", async () => {
     component = mount(SettingsPage, {
       target: document.body,

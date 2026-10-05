@@ -47,7 +47,7 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 /// assistant_response, input_tokens, output_tokens, state, created_at,
 /// completed_at, cost_microcents, structured_output, parent_turn_id,
 /// delegated_input_tokens, delegated_output_tokens, isolation_kind,
-/// isolation_detail
+/// isolation_detail, failure_message
 fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
     let id: String = row.get(0)?;
     let thread_id: String = row.get(1)?;
@@ -117,6 +117,7 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
                     )
                 })?
         },
+        failure_message: row.get(18)?,
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -169,6 +170,7 @@ impl TurnStore for SqliteStorage {
                 delegated_input_tokens: None,
                 delegated_output_tokens: None,
                 execution_isolation: None,
+                failure_message: None,
             })
         })
         .await
@@ -181,7 +183,7 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail
+                        isolation_kind, isolation_detail, failure_message
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -198,7 +200,7 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail
+                        isolation_kind, isolation_detail, failure_message
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -230,13 +232,13 @@ impl TurnStore for SqliteStorage {
                 let now_str = Utc::now().to_rfc3339();
                 conn.execute(
                     "UPDATE turns SET state = ?1, completed_at = ?2
-                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'failed', 'interrupted')",
+                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
                 conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'failed', 'interrupted')",
+                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
                     params![&state_str, id.to_string()],
                 )?;
             }
@@ -277,7 +279,7 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail
+                        isolation_kind, isolation_detail, failure_message
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -369,6 +371,26 @@ impl TurnStore for SqliteStorage {
             conn.execute(
                 "UPDATE turns SET isolation_kind = ?1, isolation_detail = ?2 WHERE id = ?3",
                 params![kind, detail, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn record_turn_failure_message(
+        &self,
+        id: Uuid,
+        message: &str,
+    ) -> Result<(), StorageError> {
+        let message = message.to_owned();
+        // First explanation wins: a later error on the same turn (a cleanup
+        // failure after the provider error) never replaces the account the
+        // person first saw.
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE turns SET failure_message = ?1
+                 WHERE id = ?2 AND failure_message IS NULL",
+                params![message, id.to_string()],
             )?;
             Ok(())
         })
@@ -825,6 +847,34 @@ mod tests {
             still_interrupted.state,
             TurnState::Interrupted,
             "terminal state should not be overwritten"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refused_and_incomplete_turns_reject_later_transitions() {
+        let (storage, thread_id) = make_thread().await;
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for state in [TurnState::Refused, TurnState::Incomplete] {
+            let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+            storage
+                .update_turn_state(turn.id, state.clone())
+                .await
+                .unwrap();
+            let settled = storage.get_turn(turn.id).await.unwrap().unwrap();
+            for later_state in [TurnState::Completed, TurnState::Processing] {
+                storage
+                    .update_turn_state(turn.id, later_state)
+                    .await
+                    .unwrap();
+                let retained = storage.get_turn(turn.id).await.unwrap().unwrap();
+                observed.push((retained.state, retained.completed_at));
+                expected.push((state.clone(), settled.completed_at));
+            }
+        }
+        assert_eq!(
+            observed, expected,
+            "both terminal accounts must survive later writes"
         );
     }
 

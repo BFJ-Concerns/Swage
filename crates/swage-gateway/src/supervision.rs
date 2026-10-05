@@ -285,6 +285,7 @@ fn classify_turn_status(state: TurnState, created_at: DateTime<Utc>, now: DateTi
         TurnState::Delegating => "delegating".to_string(),
         TurnState::Completed => "completed".to_string(),
         TurnState::Refused => "refused".to_string(),
+        TurnState::Incomplete => "incomplete".to_string(),
         TurnState::Failed => "failed".to_string(),
         TurnState::Interrupted => "interrupted".to_string(),
     }

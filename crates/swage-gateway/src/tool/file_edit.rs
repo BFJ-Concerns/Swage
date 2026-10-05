@@ -13,7 +13,9 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::{is_binary_content, location_approval_error, resolve_context_path};
+use crate::tool::workspace::{
+    FileContent, location_approval_error, read_file_content, resolve_context_path,
+};
 
 // ---------------------------------------------------------------------------
 // Public tool
@@ -98,19 +100,21 @@ impl Tool for FileEditTool {
         let mut prepared = Vec::with_capacity(changes.len());
 
         for change in &changes {
-            let bytes = tokio::fs::read(&change.resolved_path)
+            let bytes = match read_file_content(&change.resolved_path)
                 .await
-                .map_err(|error| read_error(self.name(), &change.requested_path, error))?;
-            if is_binary_content(&bytes) {
-                return Err(ToolError::ExecutionFailed {
-                    name: self.name().to_string(),
-                    message: format!(
-                        "File appears to be binary ({} bytes): {}",
-                        bytes.len(),
-                        change.requested_path
-                    ),
-                });
-            }
+                .map_err(|error| read_error(self.name(), &change.requested_path, error))?
+            {
+                FileContent::Text(bytes) => bytes,
+                FileContent::Binary { len } => {
+                    return Err(ToolError::ExecutionFailed {
+                        name: self.name().to_string(),
+                        message: format!(
+                            "File appears to be binary ({len} bytes): {}",
+                            change.requested_path
+                        ),
+                    });
+                }
+            };
             let original = String::from_utf8(bytes).map_err(|_| ToolError::ExecutionFailed {
                 name: self.name().to_string(),
                 message: format!("File is not valid UTF-8: {}", change.requested_path),

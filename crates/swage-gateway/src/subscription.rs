@@ -373,6 +373,7 @@ mod tests {
     fn turn_complete_always_delivered() {
         let state = unsubscribed();
         let event = ServerEvent::TurnComplete {
+            incomplete_reason: None,
             turn_id: Uuid::new_v4(),
             input_tokens: None,
             output_tokens: None,

@@ -49,7 +49,93 @@ pub(crate) fn message_view(
         timestamp: message.created_at,
         turn_state,
         tool_calls,
+        failure_message: None,
     })
+}
+
+/// Project a recorded row with the same turn account the conversation loads.
+/// Live announcements include its failure explanation and any owned tool calls.
+pub(crate) async fn recorded_message_view(
+    storage: &dyn Storage,
+    message: swage_storage::model::Message,
+) -> Result<MessageView, GatewayError> {
+    let Some(turn_id) = message.turn_id else {
+        return message_view(message, None, Vec::new());
+    };
+    let turns = storage.get_turn(turn_id).await?.into_iter().collect();
+    let messages = storage.list_messages_by_thread(message.thread_id).await?;
+    TurnAccounts::load(storage, turns, &messages)
+        .await?
+        .view(message)
+}
+
+/// The per-turn account a conversation view attaches to one message: the
+/// turn's state, its tool calls and its failure explanation, keyed by turn.
+#[derive(Default)]
+struct TurnAccounts {
+    state: HashMap<Uuid, TurnState>,
+    tool_calls: HashMap<Uuid, Vec<ToolCallView>>,
+    failure_message: HashMap<Uuid, String>,
+    /// Each turn's last message: it carries the failure explanation and,
+    /// for a turn that ended without a reply, the tool calls an assistant
+    /// message would otherwise carry — so the account is not lost with the
+    /// reply that never came.
+    last_message: HashMap<Uuid, Uuid>,
+    /// Turns with at least one assistant message.
+    replied: std::collections::HashSet<Uuid>,
+}
+
+impl TurnAccounts {
+    async fn load(
+        storage: &dyn swage_storage::Storage,
+        turns: Vec<swage_storage::model::Turn>,
+        messages: &[swage_storage::model::Message],
+    ) -> Result<Self, GatewayError> {
+        let mut accounts = Self::default();
+        for turn in turns {
+            let turn_id = turn.id;
+            let records = storage.list_tool_calls_by_turn(turn_id).await?;
+            accounts.tool_calls.insert(
+                turn_id,
+                records.into_iter().map(tool_call_record_to_view).collect(),
+            );
+            if let Some(message) = turn.failure_message {
+                accounts.failure_message.insert(turn_id, message);
+            }
+            accounts.state.insert(turn_id, turn.state);
+        }
+        for message in messages {
+            let Some(turn_id) = message.turn_id else {
+                continue;
+            };
+            accounts.last_message.insert(turn_id, message.id);
+            if message.role == Role::Assistant {
+                accounts.replied.insert(turn_id);
+            }
+        }
+        Ok(accounts)
+    }
+
+    fn view(&self, message: swage_storage::model::Message) -> Result<MessageView, GatewayError> {
+        let turn_id = message.turn_id;
+        let turn_state = turn_id
+            .and_then(|turn_id| self.state.get(&turn_id))
+            .map(turn_state_to_wire);
+        let is_last =
+            turn_id.is_some_and(|turn_id| self.last_message.get(&turn_id) == Some(&message.id));
+        let carries_tool_calls = message.role == Role::Assistant
+            || (is_last && turn_id.is_some_and(|turn_id| !self.replied.contains(&turn_id)));
+        let tool_calls = turn_id
+            .filter(|_| carries_tool_calls)
+            .and_then(|turn_id| self.tool_calls.get(&turn_id).cloned())
+            .unwrap_or_default();
+        let failure_message = turn_id
+            .filter(|_| is_last)
+            .and_then(|turn_id| self.failure_message.get(&turn_id).cloned());
+        let mut view = message_view(message, turn_state, tool_calls)?;
+        view.failure_message = failure_message;
+        Ok(view)
+    }
 }
 
 pub(crate) fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
@@ -58,6 +144,7 @@ pub(crate) fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
         TurnState::Processing => WireTurnState::Processing,
         TurnState::Completed => WireTurnState::Completed,
         TurnState::Refused => WireTurnState::Refused,
+        TurnState::Incomplete => WireTurnState::Incomplete,
         TurnState::Failed => WireTurnState::Failed,
         TurnState::Interrupted => WireTurnState::Interrupted,
         TurnState::AwaitingApproval => WireTurnState::AwaitingApproval,
@@ -297,18 +384,6 @@ impl ConversationService {
                 .await?;
 
         let mut all_messages = self.storage.list_messages_by_thread(root_thread.id).await?;
-        let mut tool_calls_by_turn: HashMap<Uuid, Vec<ToolCallView>> = HashMap::new();
-        let mut turn_state_by_turn: HashMap<Uuid, TurnState> = HashMap::new();
-
-        for turn in self.storage.list_turns_by_thread(root_thread.id).await? {
-            let turn_id = turn.id;
-            turn_state_by_turn.insert(turn_id, turn.state);
-            let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
-            tool_calls_by_turn.insert(
-                turn_id,
-                records.into_iter().map(tool_call_record_to_view).collect(),
-            );
-        }
 
         all_messages.sort_by(|a, b| {
             a.created_at
@@ -316,25 +391,15 @@ impl ConversationService {
                 .then(a.position.cmp(&b.position))
         });
 
+        let accounts = TurnAccounts::load(
+            self.storage.as_ref(),
+            self.storage.list_turns_by_thread(root_thread.id).await?,
+            &all_messages,
+        )
+        .await?;
         let message_views = all_messages
             .into_iter()
-            .map(|message| -> Result<MessageView, GatewayError> {
-                let turn_id = message.turn_id;
-                let turn_state = turn_id
-                    .and_then(|message_turn_id| turn_state_by_turn.get(&message_turn_id))
-                    .map(turn_state_to_wire);
-                let tool_calls = if message.role == Role::Assistant {
-                    turn_id
-                        .and_then(|message_turn_id| {
-                            tool_calls_by_turn.get(&message_turn_id).cloned()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-
-                message_view(message, turn_state, tool_calls)
-            })
+            .map(|message| accounts.view(message))
             .collect::<Result<Vec<_>, _>>()?;
 
         let topic =
@@ -694,17 +759,7 @@ impl ConversationService {
 
         let messages = self.storage.list_messages_by_thread(thread.id).await?;
         let turns = self.storage.list_turns_by_thread(thread.id).await?;
-        let mut turn_state_by_turn = HashMap::new();
-        let mut tool_calls_by_turn = HashMap::new();
-        for turn in turns {
-            let turn_id = turn.id;
-            turn_state_by_turn.insert(turn_id, turn.state);
-            let records = self.storage.list_tool_calls_by_turn(turn_id).await?;
-            tool_calls_by_turn.insert(
-                turn_id,
-                records.into_iter().map(tool_call_record_to_view).collect(),
-            );
-        }
+        let accounts = TurnAccounts::load(self.storage.as_ref(), turns, &messages).await?;
         let branch = match self.storage.get_branch(thread.id).await? {
             Some(branch) => Some(self.branch_response(branch).await?),
             None => None,
@@ -717,22 +772,7 @@ impl ConversationService {
             state: thread.state.to_string(),
             messages: messages
                 .into_iter()
-                .map(|message| -> Result<MessageView, GatewayError> {
-                    let is_assistant = message.role == Role::Assistant;
-                    let turn_state = message
-                        .turn_id
-                        .and_then(|turn_id| turn_state_by_turn.get(&turn_id))
-                        .map(turn_state_to_wire);
-                    let tool_calls = if is_assistant {
-                        message
-                            .turn_id
-                            .and_then(|turn_id| tool_calls_by_turn.get(&turn_id).cloned())
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-                    message_view(message, turn_state, tool_calls)
-                })
+                .map(|message| accounts.view(message))
                 .collect::<Result<Vec<_>, _>>()?,
             branch,
         })

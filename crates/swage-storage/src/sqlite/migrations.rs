@@ -106,6 +106,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("064_turn_queue", CREATE_TURN_QUEUE),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
+        ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
     ]
 }
 
@@ -118,6 +119,13 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_kind TEXT;
     ALTER TABLE turns ADD COLUMN isolation_detail TEXT;
+";
+
+/// The explanation a turn that ended without a reply carried to the person
+/// (the provider or request error), kept so the conversation shows it after
+/// a reload as it did live.
+const ADD_TURN_FAILURE_MESSAGE: &str = "
+    ALTER TABLE turns ADD COLUMN failure_message TEXT;
 ";
 
 const CREATE_TURN_QUEUE: &str = "

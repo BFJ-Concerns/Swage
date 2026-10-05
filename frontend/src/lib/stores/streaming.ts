@@ -74,6 +74,11 @@ export interface StreamingStore {
   cancelTurn(): void;
 }
 
+// The outcome an interrupted call shows: the result recovery records for a
+// started call (swage-storage `INTERRUPTED_TOOL_RESULT`), so a stopped row
+// reads the same live as it does after a reload.
+const INTERRUPTED_TOOL_RESULT = "tool call did not report a result; its outcome is unknown";
+
 // ---------------------------------------------------------------------------
 // Injected dependencies
 // ---------------------------------------------------------------------------
@@ -98,12 +103,23 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "refused" | "failed" | "interrupted"
+        "completed" | "refused" | "incomplete" | "failed" | "interrupted"
       >;
       thread_id?: string;
       turn_id?: string;
       tool_calls?: ToolCallView[];
     }, conversationId?: string | null): void;
+    /**
+     * Settle the person's pending request as a turn that ended without a
+     * reply: its terminal state and the tool calls it issued.
+     */
+    settleUnansweredRequest?(
+      settlement: {
+        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+        tool_calls: ToolCallView[];
+      },
+      conversationId?: string | null,
+    ): void;
     /** Installs a message the gateway recorded and announced on its conversation. */
     appendRecordedMessage?(
       message: import("../protocol/MessageView").MessageView,
@@ -240,7 +256,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -262,7 +278,7 @@ export function createStreamingStore(
   function settleResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted">,
     turnId?: string,
     toolCalls?: ToolCallView[],
   ): void {
@@ -400,9 +416,8 @@ export function createStreamingStore(
           break;
 
         case "turn_complete":
-          // The gateway has committed the full turn. Push the completed
-          // assistant message and return to idle state.
-          settleResponse(ownerId, stream, "completed", event.turn_id, get(stream.activeToolCallsStore));
+          // Preserve the terminal state and tool calls in the conversation.
+          settleResponse(ownerId, stream, event.incomplete_reason ? "incomplete" : "completed", event.turn_id, get(stream.activeToolCallsStore));
           stream.turnErrorStore.set(null);
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -450,15 +465,38 @@ export function createStreamingStore(
           break;
         }
 
-        case "cancelled":
-          // User-initiated cancel. Preserve partial content (they may want
-          // to read what was generated before they stopped it).
-          settleResponse(ownerId, stream, "interrupted");
+        case "cancelled": {
+          // User-initiated cancel. A call still running when the turn
+          // stopped has no result — whether it is still pending or the
+          // gateway already ended it as cancelled — so its outcome is
+          // interrupted, as recovery records it. Calls that finished keep
+          // the outcome they reported.
+          const settledCalls = get(stream.activeToolCallsStore).map((call) =>
+            call.status === null || (call.status === "cancelled" && call.result == null)
+              ? { ...call, status: "interrupted", result: INTERRUPTED_TOOL_RESULT }
+              : call,
+          );
+          if (get(stream.streamedContentStore)) {
+            // Preserve partial content (they may want to read what was
+            // generated before they stopped it); the calls stay beside it.
+            settleResponse(ownerId, stream, "interrupted");
+            stream.activeToolCallsStore.set(settledCalls);
+          } else if (options?.conversationStore?.settleUnansweredRequest) {
+            // No reply: the turn's account rides on its request, where the
+            // conversation shows it after a reload too.
+            options.conversationStore.settleUnansweredRequest(
+              { turn_state: "interrupted", tool_calls: settledCalls },
+              ownerId,
+            );
+            stream.activeToolCallsStore.set([]);
+          } else {
+            stream.activeToolCallsStore.set(settledCalls);
+          }
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
-          // activeToolCalls preserved — same rationale as the error case.
           stream.providerRetryStore.set(null);
           break;
+        }
 
         case "shutdown":
           // The gateway is shutting down. Preserve any partial content and
