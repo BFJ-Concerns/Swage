@@ -543,18 +543,17 @@ per turn and recording every decision in the audit trail. The
 
 ### When changes take effect
 
-The gateway reads the `[experimentation]` section from `config.toml` once, at
-startup. Nothing watches the file afterwards, and the web UI's Settings page
-does not expose experimentation controls — so editing these keys while the
-gateway is running has no effect until the gateway restarts.
+The web UI's Settings page does not expose experimentation controls, so
+changes are made by editing `config.toml`. Restart the gateway to apply
+them:
 
-How to restart depends on how the gateway runs:
-
-- **Desktop (managed gateway):** the Settings page shows a restart control
-  when the gateway supports it. The same action is available through the API
-  at `POST /api/settings/restart`.
 - **CLI / systemd:** run `swage gateway restart`.
+- **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
+
+Sessions whose topic or agent has its own `config.toml` re-resolve the full
+configuration hierarchy — global file included — on each turn, so edits can
+reach those sessions without a restart.
 
 ### Disabling experimentation
 

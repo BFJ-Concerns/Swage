@@ -579,16 +579,16 @@ recorded in the audit trail.
 
 ### When changes take effect
 
-The gateway reads `[experimentation]` from `config.toml` at startup. It does
-not watch the file afterwards, and the Settings save route does not include
-experimentation fields — editing these keys while the gateway is running has
-no effect until it restarts:
+The Settings save route does not include experimentation fields, so changes
+are made by editing `config.toml`. Restart the gateway to apply them:
 
-- **Desktop (managed gateway):** use the restart control in the web UI's
-  Settings page, or `POST /api/settings/restart`. The control appears when
-  the settings response's `can_restart` field is `true`.
 - **CLI / systemd:** `swage gateway restart`.
+- **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
+
+Sessions whose topic or agent has its own `config.toml` re-resolve the full
+configuration hierarchy (global file included) on each turn, so edits can
+reach those sessions without a restart.
 
 ### Global switch
 
