@@ -1639,3 +1639,98 @@ async fn native_file_edit_mixed_access_batch_preserves_both_files_in_either_orde
         }
     }
 }
+
+#[cfg(unix)]
+async fn native_dangling_symlink_write(remote: bool, chain: bool, writable: bool) {
+    use std::os::unix::fs::symlink;
+    use swage_gateway::tool::file_write::FileWriteTool;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
+    let root = tempfile::tempdir().unwrap();
+    let target_root = root.path().join("target");
+    std::fs::create_dir(&target_root).unwrap();
+    let target = target_root.join("probe.txt");
+    let (ctx, strategy, storage) =
+        native_file_fixture(root.path(), true, false, remote, true).await;
+    additional_native_attachment(&storage, &ctx, &target_root, writable).await;
+    // Relative targets are interpreted from each link's parent. The second
+    // link deliberately uses an absolute target to cover both forms.
+    if chain {
+        symlink(&target, root.path().join("second-link")).unwrap();
+        symlink("second-link", root.path().join("link")).unwrap();
+    } else {
+        symlink("target/probe.txt", root.path().join("link")).unwrap();
+    }
+    let result = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "link", "content": "written"}),
+            &ctx,
+        )
+        .await;
+    if writable {
+        if remote {
+            assert!(
+                result.as_ref().is_err_and(|error| error
+                    .to_string()
+                    .contains("device execution needs the live gateway state"))
+                    && !target.exists(),
+                "writable symlink must reach remote transport: {result:?}"
+            );
+        } else {
+            assert!(
+                result.is_ok()
+                    && std::fs::read_to_string(&target).is_ok_and(|text| text == "written"),
+                "writable dangling symlink must create its target: {result:?}"
+            );
+        }
+    } else {
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("read-only access"))
+                && !target.exists(),
+            "dangling symlink must refuse read-only target without creating it: {result:?}; target exists: {}",
+            target.exists()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_write_local_refuses_dangling_symlink() {
+    native_dangling_symlink_write(false, false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_write_local_refuses_dangling_symlink_chain() {
+    native_dangling_symlink_write(false, true, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_write_remote_refuses_dangling_symlink() {
+    native_dangling_symlink_write(true, false, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_write_remote_refuses_dangling_symlink_chain() {
+    native_dangling_symlink_write(true, true, false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_write_local_allows_writable_dangling_symlink() {
+    native_dangling_symlink_write(false, false, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_write_remote_allows_writable_dangling_symlink() {
+    native_dangling_symlink_write(true, false, true).await;
+}
