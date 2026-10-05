@@ -35,6 +35,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The sandbox starts when the runtime directory lies under `/tmp` or is too long for a Unix socket path, instead of timing out because the agent could not see its IPC socket. A sandbox that exits during setup fails at once, and the failure quotes the sandbox's own error rather than waiting out the timeout.
 - File search, read and edit recognise a binary file from its first 8 KiB and read no further, and file search reads text line by line. A search reaching multi-gigabyte model weights no longer holds each file whole in memory, which had grown the gateway past 20 GB.
 - Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.

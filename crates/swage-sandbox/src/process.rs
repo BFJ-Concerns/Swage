@@ -6,7 +6,6 @@
 
 use std::time::Duration;
 
-#[cfg(test)]
 use std::process::ExitStatus;
 
 use swage_core::SandboxError;
@@ -89,7 +88,6 @@ impl ChildProcessManager {
     }
 
     /// Waits asynchronously for the child process to exit.
-    #[cfg(test)]
     pub async fn wait_for_exit(&mut self) -> Result<ExitStatus, SandboxError> {
         self.child
             .wait()

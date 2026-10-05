@@ -127,3 +127,75 @@ async fn llm_proxy_completion_through_ipc() {
     assert_eq!(response.output_tokens, 5);
     assert_eq!(response.finish_reason, FinishReason::Stop);
 }
+
+// ---------------------------------------------------------------------------
+// Test 3: bubblewrap startup with the host socket under /tmp
+// Journey: the gateway's runtime directory lies under /tmp, or is too long
+//          for a Unix socket path so the socket falls back under /tmp; bwrap
+//          overlays /tmp with a tmpfs, yet the agent must still connect.
+// ---------------------------------------------------------------------------
+
+/// A stand-in sandbox agent: connects to the host socket, reports `Ready`,
+/// and acknowledges `Shutdown`. Connecting is the behaviour under test.
+const FAKE_AGENT: &str = r#"#!/usr/bin/env python3
+import json, os, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(os.environ["SWAGE_IPC_SOCKET"])
+s.sendall(b'{"kind":"ready"}\n')
+for line in s.makefile():
+    if json.loads(line).get("kind") == "shutdown":
+        s.sendall(b'{"kind":"shutdown_ack"}\n')
+        sys.exit(0)
+"#;
+
+#[tokio::test]
+async fn bubblewrap_agent_connects_when_socket_lies_under_tmp() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+    use swage_sandbox::{BubblewrapSandbox, Sandbox, find_bwrap};
+
+    if find_bwrap().is_err() {
+        eprintln!("skipping: bwrap is not installed");
+        return;
+    }
+
+    let work = tempfile::tempdir().unwrap();
+    let agent = work.path().join("fake-agent");
+    std::fs::write(&agent, FAKE_AGENT).unwrap();
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let tmp_root = tempfile::tempdir_in("/tmp").unwrap();
+    let long_root = work.path().join("r".repeat(120));
+    let layouts = [
+        ("runtime directory under /tmp", tmp_root.path().join("run")),
+        ("over-long runtime directory", long_root),
+    ];
+
+    // Both layouts run in this one test: they share process-wide env vars.
+    unsafe { std::env::set_var("SWAGE_SANDBOX_AGENT_BINARY", &agent) };
+    for (layout, runtime_dir) in layouts {
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir) };
+
+        let config = SandboxConfig::builder()
+            .working_directory(work.path())
+            .tool_call_timeout(Duration::from_secs(10))
+            .shutdown_grace_period(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut sandbox = BubblewrapSandbox::new(
+            config,
+            HostLlmHandler::new(|_req: CompletionRequest| async {
+                Err(swage_core::SandboxError::IpcError {
+                    message: "no LLM in this test".into(),
+                })
+            }),
+        );
+        let started = sandbox.spawn_agent().await;
+        assert!(
+            started.is_ok(),
+            "{layout}: sandbox agent must connect to the host socket: {started:?}"
+        );
+        sandbox.shutdown().await.unwrap();
+    }
+}
