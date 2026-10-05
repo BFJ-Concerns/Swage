@@ -243,9 +243,10 @@ describe("ConversationChannel pending approval", () => {
   }
 
   it("pins the approval card to the foot of the channel's scroll", () => {
-    const streamingStore = createStreamingStore();
+    const conversationStore = makeConversationStore([], null);
+    const streamingStore = createStreamingStore({ conversationStore });
     blockTurnOnApproval(streamingStore);
-    component = mountChannel(makeConversationStore([], null), streamingStore);
+    component = mountChannel(conversationStore, streamingStore);
 
     const card = document.querySelector('[role="dialog"][aria-label="Approval required"]');
     expect(card).not.toBeNull();
@@ -261,11 +262,13 @@ describe("ConversationChannel pending approval", () => {
   });
 
   it("shows no empty generating bubble while the turn waits on the approval", () => {
-    const streamingStore = createStreamingStore();
+    const conversationStore = makeConversationStore([], null);
+    const streamingStore = createStreamingStore({ conversationStore });
     blockTurnOnApproval(streamingStore);
-    component = mountChannel(makeConversationStore([], null), streamingStore);
+    component = mountChannel(conversationStore, streamingStore);
 
-    expect(streamingStore.isStreaming).toBe(true);
+    const conversationId = conversationStore.activeConversation!.id;
+    expect(streamingStore.streamFor(conversationId).isStreaming).toBe(true);
     expect(document.querySelector(".message.assistant.streaming")).toBeNull();
     expect(document.querySelector(".cursor")).toBeNull();
   });
