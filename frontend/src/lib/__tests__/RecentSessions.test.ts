@@ -180,23 +180,15 @@ describe("RecentSessions", () => {
 const BRIEF =
   "Check the nightly build at /home/ops/builds/nightly/artefacts/reports/summary and post the result to the team\nThen tidy up.";
 
-function run(index: number, flags: Partial<RecentSession> = {}): RecentSession {
-  return {
-    id: `run-${index}`,
-    topic_name: "General",
-    agent_id: "default",
-    origin: { kind: "schedule_run", schedule_id: "sched-1" } as RecentSession["origin"],
-    created_at: "2026-10-05T09:00:00Z",
-    last_activity: "2026-10-05T09:00:00Z",
-    message_preview: `Run ${index}`,
-    has_interrupted_turn: false,
-    has_running_turn: false,
-    ...flags,
-  };
-}
-
 function scheduleEntry(latest: Partial<RecentSession> = {}): RecentSessionsEntry {
-  const automated = Array.from({ length: 11 }, (_, index) => run(index, index === 0 ? latest : {}));
+  const automated = Array.from({ length: 11 }, (_, index) =>
+    makeSession({
+      id: `run-${index}`,
+      origin: { kind: "schedule_run", schedule_id: "sched-1" },
+      message_preview: `Run ${index}`,
+      ...(index === 0 ? latest : {}),
+    }),
+  );
   return {
     source: { kind: "schedule", id: "sched-1", message: BRIEF },
     last_activity: "2026-10-05T09:00:00Z",
@@ -283,9 +275,9 @@ describe("RecentSessions schedule groups", () => {
 
   it("remembers each group's choice across visits", async () => {
     const conversation: RecentSessionsEntry = {
-      source: { kind: "conversation", session: { ...run(99), id: "conv-1", origin: { kind: "direct" } as RecentSession["origin"] } },
+      source: { kind: "conversation", session: makeSession({ id: "conv-1" }) },
       last_activity: "2026-10-05T08:00:00Z",
-      automated: [run(100)],
+      automated: [makeSession({ id: "run-100", origin: { kind: "schedule_run", schedule_id: "sched-1" } })],
     };
     component = await render([conversation]);
     expect(childRows()).toBe(1);
