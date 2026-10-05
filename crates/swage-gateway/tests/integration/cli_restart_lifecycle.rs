@@ -53,7 +53,7 @@ impl GatewayProbe {
             .port();
         drop(listener);
         let root = tempfile::TempDir::new().expect("failed to create the probe root");
-        let runtime = tempfile::TempDir::new().expect("failed to create the probe runtime dir");
+        let runtime = super::support::scratch_tempdir();
         let home = tempfile::TempDir::new().expect("failed to create the probe home");
         let metadata_directory = if explicit_root {
             root.path().join("run")

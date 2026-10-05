@@ -34,7 +34,7 @@ pub struct ContextSnapshotRecord {
 ///
 /// Lifecycle: Pending (created) → Processing (LLM call started), potentially
 /// suspended in AwaitingApproval or Delegating, then terminal (Completed /
-/// Failed / Interrupted).
+/// Incomplete / Failed / Interrupted).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnState {
@@ -44,6 +44,8 @@ pub enum TurnState {
     Processing,
     /// Turn finished successfully.
     Completed,
+    /// The provider stopped at its output limit, preserving partial work.
+    Incomplete,
     /// Turn ended with an error.
     Failed,
     /// Turn was cut short (e.g. by a stop signal).
@@ -78,7 +80,7 @@ impl TurnState {
     /// Whether no more work may run as part of this turn.
     pub const fn is_terminal(&self) -> bool {
         match self {
-            Self::Completed | Self::Failed | Self::Interrupted => true,
+            Self::Completed | Self::Incomplete | Self::Failed | Self::Interrupted => true,
             Self::Pending | Self::Processing | Self::AwaitingApproval | Self::Delegating => false,
         }
     }
@@ -90,6 +92,7 @@ impl std::fmt::Display for TurnState {
             TurnState::Pending => "pending",
             TurnState::Processing => "processing",
             TurnState::Completed => "completed",
+            TurnState::Incomplete => "incomplete",
             TurnState::Failed => "failed",
             TurnState::Interrupted => "interrupted",
             TurnState::AwaitingApproval => "awaiting_approval",
@@ -107,6 +110,7 @@ impl FromStr for TurnState {
             "pending" => Ok(TurnState::Pending),
             "processing" => Ok(TurnState::Processing),
             "completed" => Ok(TurnState::Completed),
+            "incomplete" => Ok(TurnState::Incomplete),
             "failed" => Ok(TurnState::Failed),
             "interrupted" => Ok(TurnState::Interrupted),
             "awaiting_approval" => Ok(TurnState::AwaitingApproval),
@@ -1287,6 +1291,9 @@ pub struct Turn {
     /// The execution boundary the turn ran inside, recorded when its
     /// dispatcher settled; `None` for a turn that never reached that point.
     pub execution_isolation: Option<TurnIsolation>,
+    /// The explanation the person was shown when the turn ended without a
+    /// reply; `None` for a turn that never failed with one.
+    pub failure_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -3258,6 +3265,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3314,6 +3322,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
@@ -3344,6 +3353,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -3377,6 +3387,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3408,6 +3419,7 @@ mod tests {
             delegated_input_tokens: None,
             delegated_output_tokens: None,
             execution_isolation: None,
+            failure_message: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
