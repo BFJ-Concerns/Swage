@@ -11194,13 +11194,22 @@ mod tests {
             .expect("research sweep run");
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
         let output = run.final_output.expect("terminal research report");
+        // The gatherer for the comparison source claimed a recording the
+        // knowledge base does not hold: the store decides, and the report
+        // says both what the gatherer claimed and what the store shows.
+        assert_eq!(output["failed_sources"].as_array().map(Vec::len), Some(1));
         assert_eq!(
-            output["failed_sources"],
-            serde_json::json!([{
-                "url": "https://example.test/failed",
-                "reason": "unreachable"
-            }])
+            output["failed_sources"][0]["url"],
+            "https://example.test/failed"
         );
+        let failure_reason = output["failed_sources"][0]["reason"]
+            .as_str()
+            .expect("failed source carries its reason");
+        assert!(
+            failure_reason.contains("holds no observation for this source"),
+            "{failure_reason}"
+        );
+        assert!(failure_reason.ends_with("unreachable"), "{failure_reason}");
         assert_eq!(
             output["withheld_claims"],
             serde_json::json!([{
@@ -11213,7 +11222,14 @@ mod tests {
             .as_str()
             .and_then(|id| Uuid::parse_str(id).ok())
             .expect("terminal finding carries a citation id returned by knowledge_cite");
-        assert!(output["findings"][0].get("quote").is_none());
+        // Each finding carries its own trail — the accepted quote, the cited
+        // observation and the source's origin — so a reader follows the claim
+        // to its evidence without a backend lookup.
+        assert_eq!(output["findings"][0]["quote"], RESEARCH_SWEEP_QUOTE);
+        assert_eq!(
+            output["findings"][0]["source"],
+            "https://example.test/landed"
+        );
 
         let observations = storage
             .list_observations_by_topic(topic.id)
@@ -11238,6 +11254,10 @@ mod tests {
             .expect("persisted citation");
         assert_eq!(citation.observation_id, observations[0].id);
         assert_eq!(citation.quoted_text, RESEARCH_SWEEP_QUOTE);
+        assert_eq!(
+            output["findings"][0]["observation_id"],
+            citation.observation_id.to_string()
+        );
 
         let requests = provider.requests.lock().expect("requests");
         // Scope, gather (fetch, record, report) ×2 sources, organise ×2, synthesise ×2.
@@ -12240,8 +12260,12 @@ mod tests {
             } else if text.contains("Deliver research findings.") {
                 match tool_result("cite-landed") {
                     Some(result) => scripted_text_output(&format!(
-                        r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#,
-                        result["citation_id"].as_str().expect("citation id")
+                        r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{}","quote":"{}","observation_id":"{}","source":"https://example.test/landed"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#,
+                        result["citation_id"].as_str().expect("citation id"),
+                        result["quote"].as_str().expect("accepted quote"),
+                        result["observation_id"]
+                            .as_str()
+                            .expect("cited observation"),
                     )),
                     None => {
                         let observation_id = self
