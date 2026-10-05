@@ -1086,3 +1086,38 @@ describe("assistant message width", () => {
     expect(style("td").wordBreak).toBe("break-word");
   });
 });
+
+describe("authorship of platform-written messages", () => {
+  function makeUserRoleMessage(origin: MessageView["origin"], content: string): MessageView {
+    _msgSeq += 1;
+    return {
+      id: `m-${_msgSeq}`,
+      role: "user",
+      origin,
+      content,
+      timestamp: `2026-03-20T10:00:${String(_msgSeq).padStart(2, "0")}Z`,
+      turn_state: "completed",
+    };
+  }
+
+  it("labels delegation and schedule messages by origin and only the typed prompt as You", () => {
+    const store = makeConversationStore([
+      makeUserRoleMessage("delegation", "Delegated Task\n\nSummarise the report"),
+      makeUserRoleMessage("delegation", "Delegated agent researcher completed: done"),
+      makeUserRoleMessage("schedule", "Check the queue.\n\nPrevious run outcome: ok"),
+      makeUserRoleMessage("user", "What did the researcher find?"),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore() },
+    });
+
+    const labels = [...document.body.querySelectorAll(".message > .role-label")].map((label) =>
+      label.textContent?.trim(),
+    );
+    expect(labels).toEqual(["Delegation", "Delegation", "Schedule", "You"]);
+    expect(document.body.querySelectorAll('[aria-label="Your message"]')).toHaveLength(1);
+    expect(document.body.querySelectorAll(".message.platform")).toHaveLength(3);
+  });
+});
