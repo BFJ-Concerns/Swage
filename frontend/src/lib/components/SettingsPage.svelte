@@ -155,7 +155,10 @@
     if (!settings) return false;
     error = null;
     status = "";
-    if (archiveDelayError) return false;
+    if (archiveDelayError) {
+      error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
+      return false;
+    }
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
