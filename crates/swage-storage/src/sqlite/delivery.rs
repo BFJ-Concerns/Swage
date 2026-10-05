@@ -54,47 +54,52 @@ fn row_to_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRecord> 
     })
 }
 
+pub(super) fn insert_delivery_record(
+    conn: &rusqlite::Connection,
+    delivery: NewDeliveryRecord,
+) -> rusqlite::Result<DeliveryRecord> {
+    let id = Uuid::new_v4();
+    let delivered_at = Utc::now();
+    let target_json = serde_json::to_string(&delivery.target)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+
+    conn.execute(
+        "INSERT INTO delivery_records (id, session_id, run_id, turn_id, target_json, content, status, error, delivered_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id.to_string(),
+            delivery.session_id.map(|id| id.to_string()),
+            delivery.run_id.map(|id| id.to_string()),
+            delivery.turn_id.map(|id| id.to_string()),
+            target_json,
+            delivery.content,
+            delivery.status,
+            delivery.error,
+            delivered_at.to_rfc3339(),
+        ],
+    )?;
+
+    Ok(DeliveryRecord {
+        id,
+        session_id: delivery.session_id,
+        run_id: delivery.run_id,
+        turn_id: delivery.turn_id,
+        target: delivery.target,
+        content: delivery.content,
+        status: delivery.status,
+        error: delivery.error,
+        delivered_at,
+    })
+}
+
 #[async_trait]
 impl DeliveryStore for SqliteStorage {
     async fn create_delivery_record(
         &self,
         delivery: NewDeliveryRecord,
     ) -> Result<DeliveryRecord, StorageError> {
-        self.with_conn(move |conn| {
-            let id = Uuid::new_v4();
-            let delivered_at = Utc::now();
-            let target_json = serde_json::to_string(&delivery.target)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-
-            conn.execute(
-                "INSERT INTO delivery_records (id, session_id, run_id, turn_id, target_json, content, status, error, delivered_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    id.to_string(),
-                    delivery.session_id.map(|id| id.to_string()),
-                    delivery.run_id.map(|id| id.to_string()),
-                    delivery.turn_id.map(|id| id.to_string()),
-                    target_json,
-                    delivery.content,
-                    delivery.status,
-                    delivery.error,
-                    delivered_at.to_rfc3339(),
-                ],
-            )?;
-
-            Ok(DeliveryRecord {
-                id,
-                session_id: delivery.session_id,
-                run_id: delivery.run_id,
-                turn_id: delivery.turn_id,
-                target: delivery.target,
-                content: delivery.content,
-                status: delivery.status,
-                error: delivery.error,
-                delivered_at,
-            })
-        })
-        .await
+        self.with_conn(move |conn| insert_delivery_record(conn, delivery))
+            .await
     }
 
     async fn list_delivery_records(&self) -> Result<Vec<DeliveryRecord>, StorageError> {

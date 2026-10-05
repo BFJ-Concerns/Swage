@@ -6,8 +6,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    GateConfig, GateDecision, NewSchedule, NewScheduleRun, Schedule, ScheduleCreator, ScheduleRun,
-    ScheduleRunState, ScheduleRunUpdate, SessionPolicy, UpdateSchedule,
+    GateConfig, GateDecision, NewDeliveryRecord, NewSchedule, NewScheduleRun, Schedule,
+    ScheduleCreator, ScheduleRun, ScheduleRunState, ScheduleRunUpdate, SessionPolicy,
+    UpdateSchedule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ScheduleStore;
@@ -701,16 +702,22 @@ impl ScheduleStore for SqliteStorage {
                            WHERE run_id = schedule_runs.id
                        )",
                 )?;
-                statement.query_map([], |row| row.get::<_, String>(0))?
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
                     .collect::<Result<Vec<_>, _>>()?
             };
             for run_id in unaccounted_runs {
-                tx.execute(
-                    "INSERT INTO delivery_records
-                     (id, session_id, run_id, turn_id, target_json, content, status, error, delivered_at)
-                     VALUES (?1, NULL, ?2, NULL, ?3, '', 'not_delivered', ?4, ?5)",
-                    params![Uuid::new_v4().to_string(), run_id,
-                        r#"{"kind":"no_delivery"}"#, &error_message, &now],
+                super::delivery::insert_delivery_record(
+                    &tx,
+                    NewDeliveryRecord {
+                        session_id: None,
+                        run_id: Some(parse_uuid(&run_id)?),
+                        turn_id: None,
+                        target: serde_json::json!({ "kind": "no_delivery" }),
+                        content: String::new(),
+                        status: "not_delivered".into(),
+                        error: Some(error_message.clone()),
+                    },
                 )?;
             }
             let changed = tx.execute(
