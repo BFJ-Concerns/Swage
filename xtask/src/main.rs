@@ -1430,6 +1430,143 @@ mod tests {
         off_palette_colour_columns,
     };
 
+    // The mapping translates reader-facing names, not the gate's stage order.
+    // Unknown calls fail rather than disappearing from the comparison.
+    fn gate_stage_name(call: &str) -> &str {
+        match call {
+            "check_tracked_local_state" => "Tracked-local-state check",
+            "fmt_check" => "Format check",
+            "check" => "Type check",
+            "check_frontend_design_tokens" => "Frontend design-token check",
+            "check_shipped_workflows_parse" => "Shipped-workflow parse check",
+            "clippy" => "Clippy",
+            "run_test_suite" => "Test suite",
+            "check_projections_are_current" => "Projection freshness",
+            other => panic!("cannot identify documented gate stage for xtask call {other}"),
+        }
+    }
+
+    fn gate_function_body<'a>(source: &'a str, name: &str) -> &'a str {
+        source
+            .split_once(&format!("fn {name}() -> Result<()> {{\n"))
+            .unwrap_or_else(|| panic!("cannot find xtask gate function {name}"))
+            .1
+            .split_once("\n}")
+            .unwrap_or_else(|| panic!("cannot find closing brace for xtask gate function {name}"))
+            .0
+    }
+
+    fn documented_gate_count(section: &str, prefix: &str) -> usize {
+        let word = section
+            .split_once(prefix)
+            .unwrap_or_else(|| panic!("cannot find documented gate count after {prefix:?}"))
+            .1
+            .split_whitespace()
+            .next()
+            .expect("documented gate count is missing");
+        match word {
+            "one" => 1,
+            "two" => 2,
+            "three" => 3,
+            "four" => 4,
+            "five" => 5,
+            "six" => 6,
+            "seven" => 7,
+            "eight" => 8,
+            "nine" => 9,
+            "ten" => 10,
+            other => other
+                .parse()
+                .unwrap_or_else(|_| panic!("cannot parse documented gate count {other:?}")),
+        }
+    }
+
+    #[test]
+    fn documented_verification_gate_matches_executed_stages() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let source = std::fs::read_to_string(root.join("xtask/src/main.rs"))
+            .expect("cannot read xtask/src/main.rs gate source");
+        let page = std::fs::read_to_string(root.join("docs/interfaces-and-tooling.md"))
+            .expect("cannot read docs/interfaces-and-tooling.md");
+        let section = page
+            .split_once("\n## Verification gate\n")
+            .expect("cannot find Verification gate heading in docs/interfaces-and-tooling.md")
+            .1
+            .split_once("\n## ")
+            .expect("cannot find end of Verification gate section")
+            .0;
+        let documented: Vec<_> = section
+            .lines()
+            .filter_map(|line| {
+                let (number, rest) = line.split_once(". **")?;
+                number.parse::<usize>().ok()?;
+                Some(
+                    rest.split_once("**")
+                        .expect("gate stage lacks closing bold marker")
+                        .0,
+                )
+            })
+            .collect();
+        assert!(
+            !documented.is_empty(),
+            "cannot find any documented gate stages in Verification gate section"
+        );
+
+        let static_stages: Vec<_> = gate_function_body(&source, "check_gate")
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                line.strip_suffix("()?;")
+                    .or_else(|| line.strip_suffix("()"))
+                    .map(gate_stage_name)
+            })
+            .collect();
+        assert!(
+            !static_stages.is_empty(),
+            "cannot find any executed gate stages in xtask function check_gate"
+        );
+        assert_eq!(
+            documented_gate_count(section, "The first "),
+            static_stages.len(),
+            "documented static gate count differs from check_gate"
+        );
+        let mut executed = Vec::new();
+        let mut delegated = 0;
+        let mut final_stages = 0;
+        for line in gate_function_body(&source, "verify").lines() {
+            let line = line.trim();
+            if line == "check_gate()?;" {
+                executed.extend_from_slice(&static_stages);
+                delegated += 1;
+            } else if let Some(call) = line
+                .strip_prefix("let ")
+                .and_then(|line| line.split_once(" = "))
+                .and_then(|(_, value)| value.strip_suffix("();"))
+            {
+                // These calls retain both results so neither final stage is skipped.
+                executed.push(gate_stage_name(call));
+                final_stages += 1;
+            }
+        }
+        assert_eq!(
+            delegated, 1,
+            "cannot find exactly one check_gate delegation in xtask function verify"
+        );
+        assert!(
+            final_stages > 0,
+            "cannot find any final gate stages in xtask function verify"
+        );
+        assert_eq!(
+            documented, executed,
+            "documented verification stages differ from xtask execution order"
+        );
+        assert_eq!(
+            documented_gate_count(section, "The gate runs "),
+            executed.len(),
+            "documented total gate count differs from xtask"
+        );
+    }
+
     #[test]
     fn derives_all_xtask_artifact_paths_from_the_resolved_cargo_target_directory() {
         let paths = cargo_target_paths(PathBuf::from("/custom/cargo-target"));
