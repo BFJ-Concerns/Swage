@@ -1,5 +1,5 @@
 ---
-description: Settings memory view, operator history, turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation and the docs_read tool, voice capabilities, gateway lifecycle (status and start recovery), wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, the gateway's built-in tool inventory, and workspace tool output
+description: Settings memory view, operator history, turn context inspector, conversation branching, image attachments and reference admission, session-owned surfaces, the surface library and annotations, workspace relinking, delivery targets, devices (registration and pairing procedure, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation and the docs_read tool, voice capabilities, gateway lifecycle (status and start recovery), wire error contract, route manifest and OpenAPI projection, verification gate, client-side route handling, the gateway's built-in tool inventory, and workspace tool output
 ---
 
 # Interfaces and tooling
@@ -432,24 +432,126 @@ back over the same socket. `swage device connect` runs a machine as a device.
 
 ### Registration and pairing
 
-A device can join in two ways:
+A device can join in two ways: direct registration or pairing.
 
-- **Direct registration** — `POST /api/devices/register`
-  (`RegisterDeviceRequest` in `swage-protocol::device`). The caller supplies
-  the device identity, the gateway secret its credential resolves against,
-  and the workspace it operates in.
-- **Pairing** — the gateway issues a one-time pairing code
-  (`POST /api/onboarding/devices/pairing-codes`, with an optional
-  `expires_in_seconds`; default 600 s), and the device redeems it
-  (`POST /api/onboarding/devices/redeem` with the code and its registration
-  fields) to register and trust itself in one step.
+**Direct registration** — `POST /api/devices/register` with the device
+identity, the gateway secret its credential resolves against, and the
+workspace it operates in.
+
+**Pairing** is a seven-step alternative. Steps 1 and 2 happen on the
+gateway host; steps 3 and 5 are API calls from wherever is convenient;
+steps 4, 6 and 7 happen on the device machine.
+
+1. **Create the token file on the gateway host.** Write a plain-text file
+   holding only the shared token value (the file is trimmed on read, so a
+   trailing newline is fine):
+
+   ```bash
+   # On the gateway host
+   mkdir -p "$HOME/.swage/device-tokens"
+   head -c 32 /dev/urandom | base64 > "$HOME/.swage/device-tokens/workshop.token"
+   ```
+
+2. **Register the token file as a secret.** `POST /api/secrets`:
+
+   ```json
+   {
+     "name": "workshop-token",
+     "material_kind": "shared_token",
+     "owner_kind": "operator",
+     "backend_kind": "file",
+     "scope_kind": "device",
+     "scope_id": "workshop",
+     "external_reference": "<gateway-user-home>/.swage/device-tokens/workshop.token"
+   }
+   ```
+
+   Replace `<gateway-user-home>` with the absolute path to the gateway
+   user's home directory. The file backend reads any path the gateway
+   process can access.
+
+   No `metadata` or `json_pointer` — the entire file is the token. The
+   response carries a `reference` field (e.g. `secret://file/<id>`) used
+   in the redemption step below.
+
+3. **Issue a pairing code.** `POST /api/onboarding/devices/pairing-codes`:
+
+   ```json
+   {
+     "expires_in_seconds": 600
+   }
+   ```
+
+   `expires_in_seconds` is optional (default 600 — ten minutes). The
+   response carries the `pairing_code` and `expires_at`.
+
+4. **Create the device workspace.** On the device machine, ensure the
+   workspace directory exists:
+
+   ```bash
+   mkdir -p "$HOME/projects"
+   ```
+
+5. **Redeem the code.** `POST /api/onboarding/devices/redeem`, using the
+   `reference` from step 2 and the device's absolute workspace path:
+
+   ```json
+   {
+     "pairing_code": "<code from step 3>",
+     "device_id": "workshop",
+     "shared_token_secret_ref": "<reference from step 2>",
+     "workspace_root": "<device-user-home>/projects"
+   }
+   ```
+
+   Replace `<device-user-home>` with the absolute path to the device
+   user's home directory (the same value `$HOME` expands to on the device).
+
+   This registers and trusts the device in one step. `label` (optional) and
+   `kind` (defaults to `"attached_device"`) can also be included.
+
+6. **Copy the token to the device machine.** The device needs a local file
+   holding the same value. Copy it from the gateway host, or read the
+   gateway file and write it on the device:
+
+   ```bash
+   # On the device machine
+   mkdir -p "$HOME/.swage"
+   # Paste the token value from the gateway's workshop.token and press Ctrl-D:
+   cat > "$HOME/.swage/workshop.token"
+   ```
+
+   Alternatively, transfer the file directly:
+
+   ```bash
+   scp gateway.local:.swage/device-tokens/workshop.token \
+     "$HOME/.swage/workshop.token"
+   ```
+
+   The device file must hold exactly the same value as the gateway's file —
+   the gateway resolves its registered secret and compares the two.
+
+7. **Connect.** Run the device:
+
+   ```bash
+   swage device connect \
+     --gateway http://gateway.local:3000 \
+     --device-id workshop \
+     --shared-token-file "$HOME/.swage/workshop.token" \
+     --workspace "$HOME/projects"
+   ```
+
+   `--shared-token-file` points at the device's local copy. The process
+   reads it, dials the gateway, presents the token for comparison against
+   the registered secret, advertises the workspace's tools, and serves
+   operations until interrupted.
 
 In both paths the `kind` field defaults to `"attached_device"` and names the
-device type. A `kind` of `"local"` is refused with a `ValidationError`: a
-local device has no remote producer to register. The same refusal applies to
-recovery imports, so the remote-device registry never holds a local entry.
-What a device can run is not registered — the device advertises its
-capabilities each time it connects.
+device type. A `kind` of `"local"` is refused: a local device has no remote
+producer to register. The same constraint applies to recovery imports, so the
+remote-device registry never holds a local entry. What a device can run is
+not registered — the device advertises its capabilities each time it
+connects.
 
 ### The connection
 
@@ -472,8 +574,7 @@ After the welcome the connection carries two frame types in each direction:
 | Device → gateway | `Cancelled` | Operation `correlation_id` was stopped |
 | Device → gateway | `Heartbeat` | Sent every `heartbeat_interval_secs` (default 10 s) |
 
-All frames are tagged by `kind` (snake_case) and defined in
-`swage-protocol::device` (`DeviceFrame`, `GatewayFrame`).
+All frames are tagged by `kind` (snake_case).
 
 ### Cancellation
 
@@ -653,15 +754,16 @@ Stages 7–8 run regardless; their results are combined.
 | 8 | Projection freshness (`git diff --exit-code` on generated files) | No |
 
 The Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
-variable. When set to `nextest`, Rust tests run under `cargo nextest run`
-with a `ci` profile (which retries flaky tests), followed by a separate
-`cargo test --workspace --doc` stage for doctests (nextest cannot run
-doctests). When set to `cargo` or unset, Rust tests run under
-`cargo test --workspace --no-fail-fast`.
+variable. The Justfile defaults it to `nextest`, so `just verify` runs
+nextest unless overridden. When set to `nextest` (the default), Rust tests
+run under `cargo nextest run` with a `ci` profile (which retries flaky
+tests), followed by a separate `cargo test --workspace --doc` stage for
+doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
+under `cargo test --workspace --no-fail-fast`.
 
 When both tests and projections fail, both errors surface in one message.
-The test suite aggregates Rust, frontend, and desktop-smoke failures into a
-`Vec<String>` rather than aborting on the first.
+The test suite aggregates Rust, frontend, and desktop-smoke failures rather
+than aborting on the first.
 
 The verify body runs inside `run_with_final_sweep`, which runs
 `cargo sweep` after the gate (even on failure) and reports the artefact

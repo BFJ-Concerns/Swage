@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents, reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, handles wall-triggered succession, and configures voice transcription and synthesis
+description: How Swage defines agents (including creating them through the API), reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, controls experimentation and variant selection, handles wall-triggered succession, and configures voice transcription and synthesis
 ---
 
 # Agents and permissions
@@ -23,7 +23,7 @@ agent id can behave differently per topic without requiring separate ids.
 ### How the overlay works
 
 When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a `ResolvedConfig`, then
+cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
 overlays the agent definition on top. The overlay:
 
 - **Instructions** are appended after operator instructions, preserving the
@@ -37,9 +37,44 @@ overlays the agent definition on top. The overlay:
 - **Skills**, **output schema**, and **output retry limit** are set directly
   from the definition.
 
-A malformed permission overlay (one that fails to parse as
-`ToolPermissionConfig`) is logged and ignored — the config's own grants stand
-rather than the session silently running with an unintended permission set.
+A malformed permission overlay is logged and ignored — the config's own
+grants stand rather than the session silently running with an unintended
+permission set.
+
+### Creating and editing definitions
+
+Definitions can be created and edited through two surfaces.
+
+**Through the API.** `POST /api/operator/agent-definitions` creates a
+definition; `PUT /api/operator/agent-definitions/{agent_id}` replaces one.
+A complete creation request:
+
+```json
+{
+  "id": "reader",
+  "display_name": "Read-only assistant",
+  "description": "An agent that can search and read but not write.",
+  "instructions": "You help the user find and read information. Do not modify files.",
+  "tool_permissions": {
+    "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
+    "deny": [],
+    "bundles": {},
+    "require_approval": []
+  }
+}
+```
+
+`description` is required. `topic_id` scopes the definition to one topic;
+omit it for a global definition. The `tool_permissions` object carries
+`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+names to tool-name arrays — it must be present (use `{}` when no custom
+bundles are needed). The overlay intersects with the config cascade's
+grants, so it can only narrow what the config allows, never widen it.
+Optional fields not shown above include `model_id`, `skills`,
+`output_schema`, and `output_max_retries`.
+
+Conversational authoring of agent definitions is not yet available. The
+API routes above are the supported surface.
 
 ## Effort
 
@@ -442,8 +477,14 @@ feedback, and the turn continues. The alternative policy, **Interrupt**, marks
 the entire turn as interrupted — no further tool calls or completions are
 issued.
 
-Per-tool overrides are possible through the `WithOptions` variant of a
-`require_approval` entry, which can set a custom `timeout` and
+Per-tool overrides use an object entry in `require_approval` instead of a
+plain string:
+
+```toml
+require_approval = ["write_file", { tool = "execute_command", timeout = 600 }]
+```
+
+The object form accepts `tool` (required), `timeout` (seconds), and
 `timeout_policy` for individual tools.
 
 ## Context configuration
@@ -492,6 +533,118 @@ naming what to address (see
 Both ids can be edited in the web UI under **Settings → Voice**, which also
 states the prerequisite (an OpenAI-protocol default provider plus the two
 model ids). A save applies without restarting the gateway.
+
+## Experimentation controls
+
+Swage can run alternative implementations behind a stable surface — a
+different context assembly, a different working-norms text — selecting one
+per turn and recording every decision in the audit trail. The
+`[experimentation]` section of `config.toml` governs this.
+
+### Disabling experimentation
+
+A global switch turns all variant selection off:
+
+```toml
+[experimentation]
+enabled = false
+```
+
+When disabled, every location uses its default variant and the decision is
+recorded as such. Experimentation is on by default.
+
+### Per-location controls
+
+Each experiment location — identified by a stable string such as
+`context.assembly` or `context.working_norms` — can be individually
+controlled:
+
+```toml
+[experimentation.locations."context.working_norms"]
+enabled = true
+forced_variant = "family-fallback"
+```
+
+- **`enabled`** — defaults to `true`. Set to `false` to disable variant
+  selection for this location only; the default variant serves.
+- **`forced_variant`** — pins the location to a specific named variant for
+  every turn. The variant must be registered at the location's choice point;
+  an unrecognised name is refused. Remove the key to return to random
+  selection.
+
+The shipped locations are `context.assembly`, `context.working_norms`,
+`task.prompt`, and `prompts.memory_curator`.
+
+### Alternatives
+
+What can be forced or drawn at a location depends on the alternatives
+registered there. For `context.assembly`, alternatives are operator-authored:
+each is a `<name>.js` file placed in an `assemblies/` directory under the
+config hierarchy (global, topic, or agent — the most specific wins). List a
+new assembly in `[context] alternatives` so the selection loop includes it:
+
+```toml
+[context]
+assembly = "default"
+alternatives = ["my-variant"]
+```
+
+The assembly script runs in a caged QuickJS runtime (no IO, no network, no
+timers) and composes the turn's context from the elements the gateway built.
+The script receives four globals:
+
+- `elements` — the turn's context elements, read-only:
+  `[{ name, priority, source, tokenCount, messages }]` where `messages` is
+  `[{ role, text }]`.
+- `ctx` — read-only assembly context. `ctx.variable(name)` returns the
+  current session value or `undefined`.
+- `add(element_or_messages)` — appends an element (pass an entry from
+  `elements`) or a raw `[{ role, text }]` array to the output, in call
+  order.
+- `omit(name, reason)` — declares that the composition deliberately leaves
+  the named element out. Any baseline element neither added nor declared
+  through `omit` is restored with a warning.
+
+A minimal reordering assembly (`assemblies/my-variant.js`):
+
+```js
+const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+add(byName.orientation);
+add(byName.prompts);
+add(byName.history);
+```
+
+A script that errors (missing file, syntax error, runtime error) falls back
+to the built-in default assembly. A script that runs without error but
+leaves out baseline elements has them restored by the baseline floor, with
+warnings — except elements the script declares as omitted via `omit()`,
+which stay out. If the final composition ends up genuinely empty (every
+baseline element was declared omitted and the script added nothing else),
+the assembly also falls back to the default.
+
+The other shipped locations (`context.working_norms`, `task.prompt`,
+`prompts.memory_curator`) have their alternatives defined in the gateway
+source. For `context.working_norms`, the registered variants are
+`authored-v1` (the default) and `family-fallback`. These cannot be extended
+through configuration.
+
+### Operator history
+
+Every variant decision — whether drawn randomly, forced, or recorded as
+disabled — appears in the operator history pane. Each entry names the
+location, the variant that served, the reason (such as `drawn`, `forced`, or
+`disabled`), and the session and turn that produced it.
+
+When the selection cannot be recorded (for example because the audit store
+is temporarily unavailable), the turn falls back to the default variant
+without writing a record. The gap in the history is how a later reader
+identifies that recording failed.
+
+### Cascading
+
+Experimentation settings cascade through the file hierarchy (Global → Topic
+→ Agent). Per-location entries merge by location id across layers, so a topic
+file can force a variant the global file leaves to random selection.
 
 ## Succession compaction
 
