@@ -348,8 +348,6 @@ mod tests {
             crate::turn_queue::drain_queue(&state, session_id)
                 .await
                 .unwrap();
-            // The old relay is detached; let it deliver before starting the forwarder.
-            tokio::task::yield_now().await;
             let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
             let forwarding = tokio::spawn(forward_events(sink, session_id, receiver, broadcast));
             let mut events = Vec::new();
