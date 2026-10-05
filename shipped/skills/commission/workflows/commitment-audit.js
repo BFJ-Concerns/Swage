@@ -213,7 +213,7 @@ lets the finding be checked, so never paraphrase inside it. Prefer over-listing 
 filtering: a duplicate is cheap, a dropped want is the failure this audit exists to catch.
 An empty list is valid only for a completely-read transcript that voices none.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const diffPrompt = (wants, lines) =>
@@ -246,7 +246,7 @@ capability-shaped, a want that resists the match-or-exclude binary, lists that s
 mis-framed — say so in \`out_of_scope_concerns\`, which exists so such remarks never need
 to ride the \`unmatched\` list; empty string when you have nothing.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const hollowPrompt = (line, register) =>
@@ -279,7 +279,7 @@ If something is wrong with the QUESTION rather than the answer — the line is n
 capability-shaped, or hollow/not-hollow would mislead either way — say so in
 \`out_of_scope_concerns\`; empty string when you have nothing.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show
 a sample answer; the only JSON value in your reply is your actual answer.`;
 
 // Stage 1 — MINE. Every transcript read independently by BOTH families, so a
