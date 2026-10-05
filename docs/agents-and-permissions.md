@@ -574,8 +574,8 @@ The shipped locations are `context.assembly`, `context.working_norms`,
 What can be forced or drawn at a location depends on the alternatives
 registered there. For `context.assembly`, alternatives are operator-authored:
 each is a `<name>.js` file placed in an `assemblies/` directory under the
-config hierarchy (global, topic, or agent). List a new assembly in `[context]
-alternatives` so the selection loop includes it:
+config hierarchy (global, topic, or agent — the most specific wins). List a
+new assembly in `[context] alternatives` so the selection loop includes it:
 
 ```toml
 [context]
@@ -583,7 +583,36 @@ assembly = "default"
 alternatives = ["my-variant"]
 ```
 
-The other shipped locations have their alternatives defined in the gateway
+The assembly script runs in a caged QuickJS runtime (no IO, no network, no
+timers) and composes the turn's context from the elements the gateway built.
+The script receives three globals:
+
+- `elements` — the turn's context elements, read-only:
+  `[{ name, priority, source, tokenCount, messages }]` where `messages` is
+  `[{ role, text }]`.
+- `ctx` — read-only assembly context. `ctx.variable(name)` returns the
+  current session value or `undefined`.
+- `add(element_or_messages)` — appends an element (pass an entry from
+  `elements`) or a raw `[{ role, text }]` array to the output, in call
+  order.
+- `omit(name, reason)` — declares that the composition deliberately leaves
+  the named element out. Any baseline element neither added nor declared
+  through `omit` is restored with a warning.
+
+A minimal reordering assembly (`assemblies/my-variant.js`):
+
+```js
+const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+add(byName.orientation);
+add(byName.prompts);
+add(byName.history);
+```
+
+Failure is fail-open: any script problem (missing file, syntax error,
+runtime error, empty output) falls back to the built-in default assembly.
+
+The other shipped locations (`context.working_norms`, `task.prompt`,
+`prompts.memory_curator`) have their alternatives defined in the gateway
 source. For `context.working_norms`, the registered variants are
 `authored-v1` (the default) and `family-fallback`. These cannot be extended
 through configuration.
