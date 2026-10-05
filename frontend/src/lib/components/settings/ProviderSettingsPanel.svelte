@@ -3,6 +3,7 @@
   import { discoverModels, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
   import type { DiscoveredModel, ModelSettings, SettingsResponse } from "../../types";
   import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
+  import { providerBaseUrlError } from "./provider-endpoint";
   import ProviderConfiguration from "./ProviderConfiguration.svelte";
   import ProviderCreation, { type ProviderKindDefinition } from "./ProviderCreation.svelte";
   import ProviderDefaultModel from "./ProviderDefaultModel.svelte";
@@ -228,9 +229,8 @@
     if (!baseUrl) {
       return "Enter a base URL so Swage knows where to send requests.";
     }
-    if (!/^https?:\/\//i.test(baseUrl)) {
-      return "Enter a URL starting with http:// or https://";
-    }
+    const urlError = providerBaseUrlError(baseUrl);
+    if (urlError) return urlError;
     const baseId = slugifyProviderName(name) || "openai-compatible";
     const id = nextProviderId(baseId);
     settings.providers[id] = {

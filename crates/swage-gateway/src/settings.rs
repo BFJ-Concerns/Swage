@@ -676,6 +676,19 @@ pub async fn restart_gateway(state: &AppState) -> Result<RestartStatusResponse, 
 }
 
 fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiError> {
+    for (id, provider) in &request.providers {
+        if let Some(endpoint) = provider.base_url.as_deref() {
+            let endpoint = endpoint.trim().to_ascii_lowercase();
+            if !endpoint.is_empty()
+                && !endpoint.starts_with("http://")
+                && !endpoint.starts_with("https://")
+            {
+                return Err(ApiError::validation(format!(
+                    "providers.{id}.base_url: Base URL must start with http:// or https://"
+                )));
+            }
+        }
+    }
     if !request.default_provider.is_empty()
         && !request.providers.contains_key(&request.default_provider)
     {
@@ -1313,6 +1326,67 @@ mod tests {
             value["context"] = context;
         }
         serde_json::from_value(value).expect("settings request")
+    }
+
+    #[tokio::test]
+    async fn provider_url_updates_refuse_invalid_endpoints_without_writing_and_allow_clearing() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        let path = home.path().join("config.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        for endpoint in ["not-a-url", "ftp://example.org"] {
+            let mut request = succession_settings_request(None);
+            request.providers.get_mut("local").unwrap().base_url = Some(endpoint.into());
+            let error = save_settings(&state, request)
+                .await
+                .expect_err("invalid endpoint must be refused");
+            assert_eq!(
+                error.code(),
+                swage_protocol::client::error::ErrorCode::ValidationError
+            );
+            assert!(
+                error.message().contains("providers.local.base_url"),
+                "{error:?}"
+            );
+            assert!(error.message().contains("http:// or https://"), "{error:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(
+                load_settings(&state).await.unwrap().providers["local"]
+                    .base_url
+                    .as_deref(),
+                Some("http://127.0.0.1:65535/v1")
+            );
+        }
+        for endpoint in [
+            Some("HTTP://localhost:8317/v1"),
+            Some("https://example.org/v1"),
+            None,
+            Some(""),
+        ] {
+            let mut request = succession_settings_request(None);
+            request.providers.get_mut("local").unwrap().base_url = endpoint.map(str::to_string);
+            save_settings(&state, request)
+                .await
+                .expect("valid override or provider default");
+            assert_eq!(
+                load_settings(&state).await.unwrap().providers["local"]
+                    .base_url
+                    .as_deref(),
+                endpoint
+            );
+        }
     }
 
     #[tokio::test]
