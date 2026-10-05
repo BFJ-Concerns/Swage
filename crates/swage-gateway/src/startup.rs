@@ -984,11 +984,10 @@ fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
 /// The provider that serves a turn for the configuration's selected model.
 ///
 /// The runtime provider routes a request to the first catalogue entry whose
-/// upstream model id it names, so two entries sharing an upstream id (one per
-/// protocol, say) are indistinguishable to it. When an earlier entry in the
-/// runtime order shares the selected entry's upstream id but names a
-/// different provider, the turn gets a provider built from its own
-/// configuration, where the selected entry leads.
+/// upstream model id it names. Reuse it only when that entry's provider ID,
+/// resolved base URL and protocol match the turn's configuration. A different
+/// route, or a model absent from the runtime chain, needs a provider built
+/// from the turn's configuration, where the selected entry leads.
 pub(crate) async fn selected_model_provider(
     state: &crate::state::AppState,
     config: &swage_config::ResolvedConfig,
@@ -998,12 +997,22 @@ pub(crate) async fn selected_model_provider(
         return runtime;
     };
     let runtime_config = state.active_config();
-    let first_serving_provider = ordered_runtime_model_ids(&runtime_config)
+    let first_serving_model = ordered_runtime_model_ids(&runtime_config)
         .into_iter()
         .filter_map(|entry| runtime_config.models.entries.get(&entry))
-        .find(|model| model.model_id == selected.model_id)
-        .map(|model| model.provider_id.as_str());
-    if first_serving_provider.is_none_or(|provider_id| provider_id == selected.provider_id) {
+        .find(|model| model.model_id == selected.model_id);
+    let route_matches = first_serving_model
+        .and_then(|model| {
+            let runtime_endpoint = runtime_config.providers.entries.get(&model.provider_id)?;
+            let selected_endpoint = config.providers.entries.get(&selected.provider_id)?;
+            Some(
+                model.provider_id == selected.provider_id
+                    && runtime_endpoint.protocol == selected_endpoint.protocol
+                    && provider_base_url(runtime_endpoint) == provider_base_url(selected_endpoint),
+            )
+        })
+        .unwrap_or(false);
+    if route_matches {
         return runtime;
     }
     create_provider(config, &state.secret_manager).await

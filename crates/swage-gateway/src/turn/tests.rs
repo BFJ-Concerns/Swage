@@ -7128,7 +7128,7 @@ async fn provider_retry_events_name_the_requested_turn_model() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
-        config,
+        crate::test_support::with_mock_provider_entries(config),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
@@ -8935,7 +8935,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
     .into_iter()
     .collect();
     state.replace_runtime(
-        config,
+        crate::test_support::with_mock_provider_entries(config),
         state.active_provider(),
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
@@ -10454,7 +10454,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig {
+        crate::test_support::with_mock_provider_entries(swage_config::ResolvedConfig {
             models: swage_config::ModelCatalogConfig {
                 default: "task-review-model".into(),
                 entries: [(
@@ -10478,7 +10478,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
                 ..Default::default()
             },
             ..Default::default()
-        },
+        }),
         dispatcher,
         None,
     );
@@ -13209,7 +13209,7 @@ async fn capture_provider_effort_for_selected_model(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        config,
+        crate::test_support::with_mock_provider_entries(config),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
@@ -13389,7 +13389,7 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        config,
+        crate::test_support::with_mock_provider_entries(config),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
@@ -13684,7 +13684,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
         ..Default::default()
     };
     state.replace_runtime(
-        runtime_config,
+        crate::test_support::with_mock_provider_entries(runtime_config),
         Arc::new(provider) as Arc<dyn LlmProvider>,
         crate::tool::ToolDispatcher::allow_all(vec![]),
     );
@@ -14423,7 +14423,7 @@ async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
-        config,
+        crate::test_support::with_mock_provider_entries(config),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
     );
@@ -19411,6 +19411,190 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         error.contains(&format!("provider 'proxy-responses' at {responses_url}")),
         "the error names the configured provider and endpoint: {error}"
     );
+}
+
+/// Records both request protocols at the same endpoint and rejects without retry.
+async fn spawn_route_capture_endpoint() -> (
+    String,
+    Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+) {
+    use axum::{Json, Router, extract::OriginalUri, http::StatusCode, routing::post};
+
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&bodies);
+    let handler = move |OriginalUri(uri): OriginalUri, Json(body): Json<serde_json::Value>| {
+        let captured = Arc::clone(&captured);
+        async move {
+            captured
+                .lock()
+                .unwrap()
+                .push((uri.path().to_string(), body));
+            (StatusCode::BAD_REQUEST, "endpoint rejected the model")
+        }
+    };
+    let app = Router::new()
+        .route("/v1/chat/completions", post(handler.clone()))
+        .route("/v1/responses", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}/v1"), bodies)
+}
+
+async fn assert_topic_provider_route(override_kind: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let (runtime_url, runtime_bodies) = spawn_route_capture_endpoint().await;
+    let (topic_url, topic_bodies) = spawn_route_capture_endpoint().await;
+    let storage = Arc::new(MockStorage::new());
+    let topic = TopicStore::create(
+        storage.as_ref(),
+        swage_storage::model::NewTopic {
+            name: "Configured route".into(),
+            slug: "configured-route".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let global = format!(
+        "[providers]\ndefault = \"configured\"\n[providers.entries.configured]\nprotocol = \"openai\"\nbase_url = {runtime_url:?}\n[providers.entries.alternative]\nprotocol = \"openai\"\nbase_url = {runtime_url:?}\n[models]\ndefault = \"startup\"\n[models.entries.startup]\nprovider_id = \"configured\"\nmodel_id = \"startup-wire\"\n[models.entries.alternative]\nprovider_id = \"alternative\"\nmodel_id = \"alternative-wire\"\n"
+    );
+    std::fs::write(root.path().join("config.toml"), global).unwrap();
+    let scope = topic.location();
+    let config = swage_config::load_resolved_config_from(root.path(), &scope, "gateway").unwrap();
+    let secret_manager = crate::secret::SecretManager::new(storage.clone());
+    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        runtime_provider,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let (overlay, expected_url, expected_path, expected_model, expected_protocol) =
+        match override_kind {
+            "url" => (
+                format!(
+                    "[providers.entries.configured]\nprotocol = \"openai\"\nbase_url = {topic_url:?}\n"
+                ),
+                &topic_url,
+                "/v1/chat/completions",
+                "startup-wire",
+                "chat_completions",
+            ),
+            "protocol" => (
+                format!(
+                    "[providers.entries.configured]\nprotocol = \"openai-responses\"\nbase_url = {runtime_url:?}\n"
+                ),
+                &runtime_url,
+                "/v1/responses",
+                "startup-wire",
+                "responses",
+            ),
+            "model" => (
+                format!(
+                    "[providers.entries.topic]\nprotocol = \"openai\"\nbase_url = {topic_url:?}\n[models]\ndefault = \"topic\"\n[models.entries.topic]\nprovider_id = \"topic\"\nmodel_id = \"topic-wire\"\n"
+                ),
+                &topic_url,
+                "/v1/chat/completions",
+                "topic-wire",
+                "chat_completions",
+            ),
+            _ => unreachable!(),
+        };
+    let topic_dir = scope.data_dir(root.path());
+    std::fs::create_dir_all(&topic_dir).unwrap();
+    std::fs::write(topic_dir.join("config.toml"), overlay).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session.id,
+        None,
+        TurnInput::from("Hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let received = if override_kind == "protocol" {
+        &runtime_bodies
+    } else {
+        &topic_bodies
+    };
+    let received = received.lock().unwrap().clone();
+    let route_matches = !received.is_empty()
+        && received.iter().all(|(path, body)| {
+            path == expected_path
+                && body["model"] == expected_model
+                && (override_kind != "protocol"
+                    || (body["input"].is_array() && body.get("messages").is_none()))
+        })
+        && (override_kind == "protocol" || runtime_bodies.lock().unwrap().is_empty());
+    let thread = state.storage.list_by_session(session.id).await.unwrap()[0].clone();
+    let turn = state.storage.list_turns_by_thread(thread.id).await.unwrap()[0].clone();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("failed turn's visible error");
+    let provider_id = if override_kind == "model" {
+        "topic"
+    } else {
+        "configured"
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&state.storage.get_snapshot(turn.id).await.unwrap().unwrap()).unwrap();
+    let request_routes: Vec<_> = received
+        .iter()
+        .map(|(path, body)| (path, &body["model"]))
+        .collect();
+    let startup_routes: Vec<_> = runtime_bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(path, body)| (path.clone(), body["model"].clone()))
+        .collect();
+    assert!(
+        route_matches
+            && turn.state == TurnState::Failed
+            && error.contains(&format!("provider '{provider_id}' at {expected_url}"))
+            && snapshot["provider_visible"]["requests"][0]["request"]["protocol"]
+                == expected_protocol,
+        "the topic's configured route must receive and record {expected_model} via {expected_path}, with its failure named: requests={request_routes:?}, startup_requests={startup_routes:?}, turn={:?}, error={error}, recorded_protocol={}",
+        turn.state,
+        snapshot["provider_visible"]["requests"][0]["request"]["protocol"],
+    );
+}
+
+#[tokio::test]
+async fn topic_provider_route_uses_overridden_url_and_names_it_on_failure() {
+    assert_topic_provider_route("url").await;
+}
+
+#[tokio::test]
+async fn topic_provider_route_uses_overridden_protocol_under_the_same_provider_id() {
+    assert_topic_provider_route("protocol").await;
+}
+
+#[tokio::test]
+async fn topic_provider_route_serves_a_model_absent_from_the_runtime_chain() {
+    assert_topic_provider_route("model").await;
 }
 
 /// Serves `{route}` on a fresh local port with a successful response of the

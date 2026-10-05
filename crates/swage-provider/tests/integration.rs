@@ -510,3 +510,116 @@ async fn permanent_error_bypasses_retry_and_failover() {
     // Secondary never called — permanent errors don't trigger failover.
     assert_eq!(secondary.calls(), 0);
 }
+
+// Explicit provider finish causes must survive even when no text preceded them.
+async fn assert_no_output_finish(body: &str, responses: bool, expected: FinishReason) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind finish-cause fixture");
+    let addr = listener.local_addr().expect("fixture address");
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept provider request");
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let count = socket
+                .read(&mut buffer)
+                .await
+                .expect("read provider request");
+            assert!(count > 0, "request must arrive");
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .expect("request content-length header")
+                    .parse()
+                    .expect("parse request content length");
+                if bytes.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write fixture SSE response");
+        socket.shutdown().await.expect("close fixture response");
+    });
+    let config = swage_provider::ProviderConfig::keyless("fixture", format!("http://{addr}/v1"));
+    let provider: Box<dyn LlmProvider> = if responses {
+        Box::new(swage_provider::responses::ResponsesProvider::from_config(
+            config,
+        ))
+    } else {
+        Box::new(swage_provider::openai::OpenAiProvider::from_config(config))
+    };
+    let chunks: Vec<_> = tokio::time::timeout(
+        Duration::from_secs(5),
+        provider
+            .stream(CompletionRequest {
+                effort: None,
+                messages: vec![],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: None,
+                tool_definitions: vec![],
+            })
+            .collect(),
+    )
+    .await
+    .expect("provider stream settles");
+    server.await.expect("fixture server completes");
+    assert!(
+        chunks.iter().any(|chunk| matches!(chunk,
+            StreamChunk::Done { finish_reason: Some(reason) } if *reason == expected
+        )) && !chunks.iter().any(|chunk| matches!(
+            chunk,
+            StreamChunk::ProviderAnomaly { .. } | StreamChunk::Error { .. }
+        )),
+        "explicit finish cause {expected:?} must reach the caller without an endpoint anomaly: {chunks:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_output_chat_length_preserves_the_finish_cause() {
+    assert_no_output_finish(
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+        false,
+        FinishReason::Length,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn no_output_chat_content_filter_preserves_the_finish_cause() {
+    assert_no_output_finish(
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n\ndata: [DONE]\n\n",
+        false, FinishReason::ContentFilter,
+    ).await;
+}
+
+#[tokio::test]
+async fn no_output_responses_max_output_tokens_preserves_the_finish_cause() {
+    assert_no_output_finish(
+        "event: response.incomplete\ndata: {\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+        true, FinishReason::Length,
+    ).await;
+}
+
+#[tokio::test]
+async fn no_output_responses_content_filter_preserves_the_finish_cause() {
+    assert_no_output_finish(
+        "event: response.incomplete\ndata: {\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n\n",
+        true, FinishReason::ContentFilter,
+    ).await;
+}
