@@ -238,6 +238,7 @@
   {/if}
 
   <section class="create-card">
+    <p>Create schedule saves the schedule and activates it at once.</p>
     <label>
       <span>Prompt</span>
       <textarea
