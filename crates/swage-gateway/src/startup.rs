@@ -986,8 +986,9 @@ fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
 /// The runtime provider routes a request to the first catalogue entry whose
 /// upstream model id it names, so two entries sharing an upstream id (one per
 /// protocol, say) are indistinguishable to it. When an earlier entry in the
-/// runtime order shares the selected entry's upstream id, the turn gets a
-/// provider built from its own configuration, where the selected entry leads.
+/// runtime order shares the selected entry's upstream id but names a
+/// different provider, the turn gets a provider built from its own
+/// configuration, where the selected entry leads.
 pub(crate) async fn selected_model_provider(
     state: &crate::state::AppState,
     config: &swage_config::ResolvedConfig,
@@ -997,17 +998,12 @@ pub(crate) async fn selected_model_provider(
         return runtime;
     };
     let runtime_config = state.active_config();
-    let first_serving_entry =
-        ordered_runtime_model_ids(&runtime_config)
-            .into_iter()
-            .find(|entry| {
-                runtime_config
-                    .models
-                    .entries
-                    .get(entry)
-                    .is_some_and(|model| model.model_id == selected.model_id)
-            });
-    if first_serving_entry.as_deref() == Some(config.models.default.as_str()) {
+    let first_serving_provider = ordered_runtime_model_ids(&runtime_config)
+        .into_iter()
+        .filter_map(|entry| runtime_config.models.entries.get(&entry))
+        .find(|model| model.model_id == selected.model_id)
+        .map(|model| model.provider_id.as_str());
+    if first_serving_provider.is_none_or(|provider_id| provider_id == selected.provider_id) {
         return runtime;
     }
     create_provider(config, &state.secret_manager).await
