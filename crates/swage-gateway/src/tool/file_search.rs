@@ -96,9 +96,9 @@ impl Tool for FileSearchTool {
         let path_arg = params["path"].as_str().unwrap_or(".");
         let resolved = match params["path"].as_str() {
             Some(sub) => resolve_context_path(ctx, sub)
-                .map_err(|_| location_approval_error(self.name(), ctx, sub, "read"))?,
+                .map_err(|_| location_approval_error(self.name(), ctx, sub, "read", true))?,
             None => resolve_context_path(ctx, ".")
-                .map_err(|_| location_approval_error(self.name(), ctx, ".", "read"))?,
+                .map_err(|_| location_approval_error(self.name(), ctx, ".", "read", true))?,
         };
 
         // Collect matches by walking the tree synchronously.

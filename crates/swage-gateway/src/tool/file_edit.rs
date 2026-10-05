@@ -242,8 +242,9 @@ fn parse_changes(
     for change in changes {
         validate_object_keys(change, &["path", "edits"], tool_name)?;
         let requested_path = parse_change_path(change, tool_name)?.to_owned();
-        let resolved = resolve_context_path(ctx, &requested_path)
-            .map_err(|_| location_approval_error(tool_name, ctx, &requested_path, "write"))?;
+        let resolved = resolve_context_path(ctx, &requested_path).map_err(|_| {
+            location_approval_error(tool_name, ctx, &requested_path, "write", false)
+        })?;
         if !seen_paths.insert(resolved.path.clone()) {
             return Err(invalid(
                 tool_name,

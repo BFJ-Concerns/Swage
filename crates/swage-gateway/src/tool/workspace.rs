@@ -80,10 +80,8 @@ pub fn location_approval_error(
     ctx: &dyn ToolContext,
     requested: &str,
     access: &str,
+    directory_target: bool,
 ) -> ToolError {
-    // List and search address directories even when filesystem metadata cannot
-    // identify their not-yet-created targets.
-    let directory_target = matches!(tool_name, "file_list" | "file_search");
     let path = approval_root_for_request(ctx, requested, directory_target)
         .unwrap_or_else(|| requested.to_string());
     ToolError::RequiresLocationApproval {
@@ -890,7 +888,7 @@ mod tests {
             turn_id: None,
         };
         let requested = "../missing/deep/report.md";
-        let root = match location_approval_error("file_write", &ctx, requested, "write") {
+        let root = match location_approval_error("file_write", &ctx, requested, "write", false) {
             ToolError::RequiresLocationApproval { path, .. } => path,
             other => panic!("expected location approval, got {other:?}"),
         };
@@ -903,6 +901,48 @@ mod tests {
         );
         assert!(resolve_new_context_path(&ctx, "../missing/neighbour.md").is_err());
         assert!(resolve_new_context_path(&ctx, "../outside.md").is_err());
+    }
+
+    #[test]
+    fn approval_root_uses_the_directory_flag_instead_of_the_tool_name() {
+        let dir = tmp_workspace();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let ctx = swage_tool::context::MockToolContext {
+            agent_id: "test-agent".into(),
+            session_id: "test-session".into(),
+            working_directory: project,
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
+        let target = dir.path().join("missing-Annexe");
+        for name in ["inspect_tree", "file_list"] {
+            for directory_target in [true, false] {
+                let error = location_approval_error(
+                    name,
+                    &ctx,
+                    "../missing-Annexe",
+                    "read",
+                    directory_target,
+                );
+                let ToolError::RequiresLocationApproval { path, .. } = error else {
+                    panic!("expected location approval, got {error:?}");
+                };
+                let expected = if directory_target {
+                    target.as_path()
+                } else {
+                    dir.path()
+                };
+                assert_eq!(
+                    Path::new(&path),
+                    expected,
+                    "{name}: directory_target={directory_target}"
+                );
+            }
+        }
+        assert!(!target.exists());
     }
 
     #[test]

@@ -60,7 +60,7 @@ impl Tool for FileListTool {
             .to_string();
 
         let resolved = resolve_context_path(ctx, &path_str)
-            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read"))?;
+            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read", true))?;
 
         // Verify the resolved path is a directory.
         match tokio::fs::metadata(&resolved.path).await {
