@@ -327,6 +327,11 @@ pub(crate) async fn update_schedule_change(
     source: &str,
     session_id: Option<Uuid>,
 ) -> Result<wire::Schedule, GatewayError> {
+    if request.agent_id.is_some() {
+        return Err(GatewayError::ValidationError(
+            "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.".into(),
+        ));
+    }
     let rearm = request.spec.is_some();
     let intended = resolve_update_schedule(state, schedule_id, request).await?;
     validate_schedule_shape(&intended)?;

@@ -6251,6 +6251,14 @@
       "UpdateScheduleRequest": {
         "description": "Partially update a schedule.\n\nThe session policy is fixed at creation — delete and recreate to change\nwhere runs execute.",
         "properties": {
+          "agent_id": {
+            "default": null,
+            "description": "Recognised so an attempted agent change receives an actionable refusal.\nThe agent is fixed when the schedule is created.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "gate": {
             "anyOf": [
               {
