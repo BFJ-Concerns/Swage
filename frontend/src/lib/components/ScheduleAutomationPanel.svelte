@@ -370,22 +370,14 @@
           {/if}
         </div>
         <div class="scope-toggle row-actions">
-          {#if passedOneShot(schedule)}
-            <button
-              type="button"
-              onclick={() => runNow(schedule)}
-              disabled={actionId === schedule.id}
-            >
-              {actionId === schedule.id ? "Running…" : "Run again"}
-            </button>
-          {:else}
-            <button
-              type="button"
-              onclick={() => runNow(schedule)}
-              disabled={actionId === schedule.id}
-            >
-              {actionId === schedule.id ? "Running…" : "Run now"}
-            </button>
+          <button
+            type="button"
+            onclick={() => runNow(schedule)}
+            disabled={actionId === schedule.id}
+          >
+            {actionId === schedule.id ? "Running…" : passedOneShot(schedule) ? "Run again" : "Run now"}
+          </button>
+          {#if !passedOneShot(schedule)}
             {#if schedule.status === "active"}
               <button
                 type="button"
