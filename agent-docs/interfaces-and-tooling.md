@@ -446,6 +446,7 @@ workspace it operates in.
 
    ```bash
    # On the gateway host
+   mkdir -p /var/lib/swage/device-tokens
    head -c 32 /dev/urandom | base64 > /var/lib/swage/device-tokens/workshop.token
    ```
 
@@ -464,7 +465,8 @@ workspace it operates in.
    ```
 
    No `metadata` or `json_pointer` — the entire file is the token. The
-   response carries the `secret_id`.
+   response carries a `reference` field (e.g. `secret://file/<id>`) used
+   in the redemption step below.
 
 3. **Issue a pairing code.** `POST /api/onboarding/devices/pairing-codes`:
 
@@ -477,13 +479,14 @@ workspace it operates in.
    `expires_in_seconds` is optional (default 600 — ten minutes). The
    response carries the `pairing_code` and `expires_at`.
 
-4. **Redeem the code.** `POST /api/onboarding/devices/redeem`:
+4. **Redeem the code.** `POST /api/onboarding/devices/redeem`, using the
+   `reference` from step 2:
 
    ```json
    {
      "pairing_code": "<code from step 3>",
      "device_id": "workshop",
-     "shared_token_secret_ref": "secret://file/<secret-id>",
+     "shared_token_secret_ref": "<reference from step 2>",
      "workspace_root": "/home/user/projects"
    }
    ```
@@ -491,13 +494,26 @@ workspace it operates in.
    This registers and trusts the device in one step. `label` (optional) and
    `kind` (defaults to `"attached_device"`) can also be included.
 
-5. **Create the same token file on the device machine.** Copy or recreate
-   the file so the device holds the same value the gateway resolves:
+5. **Copy the token to the device machine.** The device needs a local file
+   holding the same value. Copy it from the gateway host, or read the
+   gateway file and write it on the device:
 
    ```bash
-   # On the device machine — same content as the gateway's file
+   # On the device machine
+   mkdir -p /home/user/.swage
+   # Paste the token value from the gateway's workshop.token and press Ctrl-D:
    cat > /home/user/.swage/workshop.token
    ```
+
+   Alternatively, transfer the file directly:
+
+   ```bash
+   scp gateway.local:/var/lib/swage/device-tokens/workshop.token \
+     /home/user/.swage/workshop.token
+   ```
+
+   The device file must hold exactly the same value as the gateway's file —
+   the gateway resolves its registered secret and compares the two.
 
 6. **Connect.** Run the device:
 
