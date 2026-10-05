@@ -16,14 +16,16 @@
  *   - Live tool calls without result have isLive=true (pulse indicator)
  *   - Live tool calls with a result have isLive=false (no pulse)
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, onTestFinished, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
+import { compile } from "svelte/compiler";
 vi.mock("../api/turns", () => ({
   fetchTurnContext: vi.fn(),
 }));
 
 import { fetchTurnContext } from "../api/turns";
 import MessageDisplay from "../components/MessageDisplay.svelte";
+import messageDisplaySource from "../components/MessageDisplay.svelte?raw";
 import type { ConversationStore } from "../stores/conversations";
 import {
   createStreamingStore,
@@ -952,48 +954,90 @@ describe("branching from a message", () => {
 });
 
 describe("assistant message width", () => {
-  // jsdom computes no layout, so the width contract is read from the
-  // component's own style rules: which selectors carry the prose cap.
-  type Rule = { selectors: string[]; body: string };
-  function styleRules(source: string): Rule[] {
-    const style = source.slice(source.indexOf("<style>"), source.indexOf("</style>"));
-    const stripped = style.replace(/\/\*[\s\S]*?\*\//g, "");
-    return [...stripped.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
-      selectors: m[1].split(",").map((s) => s.trim().replace(/^<style>\s*/, "")),
-      body: m[2],
-    }));
+  // Vitest mounts a component without its stylesheet, so compile the
+  // component's own CSS under the scoping class the mounted markup carries and
+  // apply it; getComputedStyle then resolves the cascade over the rendered
+  // elements. jsdom computes no layout, so these are constraints, not pixels.
+  function applyComponentStyles() {
+    const scope = [...document.querySelector(".message-display")!.classList].find((name) =>
+      name.startsWith("svelte-"),
+    )!;
+    const { css } = compile(messageDisplaySource, {
+      filename: "MessageDisplay.svelte",
+      css: "external",
+      cssHash: () => scope,
+    });
+    const style = document.createElement("style");
+    style.textContent = css!.code;
+    document.head.append(style);
+    onTestFinished(() => style.remove());
   }
-  // The effective declaration for one selector: the last one in source order,
-  // across rules and within a rule, as the cascade resolves equal specificity.
-  function declared(rules: Rule[], selector: string, property: string): string | undefined {
-    let value: string | undefined;
-    const pattern = new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`, "g");
-    for (const rule of rules) {
-      if (!rule.selectors.includes(selector)) continue;
-      for (const m of rule.body.matchAll(pattern)) value = m[1].trim();
-    }
-    return value;
-  }
-  const maxWidthFor = (rules: Rule[], selector: string) => declared(rules, selector, "max-width");
 
-  it("lets the assistant reply span the column while prose keeps its line-length cap", async () => {
-    const source = (await import("../components/MessageDisplay.svelte?raw")).default as string;
-    const rules = styleRules(source);
-    expect(maxWidthFor(rules, ".message-content")).toBe("80ch");
-    expect(maxWidthFor(rules, ".message:not(.platform) .assistant-content")).toBe("none");
-    // Platform-written messages share the assistant markup but keep the cap.
-    expect(maxWidthFor(rules, ".assistant-content")).toBeUndefined();
-    expect(maxWidthFor(rules, ".message.platform .message-content")).toBeUndefined();
-    expect(maxWidthFor(rules, ".markdown-body :global(p)")).toBe("80ch");
-    expect(maxWidthFor(rules, ".markdown-body :global(table)")).toBe("100%");
-    expect(maxWidthFor(rules, ".markdown-body :global(pre)")).toBeUndefined();
+  const wideReply = [
+    "Here is the comparison.",
+    "",
+    "| Merchant | Category | Amount | Date | Status |",
+    "| --- | --- | --- | --- | --- |",
+    "| Northwind Traders | Office supplies | 1,250.00 | 2026-09-14 | Reconciled |",
+    "",
+    "```",
+    `const line = "${"a".repeat(240)}";`,
+    "```",
+  ].join("\n");
+
+  function mountMessages(messages: MessageView[]) {
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore(messages), streamingStore: makeStreamingStore() },
+    });
+    applyComponentStyles();
+  }
+
+  it("lets an assistant reply span the column while its prose keeps the line-length cap", () => {
+    mountMessages([makeAssistantMessage(wideReply)]);
+    const reply = document.querySelector<HTMLElement>('[aria-label="Assistant message"]')!;
+    const style = (selector: string) => getComputedStyle(reply.querySelector(selector)!);
+
+    expect(style(".message-content").maxWidth).toBe("none");
+    expect(style("p").maxWidth).toBe("80ch");
+    expect(style("table").maxWidth).toBe("100%");
+    expect(style("pre").maxWidth).toBe("none");
   });
 
-  it("scrolls a wide table inside itself rather than breaking cell words", async () => {
-    const source = (await import("../components/MessageDisplay.svelte?raw")).default as string;
-    const rules = styleRules(source);
-    expect(declared(rules, ".markdown-body :global(table)", "overflow-x")).toBe("auto");
-    expect(declared(rules, ".markdown-body :global(td)", "word-break")).toBe("normal");
-    expect(declared(rules, ".markdown-body :global(td)", "overflow-wrap")).toBe("normal");
+  it("scrolls a wide assistant table inside itself rather than breaking cell words", () => {
+    mountMessages([makeAssistantMessage(wideReply)]);
+    const reply = document.querySelector<HTMLElement>('[aria-label="Assistant message"]')!;
+    const table = getComputedStyle(reply.querySelector("table")!);
+    const cell = getComputedStyle(reply.querySelector("td")!);
+
+    expect(table.display).toBe("block");
+    expect(table.overflowX).toBe("auto");
+    expect(table.width).toBe("max-content");
+    expect(cell.wordBreak).toBe("normal");
+  });
+
+  it("keeps a platform message's bubble cap and table layout", () => {
+    mountMessages([
+      {
+        id: "msg-brief",
+        role: "user",
+        origin: "schedule",
+        content: wideReply,
+        timestamp: "2026-03-20T11:00:00Z",
+        turn_state: "pending",
+      },
+    ]);
+    const brief = document.querySelector<HTMLElement>('[aria-label="Schedule message"]')!;
+    const style = (selector: string) => getComputedStyle(brief.querySelector(selector)!);
+
+    // Schedule and delegation messages share the assistant markup; none of
+    // the reply's width rules reach them.
+    expect(style(".message-content").maxWidth).toBe("80ch");
+    expect(style("p").maxWidth).toBe("none");
+    expect(style("table").display).toBe("table");
+    expect(style("table").width).toBe("100%");
+    expect(style("table").maxWidth).toBe("none");
+    expect(style("table").overflowX).toBe("visible");
+    expect(style("td").wordBreak).toBe("break-word");
   });
 });
