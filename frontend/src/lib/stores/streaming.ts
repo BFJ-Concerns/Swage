@@ -258,16 +258,17 @@ export function createStreamingStore(
     }, conversationId);
   }
 
-  // Commits any accumulated content to the conversation store. Called when a
-  // turn ends before the server explicitly completes it (error or cancellation).
-  function settlePartialResponse(
+  // Commits the response and any settled tool calls to the conversation.
+  function settleResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "refused" | "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "failed" | "interrupted">,
+    turnId?: string,
+    toolCalls?: ToolCallView[],
   ): void {
     const streamedContent = get(stream.streamedContentStore);
-    if (streamedContent) {
-      pushAssistantMessage(conversationId, streamedContent, turnState);
+    if (streamedContent || (toolCalls?.length ?? 0) > 0) {
+      pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
     }
     stream.streamedContentStore.set("");
   }
@@ -401,20 +402,7 @@ export function createStreamingStore(
         case "turn_complete":
           // The gateway has committed the full turn. Push the completed
           // assistant message and return to idle state.
-          {
-            const streamedContent = get(stream.streamedContentStore);
-            const activeToolCalls = get(stream.activeToolCallsStore);
-            if (streamedContent || activeToolCalls.length > 0) {
-              pushAssistantMessage(
-                ownerId,
-                streamedContent,
-                "completed",
-                event.turn_id,
-                activeToolCalls,
-              );
-            }
-          }
-          stream.streamedContentStore.set("");
+          settleResponse(ownerId, stream, "completed", event.turn_id, get(stream.activeToolCallsStore));
           stream.turnErrorStore.set(null);
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -423,20 +411,26 @@ export function createStreamingStore(
           stream.providerRetryStore.set(null);
           break;
 
-        case "error":
+        case "error": {
           // Turn failed mid-stream. Preserve whatever the user saw so the
           // conversation history reflects the partial response.
-          settlePartialResponse(ownerId, stream, event.code === "provider_refused" ? "refused" : "failed");
+          const refused = event.code === "provider_refused";
+          settleResponse(
+            ownerId, stream, refused ? "refused" : "failed", undefined,
+            refused ? get(stream.activeToolCallsStore) : undefined,
+          );
           stream.turnErrorStore.set({ code: event.code, message: event.message });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
-          // activeToolCalls are preserved so the UI can show what was
-          // in-flight when the error occurred.
+          // Refused turns own their calls in history; other errors retain
+          // live calls so the UI can show what was in flight.
+          if (refused) stream.activeToolCallsStore.set([]);
           stream.providerRetryStore.set(null);
           break;
+        }
 
         case "output_schema_failed": {
-          settlePartialResponse(ownerId, stream, "failed");
+          settleResponse(ownerId, stream, "failed");
           const details = event.errors
             .map((error) =>
               error.path
@@ -459,7 +453,7 @@ export function createStreamingStore(
         case "cancelled":
           // User-initiated cancel. Preserve partial content (they may want
           // to read what was generated before they stopped it).
-          settlePartialResponse(ownerId, stream, "interrupted");
+          settleResponse(ownerId, stream, "interrupted");
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
           // activeToolCalls preserved — same rationale as the error case.
@@ -470,7 +464,7 @@ export function createStreamingStore(
           // The gateway is shutting down. Preserve any partial content and
           // surface the shutdown as a turn error so the UI can notify the user.
           // The WebSocket will close shortly after this event arrives.
-          settlePartialResponse(ownerId, stream, "failed");
+          settleResponse(ownerId, stream, "failed");
           stream.turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);

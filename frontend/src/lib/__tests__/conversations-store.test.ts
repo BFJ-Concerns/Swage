@@ -519,6 +519,31 @@ describe("durable local updates", () => {
     expect(store.conversations[0].message_preview, "platform accounts must preserve the person's preview").toBe("Read README.md");
   });
 
+  it("installs a platform refusal account without changing activity or sidebar order", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([
+      makeSummary("conv-2", "2026-01-01T00:00:30Z"),
+      { ...makeSummary("conv-1"), message_preview: "Read README.md" },
+    ]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    const summaries = [...store.conversations];
+    const lastActivity = store.activeConversation!.last_activity;
+
+    store.appendRecordedMessage({
+      id: "refusal-notice", thread_id: "thread-1", turn_id: "refused-turn",
+      role: "user", origin: "platform", content: "The model refused this request.",
+      timestamp: "2026-01-01T00:01:00Z", turn_state: "refused", tool_calls: [],
+    }, "conv-1");
+
+    expect(store.activeConversation!.messages.at(-1)?.id).toBe("refusal-notice");
+    expect.soft(store.conversations.find(conversation => conversation.id === "conv-1")!.last_activity).toBe(lastActivity);
+    expect.soft(store.conversations.map(conversation => conversation.id)).toEqual(["conv-2", "conv-1"]);
+    expect.soft(store.activeConversation!.last_activity).toBe(lastActivity);
+    expect.soft(store.conversations).toEqual(summaries);
+  });
+
   it("preserves the existing preview for a tool-only assistant message", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([

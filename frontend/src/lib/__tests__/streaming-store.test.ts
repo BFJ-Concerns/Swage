@@ -565,6 +565,40 @@ describe("turn_complete", () => {
 // ---------------------------------------------------------------------------
 
 describe("error events", () => {
+  it.each(["", "I cannot fulfil that request."])("retains earlier tool calls after Retry when a refusal has text %j", (content) => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+
+    store.startTurn("read the file");
+    store.handleServerEvent({
+      type: "tool_start", call_id: "call-1", tool: "file_read",
+      arguments: { path: "README.md" },
+    });
+    store.handleServerEvent({
+      type: "tool_end", call_id: "call-1", tool: "file_read",
+      result: "contents", status: "success", duration_ms: 8,
+      truncated: false, total_bytes: 8,
+    });
+    store.handleServerEvent({ type: "token", content });
+    store.handleServerEvent({ type: "error", code: "provider_refused", message: "The model refused this request." });
+
+    // Retry uses the same startTurn path as the conversation's Retry button.
+    store.startTurn("read the file");
+    expect(conn.sendMessage).toHaveBeenCalledTimes(2);
+    expect(store.activeToolCalls).toEqual([]);
+    expect(conv.getMessages().filter(message => message.role === "assistant")).toEqual([
+      expect.objectContaining({
+        content,
+        turn_state: "refused",
+        tool_calls: [expect.objectContaining({
+          call_id: "call-1", tool: "file_read", arguments: { path: "README.md" },
+          result: "contents", status: "success",
+        })],
+      }),
+    ]);
+  });
+
   it("keeps a streamed refusal as refused rather than failed", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
