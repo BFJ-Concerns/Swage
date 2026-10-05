@@ -437,6 +437,7 @@ mod tests {
             first: std::sync::Mutex::new(Some(receiver)),
             later: crate::turn::tests::MockProvider::new(reply("second reply")),
         });
+        let mut broadcasts = state.broadcast.subscribe();
         let (listener, mut events) = mpsc::unbounded_channel();
         state.listen_to_session(session_id, listener).await;
         state
@@ -456,10 +457,14 @@ mod tests {
         let draining = state.clone();
         let mut first = tokio::spawn(async move { drain_queue(&draining, session_id).await });
         let first_turn = loop {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    event = events.recv() => event.unwrap(),
+                    event = broadcasts.recv() => event.unwrap(),
+                }
+            })
+            .await
+            .unwrap();
             if let ServerEvent::QueueDrained { turn_id, .. } = event {
                 break turn_id;
             }
