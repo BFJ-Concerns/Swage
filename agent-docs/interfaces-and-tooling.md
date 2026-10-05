@@ -26,14 +26,17 @@ All three routes are in the client route manifest. The scope selector
 changes from Settings — there is no direct page-editing endpoint.
 
 The curator's notices (from its background curation) link to the page they
-name: the Settings route `/settings/memory?reference=<ref>` opens the Memory
-tab with that page selected.
+name: the Settings route
+`/settings/memory?scope=<general|topic_id>&reference=<ref>` opens the
+Memory tab with that page selected. The `scope` parameter identifies
+whether the page belongs to the general memory or a specific topic;
+a reference alone does not identify a page across scopes.
 
 ## Operator history
 
-The operator history pane (`OperatorHistoryPane.svelte`) reads
-`GET /api/operator/history` (`OperatorHistoryResponse`) and the filterable
-audit record (`GET /api/audit/events`).
+The operator history pane reads `GET /api/operator/history`
+(`OperatorHistoryResponse`) and the filterable audit record
+(`GET /api/operator/audit-events`).
 
 Configuration changes carry the whole prior and new state of the named
 entity. The pane derives a per-field diff from those two snapshots:
@@ -500,22 +503,21 @@ trail under the device's id.
 
 ### Status
 
-`swage gateway status` (`cli/status.rs`) reports the running gateway's
-state: PID, bound address, uptime, and health. When no runtime metadata
-file exists and no running gateway can be recovered at the configured
-address, it prints "Gateway is not running" and exits successfully (exit 0).
-When stale metadata points to a dead PID, it removes the stale file, prints
-"Gateway is not running (stale PID file removed)", and exits with an error.
+`swage gateway status` reports the running gateway's state: PID, bound
+address, uptime, and health. When no runtime metadata file exists and no
+running gateway can be recovered at the configured address, it prints
+"Gateway is not running" and exits successfully (exit 0). When stale
+metadata points to a dead PID, it removes the stale file and exits with
+an error (non-zero).
 
 ### Start recovery
 
-`swage gateway start` (`cli/start.rs`) checks for an existing gateway
-before spawning. If runtime metadata names a PID that has terminated (even
-if the parent process has not yet reaped it), it cleans up the stale
-metadata file and proceeds with a fresh start. If no metadata file exists,
-it probes the configured address for a running gateway whose metadata was
-lost, and if found, writes recovery metadata and reports it as already
-running.
+`swage gateway start` checks for an existing gateway before spawning. If
+runtime metadata names a PID that has terminated (even if the parent
+process has not yet reaped it), it cleans up the stale metadata file and
+proceeds with a fresh start. If no metadata file exists, it probes the
+configured address for a running gateway whose metadata was lost, and if
+found, writes recovery metadata and reports it as already running.
 
 ## Wire error contract
 
@@ -745,9 +747,14 @@ turn passes through:
 | `AwaitingApproval` | Paused for a human approval decision |
 | `Delegating` | Dispatching a child turn |
 
-An incomplete turn's `turn_complete` WebSocket event and persisted message
-carry an `incomplete_reason` naming the cause (e.g. the output token limit).
-The partial text the model produced is retained and displayed.
+An incomplete turn is surfaced through two paths. The `turn_complete`
+WebSocket event carries an `incomplete_reason` string naming the cause
+(e.g. the output token limit), delivered live to connected clients. For
+persistence, the agent appends a separate platform-origin message whose
+content states the cause; this message carries `TurnState::Incomplete` and
+is what the conversation shows after a reload. `MessageView` has no
+`incomplete_reason` field — the cause is in the platform message's content.
+The partial text the model produced is retained on the assistant message.
 
 A failed, interrupted or cancelled turn keeps its explanation text and its
 tool calls in the conversation after a reload. The tool calls are attached
